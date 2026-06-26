@@ -1,0 +1,12 @@
+.env
+.env.local
+.next/
+node_modules/
+deploy_config.py
+__pycache__/
+.claude/
+
+# Personal data — never commit
+Running.csv
+runs.csv
+*.csv
