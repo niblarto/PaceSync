@@ -173,7 +173,7 @@ function parseExportifyCsv(text: string): CsvParseResult {
 export function DashboardClient({ spotifyUser }: Props) {
   const { data: session } = useSession();
   const [zones, setZones]               = useState<RunningZone[]>([]);
-  const [selectedZone, setSelectedZone] = useState<RunningZone | null>(null);
+  const [selectedZones, setSelectedZones] = useState<RunningZone[]>([]);
   const [allTracks, setAllTracks]       = useState<TrackWithBPM[]>([]);
   const [filteredTracks, setFilteredTracks] = useState<TrackWithBPM[]>([]);
   const [csvName, setCsvName]           = useState<string | null>(null);
@@ -236,15 +236,23 @@ export function DashboardClient({ spotifyUser }: Props) {
       .catch(() => {/* silently ignore if file missing */});
   }, []);
 
-  // Re-filter whenever zone or tracks change
+  // Re-filter whenever zone selection or tracks change
   useEffect(() => {
-    if (allTracks.length > 0 && selectedZone) {
-      const filtered = selectedZone.number === 0
-        ? allTracks
-        : filterTracksByBPM(allTracks, selectedZone.bpmMin, selectedZone.bpmMax);
-      setFilteredTracks(filtered);
+    if (allTracks.length === 0 || selectedZones.length === 0) return;
+    if (selectedZones.some(z => z.number === 0)) {
+      setFilteredTracks(allTracks);
+    } else {
+      const seen = new Set<string>();
+      const result: TrackWithBPM[] = [];
+      const sorted = [...selectedZones].sort((a, b) => a.bpmMin - b.bpmMin);
+      for (const zone of sorted) {
+        for (const t of filterTracksByBPM(allTracks, zone.bpmMin, zone.bpmMax)) {
+          if (!seen.has(t.uri)) { seen.add(t.uri); result.push(t); }
+        }
+      }
+      setFilteredTracks(result);
     }
-  }, [selectedZone, allTracks]);
+  }, [selectedZones, allTracks]);
 
   async function handleDeleteTrack(track: TrackWithBPM) {
     const token = session?.accessToken;
@@ -289,7 +297,7 @@ export function DashboardClient({ spotifyUser }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: playlistName,
-          description: `PaceSync: ${selectedZone?.name} zone (${selectedZone?.bpmMin}–${selectedZone?.bpmMax} BPM)`,
+          description: `PaceSync: zones ${selectedZones.map(z => z.number).sort().join(",")} (${selectedZones.map(z => `${z.bpmMin}–${z.bpmMax}`).join(", ")} BPM)`,
           trackUris: filteredTracks.map((t) => t.uri),
         }),
       });
@@ -397,11 +405,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               {/* All Songs tile */}
               <button
                 onClick={() => {
-                  setSelectedZone(ALL_ZONE);
+                  setSelectedZones([ALL_ZONE]);
                   if (csvName) setPlaylistName(csvName);
                 }}
                 className={`w-full rounded-lg border p-4 text-left transition-all ${
-                  selectedZone?.number === 0
+                  selectedZones.some(z => z.number === 0)
                     ? "border-green-500 bg-green-500/10 backdrop-blur-sm ring-1 ring-green-500"
                     : "border-white/10 bg-slate-900/85 backdrop-blur-sm hover:border-white/20"
                 }`}
@@ -420,10 +428,26 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 <ZoneCard
                   key={zone.number}
                   zone={zone}
-                  selected={selectedZone?.number === zone.number}
-                  onClick={() => {
-                    setSelectedZone(zone);
-                    if (csvName) setPlaylistName(`${csvName} – ${zone.name}`);
+                  selected={selectedZones.some(z => z.number === zone.number)}
+                  onClick={(e) => {
+                    if (e.ctrlKey || e.metaKey) {
+                      setSelectedZones(prev => {
+                        const withoutAll = prev.filter(z => z.number !== 0);
+                        const exists = withoutAll.some(z => z.number === zone.number);
+                        const next = exists
+                          ? withoutAll.filter(z => z.number !== zone.number)
+                          : [...withoutAll, zone];
+                        const sorted = [...next].sort((a, b) => a.number - b.number);
+                        if (csvName && sorted.length > 0)
+                          setPlaylistName(sorted.length === 1
+                            ? `${csvName} – ${sorted[0].name}`
+                            : `${csvName} – Z${sorted.map(z => z.number).join("")}`);
+                        return next;
+                      });
+                    } else {
+                      setSelectedZones([zone]);
+                      if (csvName) setPlaylistName(`${csvName} – ${zone.name}`);
+                    }
                   }}
                 />
               ))}
@@ -440,24 +464,35 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">
                 <h2 className="font-semibold">Target zone</h2>
                 <div className="rounded-lg bg-slate-800/50 border border-white/10 px-3 py-2 text-sm">
-                  {selectedZone ? (
+                  {selectedZones.length === 0 ? (
+                    <span className="text-slate-500">← Select a zone on the left</span>
+                  ) : selectedZones.some(z => z.number === 0) ? (
+                    <span className="text-green-400 font-medium">All Songs — all BPM ranges</span>
+                  ) : selectedZones.length === 1 ? (
                     <span className="text-green-400 font-medium">
-                      Zone {selectedZone.number} — {selectedZone.name} · ♪ {selectedZone.bpmMin}–{selectedZone.bpmMax} BPM music
+                      Zone {selectedZones[0].number} — {selectedZones[0].name} · ♪ {selectedZones[0].bpmMin}–{selectedZones[0].bpmMax} BPM music
                     </span>
                   ) : (
-                    <span className="text-slate-500">← Select a zone on the left</span>
+                    <span className="text-green-400 font-medium">
+                      {(() => { const s = [...selectedZones].sort((a,b) => a.number - b.number); return `Zones ${s.map(z => z.number).join(", ")} · ♪ ${s.map(z => `${z.bpmMin}–${z.bpmMax}`).join(" & ")} BPM`; })()}
+                    </span>
                   )}
                 </div>
               </div>
             )}
 
             {/* Results */}
-            {step !== "idle" && csvName && selectedZone && (
+            {step !== "idle" && csvName && selectedZones.length > 0 && (
               <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
                 <div className="p-5 border-b border-white/10 flex items-start justify-between gap-4 flex-wrap">
                   <div>
                     <h3 className="font-semibold">
-                      {filteredTracks.length} tracks in zone {selectedZone.number} ({selectedZone.bpmMin}–{selectedZone.bpmMax} BPM)
+                      {(() => {
+                        if (selectedZones.some(z => z.number === 0)) return `${filteredTracks.length} tracks in zone 0 (0–9999 BPM)`;
+                        const s = [...selectedZones].sort((a,b) => a.number - b.number);
+                        const zLabel = s.length === 1 ? `zone ${s[0].number} (${s[0].bpmMin}–${s[0].bpmMax} BPM)` : `zones ${s.map(z=>z.number).join("+")} (${s.map(z=>`${z.bpmMin}–${z.bpmMax}`).join(", ")} BPM)`;
+                        return `${filteredTracks.length} tracks in ${zLabel}`;
+                      })()}
                     </h3>
                     <p className="text-sm text-slate-500 mt-0.5">
                       From {allTracks.length} total tracks in "{csvName}"
@@ -540,14 +575,14 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     No tracks in this BPM range. Try a different zone.
                   </div>
                 ) : (
-                  <VirtualTrackList key={selectedZone?.number} tracks={filteredTracks} onDelete={handleDeleteTrack} />
+                  <VirtualTrackList key={selectedZones.map(z=>z.number).sort().join("-")} tracks={filteredTracks} onDelete={handleDeleteTrack} />
                 )}
               </div>
             )}
 
             {/* BPM distribution */}
-            {allTracks.length > 0 && selectedZone && (
-              <BPMDistribution tracks={allTracks} zones={displayZones} selectedZone={selectedZone} />
+            {allTracks.length > 0 && selectedZones.length > 0 && (
+              <BPMDistribution tracks={allTracks} zones={displayZones} selectedZones={selectedZones} />
             )}
 
             {/* No CSV loaded */}
@@ -598,29 +633,33 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 }
 
 function BPMDistribution({
-  tracks, zones, selectedZone,
+  tracks, zones, selectedZones,
 }: {
   tracks: TrackWithBPM[];
   zones: RunningZone[];
-  selectedZone: RunningZone | null;
+  selectedZones: RunningZone[];
 }) {
   const counts = zones.map(z => filterTracksByBPM(tracks, z.bpmMin, z.bpmMax).length);
   const max = Math.max(...counts, 1);
+  const isAll = selectedZones.some(z => z.number === 0);
   return (
     <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5">
       <h3 className="text-sm font-semibold mb-4 text-slate-400">BPM distribution across zones</h3>
       <div className="flex items-end gap-2 h-20">
-        {zones.map((z, i) => (
-          <div key={z.number} className="flex-1 flex flex-col items-center gap-1">
-            <span className={`text-xs font-mono ${selectedZone?.number === z.number ? "text-white font-bold" : "text-slate-500"}`}>
-              {counts[i]}
-            </span>
-            <div className="w-full rounded-t" style={{ height: `${Math.max((counts[i] / max) * 56, 4)}px` }}>
-              <div className={`w-full h-full rounded-t ${z.color} ${selectedZone?.number === z.number ? "opacity-100" : "opacity-30"}`} />
+        {zones.map((z, i) => {
+          const active = isAll || selectedZones.some(s => s.number === z.number);
+          return (
+            <div key={z.number} className="flex-1 flex flex-col items-center gap-1">
+              <span className={`text-xs font-mono ${active ? "text-white font-bold" : "text-slate-500"}`}>
+                {counts[i]}
+              </span>
+              <div className="w-full rounded-t" style={{ height: `${Math.max((counts[i] / max) * 56, 4)}px` }}>
+                <div className={`w-full h-full rounded-t ${z.color} ${active ? "opacity-100" : "opacity-30"}`} />
+              </div>
+              <span className="text-xs text-slate-600">Z{z.number}</span>
             </div>
-            <span className="text-xs text-slate-600">Z{z.number}</span>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

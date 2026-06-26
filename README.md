@@ -137,6 +137,16 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 
 ---
 
+## Zone Selection
+
+Click any zone in the left column to filter tracks and build a playlist for that zone.
+
+**Multi-zone selection:** Hold **Ctrl** (or **Cmd** on Mac) and click additional zones to combine them. Tracks from all selected zones are merged into a single list and the playlist name updates automatically — e.g. selecting Zone 1 and Zone 2 produces `Running – Z1Z2`, selecting Zone 2 and Zone 4 produces `Running – Z2Z4`.
+
+Ctrl+clicking an already-selected zone removes it. Clicking any zone without Ctrl resets to a single-zone selection.
+
+---
+
 ## BBC Radio Cards
 
 PaceSync can pull tracks from BBC Radio programmes and add them directly to your Spotify running playlist.

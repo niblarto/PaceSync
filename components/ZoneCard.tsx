@@ -3,7 +3,7 @@ import type { RunningZone } from "@/types";
 interface Props {
   zone: RunningZone;
   selected: boolean;
-  onClick: () => void;
+  onClick: (e: React.MouseEvent) => void;
 }
 
 export function ZoneCard({ zone, selected, onClick }: Props) {
