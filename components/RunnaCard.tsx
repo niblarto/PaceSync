@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import type { RunnaWorkout, WorkoutType } from "@/app/api/runna/workouts/route";
+import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 
 const TYPE_META: Record<WorkoutType, { label: string; color: string }> = {
   easy_run:  { label: "Easy Run",   color: "bg-green-500/20 text-green-400 border-green-500/30" },
@@ -53,32 +53,167 @@ function dayLabel(dateStr: string): string {
   return formatDate(dateStr);
 }
 
-export function RunnaCard() {
-  const [workouts, setWorkouts] = useState<RunnaWorkout[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<string | null>(null);
+function isYesterday(dateStr: string): boolean {
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  return dateStr === yesterday;
+}
+
+function pastDayLabel(dateStr: string): string {
+  if (isToday(dateStr)) return "Today";
+  if (isYesterday(dateStr)) return "Yesterday";
+  return formatDate(dateStr);
+}
+
+// ── Shared data hook ──────────────────────────────────────────────────────────
+
+interface RunnaData {
+  workouts: RunnaWorkout[];
+  pastRuns: RunnaPastRun[];
+  loading: boolean;
+  error: string | null;
+}
+
+let cached: RunnaData | null = null;
+let fetchPromise: Promise<void> | null = null;
+
+function useRunnaData(): RunnaData {
+  const [data, setData] = useState<RunnaData>(
+    cached ?? { workouts: [], pastRuns: [], loading: true, error: null }
+  );
 
   useEffect(() => {
-    fetch("/api/runna/workouts")
-      .then(r => r.json())
-      .then((d: { workouts?: RunnaWorkout[]; error?: string }) => {
-        if (d.error) throw new Error(d.error);
-        setWorkouts(d.workouts ?? []);
-      })
-      .catch(e => setError(e instanceof Error ? e.message : "Failed to load"))
-      .finally(() => setLoading(false));
+    if (cached) { setData(cached); return; }
+    if (!fetchPromise) {
+      fetchPromise = fetch("/api/runna/workouts")
+        .then(r => r.json())
+        .then((d: { workouts?: RunnaWorkout[]; pastRuns?: RunnaPastRun[]; error?: string }) => {
+          if (d.error) throw new Error(d.error);
+          cached = { workouts: d.workouts ?? [], pastRuns: d.pastRuns ?? [], loading: false, error: null };
+        })
+        .catch(e => {
+          cached = { workouts: [], pastRuns: [], loading: false, error: e instanceof Error ? e.message : "Failed to load" };
+        });
+    }
+    fetchPromise.then(() => { if (cached) setData(cached); });
   }, []);
+
+  return data;
+}
+
+// ── Runna Summary Card (past 8 days) ─────────────────────────────────────────
+
+export function RunnaSummaryCard() {
+  const { pastRuns, loading, error } = useRunnaData();
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   return (
     <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
-      <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
-        <div>
-          <h2 className="font-semibold flex items-center gap-2">
-            <span className="text-base">🏃</span> Runna Schedule
-          </h2>
-          <p className="text-xs text-slate-500 mt-0.5">Next 4 weeks</p>
+      <div className="px-5 py-4 border-b border-white/10">
+        <h2 className="font-semibold flex items-center gap-2">
+          <span className="text-base">✅</span> Runna Summary
+        </h2>
+        <p className="text-xs text-slate-500 mt-0.5">Last 8 days</p>
+      </div>
+
+      {loading && (
+        <div className="divide-y divide-white/10">
+          {Array.from({ length: 3 }, (_, i) => (
+            <div key={i} className="px-5 py-3 animate-pulse flex gap-3">
+              <div className="w-16 h-4 bg-slate-800 rounded" />
+              <div className="flex-1 h-4 bg-slate-800 rounded" />
+              <div className="w-20 h-4 bg-slate-800 rounded" />
+            </div>
+          ))}
         </div>
+      )}
+
+      {error && <p className="px-5 py-4 text-sm text-red-400">{error}</p>}
+
+      {!loading && !error && pastRuns.length === 0 && (
+        <p className="px-5 py-4 text-sm text-slate-500">No completed runs in the last 8 days.</p>
+      )}
+
+      {!loading && !error && pastRuns.length > 0 && (
+        <div className="divide-y divide-white/10">
+          {pastRuns.map(run => {
+            const meta = TYPE_META[run.type];
+            const isOpen = expanded === run.uid;
+
+            return (
+              <div key={run.uid}>
+                <button
+                  onClick={() => setExpanded(isOpen ? null : run.uid)}
+                  className="w-full px-5 py-3 flex items-center gap-3 text-left hover:bg-slate-800/40 transition-colors"
+                >
+                  <span className={`text-xs shrink-0 w-20 ${isToday(run.date) ? "text-green-400 font-semibold" : "text-slate-500"}`}>
+                    {pastDayLabel(run.date)}
+                  </span>
+
+                  <span className="text-sm text-slate-200 flex-1 min-w-0 truncate">{run.title}</span>
+
+                  {/* Actual stats */}
+                  <span className="text-xs text-slate-400 shrink-0 tabular-nums">
+                    {run.distanceMi ? `${run.distanceMi}mi` : ""}
+                    {run.distanceMi && run.durationStr ? " · " : ""}
+                    {run.durationStr ?? ""}
+                  </span>
+
+                  {run.avgPace && (
+                    <span className="text-xs text-slate-500 shrink-0">{run.avgPace}</span>
+                  )}
+
+                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full border shrink-0 ${meta.color}`}>
+                    {meta.label}
+                  </span>
+
+                  <span className="text-slate-600 text-xs shrink-0">{isOpen ? "▲" : "▼"}</span>
+                </button>
+
+                {isOpen && (
+                  <div className="px-5 pb-4 pt-1 bg-slate-800/20 space-y-2">
+                    {run.laps.length > 0 && (
+                      <div className="space-y-0.5">
+                        <p className="text-xs text-slate-500 font-medium mb-1">Laps</p>
+                        {run.laps.map((lap, i) => (
+                          <p key={i} className="text-xs text-slate-400">{lap}</p>
+                        ))}
+                      </div>
+                    )}
+                    {run.appUrl && (
+                      <a
+                        href={run.appUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-block text-xs text-green-400 hover:text-green-300 underline mt-1"
+                        onClick={e => e.stopPropagation()}
+                      >
+                        View in Runna app ↗
+                      </a>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Runna Schedule Card (upcoming) ────────────────────────────────────────────
+
+export function RunnaScheduleCard() {
+  const { workouts, loading, error } = useRunnaData();
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  return (
+    <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+      <div className="px-5 py-4 border-b border-white/10">
+        <h2 className="font-semibold flex items-center gap-2">
+          <span className="text-base">🏃</span> Runna Schedule
+        </h2>
+        <p className="text-xs text-slate-500 mt-0.5">Next 4 weeks</p>
       </div>
 
       {loading && (
@@ -93,16 +228,14 @@ export function RunnaCard() {
         </div>
       )}
 
-      {error && (
-        <p className="px-5 py-4 text-sm text-red-400">{error}</p>
-      )}
+      {error && <p className="px-5 py-4 text-sm text-red-400">{error}</p>}
 
       {!loading && !error && workouts.length === 0 && (
         <p className="px-5 py-4 text-sm text-slate-500">No upcoming workouts found.</p>
       )}
 
       {!loading && !error && workouts.length > 0 && (
-        <div className="divide-y divide-white/10">
+        <div className="overflow-y-auto max-h-[340px] divide-y divide-white/10">
           {workouts.map(w => {
             const meta = TYPE_META[w.type];
             const isOpen = expanded === w.uid;
@@ -114,15 +247,12 @@ export function RunnaCard() {
                   onClick={() => setExpanded(isOpen ? null : w.uid)}
                   className="w-full px-5 py-3 flex items-center gap-3 text-left hover:bg-slate-800/40 transition-colors"
                 >
-                  {/* Date */}
                   <span className={`text-xs shrink-0 w-20 ${isToday(w.date) ? "text-green-400 font-semibold" : "text-slate-500"}`}>
                     {dayLabel(w.date)}
                   </span>
 
-                  {/* Title */}
                   <span className="text-sm text-slate-200 flex-1 min-w-0 truncate">{w.title}</span>
 
-                  {/* Distance + duration */}
                   {isRun && (
                     <span className="text-xs text-slate-500 shrink-0">
                       {w.distanceMi ? `${w.distanceMi}mi` : ""}
@@ -134,12 +264,10 @@ export function RunnaCard() {
                     <span className="text-xs text-slate-500 shrink-0">{formatDuration(w.durationSec)}</span>
                   )}
 
-                  {/* Type badge */}
                   <span className={`text-xs font-medium px-2 py-0.5 rounded-full border shrink-0 ${meta.color}`}>
                     {meta.label}
                   </span>
 
-                  {/* Zone suggestion */}
                   {w.suggestedZone !== null && (
                     <span className={`text-xs font-bold px-2 py-0.5 rounded shrink-0 ${ZONE_COLORS[w.suggestedZone]}`}>
                       Z{w.suggestedZone} {ZONE_NAMES[w.suggestedZone]}
@@ -177,3 +305,6 @@ export function RunnaCard() {
     </div>
   );
 }
+
+// Legacy export so any existing import still compiles
+export { RunnaScheduleCard as RunnaCard };

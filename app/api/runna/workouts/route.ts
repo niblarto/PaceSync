@@ -16,6 +16,18 @@ export interface RunnaWorkout {
   suggestedZone: number | null;  // 1-5, null for non-running
 }
 
+export interface RunnaPastRun {
+  uid: string;
+  date: string;           // YYYY-MM-DD
+  title: string;
+  type: WorkoutType;
+  distanceMi: number | null;
+  durationStr: string | null;   // e.g. "28:24"
+  avgPace: string | null;       // e.g. "9:15 /mi"
+  laps: string[];
+  appUrl: string | null;
+}
+
 export type WorkoutType =
   | "easy_run" | "long_run" | "tempo" | "interval" | "race"
   | "strength" | "other_run" | "rest";
@@ -27,7 +39,6 @@ function unescapeIcs(s: string): string {
 }
 
 function parseDate(s: string): string {
-  // YYYYMMDD → YYYY-MM-DD
   const d = s.replace(/[TZ].*$/, "").trim();
   if (d.length === 8) return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
   return d;
@@ -37,7 +48,6 @@ function extractField(block: string, field: string): string {
   const re = new RegExp(`^${field}[;:][^\r\n]*`, "m");
   const m = block.match(re);
   if (!m) return "";
-  // strip the field name + any params (e.g. DTSTART;TZID=...)
   return m[0].replace(/^[^:]+:/, "").trim();
 }
 
@@ -55,17 +65,16 @@ function classifyType(uid: string, summary: string): WorkoutType {
 }
 
 function paceSecToZone(secs: number): number {
-  if (secs < 480) return 5;  // faster than 8:00/mi
-  if (secs < 510) return 4;  // 8:00–8:29/mi
-  if (secs < 540) return 3;  // 8:30–8:59/mi
-  if (secs < 600) return 2;  // 9:00–9:59/mi
+  if (secs < 480) return 5;
+  if (secs < 510) return 4;
+  if (secs < 540) return 3;
+  if (secs < 600) return 2;
   return 1;
 }
 
 function suggestZone(type: WorkoutType, segments: string[]): number | null {
   if (type === "strength" || type === "rest") return null;
 
-  // Fastest explicit pace across all segments
   let fastestSecs = Infinity;
   const paceRe = /(\d+):(\d+)\/mi/g;
   for (const seg of segments) {
@@ -78,14 +87,12 @@ function suggestZone(type: WorkoutType, segments: string[]): number | null {
   }
   const paceZone = fastestSecs < Infinity ? paceSecToZone(fastestSecs) : 0;
 
-  // Keyword hints from description
   const combined = segments.join(" ").toLowerCase();
   let keywordZone = 0;
   if (/time trial|race pace|all.?out/.test(combined))    keywordZone = 5;
   else if (/threshold|tempo|lactate/.test(combined))      keywordZone = 4;
   else if (/comfortably hard|aerobic/.test(combined))     keywordZone = 3;
 
-  // Type-based floor (intervals/race are always hard regardless of stated paces)
   const typeFloor: Partial<Record<WorkoutType, number>> = {
     tempo: 4, interval: 5, race: 5,
   };
@@ -107,30 +114,73 @@ function parseDistance(summary: string): number | null {
 }
 
 function stripEmoji(summary: string): string {
-  // All Runna summaries start with a single emoji word then a space
   const i = summary.indexOf(" ");
-  return i !== -1 ? summary.slice(i).trim() : summary;
+  const title = i !== -1 ? summary.slice(i).trim() : summary;
+  // Remove trailing " • Xmi" distance (redundant with the distance field)
+  return title.replace(/\s*•\s*[\d.]+[a-zA-Z]+(?:\s*-\s*[\d.]+[a-zA-Z]+)?\s*$/, "").trim();
 }
 
-function parseIcs(text: string): RunnaWorkout[] {
+function isCompletedRun(description: string): boolean {
+  return description.includes("Summary:");
+}
+
+function parsePastRunStats(description: string): Pick<RunnaPastRun, "durationStr" | "avgPace" | "laps"> {
+  const lines = description.split("\n").map(l => l.trim());
+  let durationStr: string | null = null;
+  let avgPace: string | null = null;
+  const laps: string[] = [];
+  let inLaps = false;
+
+  for (const line of lines) {
+    if (line.startsWith("Time:")) { durationStr = line.replace("Time:", "").trim(); continue; }
+    if (line.startsWith("Avg Pace:")) { avgPace = line.replace("Avg Pace:", "").trim(); continue; }
+    if (line.includes("Laps:")) { inLaps = true; continue; }
+    if (inLaps) {
+      if (!line || line.startsWith("📲") || line.startsWith("http")) continue;
+      // Stop at next emoji section header (non-ASCII first char = emoji)
+      if (line.length > 2 && line.charCodeAt(0) > 127 && line.includes(":")) { inLaps = false; continue; }
+      laps.push(line);
+    }
+  }
+
+  return { durationStr, avgPace, laps };
+}
+
+function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPastRun[] } {
   const blocks = text.split("BEGIN:VEVENT").slice(1);
   const today = new Date().toISOString().slice(0, 10);
+  const lookback = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const cutoff = new Date(Date.now() + 28 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-  return blocks
-    .map(block => {
-      const uid         = extractField(block, "UID");
-      const rawDate     = extractField(block, "DTSTART");
-      const rawSummary  = unescapeIcs(extractField(block, "SUMMARY"));
-      const rawDesc     = unescapeIcs(extractField(block, "DESCRIPTION"));
-      const durStr      = extractField(block, "X-WORKOUT-ESTIMATED-DURATION");
+  const workouts: RunnaWorkout[] = [];
+  const pastRuns: RunnaPastRun[] = [];
 
-      const date        = parseDate(rawDate);
-      const type        = classifyType(uid, rawSummary);
-      const segments    = parseSegments(rawDesc);
-      const appUrlMatch = rawDesc.match(/https:\/\/club\.runna\.com\/\S+/);
+  for (const block of blocks) {
+    const uid        = extractField(block, "UID");
+    const rawDate    = extractField(block, "DTSTART");
+    const rawSummary = unescapeIcs(extractField(block, "SUMMARY"));
+    const rawDesc    = unescapeIcs(extractField(block, "DESCRIPTION"));
+    const durStr     = extractField(block, "X-WORKOUT-ESTIMATED-DURATION");
 
-      return {
+    const date       = parseDate(rawDate);
+    const type       = classifyType(uid, rawSummary);
+    const appUrlMatch = rawDesc.match(/https:\/\/club\.runna\.com\/\S+/);
+    const appUrl     = appUrlMatch ? appUrlMatch[0] : null;
+
+    if (isCompletedRun(rawDesc) && date >= lookback && date <= today) {
+      const stats = parsePastRunStats(rawDesc);
+      pastRuns.push({
+        uid,
+        date,
+        title: stripEmoji(rawSummary),
+        type,
+        distanceMi: parseDistance(rawSummary),
+        ...stats,
+        appUrl,
+      });
+    } else if (!isCompletedRun(rawDesc) && date >= today && date <= cutoff) {
+      const segments = parseSegments(rawDesc);
+      workouts.push({
         uid,
         date,
         summary: rawSummary,
@@ -139,12 +189,16 @@ function parseIcs(text: string): RunnaWorkout[] {
         distanceMi: parseDistance(rawSummary),
         durationSec: parseInt(durStr) || 0,
         segments,
-        appUrl: appUrlMatch ? appUrlMatch[0] : null,
+        appUrl,
         suggestedZone: suggestZone(type, segments),
-      } satisfies RunnaWorkout;
-    })
-    .filter(w => w.date >= today && w.date <= cutoff)
-    .sort((a, b) => a.date.localeCompare(b.date));
+      });
+    }
+  }
+
+  workouts.sort((a, b) => a.date.localeCompare(b.date));
+  pastRuns.sort((a, b) => b.date.localeCompare(a.date)); // most recent first
+
+  return { workouts, pastRuns };
 }
 
 // ── Route ─────────────────────────────────────────────────────────────────────
@@ -160,8 +214,8 @@ export async function GET() {
     const res = await fetch(url, { next: { revalidate: 3600 } });
     if (!res.ok) throw new Error(`ICS fetch ${res.status}`);
     const text = await res.text();
-    const workouts = parseIcs(text);
-    return NextResponse.json({ workouts });
+    const { workouts, pastRuns } = parseIcs(text);
+    return NextResponse.json({ workouts, pastRuns });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: msg }, { status: 500 });

@@ -8,7 +8,7 @@ import { ZoneCard } from "./ZoneCard";
 import { TrackRow } from "./TrackRow";
 import { BbcPlaylistCard } from "./BbcPlaylistCard";
 import { DedupCard } from "./DedupCard";
-import { RunnaCard } from "./RunnaCard";
+import { RunnaSummaryCard, RunnaScheduleCard } from "./RunnaCard";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
 
 function prewarmArt(tracks: TrackWithBPM[]) {
@@ -583,7 +583,8 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
           {/* Col 3: Right rail — Runna */}
           <div className="space-y-6 min-w-0">
-            <RunnaCard />
+            <RunnaSummaryCard />
+            <RunnaScheduleCard />
           </div>
 
         </div>
