@@ -465,21 +465,24 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   </div>
 
                   {filteredTracks.length > 0 && step !== "partial" && (
-                    <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
-                      <input
-                        type="text"
-                        value={playlistName}
-                        onChange={(e) => setPlaylistName(e.target.value)}
-                        placeholder="Playlist name"
-                        className="rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 w-48"
-                      />
+                    <div className="flex items-start gap-2 shrink-0">
+                      <label className="text-xs text-slate-500 whitespace-nowrap pt-1.5">Spotify playlist name</label>
+                      <div className="flex flex-col gap-1.5">
+                        <input
+                          type="text"
+                          value={playlistName}
+                          onChange={(e) => setPlaylistName(e.target.value)}
+                          placeholder="Playlist name"
+                          className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 w-40"
+                        />
                       <button
                         onClick={savePlaylist}
                         disabled={!playlistName || step === "saving"}
-                        className="inline-flex items-center gap-2 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-sm px-4 py-2 transition-colors whitespace-nowrap"
+                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors w-full"
                       >
                         {step === "saving" ? <><Spinner />Saving…</> : "Save to Spotify"}
                       </button>
+                      </div>
                     </div>
                   )}
                 </div>
