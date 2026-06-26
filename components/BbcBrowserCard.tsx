@@ -4,16 +4,15 @@ import { useState } from "react";
 import type { ScheduleSlot } from "@/app/api/bbc/schedule/route";
 
 const BBC_SERVICES = [
-  { id: "p00fzl8v", name: "Radio 1" },
-  { id: "p00fzl86", name: "Radio 1Xtra" },
-  { id: "p00fzl8x", name: "Radio 2" },
-  { id: "p00fzl8y", name: "Radio 3" },
-  { id: "p00fzl9p", name: "Radio 4" },
-  { id: "p00fzl7j", name: "Radio 4 Extra" },
-  { id: "p00fzl97", name: "Radio 5 Live" },
-  { id: "p00fzl9g", name: "5 Sports Extra" },
+  { id: "p00fzl86", name: "Radio 1" },
+  { id: "p00fzl64", name: "Radio 1Xtra" },
+  { id: "p0hyc2r0", name: "Radio 1 Anthems" },
+  { id: "p080kbtk", name: "Radio 1 Dance" },
+  { id: "p00fzl8v", name: "Radio 2" },
+  { id: "p00fzl8t", name: "Radio 3" },
+  { id: "p0hyc31m", name: "Radio 3 Unwind" },
   { id: "p00fzl65", name: "Radio 6 Music" },
-  { id: "p00fzl7c", name: "Asian Network" },
+  { id: "p00fzl68", name: "Asian Network" },
 ];
 
 interface Props {
@@ -163,7 +162,7 @@ export function BbcBrowserCard({ onAdd, defaultOpen = false, saveLabel = "Add to
 
           {/* Programme list (deduplicated) */}
           {programmes.length > 0 && (
-            <div className="max-h-[420px] overflow-y-auto space-y-0.5 pr-1">
+            <div className="max-h-[420px] overflow-y-auto no-scrollbar space-y-0.5 pr-1">
               {programmes.map(prog => {
                 const isSelected = selectedProg?.brand === prog.brand;
                 const wasAdded = addedBrands.has(prog.brand);
@@ -204,7 +203,18 @@ export function BbcBrowserCard({ onAdd, defaultOpen = false, saveLabel = "Add to
             <div className="rounded-lg border border-green-500/30 bg-green-500/10 px-4 py-3 flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-sm font-medium text-slate-200 truncate">{selectedProg.brand}</p>
-                <p className="text-xs text-slate-500 font-mono">{selectedProg.pid}</p>
+                <a
+                  href={`https://www.bbc.co.uk/programmes/${selectedProg.pid}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={e => e.stopPropagation()}
+                  className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300 font-mono transition-colors"
+                >
+                  Open programme
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                  </svg>
+                </a>
               </div>
               <button
                 onClick={handleAdd}

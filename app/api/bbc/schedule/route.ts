@@ -21,10 +21,6 @@ function decodeHtml(s: string): string {
 }
 
 function parseScheduleHtml(html: string): ScheduleSlot[] {
-  // BBC schedule pages use data-pid="m0xxxxxx" attributes (not /programmes/ hrefs).
-  // Each broadcast block: broadcast__time h2 (with content="YYYY-MM-DDTHH:MM") comes
-  // before the data-pid; title and synopsis come immediately after.
-
   const items: ScheduleSlot[] = [];
   const seen = new Set<string>();
   // BBC PIDs vary by era: 8-char m0/b0/p0 (Sounds-era) or 15-char w1730... (newer Radio 4/WS).
@@ -62,6 +58,9 @@ function parseScheduleHtml(html: string): ScheduleSlot[] {
         dateLabel = d.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
       } catch {}
     }
+
+    // Require a broadcast date — excludes cross-service promotions with no schedule context
+    if (!dateStr) continue;
 
     // Brand title: class="programme__title ..."
     const titleMatch = after.match(/class="programme__title[^"]*"><span>([^<]+)<\/span>/);

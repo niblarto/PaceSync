@@ -5,16 +5,20 @@ A Next.js web app for managing a Spotify running playlist based on heart rate zo
 **Features**
 - Browse tracks by BPM / heart rate zone (Z1–Z5)
 - Add tracks from BBC Radio playlists directly to Spotify
+- Play tracks in Spotify
 - Delete tracks from Spotify and local CSV simultaneously
 - Import and auto-save your Exportify CSV export
 - Runna training calendar integration with zone suggestions
-- Weekly cron job to keep the playlist fresh
+- Dedup playlist, to remove duplicate tracks
+- Weekly cron job to keep the playlist fresh:-
+    - Pull down the tracks of the last show, for the BBC programmes that are currently subcribed to
+    - Upload to the Spotify "Running" playlist, then dedupe the "Running" playlist.
 
 ---
 
 ## Prerequisites
 
-- Raspberry Pi (any model with 1 GB+ RAM) running Raspberry Pi OS
+- Pi OS / Debian
 - Python 3 with `paramiko` installed on your **local machine** (for deployment)
 - A [Spotify Developer](https://developer.spotify.com/dashboard) app
 - Your running playlist exported from Spotify using [Exportify](https://exportify.net) as a CSV with BPM data
@@ -111,7 +115,7 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 2. Find your running playlist in the list and click **Export**.
 3. Exportify downloads a `.csv` file containing all tracks with BPM, energy, and other audio features.
 
-> **Note:** Exportify is required specifically because Spotify's audio features API (which provides BPM data) is no longer accessible to newer personal developer accounts. Exportify uses a different access path to retrieve this data. There is no alternative — the app cannot fetch BPM data directly from Spotify.
+> **Note:** Exportify is required specifically because Spotify's audio features API (which provides BPM data) is no longer accessible to newer personal developer accounts. Exportify uses a different access path to retrieve this data. This app cannot fetch BPM data directly from Spotify. (Other older apps still can)
 
 ---
 
@@ -120,7 +124,7 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 1. Open the app and sign in with Spotify.
 2. Go to **Settings**.
 3. Under **Import Playlist**, click **Upload CSV** and select the file downloaded from Exportify.
-4. The file is saved permanently on the Pi as `Running.csv` and survives all future deploys.
+4. The file is saved on the Pi as `Running.csv`.
 5. Return to the **Dashboard** — your tracks will load automatically.
 
 ---
@@ -133,9 +137,21 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 
 ---
 
-## BBC Radio & BPM Data
+## BBC Radio Cards
 
-PaceSync can add tracks from BBC Radio programmes directly to your Spotify playlist — either manually via the dashboard cards or automatically via the weekly cron job.
+PaceSync can pull tracks from BBC Radio programmes and add them directly to your Spotify running playlist.
+
+**Setting up a BBC card:**
+
+1. Go to the **Dashboard** and click **Add BBC Programme** (or the BBC browser card).
+2. Click on a Station (e.g. Radio 2, Radio 6 Music)
+3. Search for a BBC programme by name (e.g. "6 Music's 90s Forever", "Sarah Cox Breakfast Show").
+4. Select the programme from the results — a card will appear on the dashboard showing the most recent episode's tracklist.
+5. Click **Add to Spotify** on the card to add all tracks from that episode to your Running playlist immediately.
+
+**Automatic weekly updates:**
+
+Once a programme card is added, the weekly cron job (Fridays at 14:00) will automatically fetch the latest episode's tracks and add them to your playlist. You can also trigger this manually from **Settings** → **Run Now**.
 
 **Important: BPM data is not fetched automatically.**
 
