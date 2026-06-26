@@ -55,7 +55,7 @@ function VirtualTrackList({ tracks, onDelete }: { tracks: TrackWithBPM[]; onDele
   }, [visibleCount, tracks.length, loadMore]);
 
   return (
-    <div ref={containerRef} className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto">
+    <div ref={containerRef} className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto no-scrollbar">
       {tracks.slice(0, visibleCount).map((track, i) => (
         <TrackRow
           key={track.id}

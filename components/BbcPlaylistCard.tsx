@@ -372,7 +372,7 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
       {updateMsg && <p className="text-xs text-green-400">{updateMsg}</p>}
 
       {tracks.length > 0 && (
-        <div className="divide-y divide-white/10 max-h-64 overflow-y-auto rounded-lg border border-white/10 bg-slate-950/40">
+        <div className="divide-y divide-white/10 max-h-64 overflow-y-auto no-scrollbar rounded-lg border border-white/10 bg-slate-950/40">
           {tracks.map((t, i) => (
             <BbcTrackRow key={`${t.uri}-${i}`} track={t} index={i} />
           ))}

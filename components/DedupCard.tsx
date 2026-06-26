@@ -121,7 +121,7 @@ export function DedupCard() {
   };
 
   return (
-    <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 px-4 py-3">
+    <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 px-4 py-[29px]">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h2 className="font-semibold text-slate-200 text-sm">Dedup Playlist</h2>

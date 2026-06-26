@@ -235,7 +235,7 @@ export function RunnaScheduleCard() {
       )}
 
       {!loading && !error && workouts.length > 0 && (
-        <div className="overflow-y-auto max-h-[340px] divide-y divide-white/10">
+        <div className="overflow-y-auto max-h-[600px] no-scrollbar divide-y divide-white/10">
           {workouts.map(w => {
             const meta = TYPE_META[w.type];
             const isOpen = expanded === w.uid;
