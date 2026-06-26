@@ -111,7 +111,7 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 2. Find your running playlist in the list and click **Export**.
 3. Exportify downloads a `.csv` file containing all tracks with BPM, energy, and other audio features.
 
-> **Note:** Exportify must include BPM data. If the exported CSV has no BPM column, your Exportify version may not include audio features — try re-exporting or check for an "Include audio features" option.
+> **Note:** Exportify is required specifically because Spotify's audio features API (which provides BPM data) is no longer accessible to newer personal developer accounts. Exportify uses a different access path to retrieve this data. There is no alternative — the app cannot fetch BPM data directly from Spotify.
 
 ---
 
