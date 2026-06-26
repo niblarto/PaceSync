@@ -133,6 +133,23 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 
 ---
 
+## BBC Radio & BPM Data
+
+PaceSync can add tracks from BBC Radio programmes directly to your Spotify playlist — either manually via the dashboard cards or automatically via the weekly cron job.
+
+**Important: BPM data is not fetched automatically.**
+
+When tracks are added to Spotify via BBC cards, they appear in the playlist but PaceSync has no way to retrieve their BPM data. Spotify's audio features API (`/audio-features`) is no longer accessible to newer personal developer accounts, so the app cannot look up tempo automatically.
+
+**To get BPM data for newly added tracks:**
+
+1. After tracks have been added to Spotify, go to [exportify.net](https://exportify.net) and re-export your running playlist.
+2. Go to **Settings** → **Import Playlist** and upload the new CSV.
+
+Until you do this, newly added BBC tracks will not appear in any zone on the dashboard (they have no BPM data and cannot be sorted into a zone).
+
+---
+
 ## Runna Integration
 
 PaceSync can pull your upcoming Runna workouts and display them on the dashboard with suggested heart rate zones.
