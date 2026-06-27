@@ -43,19 +43,22 @@ A Next.js web app for managing a Spotify running playlist based on heart rate zo
 cp .env.example .env.local
 ```
 
-Edit `.env.local` and fill in all values:
+Edit `.env.local` and fill in all required values:
 
-| Variable | Description |
-|---|---|
-| `SPOTIFY_CLIENT_ID` | From Spotify Developer Dashboard |
-| `SPOTIFY_CLIENT_SECRET` | From Spotify Developer Dashboard |
-| `NEXTAUTH_SECRET` | Random string: `openssl rand -base64 32` |
-| `NEXTAUTH_URL` | Your public URL, e.g. `https://your-domain.com` |
-| `CRON_SECRET` | Random string: `openssl rand -hex 24` |
-| `RUNNA_ICS_URL` | Your Runna calendar ICS URL (optional) |
-| `NEXT_PUBLIC_RUNNING_PLAYLIST_ID` | Your Spotify running playlist ID |
+| Variable | Required | Description |
+|---|---|---|
+| `SPOTIFY_CLIENT_ID` | ✅ | From Spotify Developer Dashboard |
+| `SPOTIFY_CLIENT_SECRET` | ✅ | From Spotify Developer Dashboard |
+| `NEXTAUTH_SECRET` | ✅ | Random string: `openssl rand -base64 32` |
+| `NEXTAUTH_URL` | ✅ | Your public URL, e.g. `https://your-domain.com` (or `http://localhost:3000` for local dev) |
+| `CRON_SECRET` | ✅ | Random string: `openssl rand -hex 24` — protects the cron endpoint |
+| `NEXT_PUBLIC_RUNNING_PLAYLIST_ID` | ✅ | Your Spotify running playlist ID |
+| `RUNNA_ICS_URL` | optional | Your Runna calendar ICS URL — can also be set in **Settings → Runna Integration** after deploy |
+| `NTFY_TOPIC` | optional | Your ntfy.sh topic name for push notifications — can also be set in **Settings → Push Notifications** after deploy |
 
 To find your **playlist ID**: open the playlist on [open.spotify.com](https://open.spotify.com), copy the URL — the ID is the string after `/playlist/`.
+
+> **Settings page overrides**: `RUNNA_ICS_URL` and `NTFY_TOPIC` can be left blank here and configured directly in the app after deploying. Values saved via Settings take precedence over `.env.local`.
 
 ---
 

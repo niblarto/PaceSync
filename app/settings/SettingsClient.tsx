@@ -374,10 +374,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
     {/* ── Column 1: Heart Rate ── */}
     <div className="space-y-6">
-      <h2 className="font-semibold text-lg">Heart Rate Settings</h2>
 
       {/* Max HR / Resting HR */}
-      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-5">
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+        <div className="px-5 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-lg">Heart Rate Settings</h2>
+        </div>
+        <div className="p-5 space-y-5">
         <div className="space-y-1.5">
           <label className="block text-sm font-medium text-slate-300">Max Heart Rate</label>
           <p className="text-xs text-slate-500">Normally measured from a Max HR Stress Test.</p>
@@ -414,28 +417,29 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             <p className="text-xs text-slate-600">This is how much your heart rate can vary.</p>
           </div>
         )}
+        </div>
       </div>
 
       {/* Zone Summary */}
       {hrrValid && (
-        <div className="space-y-3">
-          <h3 className="font-semibold text-slate-300">Zone Summary</h3>
-          <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
-            {zones.map((z, i) => (
-              <div key={i} className={`flex items-center gap-3 px-4 py-2.5 ${i < 4 ? "border-b border-white/5" : ""}`}>
-                <span className={`w-2 h-2 rounded-full shrink-0 ${ZONE_DETAILS[i].color}`} />
-                <span className="text-sm text-slate-500 w-8 shrink-0">Z{i + 1}</span>
-                <span className="text-sm text-slate-400 w-24 shrink-0">{ZONE_DETAILS[i].name}</span>
-                <span className={`text-sm font-mono font-medium ${ZONE_DETAILS[i].colorText}`}>{zoneLabel(z, i)}</span>
-              </div>
-            ))}
+        <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+          <div className="px-4 py-3 border-b border-white/10">
+            <h3 className="font-semibold text-slate-300">Zone Summary</h3>
           </div>
+          {zones.map((z, i) => (
+            <div key={i} className={`flex items-center gap-3 px-4 py-2.5 ${i < 4 ? "border-b border-white/5" : ""}`}>
+              <span className={`w-2 h-2 rounded-full shrink-0 ${ZONE_DETAILS[i].color}`} />
+              <span className="text-sm text-slate-500 w-8 shrink-0">Z{i + 1}</span>
+              <span className="text-sm text-slate-400 w-24 shrink-0">{ZONE_DETAILS[i].name}</span>
+              <span className={`text-sm font-mono font-medium ${ZONE_DETAILS[i].colorText}`}>{zoneLabel(z, i)}</span>
+            </div>
+          ))}
         </div>
       )}
 
       {/* Zone Details & Override */}
-      <div className="space-y-4">
-        <div className="flex items-baseline justify-between">
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
           <h3 className="font-semibold text-slate-300">Zone Override</h3>
           <button
             onClick={resetToCalc}
@@ -444,9 +448,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             Reset to calculated
           </button>
         </div>
+        <div className="p-3 space-y-3">
 
         {zones.map((z, i) => (
-          <div key={i} className={`rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 ${ZONE_DETAILS[i].borderColor} overflow-hidden`}>
+          <div key={i} className={`rounded-xl bg-slate-800/50 border border-white/5 ${ZONE_DETAILS[i].borderColor} overflow-hidden`}>
             <div className="flex items-center gap-2.5 px-4 py-3 border-b border-white/5">
               <span className={`text-xs font-bold rounded px-1.5 py-0.5 ${ZONE_DETAILS[i].color} text-black shrink-0`}>
                 Z{i + 1}
@@ -494,6 +499,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             </div>
           </div>
         ))}
+        </div>
       </div>
 
       {error && <p className="text-sm text-red-400">{error}</p>}
@@ -509,7 +515,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
     {/* ── Column 2: BBC ── */}
     <div className="space-y-6">
-      <h2 className="font-semibold text-lg">BBC Programmes</h2>
 
       {/* Import Playlist */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
@@ -548,9 +553,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       </div>
 
       {/* BBC Programme list */}
-      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
-        <div className="flex items-center justify-between">
-          <h3 className="font-semibold text-slate-200">Subscribed Programmes</h3>
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-lg">BBC Programmes</h2>
           {!bbcBrowserOpen && (
             <button
               onClick={() => openBrowser("add")}
@@ -560,6 +565,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             </button>
           )}
         </div>
+        <div className="p-5 space-y-4">
 
         {bbcLoading ? (
           <div className="space-y-2">
@@ -677,15 +683,19 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             />
           </div>
         )}
+        </div>
       </div>
     </div>
 
     {/* ── Column 3: Runna + ntfy ── */}
     <div className="space-y-6">
-      <h2 className="font-semibold text-lg">Runna Integration</h2>
 
       {/* Runna */}
-      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+        <div className="px-5 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-lg">Runna Integration</h2>
+        </div>
+        <div className="p-5 space-y-4">
         <p className="text-sm text-slate-400">
           Connect your Runna training calendar to see upcoming workouts and zone suggestions on the dashboard.
         </p>
@@ -717,6 +727,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         >
           {runnaSaving ? "Saving…" : runnaSaved ? "Saved!" : "Save URL"}
         </button>
+        </div>
       </div>
 
       {/* ntfy Notifications */}

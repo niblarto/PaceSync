@@ -383,15 +383,17 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
           {/* Col 1: Zones */}
           <aside className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="font-semibold">Heart Rate Zones</h2>
-              <Link
-                href="/settings"
-                className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
-              >
-                Edit zones →
-              </Link>
-            </div>
+            <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+                <h2 className="font-semibold text-sm">Heart Rate Zones</h2>
+                <Link
+                  href="/settings"
+                  className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                >
+                  Edit zones →
+                </Link>
+              </div>
+              <div className="p-2 space-y-1.5">
 
             {zones.length === 0 && (
               <div className="space-y-2">
@@ -451,6 +453,9 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   }}
                 />
               ))}
+            </div>
+
+              </div>
             </div>
 
             <DedupCard />
