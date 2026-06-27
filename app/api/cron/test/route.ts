@@ -1,13 +1,14 @@
 import { NextRequest } from "next/server";
-
-const NTFY_TOPIC = "SBH_Running_Playlist";
+import { loadNtfyTopic } from "@/lib/ntfy-config";
 
 async function notify(message: string, options: { title?: string; tags?: string; priority?: string } = {}) {
+  const topic = loadNtfyTopic() ?? process.env.NTFY_TOPIC ?? "";
+  if (!topic) return false;
   const headers: Record<string, string> = { "Content-Type": "text/plain" };
   if (options.title) headers["Title"] = options.title;
   if (options.tags) headers["Tags"] = options.tags;
   if (options.priority) headers["Priority"] = options.priority;
-  const res = await fetch(`https://ntfy.sh/${NTFY_TOPIC}`, { method: "POST", headers, body: message });
+  const res = await fetch(`https://ntfy.sh/${topic}`, { method: "POST", headers, body: message });
   return res.ok;
 }
 

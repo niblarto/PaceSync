@@ -2,11 +2,11 @@ import { NextRequest } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getFreshToken } from "@/lib/tokenStore";
+import { loadNtfyTopic } from "@/lib/ntfy-config";
 import fs from "fs";
 import path from "path";
 
 const RUNNING_PLAYLIST_ID = process.env.NEXT_PUBLIC_RUNNING_PLAYLIST_ID ?? "";
-const NTFY_TOPIC = "SBH_Running_Playlist";
 const CACHE_FILE = path.join(process.cwd(), "spotify-cache.json");
 const BBC_PROGRAMMES_FILE = path.join(process.cwd(), "bbc-programmes.json");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
@@ -28,12 +28,14 @@ function loadBbcProgrammes(): { pid: string; name: string }[] {
 // ── ntfy.sh ────────────────────────────────────────────────────────────────
 
 async function notify(message: string, options: { title?: string; tags?: string; priority?: string } = {}) {
+  const topic = loadNtfyTopic() ?? process.env.NTFY_TOPIC ?? "";
+  if (!topic) return;
   try {
     const headers: Record<string, string> = { "Content-Type": "text/plain" };
     if (options.title) headers["Title"] = options.title;
     if (options.tags) headers["Tags"] = options.tags;
     if (options.priority) headers["Priority"] = options.priority;
-    await fetch(`https://ntfy.sh/${NTFY_TOPIC}`, { method: "POST", headers, body: message });
+    await fetch(`https://ntfy.sh/${topic}`, { method: "POST", headers, body: message });
   } catch (e) {
     console.warn("[cron] ntfy failed:", e);
   }

@@ -197,6 +197,29 @@ Alternatively, you can set `RUNNA_ICS_URL` in `.env.local` before deploying — 
 
 ---
 
+## Push Notifications (ntfy.sh)
+
+PaceSync can send push notifications to your phone when the weekly playlist update runs, using [ntfy.sh](https://ntfy.sh) — a free, open source notification service.
+
+**Setting up ntfy.sh:**
+
+1. Install the **ntfy app** on your phone:
+   - [iOS — App Store](https://apps.apple.com/app/ntfy/id1625396347)
+   - [Android — Play Store / F-Droid](https://ntfy.sh/docs/subscribe/phone/)
+2. In the ntfy app, tap **+** and subscribe to a topic — choose any name you like, e.g. `my_running_playlist_abc123`. Topic names are public, so use something unique and hard to guess.
+3. In PaceSync, go to **Settings** → **Push Notifications** and enter the same topic name, then click **Save topic**.
+
+Alternatively, set `NTFY_TOPIC` in `.env.local` before deploying — the Settings page value takes precedence if set.
+
+**What you'll receive:**
+
+- A notification when the weekly update starts, listing the BBC programmes being processed
+- A per-programme notification with how many tracks were found and added
+- A final summary with total tracks added and deduplication results
+- Error notifications (with high priority) if anything goes wrong
+
+---
+
 ## Updating
 
 After making code changes, redeploy with:

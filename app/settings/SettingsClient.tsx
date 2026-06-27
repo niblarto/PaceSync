@@ -101,11 +101,18 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [bbcBrowserTargetPid, setBbcBrowserTargetPid] = useState<string | undefined>();
   const [bbcBrowserTargetName, setBbcBrowserTargetName] = useState<string | undefined>();
   const [bbcSaveMsg, setBbcSaveMsg] = useState<string | null>(null);
+
   // ── Runna URL state ────────────────────────────────────────────────────────
   const [runnaUrl, setRunnaUrl] = useState("");
   const [runnaSaving, setRunnaSaving] = useState(false);
   const [runnaSaved, setRunnaSaved] = useState(false);
   const [runnaError, setRunnaError] = useState<string | null>(null);
+
+  // ── ntfy state ─────────────────────────────────────────────────────────────
+  const [ntfyTopic, setNtfyTopic] = useState("");
+  const [ntfySaving, setNtfySaving] = useState(false);
+  const [ntfySaved, setNtfySaved] = useState(false);
+  const [ntfyError, setNtfyError] = useState<string | null>(null);
 
   // ── CSV import state ───────────────────────────────────────────────────────
   const [csvFileName, setCsvFileName] = useState<string | null>(null);
@@ -136,6 +143,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     fetch("/api/settings/runna-url")
       .then(r => r.json())
       .then((d: { icsUrl?: string | null }) => { if (d.icsUrl) setRunnaUrl(d.icsUrl); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/settings/ntfy")
+      .then(r => r.json())
+      .then((d: { topic?: string | null }) => { if (d.topic) setNtfyTopic(d.topic); })
       .catch(() => {});
   }, []);
 
@@ -250,6 +264,25 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }
 
+  async function saveNtfyTopic() {
+    setNtfySaving(true);
+    setNtfySaved(false);
+    setNtfyError(null);
+    try {
+      const res = await fetch("/api/settings/ntfy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic: ntfyTopic.trim() }),
+      });
+      if (!res.ok) throw new Error("Failed to save");
+      setNtfySaved(true);
+    } catch {
+      setNtfyError("Failed to save — try again.");
+    } finally {
+      setNtfySaving(false);
+    }
+  }
+
   function openBrowser(mode: "add" | "replace", targetPid?: string, targetName?: string) {
     setBbcBrowserMode(mode);
     setBbcBrowserTargetPid(targetPid);
@@ -266,7 +299,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const text = ev.target?.result as string;
-      // basic validation
       const lines = text.replace(/\r/g, "").split("\n").filter(Boolean);
       if (lines.length < 2) { setCsvError("File appears to be empty."); return; }
       const header = lines[0].toLowerCase();
@@ -329,28 +361,25 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
   if (loading) {
     return (
-      <div className="space-y-4">
-        {Array.from({ length: 4 }, (_, i) => (
-          <div key={i} className="h-20 rounded-lg bg-slate-900 animate-pulse" />
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {Array.from({ length: 6 }, (_, i) => (
+          <div key={i} className="h-20 rounded-lg bg-slate-900/85 backdrop-blur-sm animate-pulse" />
         ))}
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 items-start">
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
 
-    {/* ── Left column: Heart Rate ── */}
-    <div className="space-y-8">
+    {/* ── Column 1: Heart Rate ── */}
+    <div className="space-y-6">
+      <h2 className="font-semibold text-lg">Heart Rate Settings</h2>
 
-      {/* ── Max HR / Resting HR ── */}
-      <div className="space-y-5">
-        <h2 className="font-semibold text-lg">Heart Rate Settings</h2>
-
+      {/* Max HR / Resting HR */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-5">
         <div className="space-y-1.5">
-          <label className="block text-sm font-medium text-slate-300">
-            Max Heart Rate
-          </label>
+          <label className="block text-sm font-medium text-slate-300">Max Heart Rate</label>
           <p className="text-xs text-slate-500">Normally measured from a Max HR Stress Test.</p>
           <input
             type="number"
@@ -358,14 +387,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             max={220}
             value={maxHR || ""}
             onChange={e => handleMaxHR(e.target.value)}
-            className="w-24 rounded-lg bg-slate-900 border border-slate-700 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
+            className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
           />
         </div>
 
         <div className="space-y-1.5">
-          <label className="block text-sm font-medium text-slate-300">
-            Resting Heart Rate
-          </label>
+          <label className="block text-sm font-medium text-slate-300">Resting Heart Rate</label>
           <p className="text-xs text-slate-500">Measure first thing in the morning, standing still.</p>
           <input
             type="number"
@@ -373,12 +400,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             max={100}
             value={restingHR || ""}
             onChange={e => handleRestingHR(e.target.value)}
-            className="w-24 rounded-lg bg-slate-900 border border-slate-700 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
+            className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
           />
         </div>
 
         {hrrValid && (
-          <div className="rounded-lg bg-slate-900 border border-slate-800 px-4 py-3 space-y-0.5">
+          <div className="rounded-lg bg-slate-800/50 border border-white/5 px-4 py-3 space-y-0.5">
             <p className="text-sm text-slate-400">
               Heart Rate Reserve:{" "}
               <span className="text-white font-bold text-xl">{hrr}</span>
@@ -389,13 +416,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         )}
       </div>
 
-      {/* ── Zone summary ── */}
+      {/* Zone Summary */}
       {hrrValid && (
         <div className="space-y-3">
           <h3 className="font-semibold text-slate-300">Zone Summary</h3>
-          <div className="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
+          <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
             {zones.map((z, i) => (
-              <div key={i} className={`flex items-center gap-3 px-4 py-2.5 ${i < 4 ? "border-b border-slate-800" : ""}`}>
+              <div key={i} className={`flex items-center gap-3 px-4 py-2.5 ${i < 4 ? "border-b border-white/5" : ""}`}>
                 <span className={`w-2 h-2 rounded-full shrink-0 ${ZONE_DETAILS[i].color}`} />
                 <span className="text-sm text-slate-500 w-8 shrink-0">Z{i + 1}</span>
                 <span className="text-sm text-slate-400 w-24 shrink-0">{ZONE_DETAILS[i].name}</span>
@@ -406,10 +433,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
       )}
 
-      {/* ── Zone details + override ── */}
+      {/* Zone Details & Override */}
       <div className="space-y-4">
         <div className="flex items-baseline justify-between">
-          <h3 className="font-semibold text-slate-300">Zone Details &amp; Override</h3>
+          <h3 className="font-semibold text-slate-300">Zone Override</h3>
           <button
             onClick={resetToCalc}
             className="text-xs text-slate-500 hover:text-slate-300 underline transition-colors"
@@ -419,8 +446,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
 
         {zones.map((z, i) => (
-          <div key={i} className={`rounded-xl bg-slate-900 border border-slate-800 ${ZONE_DETAILS[i].borderColor} overflow-hidden`}>
-            <div className="flex items-center gap-2.5 px-4 py-3 border-b border-slate-800">
+          <div key={i} className={`rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 ${ZONE_DETAILS[i].borderColor} overflow-hidden`}>
+            <div className="flex items-center gap-2.5 px-4 py-3 border-b border-white/5">
               <span className={`text-xs font-bold rounded px-1.5 py-0.5 ${ZONE_DETAILS[i].color} text-black shrink-0`}>
                 Z{i + 1}
               </span>
@@ -442,7 +469,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     type="number"
                     value={z.max || ""}
                     onChange={e => updateZone(i, "max", e.target.value)}
-                    className="w-16 rounded bg-slate-800 border border-slate-700 text-sm px-2 py-1.5 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
+                    className="w-16 rounded bg-slate-800/60 border border-white/10 text-sm px-2 py-1.5 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
                   />
                   <span className="text-xs text-slate-500">bpm</span>
                 </div>
@@ -452,14 +479,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     type="number"
                     value={z.min || ""}
                     onChange={e => updateZone(i, "min", e.target.value)}
-                    className="w-16 rounded bg-slate-800 border border-slate-700 text-sm px-2 py-1.5 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
+                    className="w-16 rounded bg-slate-800/60 border border-white/10 text-sm px-2 py-1.5 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
                   />
                   <span className="text-xs text-slate-500">–</span>
                   <input
                     type="number"
                     value={z.max || ""}
                     onChange={e => updateZone(i, "max", e.target.value)}
-                    className="w-16 rounded bg-slate-800 border border-slate-700 text-sm px-2 py-1.5 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
+                    className="w-16 rounded bg-slate-800/60 border border-white/10 text-sm px-2 py-1.5 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
                   />
                   <span className="text-xs text-slate-500">bpm</span>
                 </div>
@@ -478,61 +505,25 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       >
         {saving ? "Saving…" : saved ? "Saved!" : "Save zones"}
       </button>
-
-      {/* ── Runna Integration ── */}
-      <div className="space-y-4 pt-4 border-t border-slate-800">
-        <div>
-          <h2 className="font-semibold text-lg">Runna Integration</h2>
-          <p className="text-sm text-slate-400 mt-1">
-            Connect your Runna training calendar to see upcoming workouts and zone suggestions on the dashboard.
-          </p>
-        </div>
-        <div className="rounded-lg bg-slate-900 border border-slate-800 p-4 space-y-2 text-xs text-slate-400">
-          <p className="font-medium text-slate-300">How to find your iCal URL:</p>
-          <ol className="list-decimal list-inside space-y-1">
-            <li>Open the <span className="text-slate-200">Runna app</span> on your phone</li>
-            <li>Tap <span className="text-slate-200">Profile</span> → <span className="text-slate-200">Settings</span></li>
-            <li>Tap <span className="text-slate-200">Calendar Integration</span></li>
-            <li>Copy the <span className="text-slate-200">iCal / Webcal URL</span></li>
-          </ol>
-          <p className="text-slate-500 pt-1">Keep this URL private — it gives read access to your training schedule.</p>
-        </div>
-        <div className="space-y-2">
-          <label className="block text-sm font-medium text-slate-300">iCal URL</label>
-          <input
-            type="url"
-            value={runnaUrl}
-            onChange={e => { setRunnaUrl(e.target.value); setRunnaSaved(false); }}
-            placeholder="https://app.runna.com/api/ical/..."
-            className="w-full rounded-lg bg-slate-900 border border-slate-700 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
-          />
-        </div>
-        {runnaError && <p className="text-sm text-red-400">{runnaError}</p>}
-        <button
-          onClick={saveRunnaUrl}
-          disabled={runnaSaving || !runnaUrl.trim()}
-          className="rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
-        >
-          {runnaSaving ? "Saving…" : runnaSaved ? "Saved!" : "Save URL"}
-        </button>
-      </div>
-
     </div>
 
-    {/* ── Right column: Import + BBC Programmes ── */}
-    <div className="space-y-8">
+    {/* ── Column 2: BBC ── */}
+    <div className="space-y-6">
+      <h2 className="font-semibold text-lg">BBC Programmes</h2>
 
-      {/* ── Import Playlist ── */}
-      <div className="space-y-4">
-        <h2 className="font-semibold text-lg">Import Playlist</h2>
-        <p className="text-sm text-slate-400">
-          Export your Spotify playlist via{" "}
-          <a href="https://exportify.net" target="_blank" rel="noopener noreferrer"
-            className="text-green-400 hover:text-green-300 underline">
-            exportify.net
-          </a>
-          , then upload the CSV here. It will be saved as your default Running playlist.
-        </p>
+      {/* Import Playlist */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h3 className="font-semibold text-slate-200">Import Playlist</h3>
+          <p className="text-sm text-slate-400 mt-1">
+            Export your Spotify playlist via{" "}
+            <a href="https://exportify.net" target="_blank" rel="noopener noreferrer"
+              className="text-green-400 hover:text-green-300 underline">
+              exportify.net
+            </a>
+            , then upload the CSV here. It will be saved as your default Running playlist.
+          </p>
+        </div>
         <ol className="text-xs text-slate-500 space-y-1 list-decimal list-inside">
           <li>Go to <span className="text-slate-300">exportify.net</span> and log in with Spotify</li>
           <li>Find your Running playlist and click <span className="text-slate-300">Export</span></li>
@@ -543,7 +534,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           <button
             onClick={() => csvFileRef.current?.click()}
             disabled={csvSaving}
-            className="inline-flex items-center gap-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-slate-200 text-sm font-medium px-4 py-2 transition-colors"
+            className="inline-flex items-center gap-2 rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 text-sm font-medium px-4 py-2 transition-colors"
           >
             {csvSaving ? "Saving…" : "Upload CSV"}
           </button>
@@ -556,13 +547,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         {csvError && <p className="text-sm text-red-400">{csvError}</p>}
       </div>
 
-      <div className="space-y-4">
+      {/* BBC Programme list */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="font-semibold text-lg">BBC Programmes</h2>
+          <h3 className="font-semibold text-slate-200">Subscribed Programmes</h3>
           {!bbcBrowserOpen && (
             <button
               onClick={() => openBrowser("add")}
-              className="text-xs text-slate-400 hover:text-slate-200 border border-slate-700 rounded-lg px-3 py-1.5 transition-colors"
+              className="text-xs text-slate-400 hover:text-slate-200 border border-white/10 rounded-lg px-3 py-1.5 transition-colors"
             >
               + Add Programme
             </button>
@@ -571,14 +563,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
         {bbcLoading ? (
           <div className="space-y-2">
-            {[1, 2, 3].map(i => <div key={i} className="h-14 rounded-lg bg-slate-900 animate-pulse" />)}
+            {[1, 2, 3].map(i => <div key={i} className="h-14 rounded-lg bg-slate-800/50 animate-pulse" />)}
           </div>
         ) : bbcProgrammes.length === 0 ? (
           <p className="text-sm text-slate-500">No BBC programmes configured.</p>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-2 overflow-y-auto no-scrollbar max-h-[320px]">
             {bbcProgrammes.map(p => (
-              <div key={p.pid} className="flex items-center justify-between gap-2 rounded-lg bg-slate-900 border border-slate-800 px-4 py-3">
+              <div key={p.pid} className="flex items-center justify-between gap-2 rounded-lg bg-slate-800/50 border border-white/5 px-4 py-3">
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium text-slate-200 truncate">{p.name}</p>
                   <p className="text-xs text-slate-500 font-mono">{p.pid}</p>
@@ -608,17 +600,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </div>
         )}
 
-        {bbcSaveMsg && (
-          <p className="text-sm text-green-400">{bbcSaveMsg}</p>
-        )}
+        {bbcSaveMsg && <p className="text-sm text-green-400">{bbcSaveMsg}</p>}
 
-        {/* ── Run Now ── */}
+        {/* Run Now */}
         {!bbcBrowserOpen && (
           <div className="space-y-3 pt-1">
             <button
               onClick={runCronNow}
               disabled={cronRunning || bbcLoading}
-              className="w-full rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 text-sm font-medium text-slate-200 px-4 py-2.5 transition-colors flex items-center justify-center gap-2"
+              className="w-full rounded-lg bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 border border-white/10 text-sm font-medium text-slate-200 px-4 py-2.5 transition-colors flex items-center justify-center gap-2"
             >
               {cronRunning ? (
                 <>
@@ -638,14 +628,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               )}
             </button>
 
-            {cronError && (
-              <p className="text-sm text-red-400">{cronError}</p>
-            )}
+            {cronError && <p className="text-sm text-red-400">{cronError}</p>}
 
             {cronResults && cronSummary && (
-              <div className="rounded-lg bg-slate-900 border border-slate-800 overflow-hidden text-sm">
+              <div className="rounded-lg bg-slate-800/50 border border-white/5 overflow-hidden text-sm">
                 {cronResults.map((r, i) => (
-                  <div key={i} className={`flex items-center justify-between gap-3 px-4 py-2.5 ${i < cronResults.length - 1 ? "border-b border-slate-800" : ""}`}>
+                  <div key={i} className={`flex items-center justify-between gap-3 px-4 py-2.5 ${i < cronResults.length - 1 ? "border-b border-white/5" : ""}`}>
                     <span className={`truncate ${r.error ? "text-red-400" : "text-slate-300"}`}>{r.name}</span>
                     {r.error ? (
                       <span className="text-xs text-red-500 shrink-0">{r.error}</span>
@@ -654,7 +642,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     )}
                   </div>
                 ))}
-                <div className="px-4 py-2.5 bg-slate-800/50 border-t border-slate-700 flex items-center justify-between">
+                <div className="px-4 py-2.5 bg-slate-800/50 border-t border-white/5 flex items-center justify-between">
                   <span className="text-slate-400 font-medium">{cronSummary.totalMatched} songs added total</span>
                   <span className="text-xs text-slate-500 tabular-nums">
                     {cronSummary.dedupRemoved > 0
@@ -690,9 +678,88 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </div>
         )}
       </div>
-
     </div>
+
+    {/* ── Column 3: Runna + ntfy ── */}
+    <div className="space-y-6">
+      <h2 className="font-semibold text-lg">Runna Integration</h2>
+
+      {/* Runna */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <p className="text-sm text-slate-400">
+          Connect your Runna training calendar to see upcoming workouts and zone suggestions on the dashboard.
+        </p>
+        <div className="rounded-lg bg-slate-800/50 border border-white/5 p-4 space-y-2 text-xs text-slate-400">
+          <p className="font-medium text-slate-300">How to find your iCal URL:</p>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>Open the <span className="text-slate-200">Runna app</span> on your phone</li>
+            <li>Tap <span className="text-slate-200">Profile</span> → <span className="text-slate-200">Settings</span></li>
+            <li>Tap <span className="text-slate-200">Calendar Integration</span></li>
+            <li>Copy the <span className="text-slate-200">iCal / Webcal URL</span></li>
+          </ol>
+          <p className="text-slate-500 pt-1">Keep this URL private — it gives read access to your training schedule.</p>
+        </div>
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-slate-300">iCal URL</label>
+          <input
+            type="url"
+            value={runnaUrl}
+            onChange={e => { setRunnaUrl(e.target.value); setRunnaSaved(false); }}
+            placeholder="https://app.runna.com/api/ical/..."
+            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+          />
+        </div>
+        {runnaError && <p className="text-sm text-red-400">{runnaError}</p>}
+        <button
+          onClick={saveRunnaUrl}
+          disabled={runnaSaving || !runnaUrl.trim()}
+          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+        >
+          {runnaSaving ? "Saving…" : runnaSaved ? "Saved!" : "Save URL"}
+        </button>
+      </div>
+
+      {/* ntfy Notifications */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h3 className="font-semibold text-slate-200">Push Notifications</h3>
+          <p className="text-sm text-slate-400 mt-1">
+            Get notified on your phone when the weekly playlist update runs, using{" "}
+            <a href="https://ntfy.sh" target="_blank" rel="noopener noreferrer" className="text-green-400 hover:text-green-300 underline">ntfy.sh</a>.
+          </p>
+        </div>
+        <div className="rounded-lg bg-slate-800/50 border border-white/5 p-4 space-y-2 text-xs text-slate-400">
+          <p className="font-medium text-slate-300">How to set up ntfy.sh:</p>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>Install the <span className="text-slate-200">ntfy app</span> on your phone (iOS or Android)</li>
+            <li>Subscribe to a topic — choose any unique name, e.g. <span className="text-slate-200 font-mono">my_running_playlist</span></li>
+            <li>Enter the same topic name below and click Save</li>
+          </ol>
+          <p className="text-slate-500 pt-1">
+            Topic names are public on ntfy.sh — use something hard to guess. Leave blank to disable notifications.
+          </p>
+        </div>
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-slate-300">ntfy Topic</label>
+          <input
+            type="text"
+            value={ntfyTopic}
+            onChange={e => { setNtfyTopic(e.target.value); setNtfySaved(false); }}
+            placeholder="e.g. my_running_playlist_abc123"
+            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono"
+          />
+        </div>
+        {ntfyError && <p className="text-sm text-red-400">{ntfyError}</p>}
+        <button
+          onClick={saveNtfyTopic}
+          disabled={ntfySaving}
+          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+        >
+          {ntfySaving ? "Saving…" : ntfySaved ? "Saved!" : "Save topic"}
+        </button>
+      </div>
+    </div>
+
     </div>
   );
 }
-
