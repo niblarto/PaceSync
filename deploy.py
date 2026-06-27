@@ -82,6 +82,7 @@ FILES = [
     ('lib/ntfy-config.ts',                        'lib/ntfy-config.ts'),
     ('public/Running.csv',                        'public/Running.csv'),
     ('public/favicon.svg',                        'public/favicon.svg'),
+    ('public/settings-hero.png',                  'public/settings-hero.png'),
     ('public/hero.png',                            'public/hero.png'),
     ('public/dashboard-hero.png',                  'public/dashboard-hero.png'),
     ('components/AuthProvider.tsx',               'components/AuthProvider.tsx'),

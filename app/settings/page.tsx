@@ -19,7 +19,7 @@ export default async function SettingsPage({
   return (
     <div
       className="min-h-screen flex flex-col bg-cover bg-fixed bg-center bg-no-repeat"
-      style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.65), rgba(2,6,23,0.65)), url('/dashboard-hero.png')" }}
+      style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.65), rgba(2,6,23,0.65)), url('/settings-hero.png')" }}
     >
       <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
         <div className="max-w-[1800px] mx-auto px-4 h-14 flex items-center gap-4">
