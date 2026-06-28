@@ -424,6 +424,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 </div>
                 <p className="font-semibold text-sm">Complete Playlist</p>
                 <p className="text-xs text-slate-500 mt-0.5">All BPM ranges</p>
+                {allTracks.length > 0 && (() => {
+                  const noBpm = allTracks.filter(t => t.bpm === 0).length;
+                  return (
+                    <p className={`text-xs mt-0.5 ${noBpm > 0 ? "text-red-400" : "text-green-700"}`}>{noBpm} Tracks without BPM info</p>
+                  );
+                })()}
               </button>
 
               {displayZones.map((zone) => (
