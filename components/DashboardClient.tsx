@@ -430,6 +430,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 onClick={() => {
                   setPaceFilter(null);
                   setSelectedZones([ALL_ZONE]);
+                  setPaceFilter(null);
                   if (csvName) setPlaylistName(csvName);
                 }}
                 className={`w-full rounded-lg border p-4 text-left transition-all ${
@@ -620,7 +621,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     No tracks in this BPM range. Try a different zone.
                   </div>
                 ) : (
-                  <VirtualTrackList key={selectedZones.map(z=>z.number).sort().join("-")} tracks={filteredTracks} onDelete={handleDeleteTrack} />
+                  <VirtualTrackList key={paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : selectedZones.map(z=>z.number).sort().join("-")} tracks={filteredTracks} onDelete={handleDeleteTrack} />
                 )}
               </div>
             )}

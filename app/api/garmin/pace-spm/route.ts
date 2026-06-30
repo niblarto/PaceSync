@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+﻿import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { loadGarminConfig } from "@/lib/garmin-config";
@@ -25,9 +25,9 @@ export async function GET() {
     db.pragma("busy_timeout = 30000");
 
     // Aggregate per-second records into 5-second pace buckets.
-    // speed is in mph → pace_secs = 3600/speed.
-    // cadence is raw (×2 = SPM).
-    // Bucket = floor(pace_secs / 5) * 5 covers 6:30–10:00/mile (390–600 secs).
+    // speed is in mph â†’ pace_secs = 3600/speed.
+    // cadence is raw (Ã—2 = SPM).
+    // Bucket = floor(pace_secs / 5) * 5 covers 6:30â€“10:00/mile (390â€“600 secs).
     const rows = db.prepare(`
       SELECT
         (CAST(3600.0 / speed / 5 AS INTEGER)) * 5 AS bucket,

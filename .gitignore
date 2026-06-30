@@ -10,3 +10,4 @@ __pycache__/
 Running.csv
 runs.csv
 *.csv
+garmin-config.json

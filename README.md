@@ -10,6 +10,7 @@ A Next.js web app for managing a Spotify running playlist based on heart rate zo
 - Import and auto-save your Exportify CSV export
 - Runna training calendar integration with zone suggestions
 - Dedup playlist, to remove duplicate tracks
+- Garmin activity stats: pace/cadence tables and per-lap speed segments, read directly from a local [GarminDB](https://github.com/tcgoetz/GarminDB) database
 - Weekly cron job to keep the playlist fresh:-
     - Pull down the tracks of the last show, for the BBC programmes that are currently subcribed to
     - Upload to the Spotify "Running" playlist, then dedupe the "Running" playlist.
@@ -55,6 +56,9 @@ Edit `.env.local` and fill in all required values:
 | `NEXT_PUBLIC_RUNNING_PLAYLIST_ID` | ✅ | Your Spotify running playlist ID |
 | `RUNNA_ICS_URL` | optional | Your Runna calendar ICS URL — can also be set in **Settings → Runna Integration** after deploy |
 | `NTFY_TOPIC` | optional | Your ntfy.sh topic name for push notifications — can also be set in **Settings → Push Notifications** after deploy |
+| `GARMINDB_SYNC_WRAPPER` | optional | Path to the GarminDB sync wrapper script (see [GarminDB Integration](#garmindb-integration)) — only needed for the Settings sync-status card |
+| `GARMINDB_PYTHON_BIN` | optional | Path to the Python binary inside your GarminDB venv |
+| `GARMINDB_LOG_PATH` | optional | Path to the GarminDB sync log file |
 
 To find your **playlist ID**: open the playlist on [open.spotify.com](https://open.spotify.com), copy the URL — the ID is the string after `/playlist/`.
 
@@ -197,6 +201,69 @@ Go to **Settings** → **Runna Integration**, paste the URL, and click **Save UR
 > Keep the URL private. It provides read-only access to your training schedule.
 
 Alternatively, you can set `RUNNA_ICS_URL` in `.env.local` before deploying — the app will use the settings page value if set, otherwise falls back to the environment variable.
+
+---
+
+## GarminDB Integration
+
+PaceSync's **Garmin** page (activity list, pace/cadence tables, per-lap speed segments) reads directly from a local SQLite database — it does not call the Garmin Connect API itself. That database is produced by [**GarminDB**](https://github.com/tcgoetz/GarminDB), a separate open-source tool by Tom Goetz that syncs your Garmin Connect data to SQLite.
+
+Because PaceSync reads the SQLite file straight off disk (via `better-sqlite3`), **GarminDB must be installed on the same Pi/server that runs PaceSync** — there's no network sync between them, just a shared file.
+
+### Install GarminDB on the Pi
+
+SSH into the Pi and set up GarminDB in its own virtual environment:
+
+```bash
+python3 -m venv ~/garmindb-venv
+~/garmindb-venv/bin/pip install garmindb
+```
+
+Create the config file with your Garmin Connect credentials:
+
+```bash
+mkdir -p ~/.GarminDb
+cp ~/garmindb-venv/lib/python*/site-packages/garmindb/GarminConnectConfig.json.example \
+   ~/.GarminDb/GarminConnectConfig.json
+```
+
+Edit `~/.GarminDb/GarminConnectConfig.json`:
+- Set `credentials.user` / `credentials.password` to your Garmin Connect login.
+- `data.download_all_activities` controls how many historical activities a full sync fetches (default `1000`).
+
+Run the first full sync (this downloads your entire activity history and can take a while):
+
+```bash
+~/garmindb-venv/bin/python3 ~/garmindb-venv/bin/garmindb_cli.py --all --download --import --analyze
+```
+
+This creates the databases under `~/HealthData/DBs/`. PaceSync only needs **`garmin_activities.db`** from that folder.
+
+### Point PaceSync at the database
+
+1. In PaceSync, go to **Settings → Garmin** (or visit `/garmin` and follow the prompt if it's not configured yet).
+2. Enter the full path to the database, e.g. `/home/pi/HealthData/DBs/garmin_activities.db`.
+3. Save — the **Garmin** page will start showing your activities immediately.
+
+### Keeping it in sync
+
+Add a daily cron job on the Pi to pull new activities (`--latest` only fetches recent ones, so it stays fast):
+
+```bash
+crontab -e
+```
+
+```
+0 15 * * * /home/pi/garmindb-venv/bin/python3 /home/pi/garmindb-venv/bin/garmindb_cli.py --all --download --import --analyze --latest
+```
+
+> **Sync status card:** Settings also shows a live sync status card with a log tail and a "Sync now" button. This launches GarminDB through a small wrapper script that timestamps each log line (so tqdm progress bars can be parsed) and reads back from a fixed log path. If you want that card to work, write a timestamping wrapper around `garmindb_cli.py` on the Pi (it just needs to prefix each output line with a time and write to a log file) and set `GARMINDB_SYNC_WRAPPER`, `GARMINDB_PYTHON_BIN`, and `GARMINDB_LOG_PATH` in `.env.local` to match your paths. Without it, you can still sync GarminDB manually via cron/SSH — only the status card's live log and "Sync now" button won't work.
+
+### Notes
+
+- GarminDB occasionally fails to download a FIT file for an activity that Garmin Connect only stores as GPX (no FIT archived) — those activities won't have per-second speed/cadence data, which is a Garmin Connect limitation, not a PaceSync or GarminDB bug.
+- If an activity fails to import with an `UnknownEnumValue` error on `hr_zones_method`, that's a known GarminDB parsing edge case for certain FIT files — the rest of the sync still completes normally.
+- The intial data pull from Garmin to the local database can take hours, the transfer is throttled so that excessive data grab thresholds are not breached, leading to 429 errors
 
 ---
 

@@ -1,7 +1,49 @@
-"use client";
+﻿"use client";
 
 import { useState, useEffect } from "react";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
+
+interface PaceSpmRow { bucket: number; avg_spm: number; records: number; }
+
+let paceSpmCache: PaceSpmRow[] | null = null;
+let paceSpmPromise: Promise<void> | null = null;
+
+function usePaceSpm(enabled: boolean): PaceSpmRow[] {
+  const [rows, setRows] = useState<PaceSpmRow[]>(paceSpmCache ?? []);
+  useEffect(() => {
+    if (!enabled) return;
+    if (paceSpmCache) { setRows(paceSpmCache); return; }
+    if (!paceSpmPromise) {
+      paceSpmPromise = fetch("/api/garmin/pace-spm")
+        .then(r => r.json())
+        .then((d: unknown) => { if (Array.isArray(d)) paceSpmCache = d as PaceSpmRow[]; })
+        .catch(() => {});
+    }
+    paceSpmPromise.then(() => { if (paceSpmCache) setRows(paceSpmCache); });
+  }, [enabled]);
+  return rows;
+}
+
+function parsePacesFromSegments(segments: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  const re = /(\d+:\d{2})\/mi/g;
+  for (const seg of segments) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(seg)) !== null) {
+      if (!seen.has(m[1])) { seen.add(m[1]); result.push(m[1]); }
+    }
+  }
+  return result;
+}
+
+function lookupSpm(pace: string, rows: PaceSpmRow[]): number | null {
+  const [min, sec] = pace.split(":").map(Number);
+  const secs = min * 60 + sec;
+  const bucket = Math.floor(secs / 5) * 5;
+  return rows.find(r => r.bucket === bucket)?.avg_spm ?? null;
+}
 
 const TYPE_META: Record<WorkoutType, { label: string; color: string }> = {
   easy_run:  { label: "Easy Run",   color: "bg-green-500/20 text-green-400 border-green-500/30" },
