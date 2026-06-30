@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import {
-  ComposedChart, Line, XAxis, YAxis, CartesianGrid,
+  ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer,
 } from "recharts";
 
@@ -158,13 +158,23 @@ const CARD = "rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10
 const TH = "text-left text-xs font-medium text-slate-500 uppercase tracking-wider pb-2";
 const TD = "py-1.5 text-sm text-slate-300";
 
-// Map a pace (secs/mile) to a colour on a green→yellow→orange scale
-// using the activity-wide min/max so all laps share the same reference.
-function paceToColor(pace: number | null, minPace: number, maxPace: number): string {
-  if (pace === null) return "rgba(255,255,255,0.06)";
-  const t = Math.max(0, Math.min(1, (pace - minPace) / (Math.max(maxPace - minPace, 1))));
-  const hue = Math.round(142 - 117 * t); // 142 = green, 25 = orange
-  return `hsl(${hue},65%,46%)`;
+// Custom tooltip for HR chart
+function HrTooltip({ active, payload, label }: {
+  active?: boolean;
+  payload?: Array<{ name: string; value: number; color: string }>;
+  label?: number;
+}) {
+  if (!active || !payload?.length || label === undefined) return null;
+  const m = Math.floor(label / 60);
+  const s = label % 60;
+  return (
+    <div className="bg-slate-950 border border-white/10 rounded-lg p-2.5 text-xs space-y-1 shadow-xl">
+      <p className="text-slate-400 font-medium mb-1">{m}:{s.toString().padStart(2, "0")}</p>
+      {payload.map(p => (
+        <p key={p.name} style={{ color: p.color }}>{p.value} bpm</p>
+      ))}
+    </div>
+  );
 }
 
 // Custom tooltip for pace/cadence chart
@@ -233,6 +243,8 @@ export function GarminActivityClient({ id }: { id: string }) {
     return [Math.max(180, Math.floor(min - pad)), Math.ceil(max + pad)] as [number, number];
   })();
 
+  const hasHr = hasChart && (data?.records ?? []).some(r => r.hr !== null);
+
   return (
     <div
       className="min-h-screen flex flex-col bg-cover bg-fixed bg-center bg-no-repeat"
@@ -259,7 +271,16 @@ export function GarminActivityClient({ id }: { id: string }) {
             {/* Title */}
             <div>
               <p className="text-xs text-slate-500 mb-1">{fmtDateTime(a.start_time)}</p>
-              <h1 className="text-xl font-semibold text-slate-100">{a.name || "Activity"}</h1>
+              <h1 className="text-xl font-semibold">
+                <a
+                  href={`https://connect.garmin.com/app/activity/${id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-slate-100 hover:text-green-400 transition-colors"
+                >
+                  {a.name || "Activity"}
+                </a>
+              </h1>
               <p className="text-sm text-slate-500 capitalize mt-0.5">{a.sub_sport || a.sport}</p>
             </div>
 
@@ -376,6 +397,60 @@ export function GarminActivityClient({ id }: { id: string }) {
               </div>
             )}
 
+            {/* HR over time chart */}
+            {hasHr && (
+              <div className={CARD}>
+                <h2 className="font-semibold text-sm text-slate-300 mb-1">Heart Rate</h2>
+                <p className="text-xs text-slate-500 mb-4">10-second averages</p>
+                <ResponsiveContainer width="100%" height={200}>
+                  <ComposedChart
+                    data={data!.records}
+                    margin={{ top: 4, right: 16, left: 4, bottom: 0 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+                    <XAxis
+                      dataKey="t"
+                      type="number"
+                      scale="linear"
+                      domain={["dataMin", "dataMax"]}
+                      tickFormatter={fmtTimeTick}
+                      tick={{ fill: "#64748b", fontSize: 10 }}
+                      axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
+                      tickLine={false}
+                      interval="preserveStartEnd"
+                      tickCount={8}
+                    />
+                    <YAxis
+                      domain={["auto", "auto"]}
+                      tick={{ fill: "#f87171", fontSize: 10 }}
+                      axisLine={false}
+                      tickLine={false}
+                      width={32}
+                    />
+                    <Tooltip content={<HrTooltip />} />
+                    <Area
+                      type="monotone"
+                      dataKey="hr"
+                      name="HR"
+                      stroke="#f87171"
+                      strokeWidth={1.5}
+                      fill="#f87171"
+                      fillOpacity={0.12}
+                      dot={false}
+                      connectNulls={false}
+                      isAnimationActive={false}
+                    />
+                  </ComposedChart>
+                </ResponsiveContainer>
+                <div className="flex gap-6 mt-3 text-xs text-slate-500">
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-4 h-0.5 bg-red-400 inline-block rounded" />
+                    Heart rate (bpm)
+                  </span>
+                </div>
+              </div>
+            )}
+
             {/* HR zone bar */}
             {hasZones && (
               <div className={CARD}>
@@ -406,179 +481,6 @@ export function GarminActivityClient({ id }: { id: string }) {
               </div>
             )}
 
-            {/* Laps */}
-            {data.laps.length > 0 && (() => {
-              const hasTraditional = data.laps.some(l =>
-                (l.distance && l.distance > 0) ||
-                (parseDuration(l.elapsed_time) ?? 0) > 0
-              );
-              const hasLapZones = data.laps.some(l =>
-                (parseDuration(l.hrz_1_time) ?? 0) + (parseDuration(l.hrz_2_time) ?? 0) +
-                (parseDuration(l.hrz_3_time) ?? 0) + (parseDuration(l.hrz_4_time) ?? 0) +
-                (parseDuration(l.hrz_5_time) ?? 0) > 0
-              );
-
-              // records[].t is elapsed seconds from the first record's timestamp, not a.start_time
-              const refTs = data.recordsT0 ?? a.start_time;
-              const refMs = new Date(refTs.replace(" ", "T")).getTime();
-
-              const hasUsableSegments = hasChart && data.laps.some(lap => {
-                const lapOffset = lap.start_time
-                  ? (new Date(lap.start_time.replace(" ", "T")).getTime() - refMs) / 1000
-                  : 0;
-                const lapDur = parseDuration(lap.elapsed_time) ?? parseDuration(lap.moving_time) ?? 0;
-                return lapOffset > 0 || lapDur > 0;
-              });
-
-              if (!hasUsableSegments && !hasTraditional && !hasLapZones) return null;
-
-              // Global pace range for consistent colour scale across all laps
-              const allPaces = data.records.filter(r => r.pace !== null).map(r => r.pace!);
-              const globalMin = allPaces.length ? Math.min(...allPaces) : 300;
-              const globalMax = allPaces.length ? Math.max(...allPaces) : 720;
-
-              return (
-                <div className={CARD}>
-                  <h2 className="font-semibold text-sm text-slate-300 mb-4">Laps</h2>
-
-                  {hasUsableSegments ? (
-                    // Per-lap speed segments: each lap divided into 12 time-equal slices coloured by pace
-                    <div className="space-y-2">
-                      {data.laps.map(lap => {
-                        const lapOffset = lap.start_time
-                          ? (new Date(lap.start_time.replace(" ", "T")).getTime() - refMs) / 1000
-                          : 0;
-                        const lapDur = parseDuration(lap.elapsed_time) ?? parseDuration(lap.moving_time) ?? 0;
-                        if (lapDur <= 0) return null;
-                        const lapRecs = data.records.filter(
-                          r => r.t >= lapOffset && r.t < lapOffset + lapDur + 5 && r.pace !== null
-                        );
-
-                        const N = 12;
-                        const segLen = lapDur / N;
-                        const segments = Array.from({ length: N }, (_, i) => {
-                          const s0 = lapOffset + i * segLen;
-                          const s1 = s0 + segLen;
-                          const recs = lapRecs.filter(r => r.t >= s0 && r.t < s1);
-                          return recs.length ? recs.reduce((s, r) => s + r.pace!, 0) / recs.length : null;
-                        });
-
-                        const validPaces = segments.filter((p): p is number => p !== null);
-                        const avgPace = validPaces.length
-                          ? validPaces.reduce((s, v) => s + v, 0) / validPaces.length
-                          : null;
-
-                        return (
-                          <div key={lap.lap} className="flex items-center gap-3">
-                            <span className="text-xs text-slate-500 w-10 shrink-0 text-right">
-                              {lap.lap === 0 ? "Warm" : `Lap ${lap.lap}`}
-                            </span>
-                            <div className="flex h-5 flex-1 rounded overflow-hidden gap-px">
-                              {segments.map((pace, i) => (
-                                <div
-                                  key={i}
-                                  className="flex-1"
-                                  style={{ backgroundColor: paceToColor(pace, globalMin, globalMax) }}
-                                  title={pace !== null ? `${fmtPaceSecs(pace)} /mi` : "no data"}
-                                />
-                              ))}
-                            </div>
-                            <span className="text-xs text-slate-400 w-16 shrink-0 tabular-nums text-right">
-                              {avgPace !== null ? `${fmtPaceSecs(avgPace)} /mi` : "—"}
-                            </span>
-                          </div>
-                        );
-                      })}
-                      {/* Legend: gradient bar showing pace scale */}
-                      <div className="flex items-center gap-2 mt-3 text-xs text-slate-600">
-                        <span>{fmtPaceSecs(globalMin)}</span>
-                        <div
-                          className="flex-1 h-1.5 rounded"
-                          style={{
-                            background: `linear-gradient(to right, hsl(142,65%,46%), hsl(84,65%,46%), hsl(25,65%,46%))`,
-                          }}
-                        />
-                        <span>{fmtPaceSecs(globalMax)}</span>
-                      </div>
-                    </div>
-                  ) : hasTraditional ? (
-                    <div className="overflow-x-auto">
-                      <table className="w-full">
-                        <thead>
-                          <tr>
-                            <th className={TH}>Lap</th>
-                            <th className={TH}>Distance</th>
-                            <th className={TH}>Time</th>
-                            <th className={TH}>Avg HR</th>
-                            <th className={TH}>Cadence</th>
-                            <th className={TH}>Ascent</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-800/50">
-                          {data.laps.map(lap => (
-                            <tr key={lap.lap}>
-                              <td className={`${TD} text-slate-500`}>{lap.lap}</td>
-                              <td className={TD}>{fmtDist(lap.distance)}</td>
-                              <td className={TD}>{fmtDuration(lap.elapsed_time)}</td>
-                              <td className={TD}>{lap.avg_hr ? `${lap.avg_hr} bpm` : "—"}</td>
-                              <td className={TD}>{lap.avg_cadence ? `${lap.avg_cadence * 2} spm` : "—"}</td>
-                              <td className={TD}>{lap.ascent ? `${Math.round(lap.ascent)} ft` : "—"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : hasLapZones ? (
-                    // Zone-only fallback (older activities without per-second records)
-                    <div className="space-y-3">
-                      {data.laps.map(lap => {
-                        const times = [
-                          parseDuration(lap.hrz_1_time) ?? 0,
-                          parseDuration(lap.hrz_2_time) ?? 0,
-                          parseDuration(lap.hrz_3_time) ?? 0,
-                          parseDuration(lap.hrz_4_time) ?? 0,
-                          parseDuration(lap.hrz_5_time) ?? 0,
-                        ];
-                        const total = times.reduce((s, v) => s + v, 0);
-                        if (total === 0) return null;
-                        return (
-                          <div key={lap.lap} className="flex items-center gap-3">
-                            <span className="text-xs text-slate-500 w-10 shrink-0 text-right">
-                              {lap.lap === 0 ? "Warm" : `Lap ${lap.lap}`}
-                            </span>
-                            <div className="flex h-4 flex-1 rounded overflow-hidden gap-px">
-                              {times.map((t, i) => {
-                                const pct = (t / total) * 100;
-                                if (pct < 0.5) return null;
-                                return (
-                                  <div
-                                    key={i}
-                                    className={`${ZONE_COLORS[i]} shrink-0`}
-                                    style={{ width: `${pct}%` }}
-                                    title={`${ZONE_NAMES[i]}: ${fmtDuration(t)}`}
-                                  />
-                                );
-                              })}
-                            </div>
-                            <span className="text-xs text-slate-500 w-12 shrink-0 tabular-nums">
-                              {fmtDuration(total)}
-                            </span>
-                          </div>
-                        );
-                      })}
-                      <div className="flex gap-3 mt-2 flex-wrap">
-                        {ZONE_NAMES.map((name, i) => (
-                          <div key={i} className="flex items-center gap-1.5 text-xs text-slate-500">
-                            <span className={`w-2.5 h-2.5 rounded-sm ${ZONE_COLORS[i]}`} />
-                            {name}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })()}
           </>
         )}
       </div>

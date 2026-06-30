@@ -185,6 +185,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [saveError, setSaveError]       = useState<string | null>(null);
   const [bbcProgrammes, setBbcProgrammes] = useState<{ pid: string; name: string; synopsis?: string }[]>(BBC_DEFAULTS);
   const [garminConfigured, setGarminConfigured] = useState(false);
+  const [paceFilter, setPaceFilter] = useState<{ paceStr: string; bpm: number } | null>(null);
 
   useEffect(() => {
     fetch("/api/settings/garmin")
@@ -244,9 +245,15 @@ export function DashboardClient({ spotifyUser }: Props) {
       .catch(() => {/* silently ignore if file missing */});
   }, []);
 
-  // Re-filter whenever zone selection or tracks change
+  // Re-filter whenever zone selection, pace filter, or tracks change
   useEffect(() => {
-    if (allTracks.length === 0 || selectedZones.length === 0) return;
+    if (allTracks.length === 0) return;
+    if (paceFilter) {
+      const lo = paceFilter.bpm - 2, hi = paceFilter.bpm + 2;
+      setFilteredTracks(allTracks.filter(t => t.bpm >= lo && t.bpm <= hi));
+      return;
+    }
+    if (selectedZones.length === 0) return;
     if (selectedZones.some(z => z.number === 0)) {
       setFilteredTracks(allTracks);
     } else {
@@ -260,7 +267,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       }
       setFilteredTracks(result);
     }
-  }, [selectedZones, allTracks]);
+  }, [selectedZones, allTracks, paceFilter]);
 
   async function handleDeleteTrack(track: TrackWithBPM) {
     const token = session?.accessToken;
@@ -424,6 +431,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <button
                 onClick={() => {
                   setSelectedZones([ALL_ZONE]);
+                  setPaceFilter(null);
                   if (csvName) setPlaylistName(csvName);
                 }}
                 className={`w-full rounded-lg border p-4 text-left transition-all ${
@@ -454,6 +462,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   zone={zone}
                   selected={selectedZones.some(z => z.number === zone.number)}
                   onClick={(e) => {
+                    setPaceFilter(null);
                     if (e.ctrlKey || e.metaKey) {
                       setSelectedZones(prev => {
                         const withoutAll = prev.filter(z => z.number !== 0);
@@ -491,7 +500,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">
                 <h2 className="font-semibold">Target zone</h2>
                 <div className="rounded-lg bg-slate-800/50 border border-white/10 px-3 py-2 text-sm">
-                  {selectedZones.length === 0 ? (
+                  {paceFilter ? (
+                    <span className="text-orange-400 font-medium">
+                      {paceFilter.paceStr}/mi pace · ♪ {paceFilter.bpm - 5}–{paceFilter.bpm + 5} BPM
+                    </span>
+                  ) : selectedZones.length === 0 ? (
                     <span className="text-slate-500">← Select a zone on the left</span>
                   ) : selectedZones.some(z => z.number === 0) ? (
                     <span className="text-green-400 font-medium">All Songs — all BPM ranges</span>
@@ -509,12 +522,13 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             )}
 
             {/* Results */}
-            {step !== "idle" && csvName && selectedZones.length > 0 && (
+            {step !== "idle" && csvName && (selectedZones.length > 0 || paceFilter !== null) && (
               <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
                 <div className="p-5 border-b border-white/10 flex items-start justify-between gap-4 flex-wrap">
                   <div>
                     <h3 className="font-semibold">
                       {(() => {
+                        if (paceFilter) return `${filteredTracks.length} tracks matching ${paceFilter.paceStr}/mi (${paceFilter.bpm - 5}–${paceFilter.bpm + 5} BPM)`;
                         if (selectedZones.some(z => z.number === 0)) return `${filteredTracks.length} tracks in zone 0 (0–9999 BPM)`;
                         const s = [...selectedZones].sort((a,b) => a.number - b.number);
                         const zLabel = s.length === 1 ? `zone ${s[0].number} (${s[0].bpmMin}–${s[0].bpmMax} BPM)` : `zones ${s.map(z=>z.number).join("+")} (${s.map(z=>`${z.bpmMin}–${z.bpmMax}`).join(", ")} BPM)`;
@@ -602,7 +616,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     No tracks in this BPM range. Try a different zone.
                   </div>
                 ) : (
-                  <VirtualTrackList key={selectedZones.map(z=>z.number).sort().join("-")} tracks={filteredTracks} onDelete={handleDeleteTrack} />
+                  <VirtualTrackList key={paceFilter ? `pace-${paceFilter.bpm}` : selectedZones.map(z=>z.number).sort().join("-")} tracks={filteredTracks} onDelete={handleDeleteTrack} />
                 )}
               </div>
             )}
@@ -649,7 +663,14 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           {/* Col 3: Right rail — Runna */}
           <div className="space-y-6 min-w-0">
             <RunnaSummaryCard />
-            <RunnaScheduleCard />
+            <RunnaScheduleCard
+              garminConfigured={garminConfigured}
+              onPaceFilter={(paceStr, bpm) => {
+                setPaceFilter({ paceStr, bpm });
+                setSelectedZones([]);
+                if (csvName) setPlaylistName(`${csvName} – ${paceStr}/mi`);
+              }}
+            />
           </div>
 
         </div>
