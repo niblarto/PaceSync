@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import type { RunningZone } from "@/types";
 import { BbcBrowserCard } from "@/components/BbcBrowserCard";
@@ -114,6 +114,22 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [ntfySaved, setNtfySaved] = useState(false);
   const [ntfyError, setNtfyError] = useState<string | null>(null);
 
+  // ── Garmin DB state ────────────────────────────────────────────────────────
+  const [garminDbPath, setGarminDbPath] = useState("/home/scott/HealthData/DBs");
+  const [garminSaving, setGarminSaving] = useState(false);
+  const [garminSaved, setGarminSaved] = useState(false);
+  const [garminError, setGarminError] = useState<string | null>(null);
+  const [garminConfigured, setGarminConfigured] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<{
+    running: boolean;
+    progress: {
+      percent: number; current: number; total: number;
+      elapsed: string; eta: string; speed: string; section: string;
+    } | null;
+    logTail: string[];
+    lastRun: string | null;
+  } | null>(null);
+
   // ── CSV import state ───────────────────────────────────────────────────────
   const [csvFileName, setCsvFileName] = useState<string | null>(null);
   const [csvTrackCount, setCsvTrackCount] = useState<number | null>(null);
@@ -152,6 +168,46 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .then((d: { topic?: string | null }) => { if (d.topic) setNtfyTopic(d.topic); })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    fetch("/api/settings/garmin")
+      .then(r => r.json())
+      .then((d: { configured?: boolean; config?: { dbPath?: string } }) => {
+        setGarminConfigured(d.configured ?? false);
+        if (d.config?.dbPath) setGarminDbPath(d.config.dbPath);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Sync status polling — 20s when active, 5min when idle
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const syncCancelledRef = useRef(false);
+
+  const fetchSyncStatus = useCallback(async () => {
+    if (syncCancelledRef.current) return;
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    try {
+      const res = await fetch("/api/settings/garmin/sync-status");
+      if (res.ok && !syncCancelledRef.current) {
+        const data = await res.json();
+        setSyncStatus(data);
+        syncTimerRef.current = setTimeout(fetchSyncStatus, data.running ? 20_000 : 300_000);
+      }
+    } catch {
+      if (!syncCancelledRef.current)
+        syncTimerRef.current = setTimeout(fetchSyncStatus, 300_000);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!garminConfigured) return;
+    syncCancelledRef.current = false;
+    fetchSyncStatus();
+    return () => {
+      syncCancelledRef.current = true;
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    };
+  }, [garminConfigured, fetchSyncStatus]);
 
   useEffect(() => {
     fetch("/api/bbc/programmes")
@@ -281,6 +337,32 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     } finally {
       setNtfySaving(false);
     }
+  }
+
+  async function saveGarminConfig() {
+    setGarminSaving(true);
+    setGarminSaved(false);
+    setGarminError(null);
+    try {
+      const res = await fetch("/api/settings/garmin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dbPath: garminDbPath.trim() }),
+      });
+      if (!res.ok) throw new Error("Failed to save");
+      setGarminSaved(true);
+      setGarminConfigured(true);
+    } catch {
+      setGarminError("Failed to save — try again.");
+    } finally {
+      setGarminSaving(false);
+    }
+  }
+
+  async function removeGarminConfig() {
+    await fetch("/api/settings/garmin", { method: "DELETE" });
+    setGarminConfigured(false);
+    setGarminSaved(false);
   }
 
   function openBrowser(mode: "add" | "replace", targetPid?: string, targetName?: string) {
@@ -730,6 +812,166 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
       </div>
 
+      {/* Garmin DB */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h2 className="font-semibold text-base">Garmin DB</h2>
+          <p className="text-sm text-slate-400 mt-1">
+            Path to the GarminDB SQLite files on this device. Enables the{" "}
+            <a href="/garmin" className="text-green-400 hover:text-green-300 underline">Garmin Stats</a>{" "}
+            page.
+          </p>
+        </div>
+        {garminConfigured && (
+          <div className="flex items-center gap-2 text-sm text-green-400">
+            <span>●</span>
+            <span>Connected — DB path saved</span>
+          </div>
+        )}
+
+        {/* GarminDB sync status */}
+        {garminConfigured && syncStatus && (
+          <div className="rounded-lg bg-slate-800/50 border border-white/5 p-3 space-y-2.5">
+            <div className="flex items-center gap-2">
+              {syncStatus.running ? (
+                <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse shrink-0" />
+              ) : (
+                <span className="w-2 h-2 rounded-full bg-slate-500 shrink-0" />
+              )}
+              <span className="text-xs font-medium text-slate-300">
+                {syncStatus.running ? (() => {
+                  const s = (syncStatus.progress?.section ?? "").toLowerCase();
+                  if (s.includes("download") || s.includes("getting"))
+                    return "Syncing — Downloading from Garmin";
+                  if (s.includes("analyz") || s.includes("import"))
+                    return "Syncing — Updating local files";
+                  return "Syncing";
+                })() : "Sync idle"}
+              </span>
+              {!syncStatus.running && syncStatus.lastRun && (
+                <span className="text-xs text-slate-600">
+                  Last run: {new Date(syncStatus.lastRun).toLocaleString([], {
+                    month: "short", day: "numeric",
+                    hour: "2-digit", minute: "2-digit",
+                  })}
+                </span>
+              )}
+              <button
+                onClick={async () => {
+                  if (syncStatus.running) return;
+                  await fetch("/api/settings/garmin/sync-status", { method: "POST" });
+                  fetchSyncStatus();
+                }}
+                disabled={syncStatus.running}
+                className="ml-auto text-xs px-2.5 py-1 rounded bg-green-600/20 border border-green-600/30 text-green-400 hover:bg-green-600/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+              >
+                {syncStatus.running ? "Running…" : "Sync now"}
+              </button>
+            </div>
+
+            {syncStatus.running && syncStatus.progress && (() => {
+              const p = syncStatus.progress;
+
+              function fmtEta(eta: string): string {
+                if (!eta || eta.includes("?")) return "";
+                const parts = eta.split(":").map(Number);
+                if (parts.length === 3 && parts[0] > 0) return `~${parts[0]}h ${parts[1]}m remaining`;
+                if (parts.length >= 2) return `~${parts[parts.length - 2]}m remaining`;
+                return "";
+              }
+
+              return (
+                <>
+                  <div className="h-1.5 w-full rounded-full bg-slate-700">
+                    <div
+                      className="h-1.5 rounded-full bg-green-500 transition-all duration-700"
+                      style={{ width: `${p.percent}%` }}
+                    />
+                  </div>
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-xs text-slate-300 font-mono tabular-nums">
+                      {p.current.toLocaleString()} / {p.total.toLocaleString()}
+                    </span>
+                    <span className="text-xs font-semibold text-slate-400">{p.percent}%</span>
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                    <span>Elapsed: <span className="text-slate-400">{p.elapsed}</span></span>
+                    <span>Speed: <span className="text-slate-400">{p.speed}</span></span>
+                    {fmtEta(p.eta) && (
+                      <span className="text-slate-400">{fmtEta(p.eta)}</span>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
+
+            {/* Log tail */}
+            {syncStatus.logTail && syncStatus.logTail.length > 0 && (
+              <div className="rounded bg-slate-950/60 border border-white/5 px-2.5 py-2 mt-1 space-y-px">
+                {syncStatus.logTail.map((line, i) => {
+                  const tsMatch = line.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*(.*)/);
+                  const ts = tsMatch ? tsMatch[1] : null;
+                  const text = tsMatch ? tsMatch[2] : line;
+                  const isMarker = text.startsWith("===");
+                  const isSection = /^_{3}/.test(text);
+                  return (
+                    <div key={i} className="flex gap-2 items-baseline font-mono text-[10px] leading-relaxed">
+                      {ts && (
+                        <span className="text-slate-600 shrink-0">{ts}</span>
+                      )}
+                      <span className={`truncate ${
+                        isMarker ? "text-green-500/70" :
+                        isSection ? "text-slate-300 font-semibold" :
+                        "text-slate-500"
+                      }`}>
+                        {text}
+                      </span>
+                    </div>
+                  );
+                })}
+                {!syncStatus.running && syncStatus.lastRun && (
+                  <div className="flex gap-2 items-baseline font-mono text-[10px] leading-relaxed mt-1 pt-1 border-t border-white/5">
+                    <span className="text-green-500/60">✓</span>
+                    <span className="text-green-500/60">
+                      Completed {new Date(syncStatus.lastRun).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-slate-300">DB folder path</label>
+          <input
+            type="text"
+            value={garminDbPath}
+            onChange={e => { setGarminDbPath(e.target.value); setGarminSaved(false); }}
+            placeholder="/home/scott/HealthData/DBs"
+            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono"
+          />
+        </div>
+        {garminError && <p className="text-sm text-red-400">{garminError}</p>}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={saveGarminConfig}
+            disabled={garminSaving}
+            className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+          >
+            {garminSaving ? "Saving…" : garminSaved ? "Saved!" : "Save path"}
+          </button>
+          {garminConfigured && (
+            <button
+              onClick={removeGarminConfig}
+              className="text-xs text-slate-600 hover:text-red-400 transition-colors"
+            >
+              Remove
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* ntfy Notifications */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
         <div>
@@ -770,6 +1012,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </button>
       </div>
     </div>
+
 
     </div>
   );
