@@ -1,4 +1,4 @@
-"""Deploy PaceSync Running Playlist to a Raspberry Pi.
+﻿"""Deploy PaceSync Running Playlist to a Raspberry Pi.
 
 Before deploying:
   1. Copy deploy_config.example.py to deploy_config.py and fill in your Pi details.
