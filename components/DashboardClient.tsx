@@ -184,6 +184,14 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [playlistName, setPlaylistName] = useState("");
   const [saveError, setSaveError]       = useState<string | null>(null);
   const [bbcProgrammes, setBbcProgrammes] = useState<{ pid: string; name: string; synopsis?: string }[]>(BBC_DEFAULTS);
+  const [garminConfigured, setGarminConfigured] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/settings/garmin")
+      .then(r => r.json())
+      .then((d: { configured?: boolean }) => { setGarminConfigured(d.configured ?? false); })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetch("/api/bbc/programmes")
@@ -362,6 +370,14 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               )}
               <span>{spotifyUser.name}</span>
             </div>
+            {garminConfigured && (
+              <Link
+                href="/garmin"
+                className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                Garmin
+              </Link>
+            )}
             <Link
               href="/settings"
               className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
