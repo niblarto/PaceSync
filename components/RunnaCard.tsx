@@ -3,6 +3,48 @@
 import { useState, useEffect } from "react";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 
+interface PaceSpmRow { bucket: number; avg_spm: number; records: number; }
+
+let paceSpmCache: PaceSpmRow[] | null = null;
+let paceSpmPromise: Promise<void> | null = null;
+
+function usePaceSpm(enabled: boolean): PaceSpmRow[] {
+  const [rows, setRows] = useState<PaceSpmRow[]>(paceSpmCache ?? []);
+  useEffect(() => {
+    if (!enabled) return;
+    if (paceSpmCache) { setRows(paceSpmCache); return; }
+    if (!paceSpmPromise) {
+      paceSpmPromise = fetch("/api/garmin/pace-spm")
+        .then(r => r.json())
+        .then((d: unknown) => { if (Array.isArray(d)) paceSpmCache = d as PaceSpmRow[]; })
+        .catch(() => {});
+    }
+    paceSpmPromise.then(() => { if (paceSpmCache) setRows(paceSpmCache); });
+  }, [enabled]);
+  return rows;
+}
+
+function parsePacesFromSegments(segments: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  const re = /(\d+:\d{2})\/mi/g;
+  for (const seg of segments) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(seg)) !== null) {
+      if (!seen.has(m[1])) { seen.add(m[1]); result.push(m[1]); }
+    }
+  }
+  return result;
+}
+
+function lookupSpm(pace: string, rows: PaceSpmRow[]): number | null {
+  const [min, sec] = pace.split(":").map(Number);
+  const secs = min * 60 + sec;
+  const bucket = Math.floor(secs / 5) * 5;
+  return rows.find(r => r.bucket === bucket)?.avg_spm ?? null;
+}
+
 const TYPE_META: Record<WorkoutType, { label: string; color: string }> = {
   easy_run:  { label: "Easy Run",   color: "bg-green-500/20 text-green-400 border-green-500/30" },
   long_run:  { label: "Long Run",   color: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30" },
@@ -203,9 +245,15 @@ export function RunnaSummaryCard() {
 
 // ── Runna Schedule Card (upcoming) ────────────────────────────────────────────
 
-export function RunnaScheduleCard() {
+interface RunnaScheduleProps {
+  garminConfigured?: boolean;
+  onPaceFilter?: (paceStr: string, bpm: number) => void;
+}
+
+export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter }: RunnaScheduleProps = {}) {
   const { workouts, loading, error } = useRunnaData();
   const [expanded, setExpanded] = useState<string | null>(null);
+  const paceSpm = usePaceSpm(garminConfigured);
 
   return (
     <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
@@ -295,6 +343,26 @@ export function RunnaScheduleCard() {
                         View in Runna app ↗
                       </a>
                     )}
+                    {garminConfigured && onPaceFilter && paceSpm.length > 0 && (() => {
+                      const paces = parsePacesFromSegments(w.segments);
+                      const withSpm = paces
+                        .map(p => ({ pace: p, spm: lookupSpm(p, paceSpm) }))
+                        .filter((x): x is { pace: string; spm: number } => x.spm !== null);
+                      if (!withSpm.length) return null;
+                      return (
+                        <div className="flex flex-wrap gap-1.5 pt-1">
+                          {withSpm.map(({ pace, spm }) => (
+                            <button
+                              key={pace}
+                              onClick={e => { e.stopPropagation(); onPaceFilter(pace, spm); }}
+                              className="text-xs px-2.5 py-1 rounded-lg bg-orange-500/15 border border-orange-500/30 text-orange-300 hover:bg-orange-500/25 transition-colors"
+                            >
+                              {pace} · {spm} BPM
+                            </button>
+                          ))}
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
