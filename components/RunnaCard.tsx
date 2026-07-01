@@ -45,6 +45,24 @@ function lookupSpm(pace: string, rows: PaceSpmRow[]): number | null {
   return rows.find(r => r.bucket === bucket)?.avg_spm ?? null;
 }
 
+// For workouts that only say "conversational pace" with no explicit X:XX/mi,
+// find the slowest (no-faster-than) pace from easy run workouts in the schedule.
+function findEasyRunPace(workouts: RunnaWorkout[], paceSpm: PaceSpmRow[]): { pace: string; spm: number } | null {
+  let slowestSecs = 0;
+  let slowestPace: string | null = null;
+  for (const w of workouts) {
+    if (w.type !== "easy_run") continue;
+    for (const p of parsePacesFromSegments(w.segments)) {
+      const [min, sec] = p.split(":").map(Number);
+      const secs = min * 60 + sec;
+      if (secs > slowestSecs) { slowestSecs = secs; slowestPace = p; }
+    }
+  }
+  if (!slowestPace) return null;
+  const spm = lookupSpm(slowestPace, paceSpm);
+  return spm !== null ? { pace: slowestPace, spm } : null;
+}
+
 const TYPE_META: Record<WorkoutType, { label: string; color: string }> = {
   easy_run:  { label: "Easy Run",   color: "bg-green-500/20 text-green-400 border-green-500/30" },
   long_run:  { label: "Long Run",   color: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30" },
@@ -243,49 +261,6 @@ export function RunnaSummaryCard() {
   );
 }
 
-// ── Pace → SPM lookup (from Garmin activity_records) ─────────────────────────
-
-interface PaceSpmRow { bucket: number; avg_spm: number; records: number; }
-
-let paceSpmCache: PaceSpmRow[] | null = null;
-let paceSpmPromise: Promise<void> | null = null;
-
-function usePaceSpm(enabled: boolean): PaceSpmRow[] {
-  const [rows, setRows] = useState<PaceSpmRow[]>(paceSpmCache ?? []);
-  useEffect(() => {
-    if (!enabled) return;
-    if (paceSpmCache) { setRows(paceSpmCache); return; }
-    if (!paceSpmPromise) {
-      paceSpmPromise = fetch("/api/garmin/pace-spm")
-        .then(r => r.json())
-        .then((d: unknown) => { if (Array.isArray(d)) paceSpmCache = d as PaceSpmRow[]; })
-        .catch(() => {});
-    }
-    paceSpmPromise.then(() => { if (paceSpmCache) setRows(paceSpmCache); });
-  }, [enabled]);
-  return rows;
-}
-
-function parsePacesFromSegments(segments: string[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  const re = /(\d+:\d{2})\/mi/g;
-  for (const seg of segments) {
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(seg)) !== null) {
-      if (!seen.has(m[1])) { seen.add(m[1]); result.push(m[1]); }
-    }
-  }
-  return result;
-}
-
-function lookupSpm(pace: string, rows: PaceSpmRow[]): number | null {
-  const [min, sec] = pace.split(":").map(Number);
-  const bucket = Math.floor((min * 60 + sec) / 5) * 5;
-  return rows.find(r => r.bucket === bucket)?.avg_spm ?? null;
-}
-
 // ── Runna Schedule Card (upcoming) ────────────────────────────────────────────
 
 interface RunnaScheduleProps {
@@ -388,9 +363,13 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                       </a>
                     )}
                     {garminConfigured && onPaceFilter && paceSpm.length > 0 && (() => {
-                      const withSpm = parsePacesFromSegments(w.segments)
+                      let withSpm = parsePacesFromSegments(w.segments)
                         .map(p => ({ pace: p, spm: lookupSpm(p, paceSpm) }))
                         .filter((x): x is { pace: string; spm: number } => x.spm !== null);
+                      if (withSpm.length === 0 && w.segments.some(s => /conversational/i.test(s))) {
+                        const fallback = findEasyRunPace(workouts, paceSpm);
+                        if (fallback) withSpm = [fallback];
+                      }
                       if (!withSpm.length) return null;
                       return (
                         <div className="flex flex-wrap gap-1.5 pt-1">
