@@ -120,6 +120,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [aiDjSaving, setAiDjSaving] = useState(false);
   const [aiDjSaved, setAiDjSaved] = useState(false);
   const [aiDjError, setAiDjError] = useState<string | null>(null);
+  const [aiDjHealth, setAiDjHealth] = useState<"idle" | "checking" | "ok" | "down">("idle");
+  const [aiDjHealthLlm, setAiDjHealthLlm] = useState(false);
+  const [aiDjHealthMsg, setAiDjHealthMsg] = useState<string | null>(null);
 
   // ── Garmin DB state ────────────────────────────────────────────────────────
   const [garminDbPath, setGarminDbPath] = useState("/home/scott/HealthData/DBs");
@@ -195,6 +198,32 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       })
       .catch(() => {});
   }, []);
+
+  // Debounced connection check whenever the URL changes, plus a periodic
+  // recheck (every 60s) so the indicator doesn't go stale while the page is open.
+  useEffect(() => {
+    const url = aiDjUrl.trim();
+    if (!url) { setAiDjHealth("idle"); setAiDjHealthMsg(null); return; }
+
+    let cancelled = false;
+    const check = async () => {
+      setAiDjHealth("checking");
+      try {
+        const res = await fetch(`/api/ai-dj/health?url=${encodeURIComponent(url)}`);
+        const d = await res.json() as { ok?: boolean; llm?: boolean; error?: string };
+        if (cancelled) return;
+        setAiDjHealth(d.ok ? "ok" : "down");
+        setAiDjHealthLlm(!!d.llm);
+        setAiDjHealthMsg(d.ok ? null : (d.error ?? "Unreachable"));
+      } catch {
+        if (!cancelled) { setAiDjHealth("down"); setAiDjHealthMsg("Unreachable"); }
+      }
+    };
+
+    const debounce = setTimeout(check, 500);
+    const interval = setInterval(check, 60000);
+    return () => { cancelled = true; clearTimeout(debounce); clearInterval(interval); };
+  }, [aiDjUrl]);
 
   // Sync status polling — 20s when active, 5min when idle
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -804,6 +833,86 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         )}
         </div>
       </div>
+
+      {/* AI DJ */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="font-semibold text-base">🎧 AI DJ</h2>
+            <p className="text-sm text-slate-400 mt-1">
+              Adds an <span className="text-purple-300">AI DJ Mix</span> button to each Runna workout that
+              builds a pace-matched Spotify playlist from your library, section by section.
+            </p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={aiDjEnabled}
+            onClick={() => { if (!aiDjSaving && aiDjUrl.trim()) saveAiDj(!aiDjEnabled); }}
+            disabled={aiDjSaving || !aiDjUrl.trim()}
+            className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-40 ${
+              aiDjEnabled ? "bg-purple-500" : "bg-slate-700"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                aiDjEnabled ? "translate-x-5" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
+        {aiDjEnabled && (
+          <div className="flex items-center gap-2 text-sm text-purple-300">
+            <span>●</span>
+            <span>Enabled — mix buttons shown on workouts</span>
+          </div>
+        )}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <label className="block text-sm font-medium text-slate-300">AI DJ service URL</label>
+            {aiDjUrl.trim() && (
+              <span className="flex items-center gap-1.5 text-xs">
+                {aiDjHealth === "checking" && (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-pulse" />
+                    <span className="text-slate-500">Checking…</span>
+                  </>
+                )}
+                {aiDjHealth === "ok" && (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+                    <span className="text-green-400">Connected{aiDjHealthLlm ? " · LLM ready" : " · no LLM (distance-chain only)"}</span>
+                  </>
+                )}
+                {aiDjHealth === "down" && (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
+                    <span className="text-red-400">{aiDjHealthMsg ?? "Unreachable"}</span>
+                  </>
+                )}
+              </span>
+            )}
+          </div>
+          <input
+            type="url"
+            value={aiDjUrl}
+            onChange={e => { setAiDjUrl(e.target.value); setAiDjSaved(false); }}
+            placeholder="http://192.168.1.50:8765"
+            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
+          />
+          <p className="text-xs text-slate-500">
+            Where the AI DJ service is running (<code className="text-slate-400">python -m ai_dj.server</code> —
+            on a PC with Ollama, or on this Pi with <code className="text-slate-400">--no-llm</code>).
+          </p>
+        </div>
+        {aiDjError && <p className="text-sm text-red-400">{aiDjError}</p>}
+        <button
+          onClick={() => saveAiDj(aiDjEnabled)}
+          disabled={aiDjSaving || !aiDjUrl.trim()}
+          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+        >
+          {aiDjSaving ? "Saving…" : aiDjSaved ? "Saved!" : "Save"}
+        </button>
+      </div>
     </div>
 
     {/* ── Column 3: Runna + ntfy ── */}
@@ -847,62 +956,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           {runnaSaving ? "Saving…" : runnaSaved ? "Saved!" : "Save URL"}
         </button>
         </div>
-      </div>
-
-      {/* AI DJ */}
-      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="font-semibold text-base">🎧 AI DJ</h2>
-            <p className="text-sm text-slate-400 mt-1">
-              Adds an <span className="text-purple-300">AI DJ Mix</span> button to each Runna workout that
-              builds a pace-matched Spotify playlist from your library, section by section.
-            </p>
-          </div>
-          <button
-            role="switch"
-            aria-checked={aiDjEnabled}
-            onClick={() => { if (!aiDjSaving && aiDjUrl.trim()) saveAiDj(!aiDjEnabled); }}
-            disabled={aiDjSaving || !aiDjUrl.trim()}
-            className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-40 ${
-              aiDjEnabled ? "bg-purple-500" : "bg-slate-700"
-            }`}
-          >
-            <span
-              className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
-                aiDjEnabled ? "translate-x-[22px]" : "translate-x-0.5"
-              }`}
-            />
-          </button>
-        </div>
-        {aiDjEnabled && (
-          <div className="flex items-center gap-2 text-sm text-purple-300">
-            <span>●</span>
-            <span>Enabled — mix buttons shown on workouts</span>
-          </div>
-        )}
-        <div className="space-y-2">
-          <label className="block text-sm font-medium text-slate-300">AI DJ service URL</label>
-          <input
-            type="url"
-            value={aiDjUrl}
-            onChange={e => { setAiDjUrl(e.target.value); setAiDjSaved(false); }}
-            placeholder="http://192.168.1.50:8765"
-            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
-          />
-          <p className="text-xs text-slate-500">
-            Where the AI DJ service is running (<code className="text-slate-400">python -m ai_dj.server</code> —
-            on a PC with Ollama, or on this Pi with <code className="text-slate-400">--no-llm</code>).
-          </p>
-        </div>
-        {aiDjError && <p className="text-sm text-red-400">{aiDjError}</p>}
-        <button
-          onClick={() => saveAiDj(aiDjEnabled)}
-          disabled={aiDjSaving || !aiDjUrl.trim()}
-          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
-        >
-          {aiDjSaving ? "Saving…" : aiDjSaved ? "Saved!" : "Save"}
-        </button>
       </div>
 
       {/* Garmin DB */}

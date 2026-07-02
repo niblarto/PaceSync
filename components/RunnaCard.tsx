@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
+import type { TrackWithBPM } from "@/types";
 
 interface PaceSpmRow { bucket: number; avg_spm: number; records: number; }
 
@@ -263,14 +264,20 @@ export function RunnaSummaryCard() {
 
 // ── Runna Schedule Card (upcoming) ────────────────────────────────────────────
 
+interface AiDjTrack { uri: string; name: string; artist: string; startsAt: string; tempo: number; camelot: string | null; energy: number; }
+interface AiDjTimelineSegment { segment: string; targetBpm: number; tracks: AiDjTrack[]; }
+interface AiDjMixResponse { trackUris: string[]; totalSec: number; timeline: AiDjTimelineSegment[]; }
+
 interface RunnaScheduleProps {
   garminConfigured?: boolean;
   onPaceFilter?: (paceStr: string, bpm: number, multiSelect: boolean) => void;
   activePaces?: string[];
   aiDjEnabled?: boolean;
+  /** Called once a mix is built — the parent populates the central track list/save UI rather than saving directly */
+  onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number) => void;
 }
 
-type MixStatus = { status: "building" | "done" | "error"; url?: string; error?: string };
+type MixStatus = { status: "building" | "done" | "error"; error?: string };
 
 // "2026-07-08" + "Steady into Tempo" -> "08-07-26 Steady into Tempo"
 function mixName(w: RunnaWorkout): string {
@@ -278,7 +285,7 @@ function mixName(w: RunnaWorkout): string {
   return `${d}-${m}-${y.slice(2)} ${w.title}`;
 }
 
-export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false }: RunnaScheduleProps = {}) {
+export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix }: RunnaScheduleProps = {}) {
   const { workouts, loading, error } = useRunnaData();
   const [expanded, setExpanded] = useState<string | null>(null);
   const paceSpm = usePaceSpm(garminConfigured);
@@ -292,22 +299,23 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: w.title, segments: w.segments }),
       });
-      const mix = await mixRes.json() as { trackUris?: string[]; error?: string };
+      const mix = await mixRes.json() as AiDjMixResponse & { error?: string };
       if (!mixRes.ok) throw new Error(mix.error ?? `Mix failed (${mixRes.status})`);
       if (!mix.trackUris?.length) throw new Error("No tracks matched this workout");
 
-      const plRes = await fetch("/api/spotify/create-playlist", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: mixName(w),
-          description: `AI DJ mix for Runna workout "${w.title}" on ${w.date} — pace-matched to each segment`,
-          trackUris: mix.trackUris,
-        }),
-      });
-      const pl = await plRes.json() as { url?: string; error?: string };
-      if (!plRes.ok) throw new Error(pl.error ?? `Playlist creation failed (${plRes.status})`);
-      setMixState(s => ({ ...s, [w.uid]: { status: "done", url: pl.url } }));
+      const tracks: TrackWithBPM[] = mix.timeline.flatMap(seg => seg.tracks).map(t => ({
+        id: t.uri.split(":")[2] ?? t.uri,
+        name: t.name,
+        artists: [{ name: t.artist }],
+        album: { name: "", images: [] },
+        duration_ms: 0,
+        uri: t.uri,
+        bpm: Math.round(t.tempo),
+        energy: t.energy,
+      }));
+
+      onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec);
+      setMixState(s => ({ ...s, [w.uid]: { status: "done" } }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to build mix";
       setMixState(s => ({ ...s, [w.uid]: { status: "error", error: msg } }));
@@ -446,16 +454,8 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                           {st?.status === "building" && (
                             <span className="text-xs text-slate-500">Building pace-matched playlist…</span>
                           )}
-                          {st?.status === "done" && st.url && (
-                            <a
-                              href={st.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-xs text-purple-300 hover:text-purple-200 underline"
-                              onClick={e => e.stopPropagation()}
-                            >
-                              “{mixName(w)}” in Spotify ↗
-                            </a>
+                          {st?.status === "done" && (
+                            <span className="text-xs text-purple-300/80">Loaded into the track list — review &amp; save from there ↑</span>
                           )}
                           {st?.status === "error" && (
                             <span className="text-xs text-red-400">{st.error}</span>

@@ -7,13 +7,14 @@ A Next.js web app for managing a Spotify running playlist based on heart rate zo
 **Features**
 - Browse tracks by BPM / heart rate zone (Z1–Z5)
 - Add tracks from BBC Radio playlists directly to Spotify — with BPM data fetched automatically
-- Play tracks in Spotify
+- Click any track to play it **instantly on your active Spotify device** (falls back to opening the app/web player if nothing's active)
 - Delete tracks from Spotify and local CSV simultaneously
 - Import and auto-save your Exportify CSV export
 - Runna training calendar integration with zone suggestions and per-pace BPM filter buttons (driven by your real Garmin cadence data)
 - **Song matching**: filter the playlist to songs similar to any track (BPM, musical key, energy)
 - **Song suggestions**: discover new tracks *not* in your playlist that match a seed track by style or tempo (via Last.fm / Deezer / ReccoBeats), and add them to the playlist with one click
 - **Automatic BPM enrichment**: tracks without BPM data are looked up on ReccoBeats automatically
+- **🎧 AI DJ Mix** (optional): build a pace-matched playlist for any Runna workout — each section's tempo and intensity track your target pace, with an optional local LLM for smarter track choices. See [AI DJ Mix](#ai-dj-mix-optional) below
 - Dedup playlist, to remove duplicate tracks
 - Garmin activity stats: pace/cadence/HR charts and activity summaries, read directly from a local [GarminDB](https://github.com/tcgoetz/GarminDB) database
 - Weekly cron job to keep the playlist fresh:-
@@ -150,9 +151,19 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 
 ---
 
-## Zone Selection
+## Playing Tracks
 
 ![Dashboard — zones, track list and Runna schedule](docs/screenshots/dashboard.png)
+
+Click any track in the list to start it playing **immediately on your active Spotify device** — no window switching. This uses Spotify's Web Playback control API, which requires the `user-modify-playback-state` scope.
+
+> **If you signed in before this feature was added**, sign out and back in once so Spotify re-issues your token with the new scope — otherwise playback silently falls back to opening the Spotify app/web player instead of playing instantly.
+
+If there's no active Spotify device (nothing currently playing anywhere), it falls back to launching the desktop app via a `spotify:track:...` link, then opens the web player after a second if the app doesn't take focus.
+
+---
+
+## Zone Selection
 
 Click any zone in the left column to filter tracks and build a playlist for that zone.
 
@@ -247,6 +258,51 @@ Go to **Settings** → **Runna Integration**, paste the URL, and click **Save UR
 > Keep the URL private. It provides read-only access to your training schedule.
 
 Alternatively, you can set `RUNNA_ICS_URL` in `.env.local` before deploying — the app will use the settings page value if set, otherwise falls back to the environment variable.
+
+---
+
+## AI DJ Mix (optional)
+
+Builds a pace-matched Spotify playlist for a Runna workout: each section of the run (warm up, tempo/interval reps, walking rest, cool down) is filled with tracks matched to that section's target BPM and intensity, timed to last as long as the section itself.
+
+**How the mix is built:**
+- **Tempo** scales continuously with pace — each segment's pace is converted to a target BPM via your Garmin cadence data (falling back to a linear fit if GarminDB isn't configured), and tracks are filtered to that BPM band.
+- **Intensity** (Spotify's energy feature) is bucketed by segment type: warm up 0.45–0.85, work (tempo/intervals) 0.60–1.00, walking rest 0.00–0.50, cool down 0.00–0.60 — so hard efforts pull driving, high-energy tracks and rest/cool-down periods pull calmer ones.
+- Section changes land on track boundaries — the playlist doesn't cut a song off mid-way when the pace changes.
+
+**Using it:**
+1. Expand any runnable workout in the **Runna Schedule** card and click **🎧 AI DJ Mix**.
+2. The mix builds (takes a few seconds to a minute, longer if the optional LLM is enabled) and populates the **central track list card** — it does *not* save to Spotify automatically.
+3. From there:
+   - **Save to Spotify** saves it under the pre-filled dated name (e.g. `08-07-26 Steady into Tempo`, editable).
+   - **Save to Today's Running Playlist** saves the same tracks to a standing playlist named **"Today's Run"** (created on first use, overwritten each time).
+   - Neither happens until you click one — review the tracklist first.
+4. Click **🎧 Remix** to rebuild and refresh the central list with a different pick (e.g. after adding new tracks to your library).
+
+**Daily automatic pre-build:** if enabled, a cron job runs at **15:30 Pi-local time** every day. If there's a runnable workout scheduled for *tomorrow*, it builds the mix and saves it straight to **"Today's Run"** on Spotify — no dated playlist, no manual step — then sends an ntfy push notification (success with track count, or a clear failure reason) if you have a topic configured. By the time you wake up for the run, "Today's Run" is already correct.
+
+### Optional local LLM
+
+Track selection within each section can happen two ways:
+
+- **With an LLM** (default when available): the service calls a local [Ollama](https://ollama.com) model (`qwen2.5:7b` by default) with a mood-aware prompt per section (e.g. *"Hard effort — driving, motivating, relentless"* for work, *"Recovery — calm"* for rest) to pick and order tracks from the BPM/energy-filtered candidate pool.
+- **Without an LLM**: tracks are chosen purely by [bpm_matcher](bpm_matcher/)'s weighted distance — a deterministic greedy nearest-neighbour chain over BPM, Camelot key, energy, danceability and valence. No GPU or model download needed; runs fine on a Raspberry Pi.
+
+**The LLM is entirely optional and fails gracefully**: if Ollama isn't running, the model isn't pulled, or the service was started with `--no-llm`, mix-building **automatically falls back** to the deterministic distance-chain method for that section — the mix still completes, just without the LLM's picks. Nothing breaks either way.
+
+**Setting it up:**
+
+1. **Run the AI DJ service** somewhere on your network (a PC with Ollama for LLM-assisted mixes, or the Pi itself with `--no-llm` for the deterministic-only mode — it's pure Python, no GPU required). The service exposes two endpoints PaceSync calls:
+   - `POST /mix` `{title, segments, csv, easyPace?, useLlm?}` → `{trackUris, totalSec, timeline}`
+   - `GET /health` → `{ok, llm}`
+2. If running with LLM support, install [Ollama](https://ollama.com/download) and pull a model: `ollama pull qwen2.5:7b` (or set a different model via that service's own config — see its README).
+3. If the service runs on a separate machine from the Pi, **allow inbound traffic on its port through the firewall** — and if using Windows, scope the rule to cover whatever network profile that connection uses (Private *and* Public), since Windows can silently reclassify a network and drop a Private-only rule.
+4. In PaceSync, go to **Settings**, scroll to the bottom of the **middle column**, and find the **🎧 AI DJ** card:
+   - Enter the service's URL (e.g. `http://192.168.1.50:8765`) and click **Save**.
+   - A live connection indicator appears next to the URL field — green "Connected · LLM ready" (or "no LLM (distance-chain only)" if running with `--no-llm`), red with the failure reason if unreachable, checked automatically as you type and every 60 seconds while the page is open.
+   - Once a URL is saved, flip the **enable** toggle to start showing the AI DJ Mix button on Runna workouts.
+
+> The `ai-dj-config.json` this creates on the Pi is gitignored, same as other personal settings files.
 
 ---
 

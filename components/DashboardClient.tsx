@@ -97,6 +97,7 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy,
 }
 
 const RUNNING_PLAYLIST_ID = process.env.NEXT_PUBLIC_RUNNING_PLAYLIST_ID ?? "";
+const TODAYS_RUN_PLAYLIST = "Today's Run";
 
 const BBC_DEFAULTS = [
   { pid: "m001j52w", name: "6 Music Playlist", synopsis: "" },
@@ -263,6 +264,11 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [enriching, setEnriching] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
   const enrichAttempted = useRef(false);
+  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number } | null>(null);
+  const [todaysRunSaving, setTodaysRunSaving] = useState(false);
+  const [todaysRunSaved, setTodaysRunSaved] = useState(false);
+  const [todaysRunError, setTodaysRunError] = useState<string | null>(null);
+  const [todaysRunUrl, setTodaysRunUrl] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/settings/garmin")
@@ -377,6 +383,10 @@ export function DashboardClient({ spotifyUser }: Props) {
 
   // Re-filter whenever zone selection, pace filter, similar filter, or tracks change
   useEffect(() => {
+    if (aiDjMix) {
+      setFilteredTracks(aiDjMix.tracks);
+      return;
+    }
     if (allTracks.length === 0) return;
     if (noBpmFilter) {
       setFilteredTracks(allTracks.filter(t => t.bpm === 0));
@@ -410,7 +420,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       }
       setFilteredTracks(result);
     }
-  }, [selectedZones, allTracks, paceFilter, similarFilter, noBpmFilter]);
+  }, [selectedZones, allTracks, paceFilter, similarFilter, noBpmFilter, aiDjMix]);
 
   // For seeds not in the playlist pool (BBC tracks, 0-BPM tracks) the CSV
   // lookup in the python bridge can't work — fetch features from ReccoBeats
@@ -449,6 +459,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       setSelectedZones([]);
       setPaceFilter(null);
       setNoBpmFilter(false);
+      setAiDjMix(null);
       if (csvName) setPlaylistName(`${csvName} – like ${track.name}`);
     } catch (e) {
       console.error("[similar]", e);
@@ -456,6 +467,62 @@ export function DashboardClient({ spotifyUser }: Props) {
       setTimeout(() => setSimilarNotice(null), 5000);
     } finally {
       setSimilarLoading(false);
+    }
+  }
+
+  // Populates the central track list/save UI from an AI DJ mix (built in
+  // RunnaScheduleCard) instead of saving straight to Spotify — the user picks
+  // which playlist(s) to save to from here.
+  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number) {
+    setSelectedZones([]);
+    setPaceFilter(null);
+    setSimilarFilter(null);
+    setNoBpmFilter(false);
+    setAiDjMix({ workoutTitle, name, tracks, totalSec });
+    setPlaylistName(name);
+    setStep("ready");
+    setSaveError(null);
+    setSavedUrl(null);
+    setTodaysRunSaving(false);
+    setTodaysRunSaved(false);
+    setTodaysRunError(null);
+    setTodaysRunUrl(null);
+  }
+
+  async function saveTodaysRun() {
+    if (!filteredTracks.length) return;
+    setTodaysRunSaving(true);
+    setTodaysRunError(null);
+    try {
+      const res = await fetch("/api/spotify/create-playlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: TODAYS_RUN_PLAYLIST,
+          description: aiDjMix
+            ? `AI DJ mix for Runna workout "${aiDjMix.workoutTitle}" — pace-matched to each segment`
+            : "PaceSync running playlist for today",
+          trackUris: filteredTracks.map((t) => t.uri),
+        }),
+      });
+      const data = await res.json() as { error?: string; url?: string; tracksAdded?: boolean; trackUris?: string[] };
+      if (data.error) throw new Error(data.error);
+      setTodaysRunUrl(data.url ?? null);
+      if (data.tracksAdded === false && data.url) {
+        const playlistId = data.url.split("/").pop()!;
+        try {
+          await addTracksBrowser(playlistId, data.trackUris ?? filteredTracks.map((t) => t.uri));
+          setTodaysRunSaved(true);
+        } catch (e) {
+          setTodaysRunError(e instanceof Error ? e.message : "Playlist created but adding tracks failed");
+        }
+      } else {
+        setTodaysRunSaved(true);
+      }
+    } catch (e) {
+      setTodaysRunError(e instanceof Error ? e.message : "Failed to save playlist");
+    } finally {
+      setTodaysRunSaving(false);
     }
   }
 
@@ -596,7 +663,9 @@ export function DashboardClient({ spotifyUser }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: playlistName,
-          description: `PaceSync: zones ${selectedZones.map(z => z.number).sort().join(",")} (${selectedZones.map(z => `${z.bpmMin}–${z.bpmMax}`).join(", ")} BPM)`,
+          description: aiDjMix
+            ? `AI DJ mix for Runna workout "${aiDjMix.workoutTitle}" — pace-matched to each segment`
+            : `PaceSync: zones ${selectedZones.map(z => z.number).sort().join(",")} (${selectedZones.map(z => `${z.bpmMin}–${z.bpmMax}`).join(", ")} BPM)`,
           trackUris: filteredTracks.map((t) => t.uri),
         }),
       });
@@ -724,6 +793,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   setPaceFilter(null);
                   setSimilarFilter(null);
                   setNoBpmFilter(false);
+                  setAiDjMix(null);
                   setSelectedZones([ALL_ZONE]);
                   if (csvName) setPlaylistName(csvName);
                 }}
@@ -751,6 +821,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                         setPaceFilter(null);
                         setSimilarFilter(null);
                         setNoBpmFilter(true);
+                        setAiDjMix(null);
                         setEnrichMsg(null);
                       } : undefined}
                       className={`block text-xs mt-0.5 ${
@@ -775,6 +846,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     setPaceFilter(null);
                     setSimilarFilter(null);
                     setNoBpmFilter(false);
+                    setAiDjMix(null);
                     if (e.ctrlKey || e.metaKey) {
                       setSelectedZones(prev => {
                         const withoutAll = prev.filter(z => z.number !== 0);
@@ -812,7 +884,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">
                 <h2 className="font-semibold">Target zone</h2>
                 <div className="rounded-lg bg-slate-800/50 border border-white/10 px-3 py-2 text-sm">
-                  {noBpmFilter ? (
+                  {aiDjMix ? (
+                    <span className="text-purple-400 font-medium">
+                      🎧 AI DJ Mix — &quot;{aiDjMix.workoutTitle}&quot; · {Math.round(aiDjMix.totalSec / 60)} min
+                    </span>
+                  ) : noBpmFilter ? (
                     <span className="text-red-400 font-medium">
                       Tracks without BPM info — fix with a BPM lookup, delete, or re-export via Exportify
                     </span>
@@ -843,12 +919,13 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             )}
 
             {/* Results */}
-            {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || similarFilter || noBpmFilter) && (
+            {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || similarFilter || noBpmFilter || aiDjMix) && (
               <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
                 <div className="p-5 border-b border-white/10 flex items-start justify-between gap-4 flex-wrap">
                   <div>
                     <h3 className="font-semibold">
                       {(() => {
+                        if (aiDjMix) return `${filteredTracks.length} tracks in AI DJ mix for "${aiDjMix.workoutTitle}"`;
                         if (noBpmFilter) return `${filteredTracks.length} tracks without BPM info`;
                         if (similarFilter) return `${filteredTracks.length} songs like "${similarFilter.seed.name}"`;
                         if (paceFilter && paceFilter.paces.length > 0) {
@@ -912,6 +989,26 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       >
                         {step === "saving" ? <><Spinner />Saving…</> : "Save to Spotify"}
                       </button>
+                      {aiDjMix && (
+                        <button
+                          onClick={saveTodaysRun}
+                          disabled={todaysRunSaving}
+                          className="inline-flex items-center justify-center gap-2 rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors w-full"
+                        >
+                          {todaysRunSaving ? <><Spinner />Saving…</> : todaysRunSaved ? "Saved to Today's Run!" : "Save to Today's Running Playlist"}
+                        </button>
+                      )}
+                      {todaysRunError && <p className="text-xs text-red-400">{todaysRunError}</p>}
+                      {todaysRunSaved && todaysRunUrl && (
+                        <a
+                          href={todaysRunUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-purple-300 hover:text-purple-200 underline"
+                        >
+                          Open &quot;{TODAYS_RUN_PLAYLIST}&quot; ↗
+                        </a>
+                      )}
                       </div>
                     </div>
                   )}
@@ -967,11 +1064,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
                 {filteredTracks.length === 0 ? (
                   <div className="p-8 text-center text-slate-500 text-sm">
-                    {noBpmFilter ? "All tracks have BPM info 🎉" : "No tracks in this BPM range. Try a different zone."}
+                    {noBpmFilter ? "All tracks have BPM info 🎉" : aiDjMix ? "No tracks in this mix." : "No tracks in this BPM range. Try a different zone."}
                   </div>
                 ) : (
                   <VirtualTrackList
-                    key={noBpmFilter ? "nobpm" : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : selectedZones.map(z=>z.number).sort().join("-")}
+                    key={aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : selectedZones.map(z=>z.number).sort().join("-")}
                     tracks={filteredTracks}
                     onDelete={handleDeleteTrack}
                     onSimilar={handleSimilar}
@@ -1046,8 +1143,10 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               aiDjEnabled={aiDjEnabled}
               garminConfigured={garminConfigured}
               activePaces={paceFilter?.paces.map(p => p.paceStr) ?? []}
+              onAiDjMix={handleAiDjMix}
               onPaceFilter={(paceStr, bpm, multiSelect) => {
                 setNoBpmFilter(false);
+                setAiDjMix(null);
                 if (multiSelect) {
                   setPaceFilter(prev => {
                     const current = prev?.paces ?? [];

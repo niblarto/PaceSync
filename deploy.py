@@ -128,8 +128,13 @@ FILES = [
     ('app/api/bpm/suggest/route.ts',              'app/api/bpm/suggest/route.ts'),
     ('app/api/bpm/enrich/route.ts',               'app/api/bpm/enrich/route.ts'),
     ('app/api/ai-dj/mix/route.ts',                'app/api/ai-dj/mix/route.ts'),
+    ('app/api/ai-dj/health/route.ts',             'app/api/ai-dj/health/route.ts'),
     ('app/api/settings/ai-dj/route.ts',           'app/api/settings/ai-dj/route.ts'),
+    ('app/api/cron/ai-dj/route.ts',               'app/api/cron/ai-dj/route.ts'),
     ('lib/ai-dj-config.ts',                       'lib/ai-dj-config.ts'),
+    ('lib/ai-dj-mix.ts',                          'lib/ai-dj-mix.ts'),
+    ('lib/spotify-playlist.ts',                   'lib/spotify-playlist.ts'),
+    ('lib/runna-schedule.ts',                     'lib/runna-schedule.ts'),
     ('scripts/bpm_bridge.py',                     'scripts/bpm_bridge.py'),
     ('bpm_matcher/__init__.py',                   'bpm_matcher/__init__.py'),
     ('bpm_matcher/camelot.py',                    'bpm_matcher/camelot.py'),
@@ -251,6 +256,16 @@ cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""(crontab -l 2>/dev/null | grep -v '/api/cron/weekly'; echo '{cron_line}') | crontab -""")
+
+# Install cron job — daily at 15:30, pre-builds tomorrow's AI DJ mix if one is scheduled
+print('  Installing cron job (AI DJ pre-build, daily 15:30)...')
+ai_dj_cron_log = f'/home/{PI["user"]}/cron-ai-dj.log'
+ai_dj_cron_line = (
+    f'30 15 * * * curl -s -o {ai_dj_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/ai-dj '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""(crontab -l 2>/dev/null | grep -v '/api/cron/ai-dj'; echo '{ai_dj_cron_line}') | crontab -""")
 
 ssh.close()
 

@@ -11,4 +11,10 @@ Running.csv
 runs.csv
 *.csv
 garmin-config.json
+ai-dj-config.json
+ntfy-config.json
+bbc-programmes.json
+runna-config.json
+spotify-tokens.json
+spotify-cache.json
 !bpm_matcher/tests/sample_playlist.csv
