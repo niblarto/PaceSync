@@ -10,14 +10,17 @@ export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { uri, n } = await req.json() as { uri?: string; n?: number };
+  const { uri, n, seed } = await req.json() as { uri?: string; n?: number; seed?: object };
   if (!uri) return NextResponse.json({ error: "Missing uri" }, { status: 400 });
 
   const script = path.join(process.cwd(), "scripts", "bpm_bridge.py");
   const csv = path.join(process.cwd(), "public", "Running.csv");
 
+  const args = [script, "similar", csv, uri, String(n ?? 25)];
+  if (seed) args.push(JSON.stringify(seed));
+
   return new Promise<NextResponse>((resolve) => {
-    const proc = spawn(PYTHON, [script, "similar", csv, uri, String(n ?? 25)]);
+    const proc = spawn(PYTHON, args);
     let stdout = "";
     let stderr = "";
     proc.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });

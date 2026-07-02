@@ -17,6 +17,7 @@ export async function GET(req: NextRequest) {
 
   const uri = req.nextUrl.searchParams.get("uri");
   const mode = req.nextUrl.searchParams.get("mode") === "tempo" ? "tempo" : "style";
+  const seed = req.nextUrl.searchParams.get("seed"); // JSON features for seeds not in the CSV
   if (!uri) return new Response("Missing uri", { status: 400 });
 
   const cacheKey = `${uri}:${mode}`;
@@ -40,7 +41,9 @@ export async function GET(req: NextRequest) {
 
       const script = path.join(process.cwd(), "scripts", "bpm_bridge.py");
       const csv = path.join(process.cwd(), "public", "Running.csv");
-      const proc = spawn(PYTHON, [script, "suggest", csv, uri, mode]);
+      const args = [script, "suggest", csv, uri, mode, "20"];
+      if (seed) args.push(seed);
+      const proc = spawn(PYTHON, args);
 
       let stdout = "";
       let stderrTail = "";

@@ -114,6 +114,7 @@ FILES = [
     ('components/DashboardClient.tsx',            'components/DashboardClient.tsx'),
     ('components/SignInButton.tsx',               'components/SignInButton.tsx'),
     ('components/TrackRow.tsx',                   'components/TrackRow.tsx'),
+    ('components/FloatingCard.tsx',               'components/FloatingCard.tsx'),
     ('components/ZoneCard.tsx',                   'components/ZoneCard.tsx'),
     ('lib/auth.ts',                               'lib/auth.ts'),
     ('lib/itunes-art.ts',                         'lib/itunes-art.ts'),

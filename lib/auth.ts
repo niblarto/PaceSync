@@ -9,6 +9,7 @@ const SPOTIFY_SCOPES = [
   "playlist-read-collaborative",
   "playlist-modify-public",
   "playlist-modify-private",
+  "user-modify-playback-state",
 ].join(" ");
 
 export const authOptions: NextAuthOptions = {

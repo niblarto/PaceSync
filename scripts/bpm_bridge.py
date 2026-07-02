@@ -1,8 +1,15 @@
 """Bridge between the Next.js API routes and the bpm_matcher package.
 
 Usage:
-  python bpm_bridge.py similar <csv_path> <track_uri> [n]
-  python bpm_bridge.py suggest <csv_path> <track_uri> <style|tempo> [n]
+  python bpm_bridge.py similar <csv_path> <track_uri> [n] [seed_json]
+  python bpm_bridge.py suggest <csv_path> <track_uri> <style|tempo> [n] [seed_json]
+
+seed_json (optional) supplies the seed track's identity and audio features
+explicitly, for seeds that are NOT in the playlist CSV (e.g. BBC tracks that
+haven't been added yet). Shape:
+  {"name": ..., "artist": ..., "tempo": ..., "key": ..., "mode": ...,
+   "energy": ..., "danceability": ..., "valence": ...}
+Without it, the seed is looked up in the CSV by track URI.
 
 Outputs JSON on stdout. Progress/diagnostics go to stderr (the suggest SSE
 route forwards them to the browser as live progress lines).
@@ -20,8 +27,10 @@ if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
 
 import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 
 from bpm_matcher import load_playlist  # noqa: E402
+from bpm_matcher.camelot import to_camelot  # noqa: E402
 from bpm_matcher.match import cross_distance_matrix  # noqa: E402
 
 # "style": what the song feels like matters most; tempo can drift.
@@ -43,10 +52,30 @@ def find_seed(df, track_uri: str):
     return matches.index[0]
 
 
-def cmd_similar(csv_path: str, track_uri: str, n: int):
+def seed_frame(df, track_uri: str, seed_json: str | None):
+    """Return a one-row seed DataFrame — from explicit features if given,
+    otherwise looked up in the playlist CSV."""
+    if seed_json:
+        s = json.loads(seed_json)
+        return pd.DataFrame([{
+            "Track URI": track_uri,
+            "Track Name": s["name"],
+            "Artist Name(s)": s["artist"],
+            "Tempo": float(s["tempo"]),
+            "Key": int(s["key"]),
+            "Mode": int(s["mode"]),
+            "Energy": float(s["energy"]),
+            "Danceability": float(s["danceability"]),
+            "Valence": float(s["valence"]),
+            "Camelot": to_camelot(int(s["key"]), int(s["mode"])),
+        }])
+    return df.iloc[[find_seed(df, track_uri)]]
+
+
+def cmd_similar(csv_path: str, track_uri: str, n: int, seed_json: str | None):
     df = load_playlist(csv_path)
-    seed_idx = find_seed(df, track_uri)
-    seed = df.iloc[[seed_idx]]
+    seed = seed_frame(df, track_uri, seed_json)
+    seed_id = track_uri.split(":")[-1]
 
     # (n_tracks, 1) distances to the seed — no pairwise matrix needed.
     dist = cross_distance_matrix(df, seed)[:, 0]
@@ -54,23 +83,22 @@ def cmd_similar(csv_path: str, track_uri: str, n: int):
 
     results = []
     for idx in order:
-        if idx == seed_idx:
+        uri = str(df.iloc[idx]["Track URI"])
+        if uri.endswith(seed_id):
             continue
-        row = df.iloc[idx]
-        results.append({"uri": str(row["Track URI"]), "distance": round(float(dist[idx]), 4)})
+        results.append({"uri": uri, "distance": round(float(dist[idx]), 4)})
         if len(results) >= n:
             break
 
     print(json.dumps({"seedUri": track_uri, "matches": results}))
 
 
-def cmd_suggest(csv_path: str, track_uri: str, mode: str, n: int):
+def cmd_suggest(csv_path: str, track_uri: str, mode: str, n: int, seed_json: str | None):
     from bpm_matcher.suggest import suggest_tracks
 
     weights = TEMPO_WEIGHTS if mode == "tempo" else STYLE_WEIGHTS
     df = load_playlist(csv_path)
-    seed_idx = find_seed(df, track_uri)
-    seeds = df.iloc[[seed_idx]]
+    seeds = seed_frame(df, track_uri, seed_json)
 
     log(f"Searching for songs like {seeds.iloc[0]['Track Name']} ({mode})...")
     features = suggest_tracks(df, seeds, n=n, per_seed=60, max_candidates=80, weights=weights)
@@ -101,10 +129,12 @@ def main():
         raise SystemExit(__doc__)
     cmd, csv_path, track_uri = sys.argv[1], sys.argv[2], sys.argv[3]
     if cmd == "similar":
-        cmd_similar(csv_path, track_uri, int(sys.argv[4]) if len(sys.argv) > 4 else 25)
+        n = int(sys.argv[4]) if len(sys.argv) > 4 else 25
+        cmd_similar(csv_path, track_uri, n, sys.argv[5] if len(sys.argv) > 5 else None)
     elif cmd == "suggest":
         mode = sys.argv[4] if len(sys.argv) > 4 else "style"
-        cmd_suggest(csv_path, track_uri, mode, int(sys.argv[5]) if len(sys.argv) > 5 else 20)
+        n = int(sys.argv[5]) if len(sys.argv) > 5 else 20
+        cmd_suggest(csv_path, track_uri, mode, n, sys.argv[6] if len(sys.argv) > 6 else None)
     else:
         raise SystemExit(f"Unknown command: {cmd}")
 

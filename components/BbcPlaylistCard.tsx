@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from "react";
 import { useSession } from "next-auth/react";
 import Link from "next/link";
+import { FunnelIcon, SparklesIcon, MetronomeIcon, MiniSpinner } from "./TrackRow";
+import { FloatingCard } from "./FloatingCard";
 
 const RUNNING_PLAYLIST_ID = process.env.NEXT_PUBLIC_RUNNING_PLAYLIST_ID ?? "";
 
@@ -18,6 +20,11 @@ interface Props {
   synopsis?: string;
   onRemove?: () => void;
   editHref?: string;
+  onSimilar?: (track: Track) => void;
+  onSuggest?: (track: Track, mode: "style" | "tempo") => void;
+  suggestBusy?: { trackId: string; mode: "style" | "tempo" } | null;
+  /** Card rendered inline directly below the row whose track id matches (suggestions popover) */
+  inlineCard?: { trackId: string; node: React.ReactNode } | null;
 }
 
 function Spinner() {
@@ -29,7 +36,14 @@ function Spinner() {
   );
 }
 
-function BbcTrackRow({ track, index }: { track: Track; index: number }) {
+function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy }: {
+  track: Track;
+  index: number;
+  onSimilar?: (track: Track) => void;
+  onSuggest?: (track: Track, mode: "style" | "tempo") => void;
+  suggestBusy?: "style" | "tempo" | null;
+}) {
+  const { data: session } = useSession();
   const trackId = track.uri?.split(":")?.[2];
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(track.artistName)}&title=${encodeURIComponent(track.name)}`;
 
@@ -48,32 +62,88 @@ function BbcTrackRow({ track, index }: { track: Track; index: number }) {
     document.addEventListener("visibilitychange", onVisibility);
   }
 
+  async function playTrack() {
+    if (!trackId) return;
+    const token = session?.accessToken;
+    if (token) {
+      try {
+        const res = await fetch("https://api.spotify.com/v1/me/player/play", {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ uris: [`spotify:track:${trackId}`] }),
+        });
+        if (res.ok) return; // playing on the active device
+      } catch { /* fall through */ }
+    }
+    openInSpotify();
+  }
+
   return (
-    <button
-      onClick={openInSpotify}
-      disabled={!trackId}
-      className="w-full flex items-center gap-3 px-3 py-2 text-sm hover:bg-slate-800/60 transition-colors text-left group disabled:cursor-default"
-    >
-      <span className="text-slate-600 text-xs w-5 shrink-0">{index + 1}</span>
-      <div className="h-8 w-8 rounded shrink-0 overflow-hidden bg-slate-800">
-        <img
-          src={artSrc}
-          alt=""
-          loading="lazy"
-          className="h-full w-full object-cover"
-          onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
-        />
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-slate-200 group-hover:text-green-400 transition-colors">{track.name}</p>
-        <p className="truncate text-xs text-slate-500">{track.artistName}</p>
-      </div>
-      {trackId && <span className="text-slate-700 group-hover:text-green-500 text-xs shrink-0">↗</span>}
-    </button>
+    <div className="flex items-center group">
+      <button
+        onClick={() => { playTrack().catch(() => {}); }}
+        disabled={!trackId}
+        className="flex-1 flex items-center gap-3 px-3 py-2 text-sm hover:bg-slate-800/60 transition-colors text-left disabled:cursor-default min-w-0"
+      >
+        <span className="text-slate-600 text-xs w-5 shrink-0">{index + 1}</span>
+        <div className="h-8 w-8 rounded shrink-0 overflow-hidden bg-slate-800">
+          <img
+            src={artSrc}
+            alt=""
+            loading="lazy"
+            className="h-full w-full object-cover"
+            onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
+          />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-slate-200 group-hover:text-green-400 transition-colors">{track.name}</p>
+          <p className="truncate text-xs text-slate-500">{track.artistName}</p>
+        </div>
+        {trackId && <span className="text-slate-700 group-hover:text-green-500 text-xs shrink-0">↗</span>}
+      </button>
+
+      {trackId && onSimilar && (
+        <button
+          onClick={() => onSimilar(track)}
+          className="opacity-0 group-hover:opacity-100 ml-1 p-1.5 text-slate-600 hover:text-green-400 transition-all shrink-0 rounded"
+          title="Filter playlist to songs like this"
+        >
+          <FunnelIcon />
+        </button>
+      )}
+      {trackId && onSuggest && (
+        <button
+          onClick={() => onSuggest(track, "style")}
+          disabled={!!suggestBusy}
+          className={`p-1.5 transition-all shrink-0 rounded ${
+            suggestBusy === "style"
+              ? "opacity-100 text-purple-400"
+              : "opacity-0 group-hover:opacity-100 text-slate-600 hover:text-purple-400"
+          }`}
+          title="Search new songs like this (style)"
+        >
+          {suggestBusy === "style" ? <MiniSpinner /> : <SparklesIcon />}
+        </button>
+      )}
+      {trackId && onSuggest && (
+        <button
+          onClick={() => onSuggest(track, "tempo")}
+          disabled={!!suggestBusy}
+          className={`mr-2 p-1.5 transition-all shrink-0 rounded ${
+            suggestBusy === "tempo"
+              ? "opacity-100 text-orange-400"
+              : "opacity-0 group-hover:opacity-100 text-slate-600 hover:text-orange-400"
+          }`}
+          title="Search new songs like this (tempo)"
+        >
+          {suggestBusy === "tempo" ? <MiniSpinner /> : <MetronomeIcon />}
+        </button>
+      )}
+    </div>
   );
 }
 
-export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref }: Props) {
+export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref, onSimilar, onSuggest, suggestBusy, inlineCard }: Props) {
   const { data: session } = useSession();
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
@@ -90,6 +160,7 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
   const [episodePid, setEpisodePid] = useState<string>(pid);
   const [airDate, setAirDate] = useState<string | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [suggestAnchor, setSuggestAnchor] = useState<HTMLElement | null>(null);
 
   // Fetch episode date on mount without requiring the user to press Load
   useEffect(() => {
@@ -245,13 +316,16 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
       // pool so the new tracks show up in zone/pace filters straight away.
       let enriched = 0;
       try {
-        const ids = tracksWithUri
-          .map(t => t.uri.split(":").pop()!)
-          .filter(Boolean);
         const er = await fetch("/api/bpm/enrich", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ids }),
+          body: JSON.stringify({
+            tracks: tracksWithUri.map(t => ({
+              id: t.uri.split(":").pop()!,
+              name: t.name,
+              artist: t.artistName,
+            })),
+          }),
         });
         const ed = await er.json() as {
           features?: Record<string, { tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number }>;
@@ -407,9 +481,28 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
       {tracks.length > 0 && (
         <div className="divide-y divide-white/10 max-h-64 overflow-y-auto no-scrollbar rounded-lg border border-white/10 bg-slate-950/40">
           {tracks.map((t, i) => (
-            <BbcTrackRow key={`${t.uri}-${i}`} track={t} index={i} />
+            <div
+              key={`${t.uri}-${i}`}
+              ref={inlineCard && t.uri?.split(":")?.[2] === inlineCard.trackId
+                ? (el) => { if (el) setSuggestAnchor(prev => (prev === el ? prev : el)); }
+                : undefined}
+            >
+              <BbcTrackRow
+                track={t}
+                index={i}
+                onSimilar={onSimilar}
+                onSuggest={onSuggest}
+                suggestBusy={suggestBusy && t.uri?.split(":")?.[2] === suggestBusy.trackId ? suggestBusy.mode : null}
+              />
+            </div>
           ))}
         </div>
+      )}
+
+      {/* Suggestions popover for a search seeded from one of this card's tracks —
+          floats directly below the clicked row, over anything beneath */}
+      {inlineCard && tracks.some(t => t.uri?.split(":")?.[2] === inlineCard.trackId) && (
+        <FloatingCard anchor={suggestAnchor}>{inlineCard.node}</FloatingCard>
       )}
     </div>
   );

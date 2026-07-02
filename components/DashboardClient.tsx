@@ -1,11 +1,12 @@
 ﻿"use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { FloatingCard } from "./FloatingCard";
 import { signOut, useSession } from "next-auth/react";
 import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
-import { TrackRow, openInSpotify } from "./TrackRow";
+import { TrackRow, playInSpotify } from "./TrackRow";
 import { BbcPlaylistCard } from "./BbcPlaylistCard";
 import { DedupCard } from "./DedupCard";
 import { RunnaSummaryCard, RunnaScheduleCard } from "./RunnaCard";
@@ -45,6 +46,7 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy,
   const [visibleCount, setVisibleCount] = useState(50);
   const containerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
 
   const loadMore = useCallback(() => {
     setVisibleCount(c => Math.min(c + 50, tracks.length));
@@ -65,7 +67,12 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy,
   return (
     <div ref={containerRef} className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto no-scrollbar">
       {tracks.slice(0, visibleCount).map((track, i) => (
-        <div key={track.id}>
+        <div
+          key={track.id}
+          ref={inlineCard?.trackId === track.id
+            ? (el) => { if (el) setAnchorEl(prev => (prev === el ? prev : el)); }
+            : undefined}
+        >
           <TrackRow
             track={track}
             index={i}
@@ -75,13 +82,11 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy,
             onSuggestTempo={onSuggest ? () => onSuggest(track, "tempo") : undefined}
             suggestBusy={suggestBusy?.trackId === track.id ? suggestBusy.mode : null}
           />
-          {inlineCard?.trackId === track.id && (
-            <div className="relative z-10 mx-3 my-2 rounded-xl shadow-2xl shadow-black/60 ring-1 ring-white/20">
-              {inlineCard.node}
-            </div>
-          )}
         </div>
       ))}
+      {inlineCard && (
+        <FloatingCard anchor={anchorEl}>{inlineCard.node}</FloatingCard>
+      )}
       {visibleCount < tracks.length && (
         <div ref={sentinelRef} className="py-2 text-center text-xs text-slate-600">
           {visibleCount} of {tracks.length}
@@ -125,9 +130,25 @@ function spotifyIdFromUrl(url: string | null): string | null {
   return m ? m[1] : null;
 }
 
+// BBC card tracks are a slimmer shape — lift one into a TrackWithBPM so the
+// similar/suggest handlers can treat all seeds uniformly.
+function bbcToTrack(t: { uri: string; name: string; artistName: string }): TrackWithBPM {
+  return {
+    id: t.uri.split(":")[2] ?? t.uri,
+    name: t.name,
+    artists: [{ name: t.artistName }],
+    album: { name: "", images: [] },
+    duration_ms: 0,
+    uri: t.uri,
+    bpm: 0,
+    energy: 0,
+  };
+}
+
 interface SuggestState {
   seed: TrackWithBPM;
   mode: "style" | "tempo";
+  origin: "list" | "bbc";
   progress: string;
   results: Suggestion[] | null;
   error: string | null;
@@ -237,6 +258,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [suggest, setSuggest] = useState<SuggestState | null>(null);
   const suggestSourceRef = useRef<EventSource | null>(null);
   const [noBpmFilter, setNoBpmFilter] = useState(false);
+  const [similarNotice, setSimilarNotice] = useState<string | null>(null);
   const [enriching, setEnriching] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
   const enrichAttempted = useRef(false);
@@ -294,6 +316,9 @@ export function DashboardClient({ spotifyUser }: Props) {
         setCsvName("Running");
         setAllTracks(result.tracks);
         setStep("ready");
+        // Start on the full playlist so the track list is populated immediately
+        setSelectedZones([ALL_ZONE]);
+        setPlaylistName("Running");
         prewarmArt(result.tracks);
       })
       .catch(() => {/* silently ignore if file missing */});
@@ -306,7 +331,9 @@ export function DashboardClient({ spotifyUser }: Props) {
     const er = await fetch("/api/bpm/enrich", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids: missing.map(t => t.id) }),
+      body: JSON.stringify({
+        tracks: missing.map(t => ({ id: t.id, name: t.name, artist: t.artists[0]?.name ?? "" })),
+      }),
     });
     const ed = await er.json() as {
       features?: Record<string, { tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number }>;
@@ -377,33 +404,73 @@ export function DashboardClient({ spotifyUser }: Props) {
     }
   }, [selectedZones, allTracks, paceFilter, similarFilter, noBpmFilter]);
 
+  // For seeds not in the playlist pool (BBC tracks, 0-BPM tracks) the CSV
+  // lookup in the python bridge can't work — fetch features from ReccoBeats
+  // and pass them along explicitly. Returns null when the CSV lookup is fine.
+  async function seedFeaturesFor(track: TrackWithBPM): Promise<
+    { name: string; artist: string; tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number } | null
+  > {
+    const inPool = allTracks.some(t => t.uri === track.uri && t.bpm > 0);
+    if (inPool) return null;
+    const res = await fetch("/api/bpm/enrich", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tracks: [{ id: track.id, name: track.name, artist: track.artists[0]?.name ?? "" }] }),
+    });
+    const d = await res.json() as {
+      features?: Record<string, { tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number }>;
+    };
+    const f = d.features?.[track.id];
+    if (!f) throw new Error(`No audio data found for "${track.name}" — can't search`);
+    return { name: track.name, artist: track.artists[0]?.name ?? "", ...f };
+  }
+
   async function handleSimilar(track: TrackWithBPM) {
     setSimilarLoading(true);
     try {
+      const seed = await seedFeaturesFor(track);
+      const seedTrack = seed && track.bpm === 0 ? { ...track, bpm: Math.round(seed.tempo) } : track;
       const res = await fetch("/api/bpm/similar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uri: track.uri, n: 30 }),
+        body: JSON.stringify({ uri: track.uri, n: 30, seed: seed ?? undefined }),
       });
       const data = await res.json() as { error?: string; matches?: { uri: string; distance: number }[] };
       if (data.error) throw new Error(data.error);
-      setSimilarFilter({ seed: track, uris: (data.matches ?? []).map(m => m.uri) });
+      setSimilarFilter({ seed: seedTrack, uris: (data.matches ?? []).map(m => m.uri) });
       setSelectedZones([]);
       setPaceFilter(null);
       setNoBpmFilter(false);
       if (csvName) setPlaylistName(`${csvName} – like ${track.name}`);
     } catch (e) {
       console.error("[similar]", e);
+      setSimilarNotice(e instanceof Error ? e.message : "Similar search failed");
+      setTimeout(() => setSimilarNotice(null), 5000);
     } finally {
       setSimilarLoading(false);
     }
   }
 
-  function handleSuggest(track: TrackWithBPM, mode: "style" | "tempo") {
+  async function handleSuggest(track: TrackWithBPM, mode: "style" | "tempo", origin: "list" | "bbc" = "list") {
     suggestSourceRef.current?.close();
-    setSuggest({ seed: track, mode, progress: "Starting search…", results: null, error: null });
+    setSuggest({ seed: track, mode, origin, progress: "Starting search…", results: null, error: null });
 
-    const es = new EventSource(`/api/bpm/suggest?uri=${encodeURIComponent(track.uri)}&mode=${mode}`);
+    let seedParam = "";
+    try {
+      const seed = await seedFeaturesFor(track);
+      if (seed) {
+        seedParam = `&seed=${encodeURIComponent(JSON.stringify(seed))}`;
+        if (track.bpm === 0) {
+          const bpm = Math.round(seed.tempo);
+          setSuggest(s => s && { ...s, seed: { ...s.seed, bpm } });
+        }
+      }
+    } catch (e) {
+      setSuggest(s => s && { ...s, error: e instanceof Error ? e.message : "No audio data for this track" });
+      return;
+    }
+
+    const es = new EventSource(`/api/bpm/suggest?uri=${encodeURIComponent(track.uri)}&mode=${mode}${seedParam}`);
     suggestSourceRef.current = es;
     es.onmessage = (ev) => {
       const data = JSON.parse(ev.data) as {
@@ -578,7 +645,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
       onAdd={handleAddSuggestions}
     />
   ) : null;
-  const suggestSeedVisible = suggest !== null && filteredTracks.some(t => t.id === suggest.seed.id);
+  const suggestSeedVisible = suggest !== null && suggest.origin === "list" && filteredTracks.some(t => t.id === suggest.seed.id);
 
   return (
     <div
@@ -913,9 +980,9 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             )}
 
             {/* Song suggestions (AI_BPM Phase B) — standalone fallback when the
-                seed row isn't in the current list (rendered inline below the
-                seed row otherwise) */}
-            {suggest && !suggestSeedVisible && suggestCardNode}
+                seed row isn't visible anywhere (rendered inline below the seed
+                row in the track list or BBC card otherwise) */}
+            {suggest && suggest.origin === "list" && !suggestSeedVisible && suggestCardNode}
 
             {/* BPM distribution */}
             {allTracks.length > 0 && selectedZones.length > 0 && (
@@ -941,6 +1008,14 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 synopsis={p.synopsis}
                 onRemove={() => handleRemoveBbcProgramme(p.pid)}
                 editHref={`/settings?bbc=replace&pid=${p.pid}&name=${encodeURIComponent(p.name)}`}
+                onSimilar={t => handleSimilar(bbcToTrack(t))}
+                onSuggest={(t, mode) => handleSuggest(bbcToTrack(t), mode, "bbc")}
+                suggestBusy={suggest && suggest.results === null && !suggest.error
+                  ? { trackId: suggest.seed.id, mode: suggest.mode }
+                  : null}
+                inlineCard={suggest && suggest.origin === "bbc"
+                  ? { trackId: suggest.seed.id, node: suggestCardNode }
+                  : null}
               />
             ))}
             {/* Add BBC Programme card */}
@@ -991,6 +1066,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           <Spinner /> Finding similar songs…
         </div>
       )}
+      {similarNotice && !similarLoading && (
+        <div className="fixed bottom-6 right-6 z-20 rounded-lg bg-slate-800 border border-red-500/30 px-4 py-2.5 text-sm text-red-400 shadow-xl">
+          {similarNotice}
+        </div>
+      )}
 
     </div>
   );
@@ -1001,6 +1081,7 @@ function SuggestionsCard({ suggest, onClose, onAdd }: {
   onClose: () => void;
   onAdd: (items: Suggestion[]) => Promise<void>;
 }) {
+  const { data: session } = useSession();
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [added, setAdded]       = useState<Set<number>>(new Set());
   const [adding, setAdding]     = useState(false);
@@ -1121,7 +1202,7 @@ function SuggestionsCard({ suggest, onClose, onAdd }: {
                 <button
                   onClick={() => {
                     const id = spotifyIdFromUrl(s.spotifyUrl);
-                    if (id) openInSpotify(`spotify:track:${id}`);
+                    if (id) playInSpotify(`spotify:track:${id}`, session?.accessToken).catch(() => {});
                     else window.open(`https://open.spotify.com/search/${encodeURIComponent(`${s.artist} ${s.name}`)}`, "_blank");
                   }}
                   className="flex-1 flex items-center gap-3 px-2 py-2 hover:bg-slate-800/60 transition-colors min-w-0 text-left"
@@ -1163,11 +1244,19 @@ function BPMDistribution({
   selectedZones: RunningZone[];
 }) {
   const counts = zones.map(z => filterTracksByBPM(tracks, z.bpmMin, z.bpmMax).length);
-  const max = Math.max(...counts, 1);
+  // Tracks that fall in no zone at all (mostly sub-Z1 tempos) — zones overlap,
+  // so the zone bars alone don't account for the whole playlist.
+  const outside = tracks.filter(
+    t => !zones.some(z => t.bpm >= z.bpmMin - 3 && t.bpm <= z.bpmMax + 3),
+  ).length;
+  const max = Math.max(...counts, outside, 1);
   const isAll = selectedZones.some(z => z.number === 0);
   return (
     <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5">
-      <h3 className="text-sm font-semibold mb-4 text-slate-400">BPM distribution across zones</h3>
+      <h3 className="text-sm font-semibold mb-4 text-slate-400">
+        BPM distribution across zones
+        <span className="font-normal text-slate-600"> — zones overlap, so bars can share tracks</span>
+      </h3>
       <div className="flex items-end gap-2 h-20">
         {zones.map((z, i) => {
           const active = isAll || selectedZones.some(s => s.number === z.number);
@@ -1183,6 +1272,16 @@ function BPMDistribution({
             </div>
           );
         })}
+        <div
+          className="flex-1 flex flex-col items-center gap-1"
+          title={`${outside} tracks outside every zone's BPM range (below Z1 or above Z5)`}
+        >
+          <span className={`text-xs font-mono ${isAll ? "text-white font-bold" : "text-slate-500"}`}>{outside}</span>
+          <div className="w-full rounded-t" style={{ height: `${Math.max((outside / max) * 56, 4)}px` }}>
+            <div className={`w-full h-full rounded-t bg-slate-600 ${isAll ? "opacity-100" : "opacity-30"}`} />
+          </div>
+          <span className="text-xs text-slate-600">Out</span>
+        </div>
       </div>
     </div>
   );
