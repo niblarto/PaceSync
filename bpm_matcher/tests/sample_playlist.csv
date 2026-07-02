@@ -1,0 +1,11 @@
+Track URI,Track Name,Album Name,Artist Name(s),Release Date,Duration (ms),Popularity,Explicit,Added By,Added At,Genres,Record Label,Danceability,Energy,Key,Loudness,Mode,Speechiness,Acousticness,Instrumentalness,Liveness,Valence,Tempo,Time Signature
+spotify:track:trackA,Track A,Test Album,Artist X,2020-01-01,200000,50,false,user,2021-01-01T00:00:00Z,,,0.70,0.80,0,-6.0,1,0.05,0.10,0.00,0.10,0.60,174.0,4
+spotify:track:trackB,Track B (half-time of A),Test Album,Artist X,2020-01-01,200000,50,false,user,2021-01-01T00:00:00Z,,,0.68,0.75,0,-6.2,1,0.05,0.10,0.00,0.10,0.58,87.0,4
+spotify:track:trackC,Track C (adjacent key to A),Test Album,Artist X,2020-01-01,200000,50,false,user,2021-01-01T00:00:00Z,,,0.72,0.82,7,-5.8,1,0.05,0.10,0.00,0.10,0.65,176.0,4
+spotify:track:trackD,Track D (unrelated),Test Album,Artist Y,2020-01-01,200000,50,false,user,2021-01-01T00:00:00Z,,,0.50,0.50,1,-8.0,0,0.05,0.10,0.00,0.10,0.50,128.0,4
+spotify:track:trackE,Track E (slow minor),Test Album,Artist Y,2020-01-01,200000,50,false,user,2021-01-01T00:00:00Z,,,0.40,0.30,5,-9.0,0,0.05,0.10,0.00,0.10,0.40,100.0,4
+spotify:track:trackF,Track F (near half-time of A),Test Album,Artist X,2020-01-01,200000,50,false,user,2021-01-01T00:00:00Z,,,0.66,0.73,0,-6.5,1,0.05,0.10,0.00,0.10,0.56,90.0,4
+spotify:track:trackG,Track G (relative minor of A),Test Album,Artist X,2020-01-01,200000,50,false,user,2021-01-01T00:00:00Z,,,0.69,0.78,9,-6.1,0,0.05,0.10,0.00,0.10,0.59,174.0,4
+spotify:track:trackH,Track H (slow ballad),Test Album,Artist Z,2020-01-01,200000,50,false,user,2021-01-01T00:00:00Z,,,0.30,0.20,3,-12.0,1,0.05,0.10,0.00,0.10,0.20,60.0,4
+spotify:track:trackI,Track I (mid-tempo),Test Album,Artist Z,2020-01-01,200000,50,false,user,2021-01-01T00:00:00Z,,,0.55,0.60,2,-7.0,1,0.05,0.10,0.00,0.10,0.50,140.0,4
+spotify:track:trackJ,"Track J (same key/BPM as A, different mood)",Test Album,Artist X,2020-01-01,200000,50,false,user,2021-01-01T00:00:00Z,,,0.10,0.10,0,-14.0,1,0.05,0.10,0.00,0.10,0.10,174.0,4

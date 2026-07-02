@@ -5,7 +5,7 @@ import { signOut, useSession } from "next-auth/react";
 import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
-import { TrackRow } from "./TrackRow";
+import { TrackRow, openInSpotify } from "./TrackRow";
 import { BbcPlaylistCard } from "./BbcPlaylistCard";
 import { DedupCard } from "./DedupCard";
 import { RunnaSummaryCard, RunnaScheduleCard } from "./RunnaCard";
@@ -33,7 +33,15 @@ const ALL_ZONE: RunningZone = {
   textColor: "text-white",
 };
 
-function VirtualTrackList({ tracks, onDelete }: { tracks: TrackWithBPM[]; onDelete?: (track: TrackWithBPM) => void }) {
+function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy, inlineCard }: {
+  tracks: TrackWithBPM[];
+  onDelete?: (track: TrackWithBPM) => void;
+  onSimilar?: (track: TrackWithBPM) => void;
+  onSuggest?: (track: TrackWithBPM, mode: "style" | "tempo") => void;
+  suggestBusy?: { trackId: string; mode: "style" | "tempo" } | null;
+  /** Card rendered inline directly below the row whose track id matches (suggestions popover) */
+  inlineCard?: { trackId: string; node: React.ReactNode } | null;
+}) {
   const [visibleCount, setVisibleCount] = useState(50);
   const containerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -57,12 +65,22 @@ function VirtualTrackList({ tracks, onDelete }: { tracks: TrackWithBPM[]; onDele
   return (
     <div ref={containerRef} className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto no-scrollbar">
       {tracks.slice(0, visibleCount).map((track, i) => (
-        <TrackRow
-          key={track.id}
-          track={track}
-          index={i}
-          onDelete={onDelete ? () => onDelete(track) : undefined}
-        />
+        <div key={track.id}>
+          <TrackRow
+            track={track}
+            index={i}
+            onDelete={onDelete ? () => onDelete(track) : undefined}
+            onSimilar={onSimilar ? () => onSimilar(track) : undefined}
+            onSuggestStyle={onSuggest ? () => onSuggest(track, "style") : undefined}
+            onSuggestTempo={onSuggest ? () => onSuggest(track, "tempo") : undefined}
+            suggestBusy={suggestBusy?.trackId === track.id ? suggestBusy.mode : null}
+          />
+          {inlineCard?.trackId === track.id && (
+            <div className="relative z-10 mx-3 my-2 rounded-xl shadow-2xl shadow-black/60 ring-1 ring-white/20">
+              {inlineCard.node}
+            </div>
+          )}
+        </div>
       ))}
       {visibleCount < tracks.length && (
         <div ref={sentinelRef} className="py-2 text-center text-xs text-slate-600">
@@ -86,6 +104,34 @@ interface Props {
 }
 
 type Step = "idle" | "ready" | "saving" | "saved" | "partial";
+
+interface Suggestion {
+  name: string;
+  artist: string;
+  bpm: number;
+  camelot: string;
+  spotifyUrl: string | null;
+  distance: number;
+  tempo: number;
+  key: number;
+  mode: number;
+  energy: number;
+  danceability: number;
+  valence: number;
+}
+
+function spotifyIdFromUrl(url: string | null): string | null {
+  const m = url?.match(/open\.spotify\.com\/track\/([A-Za-z0-9]+)/);
+  return m ? m[1] : null;
+}
+
+interface SuggestState {
+  seed: TrackWithBPM;
+  mode: "style" | "tempo";
+  progress: string;
+  results: Suggestion[] | null;
+  error: string | null;
+}
 
 // Parse a single CSV row, handling quoted fields
 function parseCsvRow(line: string): string[] {
@@ -186,6 +232,14 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [bbcProgrammes, setBbcProgrammes] = useState<{ pid: string; name: string; synopsis?: string }[]>(BBC_DEFAULTS);
   const [garminConfigured, setGarminConfigured] = useState(false);
   const [paceFilter, setPaceFilter] = useState<{ paces: Array<{ paceStr: string; bpm: number }> } | null>(null);
+  const [similarFilter, setSimilarFilter] = useState<{ seed: TrackWithBPM; uris: string[] } | null>(null);
+  const [similarLoading, setSimilarLoading] = useState(false);
+  const [suggest, setSuggest] = useState<SuggestState | null>(null);
+  const suggestSourceRef = useRef<EventSource | null>(null);
+  const [noBpmFilter, setNoBpmFilter] = useState(false);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
+  const enrichAttempted = useRef(false);
 
   useEffect(() => {
     fetch("/api/settings/garmin")
@@ -245,9 +299,62 @@ export function DashboardClient({ spotifyUser }: Props) {
       .catch(() => {/* silently ignore if file missing */});
   }, []);
 
-  // Re-filter whenever zone selection, pace filter, or tracks change
+  // Enrich BPM-less tracks via ReccoBeats; updates the CSV and local state.
+  // Returns how many tracks got features.
+  const runEnrichment = useCallback(async (missing: TrackWithBPM[]): Promise<number> => {
+    if (missing.length === 0) return 0;
+    const er = await fetch("/api/bpm/enrich", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: missing.map(t => t.id) }),
+    });
+    const ed = await er.json() as {
+      features?: Record<string, { tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number }>;
+    };
+    const features = ed.features ?? {};
+    const rows = missing.flatMap(t => {
+      const f = features[t.id];
+      return f ? [{ uri: t.uri, ...f }] : [];
+    });
+    if (rows.length === 0) return 0;
+
+    await fetch("/api/tracks/update-features", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tracks: rows }),
+    });
+
+    setAllTracks(prev => prev.map(t => {
+      const f = features[t.id];
+      return f && t.bpm === 0 ? { ...t, bpm: Math.round(f.tempo), energy: f.energy } : t;
+    }));
+    return rows.length;
+  }, []);
+
+  // Auto-enrich on load: any track missing BPM gets a ReccoBeats lookup once per session
+  useEffect(() => {
+    if (enrichAttempted.current || allTracks.length === 0) return;
+    const missing = allTracks.filter(t => t.bpm === 0);
+    if (missing.length === 0) return;
+    enrichAttempted.current = true;
+    runEnrichment(missing).catch(() => {});
+  }, [allTracks, runEnrichment]);
+
+  // Re-filter whenever zone selection, pace filter, similar filter, or tracks change
   useEffect(() => {
     if (allTracks.length === 0) return;
+    if (noBpmFilter) {
+      setFilteredTracks(allTracks.filter(t => t.bpm === 0));
+      return;
+    }
+    if (similarFilter) {
+      const byUri = new Map(allTracks.map(t => [t.uri, t]));
+      const ranked = similarFilter.uris
+        .map(u => byUri.get(u))
+        .filter((t): t is TrackWithBPM => t !== undefined);
+      setFilteredTracks([similarFilter.seed, ...ranked.filter(t => t.uri !== similarFilter.seed.uri)]);
+      return;
+    }
     if (paceFilter && paceFilter.paces.length > 0) {
       const bpms = paceFilter.paces.map(p => p.bpm);
       const lo = Math.min(...bpms) - 2, hi = Math.max(...bpms) + 2;
@@ -268,7 +375,108 @@ export function DashboardClient({ spotifyUser }: Props) {
       }
       setFilteredTracks(result);
     }
-  }, [selectedZones, allTracks, paceFilter]);
+  }, [selectedZones, allTracks, paceFilter, similarFilter, noBpmFilter]);
+
+  async function handleSimilar(track: TrackWithBPM) {
+    setSimilarLoading(true);
+    try {
+      const res = await fetch("/api/bpm/similar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uri: track.uri, n: 30 }),
+      });
+      const data = await res.json() as { error?: string; matches?: { uri: string; distance: number }[] };
+      if (data.error) throw new Error(data.error);
+      setSimilarFilter({ seed: track, uris: (data.matches ?? []).map(m => m.uri) });
+      setSelectedZones([]);
+      setPaceFilter(null);
+      setNoBpmFilter(false);
+      if (csvName) setPlaylistName(`${csvName} – like ${track.name}`);
+    } catch (e) {
+      console.error("[similar]", e);
+    } finally {
+      setSimilarLoading(false);
+    }
+  }
+
+  function handleSuggest(track: TrackWithBPM, mode: "style" | "tempo") {
+    suggestSourceRef.current?.close();
+    setSuggest({ seed: track, mode, progress: "Starting search…", results: null, error: null });
+
+    const es = new EventSource(`/api/bpm/suggest?uri=${encodeURIComponent(track.uri)}&mode=${mode}`);
+    suggestSourceRef.current = es;
+    es.onmessage = (ev) => {
+      const data = JSON.parse(ev.data) as {
+        progress?: string;
+        error?: string;
+        done?: boolean;
+        result?: { suggestions: Suggestion[] };
+      };
+      if (data.progress) {
+        setSuggest(s => s && { ...s, progress: data.progress! });
+      }
+      if (data.error) {
+        setSuggest(s => s && { ...s, error: data.error! });
+        es.close();
+      }
+      if (data.done && data.result) {
+        setSuggest(s => s && { ...s, results: data.result!.suggestions });
+        es.close();
+      }
+    };
+    es.onerror = () => {
+      setSuggest(s => s && s.results === null && !s.error ? { ...s, error: "Connection lost" } : s);
+      es.close();
+    };
+  }
+
+  // Add accepted suggestions to the Spotify Running playlist + the local CSV pool
+  async function handleAddSuggestions(items: Suggestion[]): Promise<void> {
+    const withIds = items
+      .map(s => ({ s, id: spotifyIdFromUrl(s.spotifyUrl) }))
+      .filter((x): x is { s: Suggestion; id: string } => x.id !== null);
+    if (withIds.length === 0) throw new Error("No Spotify IDs found for selected tracks");
+
+    const uris = withIds.map(x => `spotify:track:${x.id}`);
+    if (RUNNING_PLAYLIST_ID) {
+      await addTracksBrowser(RUNNING_PLAYLIST_ID, uris);
+    }
+
+    await fetch("/api/tracks/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tracks: withIds.map(({ s, id }) => ({
+          uri: `spotify:track:${id}`,
+          name: s.name,
+          artist: s.artist,
+          tempo: s.tempo,
+          key: s.key,
+          mode: s.mode,
+          energy: s.energy,
+          danceability: s.danceability,
+          valence: s.valence,
+        })),
+      }),
+    });
+
+    setAllTracks(prev => {
+      const existing = new Set(prev.map(t => t.uri));
+      const added: TrackWithBPM[] = withIds
+        .filter(({ id }) => !existing.has(`spotify:track:${id}`))
+        .map(({ s, id }) => ({
+          id,
+          name: s.name,
+          artists: [{ name: s.artist }],
+          album: { name: "", images: [] },
+          duration_ms: 0,
+          uri: `spotify:track:${id}`,
+          bpm: s.bpm,
+          energy: s.energy,
+        }));
+      return [...prev, ...added];
+    });
+  }
 
   async function handleDeleteTrack(track: TrackWithBPM) {
     const token = session?.accessToken;
@@ -362,6 +570,16 @@ export function DashboardClient({ spotifyUser }: Props) {
 
 const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
+  const suggestCardNode = suggest ? (
+    <SuggestionsCard
+      key={`${suggest.seed.id}-${suggest.mode}`}
+      suggest={suggest}
+      onClose={() => { suggestSourceRef.current?.close(); setSuggest(null); }}
+      onAdd={handleAddSuggestions}
+    />
+  ) : null;
+  const suggestSeedVisible = suggest !== null && filteredTracks.some(t => t.id === suggest.seed.id);
+
   return (
     <div
       className="min-h-screen flex flex-col bg-cover bg-fixed bg-center bg-no-repeat"
@@ -429,8 +647,9 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <button
                 onClick={() => {
                   setPaceFilter(null);
+                  setSimilarFilter(null);
+                  setNoBpmFilter(false);
                   setSelectedZones([ALL_ZONE]);
-                  setPaceFilter(null);
                   if (csvName) setPlaylistName(csvName);
                 }}
                 className={`w-full rounded-lg border p-4 text-left transition-all ${
@@ -450,7 +669,24 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 {allTracks.length > 0 && (() => {
                   const noBpm = allTracks.filter(t => t.bpm === 0).length;
                   return (
-                    <p className={`text-xs mt-0.5 ${noBpm > 0 ? "text-red-400" : "text-green-700"}`}>{noBpm} Tracks without BPM info</p>
+                    <span
+                      onClick={noBpm > 0 ? (e) => {
+                        e.stopPropagation();
+                        setSelectedZones([]);
+                        setPaceFilter(null);
+                        setSimilarFilter(null);
+                        setNoBpmFilter(true);
+                        setEnrichMsg(null);
+                      } : undefined}
+                      className={`block text-xs mt-0.5 ${
+                        noBpm > 0
+                          ? `text-red-400 ${noBpmFilter ? "font-semibold underline" : "hover:underline cursor-pointer"}`
+                          : "text-green-700"
+                      }`}
+                      title={noBpm > 0 ? "Show these tracks so you can fix or remove them" : undefined}
+                    >
+                      {noBpm} Tracks without BPM info
+                    </span>
                   );
                 })()}
               </button>
@@ -462,6 +698,8 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   selected={selectedZones.some(z => z.number === zone.number)}
                   onClick={(e) => {
                     setPaceFilter(null);
+                    setSimilarFilter(null);
+                    setNoBpmFilter(false);
                     if (e.ctrlKey || e.metaKey) {
                       setSelectedZones(prev => {
                         const withoutAll = prev.filter(z => z.number !== 0);
@@ -499,7 +737,15 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">
                 <h2 className="font-semibold">Target zone</h2>
                 <div className="rounded-lg bg-slate-800/50 border border-white/10 px-3 py-2 text-sm">
-                  {paceFilter && paceFilter.paces.length > 0 ? (() => {
+                  {noBpmFilter ? (
+                    <span className="text-red-400 font-medium">
+                      Tracks without BPM info — fix with a BPM lookup, delete, or re-export via Exportify
+                    </span>
+                  ) : similarFilter ? (
+                    <span className="text-purple-400 font-medium">
+                      Songs like &quot;{similarFilter.seed.name}&quot; — {similarFilter.seed.artists[0]?.name} · {similarFilter.seed.bpm} BPM
+                    </span>
+                  ) : paceFilter && paceFilter.paces.length > 0 ? (() => {
                     const bpms = paceFilter.paces.map(p => p.bpm);
                     const lo = Math.min(...bpms) - 2, hi = Math.max(...bpms) + 2;
                     const labels = [...paceFilter.paces].sort((a, b) => a.bpm - b.bpm).map(p => p.paceStr).join(", ");
@@ -522,12 +768,14 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             )}
 
             {/* Results */}
-            {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0)) && (
+            {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || similarFilter || noBpmFilter) && (
               <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
                 <div className="p-5 border-b border-white/10 flex items-start justify-between gap-4 flex-wrap">
                   <div>
                     <h3 className="font-semibold">
                       {(() => {
+                        if (noBpmFilter) return `${filteredTracks.length} tracks without BPM info`;
+                        if (similarFilter) return `${filteredTracks.length} songs like "${similarFilter.seed.name}"`;
                         if (paceFilter && paceFilter.paces.length > 0) {
                           const bpms = paceFilter.paces.map(p => p.bpm);
                           const lo = Math.min(...bpms) - 2, hi = Math.max(...bpms) + 2;
@@ -545,7 +793,33 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     </p>
                   </div>
 
-                  {filteredTracks.length > 0 && step !== "partial" && (
+                  {noBpmFilter && filteredTracks.length > 0 && (
+                    <div className="flex flex-col items-end gap-1.5 shrink-0">
+                      <button
+                        onClick={async () => {
+                          setEnriching(true);
+                          setEnrichMsg(null);
+                          try {
+                            const found = await runEnrichment(filteredTracks);
+                            setEnrichMsg(found > 0
+                              ? `Found BPM data for ${found} track${found !== 1 ? "s" : ""}`
+                              : "No BPM data found — these tracks aren't in ReccoBeats");
+                          } catch (e) {
+                            setEnrichMsg(e instanceof Error ? e.message : "Lookup failed");
+                          } finally {
+                            setEnriching(false);
+                          }
+                        }}
+                        disabled={enriching}
+                        className="inline-flex items-center gap-2 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors"
+                      >
+                        {enriching ? <><Spinner />Looking up…</> : "Retry BPM lookup"}
+                      </button>
+                      {enrichMsg && <p className="text-xs text-slate-400">{enrichMsg}</p>}
+                    </div>
+                  )}
+
+                  {!noBpmFilter && filteredTracks.length > 0 && step !== "partial" && (
                     <div className="flex items-start gap-2 shrink-0">
                       <label className="text-xs text-slate-500 whitespace-nowrap pt-1.5">Spotify playlist name</label>
                       <div className="flex flex-col gap-1.5">
@@ -618,13 +892,30 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
                 {filteredTracks.length === 0 ? (
                   <div className="p-8 text-center text-slate-500 text-sm">
-                    No tracks in this BPM range. Try a different zone.
+                    {noBpmFilter ? "All tracks have BPM info 🎉" : "No tracks in this BPM range. Try a different zone."}
                   </div>
                 ) : (
-                  <VirtualTrackList key={paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : selectedZones.map(z=>z.number).sort().join("-")} tracks={filteredTracks} onDelete={handleDeleteTrack} />
+                  <VirtualTrackList
+                    key={noBpmFilter ? "nobpm" : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : selectedZones.map(z=>z.number).sort().join("-")}
+                    tracks={filteredTracks}
+                    onDelete={handleDeleteTrack}
+                    onSimilar={handleSimilar}
+                    onSuggest={handleSuggest}
+                    suggestBusy={suggest && suggest.results === null && !suggest.error
+                      ? { trackId: suggest.seed.id, mode: suggest.mode }
+                      : null}
+                    inlineCard={suggest && suggestSeedVisible
+                      ? { trackId: suggest.seed.id, node: suggestCardNode }
+                      : null}
+                  />
                 )}
               </div>
             )}
+
+            {/* Song suggestions (AI_BPM Phase B) — standalone fallback when the
+                seed row isn't in the current list (rendered inline below the
+                seed row otherwise) */}
+            {suggest && !suggestSeedVisible && suggestCardNode}
 
             {/* BPM distribution */}
             {allTracks.length > 0 && selectedZones.length > 0 && (
@@ -672,6 +963,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               garminConfigured={garminConfigured}
               activePaces={paceFilter?.paces.map(p => p.paceStr) ?? []}
               onPaceFilter={(paceStr, bpm, multiSelect) => {
+                setNoBpmFilter(false);
                 if (multiSelect) {
                   setPaceFilter(prev => {
                     const current = prev?.paces ?? [];
@@ -694,6 +986,171 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
         </div>
       </div>
 
+      {similarLoading && (
+        <div className="fixed bottom-6 right-6 z-20 flex items-center gap-2 rounded-lg bg-slate-800 border border-white/10 px-4 py-2.5 text-sm text-slate-300 shadow-xl">
+          <Spinner /> Finding similar songs…
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+function SuggestionsCard({ suggest, onClose, onAdd }: {
+  suggest: SuggestState;
+  onClose: () => void;
+  onAdd: (items: Suggestion[]) => Promise<void>;
+}) {
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [added, setAdded]       = useState<Set<number>>(new Set());
+  const [adding, setAdding]     = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+
+  const results = suggest.results;
+
+  function toggle(i: number) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i); else next.add(i);
+      return next;
+    });
+  }
+
+  async function addSelected() {
+    if (!results || selected.size === 0) return;
+    setAdding(true);
+    setAddError(null);
+    try {
+      const items = Array.from(selected).map(i => results[i]);
+      await onAdd(items);
+      setAdded(prev => {
+        const next = new Set(prev);
+        selected.forEach(i => next.add(i));
+        return next;
+      });
+      setSelected(new Set());
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : "Failed to add tracks");
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl bg-slate-900/95 backdrop-blur-sm border border-white/10 overflow-hidden">
+      <div className="p-5 border-b border-white/10 flex items-start justify-between gap-4">
+        <div>
+          <h3 className="font-semibold flex items-center gap-2">
+            <span className={suggest.mode === "style" ? "text-purple-400" : "text-orange-400"}>
+              {suggest.mode === "style" ? "✦" : "♩"}
+            </span>
+            New songs like &quot;{suggest.seed.name}&quot;
+            <span className="text-xs font-normal text-slate-500">
+              ({suggest.mode === "style" ? "similar style" : "similar tempo"} · {suggest.seed.bpm} BPM seed)
+            </span>
+          </h3>
+          <p className="text-sm text-slate-500 mt-0.5">
+            {suggest.seed.artists[0]?.name} — via Last.fm similarity, not in your playlist
+          </p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
+          {results !== null && results.length > 0 && (
+            <button
+              onClick={addSelected}
+              disabled={selected.size === 0 || adding}
+              className="inline-flex items-center gap-2 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-3 py-1.5 transition-colors"
+            >
+              {adding ? <><Spinner />Adding…</> : `Add ${selected.size || ""} to playlist`}
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            className="text-slate-600 hover:text-slate-300 text-lg leading-none transition-colors"
+            title="Close"
+          >
+            ×
+          </button>
+        </div>
+      </div>
+
+      {addError && (
+        <p className="px-5 py-3 text-sm text-red-400 border-b border-slate-800">{addError}</p>
+      )}
+
+      {suggest.error && (
+        <p className="px-5 py-4 text-sm text-red-400">{suggest.error}</p>
+      )}
+
+      {!suggest.error && results === null && (
+        <div className="px-5 py-6 flex items-center gap-3">
+          <Spinner />
+          <div>
+            <p className="text-sm text-slate-300">Searching Last.fm → Deezer → ReccoBeats… this takes a minute or two.</p>
+            <p className="text-xs text-slate-500 mt-1 font-mono">{suggest.progress}</p>
+          </div>
+        </div>
+      )}
+
+      {results !== null && results.length === 0 && (
+        <p className="px-5 py-4 text-sm text-slate-500">No new songs found for this seed.</p>
+      )}
+
+      {results !== null && results.length > 0 && (
+        <div className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto no-scrollbar">
+          {results.map((s, i) => {
+            const isAdded = added.has(i);
+            const canAdd = spotifyIdFromUrl(s.spotifyUrl) !== null && !isAdded;
+            return (
+              <div key={`${s.artist}-${s.name}`} className="flex items-center group/sug">
+                <label
+                  className={`pl-3 pr-1 py-2 shrink-0 ${canAdd ? "cursor-pointer" : "cursor-default"}`}
+                  title={isAdded ? "Added" : canAdd ? "Select to add to playlist" : "No Spotify ID — can't add automatically"}
+                >
+                  {isAdded ? (
+                    <span className="w-4 h-4 flex items-center justify-center text-green-400 text-sm">✓</span>
+                  ) : (
+                    <input
+                      type="checkbox"
+                      checked={selected.has(i)}
+                      disabled={!canAdd}
+                      onChange={() => toggle(i)}
+                      className="w-4 h-4 rounded accent-green-500 disabled:opacity-30"
+                    />
+                  )}
+                </label>
+                <button
+                  onClick={() => {
+                    const id = spotifyIdFromUrl(s.spotifyUrl);
+                    if (id) openInSpotify(`spotify:track:${id}`);
+                    else window.open(`https://open.spotify.com/search/${encodeURIComponent(`${s.artist} ${s.name}`)}`, "_blank");
+                  }}
+                  className="flex-1 flex items-center gap-3 px-2 py-2 hover:bg-slate-800/60 transition-colors min-w-0 text-left"
+                >
+                  <div className="h-9 w-9 rounded shrink-0 overflow-hidden bg-slate-800">
+                    <img
+                      src={`/api/itunes-art?artist=${encodeURIComponent(s.artist)}&title=${encodeURIComponent(s.name)}`}
+                      alt=""
+                      className="h-full w-full object-cover"
+                      onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
+                    />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate group-hover/sug:text-green-400 transition-colors">{s.name}</p>
+                    <p className="text-xs text-slate-500 truncate">{s.artist}</p>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-xs text-slate-600 font-mono">{s.camelot}</span>
+                    <span className="text-xs font-mono font-semibold text-green-400 bg-green-500/10 rounded px-1.5 py-0.5">
+                      {s.bpm} BPM
+                    </span>
+                    <span className="text-slate-700 group-hover/sug:text-green-500 text-xs">↗</span>
+                  </div>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

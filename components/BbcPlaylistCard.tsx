@@ -240,8 +240,41 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
         return;
       }
       await addTracksBrowser(RUNNING_PLAYLIST_ID, tracksWithUri.map(t => t.uri));
+
+      // Enrich with BPM/audio features via ReccoBeats and add to the local CSV
+      // pool so the new tracks show up in zone/pace filters straight away.
+      let enriched = 0;
+      try {
+        const ids = tracksWithUri
+          .map(t => t.uri.split(":").pop()!)
+          .filter(Boolean);
+        const er = await fetch("/api/bpm/enrich", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids }),
+        });
+        const ed = await er.json() as {
+          features?: Record<string, { tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number }>;
+        };
+        const rows = tracksWithUri.flatMap(t => {
+          const id = t.uri.split(":").pop()!;
+          const f = ed.features?.[id];
+          return f ? [{ uri: `spotify:track:${id}`, name: t.name, artist: t.artistName, ...f }] : [];
+        });
+        if (rows.length > 0) {
+          const ar = await fetch("/api/tracks/add", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tracks: rows }),
+          });
+          const ad = await ar.json() as { added?: number };
+          enriched = ad.added ?? rows.length;
+        }
+      } catch { /* enrichment is best-effort — playlist add already succeeded */ }
+
       setUpdateMsg(
         `Added ${tracksWithUri.length} track${tracksWithUri.length !== 1 ? "s" : ""}` +
+        (enriched > 0 ? ` · ${enriched} with BPM data` : "") +
         (noUri > 0 ? ` · ${noUri} not found on Spotify` : "")
       );
     } catch (e) {
