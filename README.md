@@ -152,9 +152,7 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 
 ## Zone Selection
 
-<!-- Drop a dashboard screenshot at docs/screenshots/dashboard.png and uncomment:
 ![Dashboard — zones, track list and Runna schedule](docs/screenshots/dashboard.png)
--->
 
 Click any zone in the left column to filter tracks and build a playlist for that zone.
 
@@ -190,9 +188,7 @@ The rare track ReccoBeats doesn't know stays BPM-less; see [Tracks without BPM d
 
 ## Song Matching & Suggestions
 
-<!-- Drop a suggestions-card screenshot at docs/screenshots/suggestions.png and uncomment:
 ![Song suggestions card with selectable results](docs/screenshots/suggestions.png)
--->
 
 Hover over any track in the main list to reveal three action buttons (next to the delete icon):
 
@@ -256,9 +252,7 @@ Alternatively, you can set `RUNNA_ICS_URL` in `.env.local` before deploying — 
 
 ## GarminDB Integration
 
-<!-- Drop a Garmin activity screenshot at docs/screenshots/garmin-activity.png and uncomment:
-![Garmin activity page — pace, cadence and HR charts](docs/screenshots/garmin-activity.png)
--->
+![Garmin activity page — pace, cadence and HR charts](docs/screenshots/garmin-stats.png)
 
 PaceSync's **Garmin** page (activity list, pace/cadence tables, per-lap speed segments) reads directly from a local SQLite database — it does not call the Garmin Connect API itself. That database is produced by [**GarminDB**](https://github.com/tcgoetz/GarminDB), a separate open-source tool by Tom Goetz that syncs your Garmin Connect data to SQLite.
 
