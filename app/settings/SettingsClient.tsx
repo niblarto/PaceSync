@@ -114,6 +114,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [ntfySaved, setNtfySaved] = useState(false);
   const [ntfyError, setNtfyError] = useState<string | null>(null);
 
+  // ── AI DJ state ────────────────────────────────────────────────────────────
+  const [aiDjUrl, setAiDjUrl] = useState("");
+  const [aiDjEnabled, setAiDjEnabled] = useState(false);
+  const [aiDjSaving, setAiDjSaving] = useState(false);
+  const [aiDjSaved, setAiDjSaved] = useState(false);
+  const [aiDjError, setAiDjError] = useState<string | null>(null);
+
   // ── Garmin DB state ────────────────────────────────────────────────────────
   const [garminDbPath, setGarminDbPath] = useState("/home/scott/HealthData/DBs");
   const [garminSaving, setGarminSaving] = useState(false);
@@ -175,6 +182,16 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .then((d: { configured?: boolean; config?: { dbPath?: string } }) => {
         setGarminConfigured(d.configured ?? false);
         if (d.config?.dbPath) setGarminDbPath(d.config.dbPath);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/settings/ai-dj")
+      .then(r => r.json())
+      .then((d: { url?: string; enabled?: boolean }) => {
+        if (d.url) setAiDjUrl(d.url);
+        setAiDjEnabled(d.enabled ?? false);
       })
       .catch(() => {});
   }, []);
@@ -336,6 +353,26 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setNtfyError("Failed to save — try again.");
     } finally {
       setNtfySaving(false);
+    }
+  }
+
+  async function saveAiDj(enabled: boolean) {
+    setAiDjSaving(true);
+    setAiDjSaved(false);
+    setAiDjError(null);
+    try {
+      const res = await fetch("/api/settings/ai-dj", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: aiDjUrl.trim(), enabled }),
+      });
+      if (!res.ok) throw new Error();
+      setAiDjEnabled(enabled);
+      setAiDjSaved(true);
+    } catch {
+      setAiDjError("Failed to save — try again.");
+    } finally {
+      setAiDjSaving(false);
     }
   }
 
@@ -810,6 +847,62 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           {runnaSaving ? "Saving…" : runnaSaved ? "Saved!" : "Save URL"}
         </button>
         </div>
+      </div>
+
+      {/* AI DJ */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="font-semibold text-base">🎧 AI DJ</h2>
+            <p className="text-sm text-slate-400 mt-1">
+              Adds an <span className="text-purple-300">AI DJ Mix</span> button to each Runna workout that
+              builds a pace-matched Spotify playlist from your library, section by section.
+            </p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={aiDjEnabled}
+            onClick={() => { if (!aiDjSaving && aiDjUrl.trim()) saveAiDj(!aiDjEnabled); }}
+            disabled={aiDjSaving || !aiDjUrl.trim()}
+            className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-40 ${
+              aiDjEnabled ? "bg-purple-500" : "bg-slate-700"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                aiDjEnabled ? "translate-x-[22px]" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+        </div>
+        {aiDjEnabled && (
+          <div className="flex items-center gap-2 text-sm text-purple-300">
+            <span>●</span>
+            <span>Enabled — mix buttons shown on workouts</span>
+          </div>
+        )}
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-slate-300">AI DJ service URL</label>
+          <input
+            type="url"
+            value={aiDjUrl}
+            onChange={e => { setAiDjUrl(e.target.value); setAiDjSaved(false); }}
+            placeholder="http://192.168.1.50:8765"
+            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
+          />
+          <p className="text-xs text-slate-500">
+            Where the AI DJ service is running (<code className="text-slate-400">python -m ai_dj.server</code> —
+            on a PC with Ollama, or on this Pi with <code className="text-slate-400">--no-llm</code>).
+          </p>
+        </div>
+        {aiDjError && <p className="text-sm text-red-400">{aiDjError}</p>}
+        <button
+          onClick={() => saveAiDj(aiDjEnabled)}
+          disabled={aiDjSaving || !aiDjUrl.trim()}
+          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+        >
+          {aiDjSaving ? "Saving…" : aiDjSaved ? "Saved!" : "Save"}
+        </button>
       </div>
 
       {/* Garmin DB */}

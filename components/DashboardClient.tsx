@@ -252,6 +252,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [saveError, setSaveError]       = useState<string | null>(null);
   const [bbcProgrammes, setBbcProgrammes] = useState<{ pid: string; name: string; synopsis?: string }[]>(BBC_DEFAULTS);
   const [garminConfigured, setGarminConfigured] = useState(false);
+  const [aiDjEnabled, setAiDjEnabled] = useState(false);
   const [paceFilter, setPaceFilter] = useState<{ paces: Array<{ paceStr: string; bpm: number }> } | null>(null);
   const [similarFilter, setSimilarFilter] = useState<{ seed: TrackWithBPM; uris: string[] } | null>(null);
   const [similarLoading, setSimilarLoading] = useState(false);
@@ -267,6 +268,13 @@ export function DashboardClient({ spotifyUser }: Props) {
     fetch("/api/settings/garmin")
       .then(r => r.json())
       .then((d: { configured?: boolean }) => { setGarminConfigured(d.configured ?? false); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/settings/ai-dj")
+      .then(r => r.json())
+      .then((d: { enabled?: boolean }) => { setAiDjEnabled(d.enabled ?? false); })
       .catch(() => {});
   }, []);
 
@@ -1035,6 +1043,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           <div className="space-y-6 min-w-0">
             <RunnaSummaryCard />
             <RunnaScheduleCard
+              aiDjEnabled={aiDjEnabled}
               garminConfigured={garminConfigured}
               activePaces={paceFilter?.paces.map(p => p.paceStr) ?? []}
               onPaceFilter={(paceStr, bpm, multiSelect) => {
