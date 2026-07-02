@@ -2,6 +2,8 @@
 
 A Next.js web app for managing a Spotify running playlist based on heart rate zones. Runs as a self-hosted service on a Raspberry Pi.
 
+![PaceSync landing page](docs/screenshots/landing.png)
+
 **Features**
 - Browse tracks by BPM / heart rate zone (Z1–Z5)
 - Add tracks from BBC Radio playlists directly to Spotify — with BPM data fetched automatically
@@ -150,6 +152,10 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 
 ## Zone Selection
 
+<!-- Drop a dashboard screenshot at docs/screenshots/dashboard.png and uncomment:
+![Dashboard — zones, track list and Runna schedule](docs/screenshots/dashboard.png)
+-->
+
 Click any zone in the left column to filter tracks and build a playlist for that zone.
 
 **Multi-zone selection:** Hold **Ctrl** (or **Cmd** on Mac) and click additional zones to combine them. Tracks from all selected zones are merged into a single list and the playlist name updates automatically — e.g. selecting Zone 1 and Zone 2 produces `Running – Z1Z2`, selecting Zone 2 and Zone 4 produces `Running – Z2Z4`.
@@ -183,6 +189,10 @@ The rare track ReccoBeats doesn't know stays BPM-less; see [Tracks without BPM d
 ---
 
 ## Song Matching & Suggestions
+
+<!-- Drop a suggestions-card screenshot at docs/screenshots/suggestions.png and uncomment:
+![Song suggestions card with selectable results](docs/screenshots/suggestions.png)
+-->
 
 Hover over any track in the main list to reveal three action buttons (next to the delete icon):
 
@@ -245,6 +255,10 @@ Alternatively, you can set `RUNNA_ICS_URL` in `.env.local` before deploying — 
 ---
 
 ## GarminDB Integration
+
+<!-- Drop a Garmin activity screenshot at docs/screenshots/garmin-activity.png and uncomment:
+![Garmin activity page — pace, cadence and HR charts](docs/screenshots/garmin-activity.png)
+-->
 
 PaceSync's **Garmin** page (activity list, pace/cadence tables, per-lap speed segments) reads directly from a local SQLite database — it does not call the Garmin Connect API itself. That database is produced by [**GarminDB**](https://github.com/tcgoetz/GarminDB), a separate open-source tool by Tom Goetz that syncs your Garmin Connect data to SQLite.
 
