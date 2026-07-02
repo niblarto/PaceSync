@@ -45,6 +45,16 @@ if not cron_secret:
     print("ERROR: CRON_SECRET not set in .env.local")
     sys.exit(1)
 
+# Last.fm key for AI_BPM song suggestions: sync from the Windows user env var
+# into .env.local so the Pi's Next.js server (and its spawned python) sees it.
+lastfm_key = env.get('LASTFM_API_KEY') or os.environ.get('LASTFM_API_KEY', '')
+if lastfm_key and not env.get('LASTFM_API_KEY'):
+    with open(os.path.join(RUNNING_DIR, '.env.local'), 'a', encoding='utf-8') as f:
+        f.write(f'\nLASTFM_API_KEY={lastfm_key}\n')
+    print('  Added LASTFM_API_KEY to .env.local')
+if not lastfm_key:
+    print('  WARNING: LASTFM_API_KEY not found — song suggestions will fall back to Deezer only')
+
 FILES = [
     ('package.json',                              'package.json'),
     ('next.config.mjs',                           'next.config.mjs'),
@@ -62,6 +72,8 @@ FILES = [
     ('app/api/spotify/add-tracks/route.ts',       'app/api/spotify/add-tracks/route.ts'),
     ('app/api/save-default-playlist/route.ts',    'app/api/save-default-playlist/route.ts'),
     ('app/api/tracks/delete/route.ts',            'app/api/tracks/delete/route.ts'),
+    ('app/api/tracks/add/route.ts',               'app/api/tracks/add/route.ts'),
+    ('app/api/tracks/update-features/route.ts',   'app/api/tracks/update-features/route.ts'),
     ('app/api/bbc/tracks/route.ts',               'app/api/bbc/tracks/route.ts'),
     ('app/api/bbc/episode-info/route.ts',         'app/api/bbc/episode-info/route.ts'),
     ('app/api/bbc/schedule/route.ts',             'app/api/bbc/schedule/route.ts'),
@@ -107,19 +119,21 @@ FILES = [
     ('lib/itunes-art.ts',                         'lib/itunes-art.ts'),
     ('lib/bpm-zones.ts',                          'lib/bpm-zones.ts'),
     ('lib/spotify.ts',                            'lib/spotify.ts'),
-    ('lib/garmin-config.ts',                      'lib/garmin-config.ts'),
     ('lib/garmin-cache.ts',                       'lib/garmin-cache.ts'),
     ('types/index.ts',                            'types/index.ts'),
     ('types/next-auth.d.ts',                      'types/next-auth.d.ts'),
-    ('app/garmin/page.tsx',                       'app/garmin/page.tsx'),
-    ('app/garmin/activity/[id]/page.tsx',         'app/garmin/activity/[id]/page.tsx'),
-    ('app/api/garmin/data/route.ts',              'app/api/garmin/data/route.ts'),
-    ('app/api/garmin/pace-spm/route.ts',          'app/api/garmin/pace-spm/route.ts'),
-    ('app/api/garmin/activity/[id]/route.ts',     'app/api/garmin/activity/[id]/route.ts'),
-    ('app/api/settings/garmin/route.ts',          'app/api/settings/garmin/route.ts'),
-    ('app/api/settings/garmin/sync-status/route.ts', 'app/api/settings/garmin/sync-status/route.ts'),
-    ('components/GarminClient.tsx',               'components/GarminClient.tsx'),
-    ('components/GarminActivityClient.tsx',       'components/GarminActivityClient.tsx'),
+    # AI_BPM song matcher (vendored into this repo under bpm_matcher/)
+    ('app/api/bpm/similar/route.ts',              'app/api/bpm/similar/route.ts'),
+    ('app/api/bpm/suggest/route.ts',              'app/api/bpm/suggest/route.ts'),
+    ('app/api/bpm/enrich/route.ts',               'app/api/bpm/enrich/route.ts'),
+    ('scripts/bpm_bridge.py',                     'scripts/bpm_bridge.py'),
+    ('bpm_matcher/__init__.py',                   'bpm_matcher/__init__.py'),
+    ('bpm_matcher/camelot.py',                    'bpm_matcher/camelot.py'),
+    ('bpm_matcher/features.py',                   'bpm_matcher/features.py'),
+    ('bpm_matcher/match.py',                      'bpm_matcher/match.py'),
+    ('bpm_matcher/sources.py',                    'bpm_matcher/sources.py'),
+    ('bpm_matcher/enrich.py',                     'bpm_matcher/enrich.py'),
+    ('bpm_matcher/suggest.py',                    'bpm_matcher/suggest.py'),
     ('.env.local',                                '.env.local'),
 ]
 
@@ -185,6 +199,11 @@ sftp.close()
 print('  Installing npm dependencies...')
 run(ssh, f'cd {PI_REMOTE} && npm install 2>&1 | tail -5')
 
+# Python deps for the AI_BPM matcher (apt = prebuilt Pi packages, idempotent)
+print('  Checking Python matcher dependencies...')
+run(ssh, 'python3 -c "import pandas, numpy, requests" 2>/dev/null && echo "python deps OK" || echo "installing..."')
+sudo_run(ssh, 'python3 -c "import pandas, numpy, requests" 2>/dev/null || apt-get install -y -qq python3-pandas python3-numpy python3-requests')
+
 print('  Building Next.js app...')
 run(ssh, f'cd {PI_REMOTE} && npm run build 2>&1 | tail -20')
 
@@ -200,6 +219,7 @@ User={PI['user']}
 WorkingDirectory={PI_REMOTE}
 Environment=PORT={PORT}
 Environment=NODE_ENV=production
+{f'Environment=LASTFM_API_KEY={lastfm_key}' if lastfm_key else ''}
 ExecStart=/usr/bin/env npm start
 Restart=on-failure
 RestartSec=5

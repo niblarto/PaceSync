@@ -8,9 +8,9 @@ export default async function HomePage() {
   if (session) redirect("/dashboard");
 
   return (
-    <main className="min-h-screen flex flex-col">
+    <main className="h-screen flex flex-col overflow-hidden">
       {/* Hero */}
-      <div className="relative flex-1 flex flex-col items-center justify-center px-4 text-center py-24 overflow-hidden">
+      <div className="relative flex-1 min-h-0 flex flex-col items-center justify-center px-4 text-center py-6 overflow-hidden">
         {/* Background image */}
         <div
           className="absolute inset-0 bg-cover bg-center bg-no-repeat"
@@ -22,17 +22,17 @@ export default async function HomePage() {
 
         {/* Content */}
         <div className="relative z-10 flex flex-col items-center">
-          <div className="mb-6 inline-flex items-center gap-2 rounded-full bg-green-500/10 px-4 py-1.5 text-sm font-medium text-green-400 ring-1 ring-green-500/20">
+          <div className="mb-4 inline-flex items-center gap-2 rounded-full bg-green-500/10 px-4 py-1.5 text-sm font-medium text-green-400 ring-1 ring-green-500/20">
             <span className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
             Built for runners
           </div>
 
-          <h1 className="text-5xl sm:text-6xl font-bold tracking-tight mb-6 max-w-3xl drop-shadow-lg">
+          <h1 className="text-4xl sm:text-5xl font-bold tracking-tight mb-4 max-w-3xl drop-shadow-lg">
             Music that matches
             <span className="text-green-400"> your pace</span>
           </h1>
 
-          <p className="text-slate-300 text-lg max-w-xl mb-10 leading-relaxed drop-shadow">
+          <p className="text-slate-300 text-base max-w-xl mb-6 leading-relaxed drop-shadow">
             Filter your Spotify playlists by BPM across your heart rate zones —
             so your music always matches your effort.
           </p>
@@ -42,8 +42,8 @@ export default async function HomePage() {
       </div>
 
       {/* Feature grid — below the hero */}
-      <div className="bg-slate-950 px-4 pb-20 pt-12">
-        <div className="mx-auto grid grid-cols-1 sm:grid-cols-3 gap-6 max-w-3xl text-left">
+      <div className="bg-slate-950 px-4 py-5 shrink-0">
+        <div className="mx-auto grid grid-cols-2 sm:grid-cols-3 gap-3 max-w-4xl text-left">
           {[
             {
               icon: "❤️",
@@ -53,27 +53,44 @@ export default async function HomePage() {
             {
               icon: "🎵",
               title: "BPM-matched tracks",
-              body: "Scans every song in your playlists via Spotify's audio analysis API.",
+              body: "Filter your playlist by tempo — missing BPM data is filled in automatically.",
             },
             {
               icon: "📅",
               title: "Runna workouts",
-              body: "Pulls your scheduled Runna training sessions and suggests the right zone for each.",
+              body: "Your training schedule with zone suggestions and one-tap BPM filters for each session pace.",
+            },
+            {
+              icon: "✨",
+              title: "Song discovery",
+              body: "Find new songs matching any track by style or tempo, and add them straight to your playlist.",
+            },
+            {
+              icon: "🔍",
+              title: "Song matching",
+              body: "Filter to songs like any track using BPM, musical key, energy and danceability.",
+            },
+            {
+              icon: "⌚",
+              title: "Garmin insights",
+              body: "Pace, cadence and heart rate charts from your own runs — powering pace-to-BPM lookups.",
             },
           ].map((f) => (
             <div
               key={f.title}
-              className="rounded-xl bg-slate-900 border border-slate-800 p-5"
+              className="rounded-lg bg-slate-900 border border-slate-800 px-4 py-3"
             >
-              <div className="text-2xl mb-3">{f.icon}</div>
-              <h3 className="font-semibold mb-1">{f.title}</h3>
-              <p className="text-slate-400 text-sm leading-relaxed">{f.body}</p>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-lg">{f.icon}</span>
+                <h3 className="font-semibold text-sm">{f.title}</h3>
+              </div>
+              <p className="text-slate-400 text-xs leading-relaxed">{f.body}</p>
             </div>
           ))}
         </div>
       </div>
 
-      <footer className="bg-slate-950 text-center text-slate-600 text-sm py-6 border-t border-slate-900">
+      <footer className="bg-slate-950 text-center text-slate-600 text-xs py-2.5 border-t border-slate-900 shrink-0">
         PaceSync — not affiliated with Spotify
       </footer>
     </main>

@@ -11,3 +11,4 @@ Running.csv
 runs.csv
 *.csv
 garmin-config.json
+!bpm_matcher/tests/sample_playlist.csv

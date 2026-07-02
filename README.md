@@ -4,13 +4,16 @@ A Next.js web app for managing a Spotify running playlist based on heart rate zo
 
 **Features**
 - Browse tracks by BPM / heart rate zone (Z1–Z5)
-- Add tracks from BBC Radio playlists directly to Spotify
+- Add tracks from BBC Radio playlists directly to Spotify — with BPM data fetched automatically
 - Play tracks in Spotify
 - Delete tracks from Spotify and local CSV simultaneously
 - Import and auto-save your Exportify CSV export
-- Runna training calendar integration with zone suggestions
+- Runna training calendar integration with zone suggestions and per-pace BPM filter buttons (driven by your real Garmin cadence data)
+- **Song matching**: filter the playlist to songs similar to any track (BPM, musical key, energy)
+- **Song suggestions**: discover new tracks *not* in your playlist that match a seed track by style or tempo (via Last.fm / Deezer / ReccoBeats), and add them to the playlist with one click
+- **Automatic BPM enrichment**: tracks without BPM data are looked up on ReccoBeats automatically
 - Dedup playlist, to remove duplicate tracks
-- Garmin activity stats: pace/cadence tables and per-lap speed segments, read directly from a local [GarminDB](https://github.com/tcgoetz/GarminDB) database
+- Garmin activity stats: pace/cadence/HR charts and activity summaries, read directly from a local [GarminDB](https://github.com/tcgoetz/GarminDB) database
 - Weekly cron job to keep the playlist fresh:-
     - Pull down the tracks of the last show, for the BBC programmes that are currently subcribed to
     - Upload to the Spotify "Running" playlist, then dedupe the "Running" playlist.
@@ -56,6 +59,7 @@ Edit `.env.local` and fill in all required values:
 | `NEXT_PUBLIC_RUNNING_PLAYLIST_ID` | ✅ | Your Spotify running playlist ID |
 | `RUNNA_ICS_URL` | optional | Your Runna calendar ICS URL — can also be set in **Settings → Runna Integration** after deploy |
 | `NTFY_TOPIC` | optional | Your ntfy.sh topic name for push notifications — can also be set in **Settings → Push Notifications** after deploy |
+| `LASTFM_API_KEY` | optional | [Last.fm API key](https://www.last.fm/api/account/create) for song suggestions. Without it, discovery falls back to Deezer related artists (works, but finds fewer new tracks) |
 | `GARMINDB_SYNC_WRAPPER` | optional | Path to the GarminDB sync wrapper script (see [GarminDB Integration](#garmindb-integration)) — only needed for the Settings sync-status card |
 | `GARMINDB_PYTHON_BIN` | optional | Path to the Python binary inside your GarminDB venv |
 | `GARMINDB_LOG_PATH` | optional | Path to the GarminDB sync log file |
@@ -122,7 +126,7 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 2. Find your running playlist in the list and click **Export**.
 3. Exportify downloads a `.csv` file containing all tracks with BPM, energy, and other audio features.
 
-> **Note:** Exportify is required specifically because Spotify's audio features API (which provides BPM data) is no longer accessible to newer personal developer accounts. Exportify uses a different access path to retrieve this data. This app cannot fetch BPM data directly from Spotify. (Other older apps still can)
+> **Note:** Exportify is used because Spotify's audio features API (which provides BPM data) is no longer accessible to newer personal developer accounts. Exportify uses a different access path to retrieve this data. (For tracks added later through the app — BBC cards, song suggestions — PaceSync fetches BPM automatically from ReccoBeats instead, so re-exports are rarely needed.)
 
 ---
 
@@ -170,22 +174,58 @@ PaceSync can pull tracks from BBC Radio programmes and add them directly to your
 
 Once a programme card is added, the weekly cron job (Fridays at 14:00) will automatically fetch the latest episode's tracks and add them to your playlist. You can also trigger this manually from **Settings** → **Run Now**.
 
-**Important: BPM data is not fetched automatically.**
+**BPM data is fetched automatically.**
 
-When tracks are added to Spotify via BBC cards, they appear in the playlist but PaceSync has no way to retrieve their BPM data. Spotify's audio features API (`/audio-features`) is no longer accessible to newer personal developer accounts, so the app cannot look up tempo automatically.
+When you click **Update Running playlist** on a BBC card, PaceSync looks up each track's audio features (tempo, key, energy, danceability, valence) on [ReccoBeats](https://reccobeats.com) — a free, keyless API that accepts Spotify track IDs — and appends them to `Running.csv`. The status message shows how many tracks got BPM data (e.g. *"Added 12 tracks · 11 with BPM data"*), and they appear in zone/pace filters straight away.
 
-**To get BPM data for newly added tracks:**
+The rare track ReccoBeats doesn't know stays BPM-less; see [Tracks without BPM data](#tracks-without-bpm-data) below for how to handle those.
 
-1. After tracks have been added to Spotify, go to [exportify.net](https://exportify.net) and re-export your running playlist.
-2. Go to **Settings** → **Import Playlist** and upload the new CSV.
+---
 
-Until you do this, newly added BBC tracks will not appear in any zone on the dashboard (they have no BPM data and cannot be sorted into a zone).
+## Song Matching & Suggestions
+
+Hover over any track in the main list to reveal three action buttons (next to the delete icon):
+
+### 🔽 Filter songs like this (green funnel)
+
+Instantly re-filters the playlist to the ~30 tracks most similar to the one you clicked. Similarity is a weighted distance over BPM (half/double-time aware — 174 BPM matches 87 BPM tracks), Camelot-wheel key distance, energy, danceability and valence. The seed track stays at the top, ranked closest-first. Click any zone or pace button to clear the filter.
+
+### ✦ Search new songs — similar style (purple sparkles)
+
+Discovers tracks **not in your playlist** that feel like the seed track. Pipeline: Last.fm similar-tracks → Deezer resolves each candidate to an ISRC → ReccoBeats returns audio features. Candidates are ranked with style-weighted distance (energy/danceability/valence/key dominate; BPM only 15%).
+
+### ♩ Search new songs — similar tempo (orange metronome)
+
+Same discovery pipeline, but ranked with BPM at 70% of the weighting — results lock onto the seed's tempo. Use this to grow a specific pace zone.
+
+**How suggestion results work:**
+
+- Searches take **1–2 minutes** (external APIs with polite rate limiting). The clicked icon becomes a spinner and a card opens directly below the track showing live progress.
+- Results appear with checkboxes. The row itself opens the track in the Spotify app (web player fallback) so you can preview before deciding.
+- Select tracks and click **Add N to playlist** — they're added to your Spotify Running playlist *and* appended to `Running.csv` with full BPM data, so they immediately join the zone/pace filters.
+- Results are cached until the app restarts, so re-running the same search is instant.
+
+> The matcher lives in [`bpm_matcher/`](bpm_matcher/) (pure Python — pandas/numpy, installed on the Pi automatically by `deploy.py`). Run its tests with `pytest bpm_matcher/tests`. See [`bpm_matcher/HANDOFF.md`](bpm_matcher/HANDOFF.md) for API details, including why Spotify's own recommendation endpoints can't be used.
+
+---
+
+## Tracks without BPM data
+
+The **All Songs** tile shows a count of tracks with no BPM info (red when non-zero).
+
+- **On dashboard load**, PaceSync automatically tries to fill these in from ReccoBeats — found features are written back into `Running.csv` and the count drops on its own.
+- **Click the count** to filter the main list to just those tracks. From there you can:
+  - Click **Retry BPM lookup** to re-attempt the ReccoBeats lookup manually
+  - Delete tracks that shouldn't be in the playlist (trash icon)
+  - Or re-export the playlist from [exportify.net](https://exportify.net) and re-upload via **Settings → Import Playlist** for anything ReccoBeats doesn't know
 
 ---
 
 ## Runna Integration
 
 PaceSync can pull your upcoming Runna workouts and display them on the dashboard with suggested heart rate zones.
+
+If GarminDB is also configured, expanding a workout shows a **BPM filter button for each pace** in the session (e.g. `8:15 · 168 BPM`) — the BPM comes from *your own* average cadence at that pace, computed from Garmin per-second data. Clicking one filters the track list to that BPM ±2; **Ctrl+click** several to widen the range across paces. Workouts that only say "conversational pace" borrow the no-faster-than pace from your easy runs.
 
 **Finding your iCal URL:**
 
