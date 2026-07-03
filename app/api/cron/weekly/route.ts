@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getFreshToken } from "@/lib/tokenStore";
 import { loadNtfyTopic } from "@/lib/ntfy-config";
+import { appendCronLog } from "@/lib/cron-log";
 import fs from "fs";
 import path from "path";
 
@@ -294,6 +295,7 @@ async function runUpdate(): Promise<{
   errors: number;
 }> {
   const bbcPlaylists = loadBbcProgrammes();
+  appendCronLog("BBC refresh", `Started — ${bbcPlaylists.length} programme${bbcPlaylists.length !== 1 ? "s" : ""}`);
 
   const programmeList = bbcPlaylists.map(p => `• ${p.name}`).join("\n");
   await notify(
@@ -309,6 +311,7 @@ async function runUpdate(): Promise<{
         ? "Spotify token refresh failed — your session may have expired or been revoked. Please log in again at https://bpm.birch-horn.com"
         : "Network error reaching Spotify — check the Pi's internet connection.";
     await notify(msg, { title: "❌ BBC Update — Auth Failed", tags: "x", priority: "high" });
+    appendCronLog("BBC refresh", `✗ Spotify auth failed: ${tokenResult.reason}`);
     throw new Error(tokenResult.reason);
   }
   const token = tokenResult.token;
@@ -337,11 +340,13 @@ async function runUpdate(): Promise<{
         rateLimited: r.retryAfter !== null,
         retryAfter: r.retryAfter ?? undefined,
       });
+      appendCronLog("BBC refresh", `✓ ${playlist.name}: ${r.matched}/${r.found} tracks added${r.retryAfter !== null ? " (rate limited)" : ""}`);
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
       errors++;
       await notify(`Error: ${err}`, { title: `❌ ${playlist.name} failed`, tags: "x", priority: "high" });
       programmeResults.push({ name: playlist.name, found: 0, matched: 0, error: err });
+      appendCronLog("BBC refresh", `✗ ${playlist.name}: ${err}`);
     }
   }
 
@@ -383,6 +388,12 @@ async function runUpdate(): Promise<{
   );
 
   console.log("[cron/weekly] done:", programmeResults);
+  appendCronLog(
+    "BBC refresh",
+    errors === 0
+      ? `✓ Done — ${totalMatched} new tracks, ${dedupRemoved} duplicates removed, ${dedupRemaining} in playlist`
+      : `✗ Done with ${errors} error${errors !== 1 ? "s" : ""} — ${totalMatched} new tracks${dedupError ? `, dedup failed: ${dedupError}` : ""}`
+  );
   return { ok: errors === 0, programmeResults, dedupRemoved, dedupRemaining, dedupError, totalMatched, errors };
 }
 

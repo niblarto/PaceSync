@@ -210,10 +210,56 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    fetch("/api/settings/cron")
+      .then(r => r.json())
+      .then((d: { available?: boolean; jobs?: { key: string; installed: boolean; enabled: boolean; time: string; day: number | null }[]; log?: { ts: string; job: string; message: string }[] }) => {
+        setCronAvailable(d.available ?? false);
+        setCronJobs(d.jobs ?? []);
+        setCronLog(d.log ?? []);
+      })
+      .catch(() => setCronAvailable(false));
+  }, []);
+
+  function patchCronJob(key: string, patch: Partial<{ enabled: boolean; time: string; day: number | null }>) {
+    setCronJobs(jobs => jobs.map(j => (j.key === key ? { ...j, ...patch } : j)));
+    setCronSaved(false);
+  }
+
+  async function saveCronJobs() {
+    setCronSaving(true);
+    setCronSaved(false);
+    setCronJobsError(null);
+    try {
+      const res = await fetch("/api/settings/cron", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobs: cronJobs.filter(j => j.installed).map(({ key, enabled, time, day }) => ({ key, enabled, time, day })) }),
+      });
+      const d = await res.json() as { error?: string; jobs?: typeof cronJobs; log?: typeof cronLog };
+      if (!res.ok) throw new Error(d.error ?? "Failed to save");
+      if (d.jobs) setCronJobs(d.jobs);
+      if (d.log) setCronLog(d.log);
+      setCronSaved(true);
+    } catch (e) {
+      setCronJobsError(e instanceof Error ? e.message : "Failed to save — try again.");
+    } finally {
+      setCronSaving(false);
+    }
+  }
+
   // Debounced connection check whenever the URL changes (or a manual refresh
   // is requested via the nonce), plus a periodic recheck (every 60s) so the
   // indicator doesn't go stale while the page is open.
   const [aiDjCheckNonce, setAiDjCheckNonce] = useState(0);
+
+  // ── Scheduled jobs (crontab) state ────────────────────────────────────────
+  const [cronJobs, setCronJobs] = useState<{ key: string; installed: boolean; enabled: boolean; time: string; day: number | null }[]>([]);
+  const [cronAvailable, setCronAvailable] = useState(true);
+  const [cronSaving, setCronSaving] = useState(false);
+  const [cronSaved, setCronSaved] = useState(false);
+  const [cronJobsError, setCronJobsError] = useState<string | null>(null);
+  const [cronLog, setCronLog] = useState<{ ts: string; job: string; message: string }[]>([]);
   useEffect(() => {
     const url = aiDjUrl.trim();
     if (!url) { setAiDjHealth("idle"); setAiDjHealthMsg(null); return; }
@@ -1026,6 +1072,116 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         >
           {aiDjSaving ? "Saving…" : aiDjSaved ? "Saved!" : "Save"}
         </button>
+      </div>
+
+      {/* Scheduled jobs */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h2 className="font-semibold text-base">⏰ Scheduled Jobs</h2>
+          <p className="text-sm text-slate-400 mt-1">
+            The automatic jobs on the Pi&apos;s crontab — set when each runs, or switch them off.
+          </p>
+        </div>
+        {!cronAvailable ? (
+          <p className="text-sm text-slate-500">
+            The schedule can only be managed on the Pi itself (crontab isn&apos;t available here).
+          </p>
+        ) : (
+          <>
+            {([
+              { key: "garmin", label: "Garmin sync", desc: "Downloads new activities into GarminDB" },
+              { key: "weekly", label: "BBC playlist refresh", desc: "Re-fetches BBC programme tracks and removes duplicates" },
+              { key: "aidj", label: "AI DJ pre-build", desc: "Builds tomorrow's mix and saves it to “Today's Run”" },
+            ] as const).map(meta => {
+              const job = cronJobs.find(j => j.key === meta.key);
+              if (!job) return null;
+              return (
+                <div key={meta.key} className="rounded-lg bg-slate-800/40 border border-white/5 px-3 py-2.5 space-y-2">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium text-slate-300">{meta.label}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">{meta.desc}</p>
+                    </div>
+                    <button
+                      role="switch"
+                      aria-checked={job.enabled}
+                      onClick={() => { if (job.installed) patchCronJob(job.key, { enabled: !job.enabled }); }}
+                      disabled={!job.installed || cronSaving}
+                      className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-40 ${
+                        job.enabled ? "bg-sky-500" : "bg-slate-700"
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                          job.enabled ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  {job.installed ? (
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={job.day === null ? "" : String(job.day)}
+                        onChange={e => patchCronJob(job.key, { day: e.target.value === "" ? null : parseInt(e.target.value, 10) })}
+                        disabled={!job.enabled || cronSaving}
+                        className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-2 py-1.5 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                      >
+                        <option value="">Every day</option>
+                        {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((d, i) => (
+                          <option key={d} value={i}>{d}</option>
+                        ))}
+                      </select>
+                      <span className="text-xs text-slate-500">at</span>
+                      <input
+                        type="time"
+                        value={job.time}
+                        onChange={e => patchCronJob(job.key, { time: e.target.value })}
+                        disabled={!job.enabled || cronSaving}
+                        className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-2 py-1.5 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-600">Not installed on this machine&apos;s crontab.</p>
+                  )}
+                </div>
+              );
+            })}
+            {cronJobsError && <p className="text-sm text-red-400">{cronJobsError}</p>}
+            <button
+              onClick={saveCronJobs}
+              disabled={cronSaving || cronJobs.every(j => !j.installed)}
+              className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+            >
+              {cronSaving ? "Saving…" : cronSaved ? "Saved!" : "Save schedule"}
+            </button>
+
+            {/* Activity log — last 48h, newest first (same style as the GarminDB sync log) */}
+            {cronLog.length > 0 && (
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-slate-400">Latest activity</p>
+                <div className="rounded bg-slate-950/60 border border-white/5 px-2.5 py-2 space-y-px max-h-44 overflow-y-auto">
+                  {[...cronLog].reverse().map((e, i) => {
+                    const d = new Date(e.ts);
+                    const ts = isNaN(d.getTime())
+                      ? ""
+                      : `${d.toLocaleDateString([], { weekday: "short" })} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+                    const ok = e.message.startsWith("✓");
+                    const fail = e.message.startsWith("✗");
+                    return (
+                      <div key={i} className="flex gap-2 items-baseline font-mono text-[10px] leading-relaxed">
+                        {ts && <span className="text-slate-600 shrink-0">{ts}</span>}
+                        <span className="text-sky-500/70 shrink-0">{e.job}</span>
+                        <span className={`truncate ${ok ? "text-green-500/70" : fail ? "text-red-400/80" : "text-slate-500"}`} title={e.message}>
+                          {e.message}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
 

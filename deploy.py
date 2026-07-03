@@ -134,6 +134,9 @@ FILES = [
     ('app/api/ai-dj/health/route.ts',             'app/api/ai-dj/health/route.ts'),
     ('app/api/settings/ai-dj/route.ts',           'app/api/settings/ai-dj/route.ts'),
     ('app/api/cron/ai-dj/route.ts',               'app/api/cron/ai-dj/route.ts'),
+    ('lib/cron-schedule.ts',                      'lib/cron-schedule.ts'),
+    ('lib/cron-log.ts',                           'lib/cron-log.ts'),
+    ('app/api/settings/cron/route.ts',            'app/api/settings/cron/route.ts'),
     # Local login + 2FA gate in front of Spotify OAuth
     ('middleware.ts',                             'middleware.ts'),
     ('lib/local-auth.ts',                         'lib/local-auth.ts'),
@@ -236,7 +239,18 @@ run(ssh, 'python3 -c "import pandas, numpy, requests" 2>/dev/null && echo "pytho
 sudo_run(ssh, 'python3 -c "import pandas, numpy, requests" 2>/dev/null || apt-get install -y -qq python3-pandas python3-numpy python3-requests')
 
 print('  Building Next.js app...')
-run(ssh, f'cd {PI_REMOTE} && npm run build 2>&1 | tail -20')
+# Abort the deploy if the build fails — restarting the service without a
+# production build takes the whole app down.
+_, _stdout, _ = ssh.exec_command(
+    f'cd {PI_REMOTE} && npm run build > /tmp/pacesync-build.log 2>&1; rc=$?; '
+    f'tail -30 /tmp/pacesync-build.log; exit $rc'
+)
+_build_out = _stdout.read().decode('utf-8', errors='replace')
+print(_build_out.encode('ascii', errors='replace').decode('ascii'))
+if _stdout.channel.recv_exit_status() != 0 or 'Build failed' in _build_out:
+    print('\nERROR: next build FAILED on the Pi — service NOT restarted, fix the error above.')
+    ssh.close()
+    sys.exit(1)
 
 # Write systemd service
 print('  Writing systemd service...')
@@ -269,25 +283,26 @@ time.sleep(6)
 print('  Status:')
 run(ssh, 'systemctl is-active running-playlist')
 
-# Install cron job — every Friday at 14:00 local time
-print('  Installing cron job (Friday 14:00)...')
+# Install cron jobs only when absent — the app's Settings page manages their
+# schedule (and disables them via a #PACESYNC-OFF# comment marker), so an
+# existing entry, active or disabled, is left untouched.
+print('  Ensuring cron job (BBC weekly refresh, default Friday 14:00)...')
 cron_log = f'/home/{PI["user"]}/cron-weekly.log'
 cron_line = (
     f'0 14 * * 5 curl -s -o {cron_log} '
     f'-X POST http://localhost:{PORT}/api/cron/weekly '
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
-run(ssh, f"""(crontab -l 2>/dev/null | grep -v '/api/cron/weekly'; echo '{cron_line}') | crontab -""")
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/weekly' || {{ (crontab -l 2>/dev/null; echo '{cron_line}') | crontab -; }}""")
 
-# Install cron job — daily at 15:30, pre-builds tomorrow's AI DJ mix if one is scheduled
-print('  Installing cron job (AI DJ pre-build, daily 15:30)...')
+print('  Ensuring cron job (AI DJ pre-build, default daily 15:30)...')
 ai_dj_cron_log = f'/home/{PI["user"]}/cron-ai-dj.log'
 ai_dj_cron_line = (
     f'30 15 * * * curl -s -o {ai_dj_cron_log} '
     f'-X POST http://localhost:{PORT}/api/cron/ai-dj '
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
-run(ssh, f"""(crontab -l 2>/dev/null | grep -v '/api/cron/ai-dj'; echo '{ai_dj_cron_line}') | crontab -""")
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/ai-dj' || {{ (crontab -l 2>/dev/null; echo '{ai_dj_cron_line}') | crontab -; }}""")
 
 ssh.close()
 

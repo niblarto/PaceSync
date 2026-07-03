@@ -1056,7 +1056,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                           value={playlistName}
                           onChange={(e) => setPlaylistName(e.target.value)}
                           placeholder="Playlist name"
-                          className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 w-40"
+                          className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 w-full min-w-40"
                         />
                       <button
                         onClick={savePlaylist}

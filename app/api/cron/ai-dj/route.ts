@@ -8,6 +8,7 @@ import { buildAiDjMix } from "@/lib/ai-dj-mix";
 import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { fetchRunnaSchedule, TODAYS_RUN_PLAYLIST, type RunnaWorkout } from "@/lib/runna-schedule";
 import { loadNtfyTopic } from "@/lib/ntfy-config";
+import { appendCronLog } from "@/lib/cron-log";
 
 // Runs daily at 15:30 (Pi local time, installed by deploy.py): if there's a
 // run scheduled for tomorrow, pre-build its AI DJ mix and save it straight to
@@ -37,10 +38,12 @@ async function runAiDjPrebuild() {
   const config = loadAiDjConfig();
   if (!config?.enabled) {
     console.log("[cron/ai-dj] AI DJ not enabled — skipping");
+    appendCronLog("AI DJ", "Skipped — AI DJ not enabled in Settings");
     return { ok: true, skipped: "AI DJ not enabled in Settings" };
   }
   if (!config.autoPlaylist) {
     console.log("[cron/ai-dj] auto playlist switched off — skipping");
+    appendCronLog("AI DJ", "Skipped — auto playlist upload switched off");
     return { ok: true, skipped: "Auto playlist upload switched off in Settings" };
   }
 
@@ -49,12 +52,14 @@ async function runAiDjPrebuild() {
   const schedule = await fetchRunnaSchedule();
   if (!schedule.ok) {
     await notify(`Could not read Runna schedule: ${schedule.error}`, { title: "❌ AI DJ Pre-build Failed", tags: "x", priority: "high" });
+    appendCronLog("AI DJ", `✗ Could not read Runna schedule: ${schedule.error}`);
     return { ok: false, error: schedule.error };
   }
 
   const tomorrowWorkouts = schedule.workouts.filter(w => w.date === tomorrow && isRunnableWorkout(w));
   if (tomorrowWorkouts.length === 0) {
     console.log(`[cron/ai-dj] no runnable workout on ${tomorrow} — skipping`);
+    appendCronLog("AI DJ", `Skipped — no run scheduled for ${tomorrow}`);
     return { ok: true, skipped: `No run scheduled for ${tomorrow}` };
   }
 
@@ -66,6 +71,7 @@ async function runAiDjPrebuild() {
         ? "Spotify token refresh failed — log in again at https://bpm.birch-horn.com"
         : "Network error reaching Spotify.";
     await notify(msg, { title: "❌ AI DJ Pre-build — Auth Failed", tags: "x", priority: "high" });
+    appendCronLog("AI DJ", `✗ Spotify auth failed: ${tokenResult.reason}`);
     return { ok: false, error: tokenResult.reason };
   }
   const token = tokenResult.token;
@@ -78,12 +84,14 @@ async function runAiDjPrebuild() {
     if (!mixResult.ok) {
       results.push({ title: w.title, ok: false, error: mixResult.error });
       await notify(`"${w.title}" (${tomorrow}): ${mixResult.error}`, { title: "❌ AI DJ Pre-build Failed", tags: "x", priority: "high" });
+      appendCronLog("AI DJ", `✗ "${w.title}": ${mixResult.error}`);
       continue;
     }
     const trackUris = mixResult.mix.trackUris;
     if (!trackUris.length) {
       results.push({ title: w.title, ok: false, error: "No tracks matched this workout" });
       await notify(`"${w.title}" (${tomorrow}): no tracks matched`, { title: "❌ AI DJ Pre-build Failed", tags: "x", priority: "high" });
+      appendCronLog("AI DJ", `✗ "${w.title}": no tracks matched`);
       continue;
     }
 
@@ -95,10 +103,12 @@ async function runAiDjPrebuild() {
         `"${w.title}" ready for ${tomorrow} — ${trackUris.length} tracks saved as "${TODAYS_RUN_PLAYLIST}"`,
         { title: "🎧 AI DJ Mix Ready", tags: "musical_note,white_check_mark" }
       );
+      appendCronLog("AI DJ", `✓ "${w.title}" (${tomorrow}) — ${trackUris.length} tracks saved to "${TODAYS_RUN_PLAYLIST}"`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       results.push({ title: w.title, ok: false, error: msg });
       await notify(`"${w.title}" (${tomorrow}): ${msg}`, { title: "❌ AI DJ Pre-build Failed", tags: "x", priority: "high" });
+      appendCronLog("AI DJ", `✗ "${w.title}": ${msg}`);
     }
   }
 
