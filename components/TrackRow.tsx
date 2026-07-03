@@ -39,7 +39,13 @@ export async function playInSpotify(uri: string, token?: string | null): Promise
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ uris: [uri] }),
       });
-      if (res.ok) return; // playing on the active device — no window switch needed
+      if (res.ok) {
+        // Playback switched, but the app's main panel keeps showing whatever
+        // page was open (the API can't refresh it). Deep-link the track so
+        // the app comes forward showing what's now playing.
+        window.location.href = uri;
+        return;
+      }
     } catch { /* fall through to opening the app */ }
   }
   openInSpotify(uri);

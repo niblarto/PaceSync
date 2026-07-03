@@ -72,7 +72,12 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy }: {
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           body: JSON.stringify({ uris: [`spotify:track:${trackId}`] }),
         });
-        if (res.ok) return; // playing on the active device
+        if (res.ok) {
+          // Bring the app forward on the track's page so its main panel
+          // reflects what's now playing (the API only switches the audio).
+          window.location.href = `spotify:track:${trackId}`;
+          return;
+        }
       } catch { /* fall through */ }
     }
     openInSpotify();
