@@ -131,6 +131,16 @@ FILES = [
     ('app/api/ai-dj/health/route.ts',             'app/api/ai-dj/health/route.ts'),
     ('app/api/settings/ai-dj/route.ts',           'app/api/settings/ai-dj/route.ts'),
     ('app/api/cron/ai-dj/route.ts',               'app/api/cron/ai-dj/route.ts'),
+    # Local login + 2FA gate in front of Spotify OAuth
+    ('middleware.ts',                             'middleware.ts'),
+    ('lib/local-auth.ts',                         'lib/local-auth.ts'),
+    ('app/login/page.tsx',                        'app/login/page.tsx'),
+    ('app/login/LoginClient.tsx',                 'app/login/LoginClient.tsx'),
+    ('app/api/local-auth/login/route.ts',         'app/api/local-auth/login/route.ts'),
+    ('app/api/local-auth/status/route.ts',        'app/api/local-auth/status/route.ts'),
+    ('app/api/local-auth/logout/route.ts',        'app/api/local-auth/logout/route.ts'),
+    ('app/api/local-auth/totp/route.ts',          'app/api/local-auth/totp/route.ts'),
+    ('local-auth.json',                           'local-auth.json'),
     ('lib/ai-dj-config.ts',                       'lib/ai-dj-config.ts'),
     ('lib/ai-dj-mix.ts',                          'lib/ai-dj-mix.ts'),
     ('lib/spotify-playlist.ts',                   'lib/spotify-playlist.ts'),
@@ -143,11 +153,20 @@ FILES = [
     ('bpm_matcher/sources.py',                    'bpm_matcher/sources.py'),
     ('bpm_matcher/enrich.py',                     'bpm_matcher/enrich.py'),
     ('bpm_matcher/suggest.py',                    'bpm_matcher/suggest.py'),
+    # AI DJ workout mixer (on-Pi fallback when the remote service is down;
+    # source of truth lives in ../AI_DJ)
+    ('scripts/ai_dj_bridge.py',                   'scripts/ai_dj_bridge.py'),
+    ('../AI_DJ/ai_dj/__init__.py',                'ai_dj/__init__.py'),
+    ('../AI_DJ/ai_dj/workout.py',                 'ai_dj/workout.py'),
+    ('../AI_DJ/ai_dj/selector.py',                'ai_dj/selector.py'),
+    ('../AI_DJ/ai_dj/llm.py',                     'ai_dj/llm.py'),
     ('.env.local',                                '.env.local'),
 ]
 
-# Files only uploaded on first deploy — never overwrite user-managed files
-SKIP_IF_REMOTE_EXISTS = {'public/Running.csv'}
+# Files only uploaded on first deploy — never overwrite user-managed files.
+# local-auth.json holds the enrolled 2FA secret on the Pi; overwriting it
+# would silently disable 2FA and reset credentials.
+SKIP_IF_REMOTE_EXISTS = {'public/Running.csv', 'local-auth.json'}
 
 
 def run(ssh, cmd):

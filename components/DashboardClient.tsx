@@ -752,7 +752,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               Settings
             </Link>
             <button
-              onClick={() => signOut({ callbackUrl: "/" })}
+              onClick={async () => {
+                // Clear the local-auth gate first so signing back in requires
+                // username/password (+ 2FA), not just the Spotify OAuth.
+                await fetch("/api/local-auth/logout", { method: "POST" }).catch(() => {});
+                signOut({ callbackUrl: "/" });
+              }}
               className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
             >
               Sign out

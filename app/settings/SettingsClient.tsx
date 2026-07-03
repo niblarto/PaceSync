@@ -124,6 +124,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [aiDjHealthLlm, setAiDjHealthLlm] = useState(false);
   const [aiDjHealthMsg, setAiDjHealthMsg] = useState<string | null>(null);
 
+  // ── 2FA state ────────────────────────────────────────────────────────────
+  const [totpEnabled, setTotpEnabled] = useState<boolean | null>(null);
+  const [totpQr, setTotpQr] = useState<string | null>(null);
+  const [totpSecret, setTotpSecret] = useState<string | null>(null);
+  const [totpCode, setTotpCode] = useState("");
+  const [totpBusy, setTotpBusy] = useState(false);
+  const [totpError, setTotpError] = useState<string | null>(null);
+  const [totpMsg, setTotpMsg] = useState<string | null>(null);
+
   // ── Garmin DB state ────────────────────────────────────────────────────────
   const [garminDbPath, setGarminDbPath] = useState("/home/scott/HealthData/DBs");
   const [garminSaving, setGarminSaving] = useState(false);
@@ -199,8 +208,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .catch(() => {});
   }, []);
 
-  // Debounced connection check whenever the URL changes, plus a periodic
-  // recheck (every 60s) so the indicator doesn't go stale while the page is open.
+  // Debounced connection check whenever the URL changes (or a manual refresh
+  // is requested via the nonce), plus a periodic recheck (every 60s) so the
+  // indicator doesn't go stale while the page is open.
+  const [aiDjCheckNonce, setAiDjCheckNonce] = useState(0);
   useEffect(() => {
     const url = aiDjUrl.trim();
     if (!url) { setAiDjHealth("idle"); setAiDjHealthMsg(null); return; }
@@ -220,10 +231,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       }
     };
 
-    const debounce = setTimeout(check, 500);
+    const debounce = setTimeout(check, aiDjCheckNonce > 0 ? 0 : 500);
     const interval = setInterval(check, 60000);
     return () => { cancelled = true; clearTimeout(debounce); clearInterval(interval); };
-  }, [aiDjUrl]);
+  }, [aiDjUrl, aiDjCheckNonce]);
 
   // Sync status polling — 20s when active, 5min when idle
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -382,6 +393,68 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setNtfyError("Failed to save — try again.");
     } finally {
       setNtfySaving(false);
+    }
+  }
+
+  useEffect(() => {
+    fetch("/api/local-auth/totp")
+      .then(r => r.json())
+      .then((d: { enabled?: boolean; secret?: string; qrDataUrl?: string }) => {
+        setTotpEnabled(d.enabled ?? false);
+        setTotpSecret(d.secret ?? null);
+        setTotpQr(d.qrDataUrl ?? null);
+      })
+      .catch(() => setTotpEnabled(false));
+  }, []);
+
+  async function confirmTotp() {
+    setTotpBusy(true);
+    setTotpError(null);
+    setTotpMsg(null);
+    try {
+      const res = await fetch("/api/local-auth/totp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: totpCode }),
+      });
+      const d = await res.json() as { ok?: boolean; error?: string };
+      if (!res.ok || !d.ok) throw new Error(d.error ?? "Verification failed");
+      setTotpEnabled(true);
+      setTotpCode("");
+      setTotpMsg("2FA enabled — codes will be required at sign-in from now on.");
+    } catch (e) {
+      setTotpError(e instanceof Error ? e.message : "Verification failed");
+    } finally {
+      setTotpBusy(false);
+    }
+  }
+
+  async function disableTotp() {
+    setTotpBusy(true);
+    setTotpError(null);
+    setTotpMsg(null);
+    try {
+      const res = await fetch("/api/local-auth/totp", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: totpCode }),
+      });
+      const d = await res.json() as { ok?: boolean; error?: string };
+      if (!res.ok || !d.ok) throw new Error(d.error ?? "Failed to disable");
+      setTotpEnabled(false);
+      setTotpCode("");
+      setTotpQr(null);
+      setTotpSecret(null);
+      setTotpMsg("2FA disabled.");
+      // Fetch a fresh secret/QR for potential re-enrolment
+      const rq = await fetch("/api/local-auth/totp");
+      const rd = await rq.json() as { secret?: string; qrDataUrl?: string };
+      setTotpSecret(rd.secret ?? null);
+      setTotpQr(rd.qrDataUrl ?? null);
+    } catch (e) {
+      setTotpError(e instanceof Error ? e.message : "Failed to disable");
+    } finally {
+      setTotpBusy(false);
     }
   }
 
@@ -887,8 +960,20 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   <>
                     <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
                     <span className="text-red-400">{aiDjHealthMsg ?? "Unreachable"}</span>
+                    <span className="text-slate-500">· mixes fall back to on-Pi processing</span>
                   </>
                 )}
+                <button
+                  onClick={() => setAiDjCheckNonce(n => n + 1)}
+                  disabled={aiDjHealth === "checking"}
+                  className="ml-1 p-1 text-slate-500 hover:text-slate-300 disabled:opacity-40 transition-colors rounded"
+                  title="Re-check connection now"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"
+                    className={`w-3.5 h-3.5 ${aiDjHealth === "checking" ? "animate-spin" : ""}`}>
+                    <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v4.242a.75.75 0 001.5 0v-2.43l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V2.929a.75.75 0 00-1.5 0V5.36l-.31-.31A7 7 0 003.239 8.188a.75.75 0 101.448.389A5.5 5.5 0 0113.89 6.11l.311.31h-2.432a.75.75 0 000 1.5h4.243a.75.75 0 00.53-.219z" clipRule="evenodd" />
+                  </svg>
+                </button>
               </span>
             )}
           </div>
@@ -1156,6 +1241,100 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         >
           {ntfySaving ? "Saving…" : ntfySaved ? "Saved!" : "Save topic"}
         </button>
+      </div>
+
+      {/* Two-factor authentication */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h3 className="font-semibold text-slate-200">🔐 Two-Factor Authentication</h3>
+          <p className="text-sm text-slate-400 mt-1">
+            Adds a 6-digit authenticator code to the sign-in page. Works with LastPass Authenticator,
+            Google Authenticator, or any TOTP app.
+          </p>
+        </div>
+
+        {totpEnabled === null && (
+          <div className="h-10 rounded-lg bg-slate-800/50 animate-pulse" />
+        )}
+
+        {totpEnabled === true && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-sm text-green-400">
+              <span>●</span>
+              <span>2FA is enabled — codes required at sign-in</span>
+            </div>
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-slate-300">Enter a current code to disable</label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={totpCode}
+                  onChange={e => setTotpCode(e.target.value.replace(/\D/g, ""))}
+                  placeholder="123456"
+                  className="w-28 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-red-500 font-mono tracking-widest"
+                />
+                <button
+                  onClick={disableTotp}
+                  disabled={totpBusy || totpCode.length !== 6}
+                  className="rounded-lg bg-slate-700/80 hover:bg-red-500/30 disabled:opacity-40 text-slate-200 font-medium text-sm px-4 py-2 transition-colors"
+                >
+                  {totpBusy ? "…" : "Disable 2FA"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {totpEnabled === false && (
+          <div className="space-y-3">
+            <ol className="text-xs text-slate-500 space-y-1 list-decimal list-inside">
+              <li>Open <span className="text-slate-300">LastPass Authenticator</span> and tap <span className="text-slate-300">+</span></li>
+              <li>Scan the QR code below</li>
+              <li>Enter the 6-digit code it shows to confirm</li>
+            </ol>
+            {totpQr ? (
+              <div className="flex items-start gap-4 flex-wrap">
+                <img src={totpQr} alt="2FA QR code" className="rounded-lg border border-white/10 bg-white p-1 w-[180px] h-[180px]" />
+                <div className="space-y-2 min-w-0">
+                  {totpSecret && (
+                    <p className="text-xs text-slate-500 break-all">
+                      Can&apos;t scan? Enter manually:{" "}
+                      <code className="text-slate-300 font-mono">{totpSecret}</code>
+                    </p>
+                  )}
+                  <div className="space-y-2 pt-1">
+                    <label className="block text-sm font-medium text-slate-300">Confirmation code</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={6}
+                        value={totpCode}
+                        onChange={e => setTotpCode(e.target.value.replace(/\D/g, ""))}
+                        placeholder="123456"
+                        className="w-28 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono tracking-widest"
+                      />
+                      <button
+                        onClick={confirmTotp}
+                        disabled={totpBusy || totpCode.length !== 6}
+                        className="rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-sm px-4 py-2 transition-colors"
+                      >
+                        {totpBusy ? "Verifying…" : "Enable 2FA"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="h-[180px] w-[180px] rounded-lg bg-slate-800/50 animate-pulse" />
+            )}
+          </div>
+        )}
+
+        {totpError && <p className="text-sm text-red-400">{totpError}</p>}
+        {totpMsg && <p className="text-sm text-green-400">{totpMsg}</p>}
       </div>
     </div>
 

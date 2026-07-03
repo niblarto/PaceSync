@@ -1,0 +1,103 @@
+"""On-Pi fallback for the AI DJ mix builder.
+
+Used by /api/ai-dj/mix when the remote AI DJ service is unreachable (PC off,
+network change). Runs the same workout mixer locally with use_llm=False —
+deterministic BPM/key/energy distance-chaining — and prints the same JSON
+shape the remote service's POST /mix returns.
+
+Reads {"title": ..., "segments": [...]} on stdin; the library CSV path is
+argv[1]. Uses the Garmin cadence buckets for exact pace->BPM when
+garmin-config.json points at a GarminDB (the remote PC can't do that — so
+fallback mixes actually get *better* pace matching).
+"""
+
+import json
+import os
+import sys
+
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _APP_ROOT not in sys.path:
+    sys.path.insert(0, _APP_ROOT)
+# In development ai_dj lives in the sibling AI_DJ repo; on the Pi it's
+# deployed to the app root alongside bpm_matcher.
+if not os.path.isdir(os.path.join(_APP_ROOT, "ai_dj")):
+    _dev = os.path.join(os.path.dirname(_APP_ROOT), "AI_DJ")
+    if os.path.isdir(os.path.join(_dev, "ai_dj")) and _dev not in sys.path:
+        sys.path.insert(0, _dev)
+
+import pandas as pd  # noqa: E402
+
+from bpm_matcher.camelot import to_camelot  # noqa: E402
+from ai_dj.workout import (  # noqa: E402
+    build_workout_playlist,
+    garmin_cadence_buckets,
+    parse_workout,
+)
+
+
+def _load_library(csv_path: str) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    df = df.dropna(subset=["Tempo"]).reset_index(drop=True)
+    df["Camelot"] = [to_camelot(k, m) for k, m in zip(df["Key"], df["Mode"])]
+    return df
+
+
+def _cadence_buckets() -> dict | None:
+    try:
+        with open(os.path.join(_APP_ROOT, "garmin-config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        db = os.path.join(cfg["dbPath"], "garmin_activities.db")
+        if os.path.exists(db):
+            return garmin_cadence_buckets(db)
+    except Exception:
+        pass
+    return None
+
+
+def main():
+    payload = json.load(sys.stdin)
+    segments_text = payload.get("segments") or []
+    csv_path = sys.argv[1]
+
+    segments = parse_workout(segments_text)
+    if not segments:
+        print(json.dumps({"error": "No runnable segments recognized in the workout"}))
+        sys.exit(1)
+
+    library = _load_library(csv_path)
+    try:
+        playlist = build_workout_playlist(
+            segments, library, model="", use_llm=False, cadence_buckets=_cadence_buckets()
+        )
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}))
+        sys.exit(1)
+
+    timeline = []
+    for seg_label, group in playlist.groupby("Segment", sort=False):
+        timeline.append({
+            "segment": seg_label,
+            "targetBpm": float(group["Target BPM"].iloc[0]),
+            "tracks": [
+                {
+                    "uri": row.get("Track URI"),
+                    "name": row["Track Name"],
+                    "artist": row["Artist Name(s)"],
+                    "startsAt": row["Starts At"],
+                    "tempo": float(row["Tempo"]),
+                    "camelot": row["Camelot"],
+                    "energy": float(row["Energy"]),
+                }
+                for _, row in group.iterrows()
+            ],
+        })
+
+    print(json.dumps({
+        "trackUris": [u for u in playlist["Track URI"] if isinstance(u, str)],
+        "totalSec": float(playlist["Duration (ms)"].sum() / 1000),
+        "timeline": timeline,
+    }))
+
+
+if __name__ == "__main__":
+    main()

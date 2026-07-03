@@ -12,6 +12,7 @@ runs.csv
 *.csv
 garmin-config.json
 ai-dj-config.json
+local-auth.json
 ntfy-config.json
 bbc-programmes.json
 runna-config.json

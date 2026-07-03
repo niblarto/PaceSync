@@ -14,7 +14,7 @@ A Next.js web app for managing a Spotify running playlist based on heart rate zo
 - **Song matching**: filter the playlist to songs similar to any track (BPM, musical key, energy)
 - **Song suggestions**: discover new tracks *not* in your playlist that match a seed track by style or tempo (via Last.fm / Deezer / ReccoBeats), and add them to the playlist with one click
 - **Automatic BPM enrichment**: tracks without BPM data are looked up on ReccoBeats automatically
-- **🎧 AI DJ Mix** (optional): build a pace-matched playlist for any Runna workout — each section's tempo and intensity track your target pace, with an optional local LLM for smarter track choices. See [AI DJ Mix](#ai-dj-mix-optional) below
+- **🎧 AI DJ Mix** (optional): build a pace-matched playlist for any Runna workout — each section's tempo and intensity track your target pace, with an optional local LLM for smarter track choices. Powered by the [AI_DJ companion app](https://github.com/niblarto/AI_DJ). See [AI DJ Mix](#ai-dj-mix-optional) below
 - Dedup playlist, to remove duplicate tracks
 - Garmin activity stats: pace/cadence/HR charts and activity summaries, read directly from a local [GarminDB](https://github.com/tcgoetz/GarminDB) database
 - Weekly cron job to keep the playlist fresh:-
@@ -265,6 +265,8 @@ Alternatively, you can set `RUNNA_ICS_URL` in `.env.local` before deploying — 
 
 Builds a pace-matched Spotify playlist for a Runna workout: each section of the run (warm up, tempo/interval reps, walking rest, cool down) is filled with tracks matched to that section's target BPM and intensity, timed to last as long as the section itself.
 
+The mixing engine is **[AI_DJ](https://github.com/niblarto/AI_DJ)**, a companion app published separately — a natural-language DJ setlist builder with a dedicated workout mode. It runs as a small HTTP service that PaceSync calls; see its README for full installation, CLI usage (it can also build M3U playlists for Mixxx), and configuration.
+
 **How the mix is built:**
 - **Tempo** scales continuously with pace — each segment's pace is converted to a target BPM via your Garmin cadence data (falling back to a linear fit if GarminDB isn't configured), and tracks are filtered to that BPM band.
 - **Intensity** (Spotify's energy feature) is bucketed by segment type: warm up 0.45–0.85, work (tempo/intervals) 0.60–1.00, walking rest 0.00–0.50, cool down 0.00–0.60 — so hard efforts pull driving, high-energy tracks and rest/cool-down periods pull calmer ones.
@@ -288,18 +290,21 @@ Track selection within each section can happen two ways:
 - **With an LLM** (default when available): the service calls a local [Ollama](https://ollama.com) model (`qwen2.5:7b` by default) with a mood-aware prompt per section (e.g. *"Hard effort — driving, motivating, relentless"* for work, *"Recovery — calm"* for rest) to pick and order tracks from the BPM/energy-filtered candidate pool.
 - **Without an LLM**: tracks are chosen purely by [bpm_matcher](bpm_matcher/)'s weighted distance — a deterministic greedy nearest-neighbour chain over BPM, Camelot key, energy, danceability and valence. No GPU or model download needed; runs fine on a Raspberry Pi.
 
-**The LLM is entirely optional and fails gracefully**: if Ollama isn't running, the model isn't pulled, or the service was started with `--no-llm`, mix-building **automatically falls back** to the deterministic distance-chain method for that section — the mix still completes, just without the LLM's picks. Nothing breaks either way.
+**The LLM is entirely optional and fails gracefully**, at two levels:
+
+- If the service is reachable but **Ollama isn't** (not running, model not pulled, or started with `--no-llm`), the service falls back to the deterministic distance-chain per section — the mix still completes, just without the LLM's picks.
+- If the **whole service is unreachable** (PC off or asleep), PaceSync builds the mix **on the Pi itself** using the same vendored workout mixer in no-LLM mode. As a bonus, the on-Pi fallback reads your real Garmin cadence data for exact pace→BPM matching (the remote service uses a linear approximation). Either way, the manual button and the 15:30 cron keep working.
 
 **Setting it up:**
 
-1. **Run the AI DJ service** somewhere on your network (a PC with Ollama for LLM-assisted mixes, or the Pi itself with `--no-llm` for the deterministic-only mode — it's pure Python, no GPU required). The service exposes two endpoints PaceSync calls:
+1. **Run the [AI_DJ](https://github.com/niblarto/AI_DJ) service** somewhere on your network (a PC with Ollama for LLM-assisted mixes, or the Pi itself with `--no-llm` for the deterministic-only mode — it's pure Python, no GPU required). Clone the repo and follow its README; PaceSync calls two of its endpoints:
    - `POST /mix` `{title, segments, csv, easyPace?, useLlm?}` → `{trackUris, totalSec, timeline}`
    - `GET /health` → `{ok, llm}`
-2. If running with LLM support, install [Ollama](https://ollama.com/download) and pull a model: `ollama pull qwen2.5:7b` (or set a different model via that service's own config — see its README).
+2. If running with LLM support, install [Ollama](https://ollama.com/download) and pull a model: `ollama pull qwen2.5:7b` (or set a different model — see the [AI_DJ README](https://github.com/niblarto/AI_DJ#setup)).
 3. If the service runs on a separate machine from the Pi, **allow inbound traffic on its port through the firewall** — and if using Windows, scope the rule to cover whatever network profile that connection uses (Private *and* Public), since Windows can silently reclassify a network and drop a Private-only rule.
 4. In PaceSync, go to **Settings**, scroll to the bottom of the **middle column**, and find the **🎧 AI DJ** card:
    - Enter the service's URL (e.g. `http://192.168.1.50:8765`) and click **Save**.
-   - A live connection indicator appears next to the URL field — green "Connected · LLM ready" (or "no LLM (distance-chain only)" if running with `--no-llm`), red with the failure reason if unreachable, checked automatically as you type and every 60 seconds while the page is open.
+   - A live connection indicator appears next to the URL field — green "Connected · LLM ready" (or "no LLM (distance-chain only)" if running with `--no-llm`), red with the failure reason if unreachable. It's checked automatically as you type and every 60 seconds while the page is open, and there's a refresh icon to re-check on demand.
    - Once a URL is saved, flip the **enable** toggle to start showing the AI DJ Mix button on Runna workouts.
 
 > The `ai-dj-config.json` this creates on the Pi is gitignored, same as other personal settings files.
