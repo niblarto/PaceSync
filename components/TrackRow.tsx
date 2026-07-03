@@ -45,12 +45,13 @@ export async function playInSpotify(uri: string, token?: string | null): Promise
   openInSpotify(uri);
 }
 
-export function openInSpotify(uri: string) {
-  const trackId = uri.split(":")?.[2];
-  if (!trackId) return;
+// Navigate to a spotify: URI (opens the desktop/mobile app); if the page is
+// still visible after a second the app didn't take over, so fall back to the
+// web player.
+export function openSpotifyAppFirst(uri: string, webUrl: string) {
   window.location.href = uri;
   const timer = setTimeout(() => {
-    window.open(`https://open.spotify.com/track/${trackId}`, "_blank");
+    window.open(webUrl, "_blank");
   }, 1000);
   const onVisibility = () => {
     if (document.hidden) {
@@ -59,6 +60,19 @@ export function openInSpotify(uri: string) {
     }
   };
   document.addEventListener("visibilitychange", onVisibility);
+}
+
+export function openInSpotify(uri: string) {
+  const trackId = uri.split(":")?.[2];
+  if (!trackId) return;
+  openSpotifyAppFirst(`spotify:track:${trackId}`, `https://open.spotify.com/track/${trackId}`);
+}
+
+// App-first open for any open.spotify.com URL (playlist, track, album, …).
+export function openSpotifyUrl(webUrl: string) {
+  const m = /open\.spotify\.com\/(playlist|track|album|artist|show|episode)\/([A-Za-z0-9]+)/.exec(webUrl);
+  if (m) openSpotifyAppFirst(`spotify:${m[1]}:${m[2]}`, webUrl);
+  else window.open(webUrl, "_blank");
 }
 
 export function FunnelIcon() {

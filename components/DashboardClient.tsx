@@ -6,7 +6,7 @@ import { signOut, useSession } from "next-auth/react";
 import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
-import { TrackRow, playInSpotify } from "./TrackRow";
+import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl } from "./TrackRow";
 import { BbcPlaylistCard } from "./BbcPlaylistCard";
 import { DedupCard } from "./DedupCard";
 import { RunnaSummaryCard, RunnaScheduleCard } from "./RunnaCard";
@@ -537,6 +537,38 @@ export function DashboardClient({ spotifyUser }: Props) {
     }
   }
 
+  // Open the "Today's Run" playlist in the Spotify app (web as fallback).
+  // Its id isn't stored anywhere, so resolve it by name once and remember it.
+  const todaysRunIdRef = useRef<string | null>(null);
+  async function openTodaysRunPlaylist() {
+    const openById = (id: string) =>
+      openSpotifyAppFirst(`spotify:playlist:${id}`, `https://open.spotify.com/playlist/${id}`);
+    if (todaysRunIdRef.current) { openById(todaysRunIdRef.current); return; }
+    if (todaysRunUrl) { openSpotifyUrl(todaysRunUrl); return; }
+    const token = session?.accessToken;
+    if (token) {
+      try {
+        let url: string | null = "https://api.spotify.com/v1/me/playlists?limit=50";
+        while (url) {
+          const res: Response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+          if (!res.ok) break;
+          const data = await res.json() as { items: { id: string; name: string }[]; next: string | null };
+          const hit = data.items.find(p => p.name.toLowerCase() === TODAYS_RUN_PLAYLIST.toLowerCase());
+          if (hit) {
+            todaysRunIdRef.current = hit.id;
+            openById(hit.id);
+            return;
+          }
+          url = data.next;
+        }
+      } catch { /* fall through to search */ }
+    }
+    openSpotifyAppFirst(
+      `spotify:search:${encodeURIComponent(TODAYS_RUN_PLAYLIST)}`,
+      `https://open.spotify.com/search/${encodeURIComponent(TODAYS_RUN_PLAYLIST)}`,
+    );
+  }
+
   async function saveTodaysRun() {
     if (!filteredTracks.length) return;
     setTodaysRunSaving(true);
@@ -943,7 +975,30 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             {/* Target zone */}
             {csvName && (
               <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">
-                <h2 className="font-semibold">Target zone</h2>
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="font-semibold">Target zone</h2>
+                  <div className="flex items-center gap-2">
+                    {RUNNING_PLAYLIST_ID && (
+                      <button
+                        onClick={() => openSpotifyAppFirst(
+                          `spotify:playlist:${RUNNING_PLAYLIST_ID}`,
+                          `https://open.spotify.com/playlist/${RUNNING_PLAYLIST_ID}`,
+                        )}
+                        className="text-xs px-2.5 py-1 rounded-lg bg-green-500/10 border border-green-500/30 text-green-400 hover:bg-green-500/20 transition-colors"
+                        title="Open the Running playlist in Spotify"
+                      >
+                        Running ↗
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { openTodaysRunPlaylist().catch(() => {}); }}
+                      className="text-xs px-2.5 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-colors"
+                      title="Open the Today's Run playlist in Spotify"
+                    >
+                      Today&apos;s Run ↗
+                    </button>
+                  </div>
+                </div>
                 <div className="rounded-lg bg-slate-800/50 border border-white/10 px-3 py-2 text-sm">
                   {aiDjMix ? (
                     <span className="text-purple-400 font-medium">
@@ -1076,14 +1131,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       )}
                       {todaysRunError && <p className="text-xs text-red-400">{todaysRunError}</p>}
                       {todaysRunSaved && todaysRunUrl && (
-                        <a
-                          href={todaysRunUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs text-purple-300 hover:text-purple-200 underline"
+                        <button
+                          onClick={() => openSpotifyUrl(todaysRunUrl)}
+                          className="text-xs text-purple-300 hover:text-purple-200 underline text-left"
                         >
                           Open &quot;{TODAYS_RUN_PLAYLIST}&quot; ↗
-                        </a>
+                        </button>
                       )}
                       </div>
                     </div>
@@ -1109,14 +1162,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <a
-                        href={savedUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
+                      <button
+                        onClick={() => openSpotifyUrl(savedUrl)}
                         className="inline-flex items-center gap-1.5 rounded-lg bg-green-500/10 border border-green-500/30 text-green-400 text-xs font-semibold px-3 py-1.5 hover:bg-green-500/20 transition-colors"
                       >
                         Open empty playlist ↗
-                      </a>
+                      </button>
                       <button
                         onClick={() => {
                           navigator.clipboard.writeText(pendingUris.join("\n")).then(() => {
@@ -1387,7 +1438,10 @@ function SuggestionsCard({ suggest, onClose, onAdd }: {
                   onClick={() => {
                     const id = spotifyIdFromUrl(s.spotifyUrl);
                     if (id) playInSpotify(`spotify:track:${id}`, session?.accessToken).catch(() => {});
-                    else window.open(`https://open.spotify.com/search/${encodeURIComponent(`${s.artist} ${s.name}`)}`, "_blank");
+                    else openSpotifyAppFirst(
+                      `spotify:search:${encodeURIComponent(`${s.artist} ${s.name}`)}`,
+                      `https://open.spotify.com/search/${encodeURIComponent(`${s.artist} ${s.name}`)}`,
+                    );
                   }}
                   className="flex-1 flex items-center gap-3 px-2 py-2 hover:bg-slate-800/60 transition-colors min-w-0 text-left"
                 >
