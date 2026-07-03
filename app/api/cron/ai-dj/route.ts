@@ -95,7 +95,10 @@ async function runAiDjPrebuild() {
       continue;
     }
 
-    const description = `AI DJ mix for Runna workout "${w.title}" on ${w.date} — pace-matched to each segment`;
+    // e.g. "12mi Long Run - 04-07-2026" — says at a glance which workout the
+    // standing playlist currently holds.
+    const [yy, mm, dd] = w.date.split("-");
+    const description = `${w.title} - ${dd}-${mm}-${yy}`;
     try {
       const saved = await upsertPlaylist(token, user.id, TODAYS_RUN_PLAYLIST, description, trackUris);
       results.push({ title: w.title, ok: true, tracks: trackUris.length, url: saved.url });

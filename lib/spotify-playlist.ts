@@ -57,6 +57,17 @@ export async function upsertPlaylist(
 
   if (existingId) {
     const playlistUrl = `https://open.spotify.com/playlist/${existingId}`;
+    // Keep the description in step with what the playlist now holds (e.g.
+    // which workout "Today's Run" is for) — best-effort, never fails the save.
+    if (description) {
+      try {
+        await fetch(`${BASE}/playlists/${existingId}`, {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ description }),
+        });
+      } catch { /* description update is cosmetic */ }
+    }
     try {
       await replacePlaylistTracks(token, existingId, trackUris);
       return { playlistId: existingId, url: playlistUrl, tracksAdded: true, replaced: true };

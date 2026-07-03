@@ -264,7 +264,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [enriching, setEnriching] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
   const enrichAttempted = useRef(false);
-  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; stale: boolean } | null>(null);
+  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; stale: boolean } | null>(null);
   const [remixing, setRemixing] = useState(false);
   const [todaysRunSaving, setTodaysRunSaving] = useState(false);
   const [todaysRunSaved, setTodaysRunSaved] = useState(false);
@@ -474,13 +474,13 @@ export function DashboardClient({ spotifyUser }: Props) {
   // Populates the central track list/save UI from an AI DJ mix (built in
   // RunnaScheduleCard) instead of saving straight to Spotify — the user picks
   // which playlist(s) to save to from here.
-  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[]) {
+  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string) {
     setSelectedZones([]);
     setPaceFilter(null);
     setSimilarFilter(null);
     setNoBpmFilter(false);
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
-    setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, stale: false });
+    setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, stale: false });
     setPlaylistName(name);
     setStep("ready");
     setSaveError(null);
@@ -548,7 +548,7 @@ export function DashboardClient({ spotifyUser }: Props) {
         body: JSON.stringify({
           name: TODAYS_RUN_PLAYLIST,
           description: aiDjMix
-            ? `AI DJ mix for Runna workout "${aiDjMix.workoutTitle}" — pace-matched to each segment`
+            ? `${aiDjMix.workoutTitle} - ${aiDjMix.date.split("-").reverse().join("-")}`
             : "PaceSync running playlist for today",
           trackUris: filteredTracks.map((t) => t.uri),
         }),
