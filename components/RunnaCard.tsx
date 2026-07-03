@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 import type { TrackWithBPM } from "@/types";
+import { RouteMapLightbox } from "./RouteMapLightbox";
 
 interface PaceSpmRow { bucket: number; avg_spm: number; records: number; }
 
@@ -285,11 +286,65 @@ function mixName(w: RunnaWorkout): string {
   return `${d}-${m}-${y.slice(2)} ${w.title}`;
 }
 
+// ── Similar past routes (from GarminDB) ──────────────────────────────────────
+
+interface RouteActivity {
+  activity_id: number | string;
+  name: string | null;
+  start_time: string;
+  distance: number;
+  elapsed_time: string | number | null;
+  avg_hr: number | null;
+}
+
+function parseDurationSecs(v: string | number | null): number | null {
+  if (v == null) return null;
+  if (typeof v === "number") return v;
+  const parts = v.split(":").map(Number);
+  if (parts.some(isNaN)) return null;
+  return parts.reduce((acc, p) => acc * 60 + p, 0);
+}
+
+function routePace(a: RouteActivity): string | null {
+  const secs = parseDurationSecs(a.elapsed_time);
+  if (!secs || !a.distance) return null;
+  const spm = secs / a.distance;
+  return `${Math.floor(spm / 60)}:${String(Math.round(spm % 60)).padStart(2, "0")}/mi`;
+}
+
+function routeDate(a: RouteActivity): string {
+  const d = new Date(a.start_time.slice(0, 19).replace(" ", "T"));
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
 export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix }: RunnaScheduleProps = {}) {
   const { workouts, loading, error } = useRunnaData();
   const [expanded, setExpanded] = useState<string | null>(null);
   const paceSpm = usePaceSpm(garminConfigured);
   const [mixState, setMixState] = useState<Record<string, MixStatus>>({});
+  interface RoutePage { items: RouteActivity[]; offset: number; total: number; loading?: boolean }
+  const [routes, setRoutes] = useState<Record<string, RoutePage>>({});
+  const [routeMap, setRouteMap] = useState<{ id: string | number; label: string } | null>(null);
+
+  function fetchRoutes(uid: string, distanceMi: number, offset: number) {
+    setRoutes(r => ({ ...r, [uid]: { ...(r[uid] ?? { items: [], total: 0 }), offset, loading: true } }));
+    fetch(`/api/garmin/similar-activities?distanceMi=${distanceMi}&offset=${offset}`)
+      .then(res => res.json())
+      .then((d: { activities?: RouteActivity[]; total?: number }) => {
+        setRoutes(r => ({ ...r, [uid]: { items: d.activities ?? [], offset, total: d.total ?? 0 } }));
+      })
+      .catch(() => setRoutes(r => ({ ...r, [uid]: { items: [], offset, total: 0 } })));
+  }
+
+  // On expand, fetch past runs at (workout distance … +0.5mi) as route options
+  useEffect(() => {
+    if (!expanded || !garminConfigured) return;
+    const w = workouts.find(x => x.uid === expanded);
+    if (!w || !w.distanceMi || w.type === "strength" || w.type === "rest") return;
+    if (routes[w.uid] !== undefined) return;
+    fetchRoutes(w.uid, w.distanceMi, 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, garminConfigured, workouts]);
 
   async function buildMix(w: RunnaWorkout) {
     setMixState(s => ({ ...s, [w.uid]: { status: "building" } }));
@@ -463,12 +518,70 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                         </div>
                       );
                     })()}
+                    {garminConfigured && isRun && w.distanceMi && (() => {
+                      const r = routes[w.uid];
+                      if (!r || r.total === 0) return null;
+                      const canNewer = r.offset > 0;
+                      const canOlder = r.offset + 3 < r.total;
+                      const pagerBtn = "px-1.5 py-1 rounded-lg border border-white/10 text-slate-400 hover:text-sky-300 hover:border-sky-500/30 disabled:opacity-25 disabled:hover:text-slate-400 disabled:hover:border-white/10 transition-colors text-xs shrink-0";
+                      return (
+                        <div className="pt-1 space-y-1.5">
+                          <p className="text-xs text-slate-500">
+                            Routes at this distance ({w.distanceMi}–{(w.distanceMi + 0.5).toFixed(1)}mi) · {r.offset + 1}–{Math.min(r.offset + 3, r.total)} of {r.total}
+                          </p>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={e => { e.stopPropagation(); if (canNewer) fetchRoutes(w.uid, w.distanceMi!, Math.max(0, r.offset - 3)); }}
+                              disabled={!canNewer || r.loading}
+                              className={pagerBtn}
+                              title="Newer runs"
+                            >
+                              &lt;
+                            </button>
+                            <div className={`flex flex-nowrap gap-1.5 flex-1 min-w-0 ${r.loading ? "opacity-50" : ""}`}>
+                              {r.items.map(a => (
+                                <button
+                                  key={a.activity_id}
+                                  onClick={e => {
+                                    e.stopPropagation();
+                                    setRouteMap({
+                                      id: a.activity_id,
+                                      label: `${routeDate(a)} · ${a.distance.toFixed(1)}mi`,
+                                    });
+                                  }}
+                                  className="flex-1 min-w-0 truncate whitespace-nowrap text-center text-xs px-1.5 py-1 rounded-lg border bg-sky-500/15 border-sky-500/30 text-sky-300 hover:bg-sky-500/25 transition-colors"
+                                  title={a.name ?? undefined}
+                                >
+                                  {routeDate(a)} · {a.distance.toFixed(1)}mi{routePace(a) ? ` · ${routePace(a)!.replace("/mi", "")}` : ""}
+                                </button>
+                              ))}
+                            </div>
+                            <button
+                              onClick={e => { e.stopPropagation(); if (canOlder) fetchRoutes(w.uid, w.distanceMi!, r.offset + 3); }}
+                              disabled={!canOlder || r.loading}
+                              className={pagerBtn}
+                              title="Older runs"
+                            >
+                              &gt;
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
             );
           })}
         </div>
+      )}
+
+      {routeMap && (
+        <RouteMapLightbox
+          activityId={routeMap.id}
+          label={routeMap.label}
+          onClose={() => setRouteMap(null)}
+        />
       )}
     </div>
   );
