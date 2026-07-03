@@ -1,4 +1,5 @@
 import { loadAiDjConfig } from "@/lib/ai-dj-config";
+import { loadGarminConfig } from "@/lib/garmin-config";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { spawn } from "child_process";
@@ -23,6 +24,41 @@ export type AiDjMixResult =
   | { ok: true; mix: AiDjMixResponse }
   | { ok: false; error: string };
 
+// Real cadence per 5s pace bucket from GarminDB (sec/mi -> SPM), sent to the
+// remote AI DJ service so its pace->BPM uses measured turnover instead of a
+// linear guess — the service host has no Garmin data of its own.
+function loadCadenceBuckets(): Record<string, number> | null {
+  const config = loadGarminConfig();
+  if (!config) return null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+    const db = new Database(join(config.dbPath, "garmin_activities.db"), {
+      readonly: true,
+      fileMustExist: true,
+    });
+    db.pragma("busy_timeout = 30000");
+    const rows = db.prepare(`
+      SELECT CAST(3600.0 / r.speed / 5 AS INTEGER) * 5 AS bucket,
+             AVG(r.cadence * 2) AS avg_spm
+      FROM activity_records r
+      JOIN activities a ON a.activity_id = r.activity_id
+      WHERE LOWER(a.sport) LIKE '%running%'
+        AND r.speed > 0.3 AND r.speed IS NOT NULL
+        AND r.cadence IS NOT NULL AND r.cadence > 10
+      GROUP BY bucket HAVING bucket BETWEEN 390 AND 600
+      ORDER BY bucket
+    `).all() as { bucket: number; avg_spm: number }[];
+    db.close();
+    if (rows.length === 0) return null;
+    const buckets: Record<string, number> = {};
+    rows.forEach(r => { buckets[String(r.bucket)] = r.avg_spm; });
+    return buckets;
+  } catch {
+    return null;
+  }
+}
+
 export async function buildAiDjMix(title: string, segments: string[]): Promise<AiDjMixResult> {
   const config = loadAiDjConfig();
   if (!config?.enabled) {
@@ -43,7 +79,7 @@ export async function buildAiDjMix(title: string, segments: string[]): Promise<A
     const res = await fetch(`${config.url}/mix`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, segments, csv }),
+      body: JSON.stringify({ title, segments, csv, cadenceBuckets: loadCadenceBuckets() }),
       signal: AbortSignal.timeout(MIX_TIMEOUT_MS),
     });
     const data = await res.json() as AiDjMixResponse & { error?: string };
