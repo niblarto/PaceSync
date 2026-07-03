@@ -20,3 +20,4 @@ spotify-tokens.json
 spotify-cache.json
 !bpm_matcher/tests/sample_playlist.csv
 .analysis/
+.analysys/*
