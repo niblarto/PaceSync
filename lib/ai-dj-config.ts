@@ -6,12 +6,14 @@ const FILE = path.join(process.cwd(), "ai-dj-config.json");
 export interface AiDjConfig {
   url: string;      // e.g. http://192.168.1.50:8765
   enabled: boolean;
+  // Daily 15:30 cron pre-builds tomorrow's mix into "Today's Run" (on by default).
+  autoPlaylist: boolean;
 }
 
 export function loadAiDjConfig(): AiDjConfig | null {
   try {
     const data = JSON.parse(fs.readFileSync(FILE, "utf-8")) as AiDjConfig;
-    if (data?.url) return { url: data.url, enabled: !!data.enabled };
+    if (data?.url) return { url: data.url, enabled: !!data.enabled, autoPlaylist: data.autoPlaylist !== false };
   } catch {}
   return null;
 }

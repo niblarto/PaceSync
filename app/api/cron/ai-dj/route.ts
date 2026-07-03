@@ -39,6 +39,10 @@ async function runAiDjPrebuild() {
     console.log("[cron/ai-dj] AI DJ not enabled — skipping");
     return { ok: true, skipped: "AI DJ not enabled in Settings" };
   }
+  if (!config.autoPlaylist) {
+    console.log("[cron/ai-dj] auto playlist switched off — skipping");
+    return { ok: true, skipped: "Auto playlist upload switched off in Settings" };
+  }
 
   const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 

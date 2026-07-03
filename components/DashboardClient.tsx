@@ -68,7 +68,7 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy,
     <div ref={containerRef} className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto no-scrollbar">
       {tracks.slice(0, visibleCount).map((track, i) => (
         <div
-          key={track.id}
+          key={`${track.id}-${i}`}
           ref={inlineCard?.trackId === track.id
             ? (el) => { if (el) setAnchorEl(prev => (prev === el ? prev : el)); }
             : undefined}
@@ -264,7 +264,8 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [enriching, setEnriching] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
   const enrichAttempted = useRef(false);
-  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number } | null>(null);
+  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; stale: boolean } | null>(null);
+  const [remixing, setRemixing] = useState(false);
   const [todaysRunSaving, setTodaysRunSaving] = useState(false);
   const [todaysRunSaved, setTodaysRunSaved] = useState(false);
   const [todaysRunError, setTodaysRunError] = useState<string | null>(null);
@@ -473,12 +474,13 @@ export function DashboardClient({ spotifyUser }: Props) {
   // Populates the central track list/save UI from an AI DJ mix (built in
   // RunnaScheduleCard) instead of saving straight to Spotify — the user picks
   // which playlist(s) to save to from here.
-  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number) {
+  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[]) {
     setSelectedZones([]);
     setPaceFilter(null);
     setSimilarFilter(null);
     setNoBpmFilter(false);
-    setAiDjMix({ workoutTitle, name, tracks, totalSec });
+    const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
+    setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, stale: false });
     setPlaylistName(name);
     setStep("ready");
     setSaveError(null);
@@ -487,6 +489,52 @@ export function DashboardClient({ spotifyUser }: Props) {
     setTodaysRunSaved(false);
     setTodaysRunError(null);
     setTodaysRunUrl(null);
+  }
+
+  // Rebuild the AI DJ mix from the same workout segments after the library
+  // changed (a track in the mix was deleted).
+  async function remixAiDjMix() {
+    if (!aiDjMix) return;
+    setRemixing(true);
+    setSaveError(null);
+    // Clear the old tracks immediately so the stale mix can't linger (or be
+    // saved) while the rebuild runs.
+    setAiDjMix(prev => prev ? { ...prev, tracks: [] } : prev);
+    try {
+      const res = await fetch("/api/ai-dj/mix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: aiDjMix.workoutTitle, segments: aiDjMix.segments }),
+      });
+      const mix = await res.json() as {
+        error?: string;
+        trackUris?: string[];
+        totalSec?: number;
+        timeline?: { tracks: { uri: string; name: string; artist: string; tempo: number; energy: number }[] }[];
+      };
+      if (!res.ok || mix.error) throw new Error(mix.error ?? `Mix failed (${res.status})`);
+      const tracks: TrackWithBPM[] = (mix.timeline ?? []).flatMap(seg => seg.tracks).map(t => ({
+        id: t.uri.split(":")[2] ?? t.uri,
+        name: t.name,
+        artists: [{ name: t.artist }],
+        album: { name: "", images: [] },
+        duration_ms: 0,
+        uri: t.uri,
+        bpm: Math.round(t.tempo),
+        energy: t.energy,
+      })).filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
+      if (tracks.length === 0) throw new Error("No tracks matched this workout");
+      setAiDjMix(prev => prev ? { ...prev, tracks, totalSec: mix.totalSec ?? prev.totalSec, stale: false } : prev);
+      setStep("ready");
+      setSavedUrl(null);
+      setTodaysRunSaved(false);
+      setTodaysRunUrl(null);
+      setTodaysRunError(null);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "Remix failed");
+    } finally {
+      setRemixing(false);
+    }
   }
 
   async function saveTodaysRun() {
@@ -625,6 +673,14 @@ export function DashboardClient({ spotifyUser }: Props) {
 
     // Optimistically remove from local state immediately
     setAllTracks(prev => prev.filter(t => t.id !== track.id));
+
+    // Deleting a track out of an AI DJ mix invalidates it — the mix was
+    // built against a library that no longer exists. Mark it stale so the
+    // save buttons give way to a Remix button.
+    setAiDjMix(prev => {
+      if (!prev || !prev.tracks.some(t => t.id === track.id)) return prev;
+      return { ...prev, tracks: prev.tracks.filter(t => t.id !== track.id), stale: true };
+    });
 
     const fullUri = track.uri.startsWith("spotify:") ? track.uri : `spotify:track:${track.uri}`;
 
@@ -976,7 +1032,22 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     </div>
                   )}
 
-                  {!noBpmFilter && filteredTracks.length > 0 && step !== "partial" && (
+                  {!noBpmFilter && step !== "partial" && aiDjMix?.stale && (
+                    <div className="flex flex-col items-end gap-1.5 shrink-0">
+                      <button
+                        onClick={remixAiDjMix}
+                        disabled={remixing}
+                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors"
+                      >
+                        {remixing ? <><Spinner />Remixing…</> : "🎧 Remix"}
+                      </button>
+                      <p className="text-xs text-slate-500 max-w-[220px] text-right">
+                        Tracks were deleted — remix to rebuild the playlist without them.
+                      </p>
+                    </div>
+                  )}
+
+                  {!noBpmFilter && filteredTracks.length > 0 && step !== "partial" && !aiDjMix?.stale && (
                     <div className="flex items-start gap-2 shrink-0">
                       <label className="text-xs text-slate-500 whitespace-nowrap pt-1.5">Spotify playlist name</label>
                       <div className="flex flex-col gap-1.5">
@@ -1069,7 +1140,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
                 {filteredTracks.length === 0 ? (
                   <div className="p-8 text-center text-slate-500 text-sm">
-                    {noBpmFilter ? "All tracks have BPM info 🎉" : aiDjMix ? "No tracks in this mix." : "No tracks in this BPM range. Try a different zone."}
+                    {noBpmFilter ? "All tracks have BPM info 🎉" : aiDjMix ? (remixing ? "Rebuilding mix…" : "No tracks in this mix.") : "No tracks in this BPM range. Try a different zone."}
                   </div>
                 ) : (
                   <VirtualTrackList

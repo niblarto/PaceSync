@@ -37,7 +37,7 @@ from ai_dj.workout import (  # noqa: E402
 
 def _load_library(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
-    df = df.dropna(subset=["Tempo"]).reset_index(drop=True)
+    df = df.dropna(subset=["Tempo"]).drop_duplicates(subset=["Track URI"]).reset_index(drop=True)
     df["Camelot"] = [to_camelot(k, m) for k, m in zip(df["Key"], df["Mode"])]
     return df
 

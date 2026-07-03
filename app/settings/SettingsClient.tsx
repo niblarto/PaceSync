@@ -117,6 +117,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // ── AI DJ state ────────────────────────────────────────────────────────────
   const [aiDjUrl, setAiDjUrl] = useState("");
   const [aiDjEnabled, setAiDjEnabled] = useState(false);
+  const [aiDjAutoPlaylist, setAiDjAutoPlaylist] = useState(true);
   const [aiDjSaving, setAiDjSaving] = useState(false);
   const [aiDjSaved, setAiDjSaved] = useState(false);
   const [aiDjError, setAiDjError] = useState<string | null>(null);
@@ -201,9 +202,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   useEffect(() => {
     fetch("/api/settings/ai-dj")
       .then(r => r.json())
-      .then((d: { url?: string; enabled?: boolean }) => {
+      .then((d: { url?: string; enabled?: boolean; autoPlaylist?: boolean }) => {
         if (d.url) setAiDjUrl(d.url);
         setAiDjEnabled(d.enabled ?? false);
+        setAiDjAutoPlaylist(d.autoPlaylist ?? true);
       })
       .catch(() => {});
   }, []);
@@ -458,7 +460,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }
 
-  async function saveAiDj(enabled: boolean) {
+  async function saveAiDj(enabled: boolean, autoPlaylist: boolean = aiDjAutoPlaylist) {
     setAiDjSaving(true);
     setAiDjSaved(false);
     setAiDjError(null);
@@ -466,10 +468,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       const res = await fetch("/api/settings/ai-dj", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: aiDjUrl.trim(), enabled }),
+        body: JSON.stringify({ url: aiDjUrl.trim(), enabled, autoPlaylist }),
       });
       if (!res.ok) throw new Error();
       setAiDjEnabled(enabled);
+      setAiDjAutoPlaylist(autoPlaylist);
       setAiDjSaved(true);
     } catch {
       setAiDjError("Failed to save — try again.");
@@ -937,6 +940,32 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           <div className="flex items-center gap-2 text-sm text-purple-300">
             <span>●</span>
             <span>Enabled — mix buttons shown on workouts</span>
+          </div>
+        )}
+        {aiDjEnabled && (
+          <div className="flex items-start justify-between gap-3 rounded-lg bg-slate-800/40 border border-white/5 px-3 py-2.5">
+            <div>
+              <p className="text-sm font-medium text-slate-300">Auto playlist upload</p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Daily at 15:30, if a run is scheduled for tomorrow, build its mix and save it to
+                &quot;{"Today's Run"}&quot; on Spotify automatically.
+              </p>
+            </div>
+            <button
+              role="switch"
+              aria-checked={aiDjAutoPlaylist}
+              onClick={() => { if (!aiDjSaving) saveAiDj(aiDjEnabled, !aiDjAutoPlaylist); }}
+              disabled={aiDjSaving}
+              className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-40 ${
+                aiDjAutoPlaylist ? "bg-purple-500" : "bg-slate-700"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                  aiDjAutoPlaylist ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </button>
           </div>
         )}
         <div className="space-y-2">

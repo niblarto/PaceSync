@@ -275,7 +275,7 @@ interface RunnaScheduleProps {
   activePaces?: string[];
   aiDjEnabled?: boolean;
   /** Called once a mix is built — the parent populates the central track list/save UI rather than saving directly */
-  onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number) => void;
+  onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[]) => void;
 }
 
 type MixStatus = { status: "building" | "done" | "error"; error?: string };
@@ -369,7 +369,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
         energy: t.energy,
       }));
 
-      onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec);
+      onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, w.segments);
       setMixState(s => ({ ...s, [w.uid]: { status: "done" } }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to build mix";
