@@ -260,6 +260,41 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [cronSaved, setCronSaved] = useState(false);
   const [cronJobsError, setCronJobsError] = useState<string | null>(null);
   const [cronLog, setCronLog] = useState<{ ts: string; job: string; message: string }[]>([]);
+
+  // ── Default Spotify playlist (where BBC adds / dedup / deletes apply) ─────
+  const [playlistName, setPlaylistNameCfg] = useState("Running");
+  const [playlistSaving, setPlaylistSaving] = useState(false);
+  const [playlistMsg, setPlaylistMsg] = useState<string | null>(null);
+  const [playlistError, setPlaylistError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/settings/playlist")
+      .then(r => r.json())
+      .then((d: { name?: string }) => { if (d.name) setPlaylistNameCfg(d.name); })
+      .catch(() => {});
+  }, []);
+
+  async function saveDefaultPlaylist() {
+    setPlaylistSaving(true);
+    setPlaylistMsg(null);
+    setPlaylistError(null);
+    try {
+      const res = await fetch("/api/settings/playlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: playlistName }),
+      });
+      const d = await res.json() as { error?: string; name?: string; created?: boolean };
+      if (!res.ok) throw new Error(d.error ?? "Failed to save");
+      setPlaylistMsg(d.created
+        ? `Created "${d.name}" on Spotify and set as default`
+        : `Linked to your existing "${d.name}" playlist`);
+    } catch (e) {
+      setPlaylistError(e instanceof Error ? e.message : "Failed to save — try again.");
+    } finally {
+      setPlaylistSaving(false);
+    }
+  }
   useEffect(() => {
     const url = aiDjUrl.trim();
     if (!url) { setAiDjHealth("idle"); setAiDjHealthMsg(null); return; }
@@ -820,6 +855,32 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           )}
         </div>
         {csvError && <p className="text-sm text-red-400">{csvError}</p>}
+
+        <div className="pt-3 border-t border-white/10 space-y-2">
+          <label className="block text-sm font-medium text-slate-300">Default Spotify playlist</label>
+          <p className="text-xs text-slate-500">
+            Where BBC tracks are added, dedup runs, and deletes apply. Matched to a playlist you
+            own by name — created on Spotify if it doesn&apos;t exist yet.
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={playlistName}
+              onChange={e => { setPlaylistNameCfg(e.target.value); setPlaylistMsg(null); }}
+              placeholder="Running"
+              className="flex-1 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+            />
+            <button
+              onClick={saveDefaultPlaylist}
+              disabled={playlistSaving || !playlistName.trim()}
+              className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-4 py-2 transition-colors shrink-0"
+            >
+              {playlistSaving ? "Linking…" : "Save"}
+            </button>
+          </div>
+          {playlistMsg && <p className="text-xs text-green-400">{playlistMsg}</p>}
+          {playlistError && <p className="text-xs text-red-400">{playlistError}</p>}
+        </div>
       </div>
 
       {/* BBC Programme list */}

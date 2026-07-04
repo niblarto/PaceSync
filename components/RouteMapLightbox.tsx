@@ -25,6 +25,14 @@ export function RouteMapLightbox({ activityId, label, onClose }: Props) {
   const [stats, setStats] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [view, setView] = useState<"street" | "satellite">("street");
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const layersRef = useRef<{
+    map: import("leaflet").Map;
+    street: import("leaflet").TileLayer;
+    satellite: import("leaflet").TileLayer;
+  } | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -73,10 +81,19 @@ export function RouteMapLightbox({ activityId, label, onClose }: Props) {
         if (cancelled || !mapRef.current) return;
 
         map = L.map(mapRef.current, { zoomControl: true, attributionControl: true });
-        L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        const street = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
           maxZoom: 19,
           attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-        }).addTo(map);
+        });
+        const satellite = L.tileLayer(
+          "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+          {
+            maxZoom: 19,
+            attribution: "Tiles &copy; Esri — Source: Esri, Maxar, Earthstar Geographics",
+          },
+        );
+        (viewRef.current === "satellite" ? satellite : street).addTo(map);
+        layersRef.current = { map, street, satellite };
 
         const points = data.points;
 
@@ -124,8 +141,21 @@ export function RouteMapLightbox({ activityId, label, onClose }: Props) {
       }
     })();
 
-    return () => { cancelled = true; map?.remove(); };
+    return () => { cancelled = true; layersRef.current = null; map?.remove(); };
   }, [activityId]);
+
+  // Swap the base tiles when the street/satellite toggle changes.
+  useEffect(() => {
+    const l = layersRef.current;
+    if (!l) return;
+    if (view === "satellite") {
+      l.map.removeLayer(l.street);
+      l.satellite.addTo(l.map);
+    } else {
+      l.map.removeLayer(l.satellite);
+      l.street.addTo(l.map);
+    }
+  }, [view]);
 
   return createPortal(
     <div
@@ -133,7 +163,7 @@ export function RouteMapLightbox({ activityId, label, onClose }: Props) {
       onClick={onClose}
     >
       <div
-        className="w-full max-w-3xl rounded-2xl bg-slate-900 border border-white/10 overflow-hidden shadow-2xl"
+        className="w-full max-w-[72rem] rounded-2xl bg-slate-900 border border-white/10 overflow-hidden shadow-2xl"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
@@ -145,6 +175,20 @@ export function RouteMapLightbox({ activityId, label, onClose }: Props) {
             </p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
+            <div className="flex rounded-lg overflow-hidden border border-white/10 text-xs">
+              <button
+                onClick={() => setView("street")}
+                className={`px-2.5 py-1 transition-colors ${view === "street" ? "bg-sky-500/20 text-sky-300" : "text-slate-500 hover:text-slate-300"}`}
+              >
+                Map
+              </button>
+              <button
+                onClick={() => setView("satellite")}
+                className={`px-2.5 py-1 transition-colors ${view === "satellite" ? "bg-sky-500/20 text-sky-300" : "text-slate-500 hover:text-slate-300"}`}
+              >
+                Satellite
+              </button>
+            </div>
             <a
               href={`https://connect.garmin.com/app/activity/${activityId}`}
               target="_blank"
@@ -162,7 +206,7 @@ export function RouteMapLightbox({ activityId, label, onClose }: Props) {
             </button>
           </div>
         </div>
-        <div className="relative h-[60vh] min-h-[320px] bg-slate-800">
+        <div className="relative h-[69vh] min-h-[368px] bg-slate-800">
           <div ref={mapRef} className="absolute inset-0" />
           {loading && !error && (
             <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">

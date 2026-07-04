@@ -1,11 +1,14 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { useSession } from "next-auth/react";
 import Link from "next/link";
 import {
   ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer,
 } from "recharts";
+import { openInSpotify } from "./TrackRow";
+import { useRunningPlaylist } from "./useRunningPlaylist";
 
 interface ActivityDetail {
   activity_id: string;
@@ -77,6 +80,32 @@ interface ActivityData {
   records: ChartPoint[];
   recordsT0: string | null;
 }
+
+interface MixTrack {
+  uri: string | null;
+  name: string;
+  artist: string;
+  segment: string;
+  startsAtSec: number;
+  durationSec: number;
+  targetPaceSec: number | null;
+  actualPaceSec: number | null;
+  verdict: "on" | "fast" | "slow" | "unknown";
+  inLibrary?: boolean; // false once the track has been deleted from the library
+}
+
+interface MixPacing {
+  activityId: string | number | null;
+  tracks: MixTrack[];
+  summary: string | null;
+}
+
+const MIX_ROW_STYLE: Record<MixTrack["verdict"], string> = {
+  on: "bg-green-500/10 border-green-500/30 text-green-300",
+  fast: "bg-red-500/10 border-red-500/30 text-red-300",
+  slow: "bg-sky-500/10 border-sky-500/30 text-sky-300",
+  unknown: "bg-slate-800/40 border-white/5 text-slate-500",
+};
 
 function parseDuration(s: string | number | null): number | null {
   if (s === null || s === undefined) return null;
@@ -191,9 +220,9 @@ function ChartTooltip({ active, payload, label }: {
       <p className="text-slate-400 font-medium mb-1">{m}:{s.toString().padStart(2, "0")}</p>
       {payload.map(p => (
         <p key={p.name} style={{ color: p.color }}>
-          {p.name === "Pace"
-            ? `${fmtPaceSecs(p.value)} /mi`
-            : `${p.value} SPM`}
+          {p.name === "Cadence"
+            ? `${p.value} SPM`
+            : `${fmtPaceSecs(p.value)} /mi${p.name === "Target" ? " target" : ""}`}
         </p>
       ))}
     </div>
@@ -204,6 +233,46 @@ export function GarminActivityClient({ id }: { id: string }) {
   const [data, setData] = useState<ActivityData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [mix, setMix] = useState<MixPacing | null>(null);
+  const [votes, setVotes] = useState<{ uri: string; paceSec: number; vote: "up" | "down" }[]>([]);
+  const [deletedUris, setDeletedUris] = useState<Set<string>>(new Set());
+  const { data: session } = useSession();
+  const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
+
+  // Mouse-wheel zoom on the pace/cadence chart: zooms the time axis around
+  // the cursor; double-click resets.
+  const [xDomain, setXDomain] = useState<[number, number] | null>(null);
+  const xDomainRef = useRef(xDomain);
+  xDomainRef.current = xDomain;
+  const chartWrapRef = useRef<HTMLDivElement>(null);
+  const recordsRef = useRef<ChartPoint[]>([]);
+  recordsRef.current = data?.records ?? [];
+
+  useEffect(() => {
+    const el = chartWrapRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      const records = recordsRef.current;
+      if (records.length < 2) return;
+      e.preventDefault();
+      const dataMin = records[0].t;
+      const dataMax = records[records.length - 1].t;
+      const cur = xDomainRef.current ?? [dataMin, dataMax];
+      const rect = el.getBoundingClientRect();
+      const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+      const center = cur[0] + frac * (cur[1] - cur[0]);
+      const factor = e.deltaY > 0 ? 1.25 : 0.8;
+      let span = (cur[1] - cur[0]) * factor;
+      span = Math.min(dataMax - dataMin, Math.max(60, span));
+      let lo = center - frac * span;
+      let hi = lo + span;
+      if (lo < dataMin) { lo = dataMin; hi = lo + span; }
+      if (hi > dataMax) { hi = dataMax; lo = hi - span; }
+      setXDomain(span >= dataMax - dataMin ? null : [Math.round(lo), Math.round(hi)]);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [data]);
 
   useEffect(() => {
     fetch(`/api/garmin/activity/${id}`)
@@ -211,12 +280,83 @@ export function GarminActivityClient({ id }: { id: string }) {
       .then((d: ActivityData & { error?: string }) => {
         if (d.error) { setError(d.error); return; }
         setData(d);
+        // Load the "Today's Run" mix that was in place for this run's date
+        const date = d.activity?.start_time?.slice(0, 10);
+        if (date) {
+          fetch(`/api/garmin/run-pacing?date=${date}`)
+            .then(r => r.json())
+            .then((p: MixPacing & { error?: string }) => {
+              // Only show when this activity is the one the mix was matched to
+              if (!p.error && p.tracks?.length && String(p.activityId) === String(id)) setMix(p);
+            })
+            .catch(() => {});
+        }
       })
       .catch(e => setError(String(e)))
       .finally(() => setLoading(false));
+
+    fetch("/api/track-feedback")
+      .then(r => r.json())
+      .then((d: { votes?: { uri: string; paceSec: number; vote: "up" | "down" }[] }) => setVotes(d.votes ?? []))
+      .catch(() => {});
   }, [id]);
 
+  function voteFor(t: MixTrack): "up" | "down" | null {
+    if (!t.uri || t.targetPaceSec == null) return null;
+    const v = votes.find(v => v.uri === t.uri && Math.abs(v.paceSec - (t.targetPaceSec as number)) <= 10);
+    return v?.vote ?? null;
+  }
+
+  function castVote(t: MixTrack, vote: "up" | "down") {
+    if (!t.uri || t.targetPaceSec == null) return;
+    const next = voteFor(t) === vote ? null : vote; // clicking again clears
+    fetch("/api/track-feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uri: t.uri, paceSec: t.targetPaceSec, vote: next }),
+    })
+      .then(r => r.json())
+      .then((d: { votes?: { uri: string; paceSec: number; vote: "up" | "down" }[] }) => { if (d.votes) setVotes(d.votes); })
+      .catch(() => {});
+  }
+
+  // Remove the song from the Running playlist and library CSV — same as the
+  // dashboard's delete (the row stays, struck through, as a record of what
+  // played on this run).
+  function deleteTrack(t: MixTrack) {
+    if (!t.uri) return;
+    const uri = t.uri;
+    setDeletedUris(prev => { const next = new Set(Array.from(prev)); next.add(uri); return next; });
+
+    const token = session?.accessToken;
+    if (token && RUNNING_PLAYLIST_ID) {
+      fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ items: [{ uri }] }),
+      }).then(async r => {
+        if (!r.ok) console.error(`[delete] Spotify ${r.status}: ${await r.text().catch(() => "")}`);
+      }).catch(err => console.error("[delete] Spotify fetch error:", err));
+    }
+    fetch("/api/tracks/delete", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ spotifyUri: uri }),
+    }).catch(() => {});
+  }
+
   const a = data?.activity;
+
+  // Expected pace over time from the mix (song playing at each moment) —
+  // drawn on the pace chart in blue.
+  const targetAt = (t: number): number | null => {
+    if (!mix) return null;
+    const track = mix.tracks.find(x => t >= x.startsAtSec && t < x.startsAtSec + x.durationSec);
+    return track?.targetPaceSec ?? null;
+  };
+  const chartRecords = mix
+    ? (data?.records ?? []).map(r => ({ ...r, target: targetAt(r.t) }))
+    : data?.records ?? [];
 
   // HR zone times and total for the bar chart
   const zoneTimes = a ? [
@@ -236,6 +376,7 @@ export function GarminActivityClient({ id }: { id: string }) {
   const paceDomain = (() => {
     if (!hasChart) return [300, 720] as [number, number];
     const paces = (data?.records ?? []).map(r => r.pace).filter((p): p is number => p !== null);
+    (mix?.tracks ?? []).forEach(t => { if (t.targetPaceSec) paces.push(t.targetPaceSec); });
     if (!paces.length) return [300, 720] as [number, number];
     const min = Math.min(...paces);
     const max = Math.max(...paces);
@@ -310,11 +451,16 @@ export function GarminActivityClient({ id }: { id: string }) {
               <div className={CARD}>
                 <h2 className="font-semibold text-sm text-slate-300 mb-1">Pace & Cadence</h2>
                 <p className="text-xs text-slate-500 mb-4">
-                  10-second averages — faster pace at top, cadence on right axis
+                  10-second averages — faster pace at top, cadence on right axis ·
+                  scroll to zoom{xDomain ? " · " : ", "}
+                  {xDomain
+                    ? <button onClick={() => setXDomain(null)} className="text-sky-400 hover:text-sky-300 underline">reset zoom</button>
+                    : "double-click to reset"}
                 </p>
+                <div ref={chartWrapRef} onDoubleClick={() => setXDomain(null)}>
                 <ResponsiveContainer width="100%" height={260}>
                   <ComposedChart
-                    data={data!.records}
+                    data={chartRecords}
                     margin={{ top: 4, right: 52, left: 4, bottom: 0 }}
                   >
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
@@ -324,7 +470,8 @@ export function GarminActivityClient({ id }: { id: string }) {
                       dataKey="t"
                       type="number"
                       scale="linear"
-                      domain={["dataMin", "dataMax"]}
+                      domain={xDomain ?? ["dataMin", "dataMax"]}
+                      allowDataOverflow
                       tickFormatter={fmtTimeTick}
                       tick={{ fill: "#64748b", fontSize: 10 }}
                       axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
@@ -381,8 +528,23 @@ export function GarminActivityClient({ id }: { id: string }) {
                       connectNulls={false}
                       isAnimationActive={false}
                     />
+                    {mix && (
+                      <Line
+                        yAxisId="pace"
+                        type="stepAfter"
+                        dataKey="target"
+                        name="Target"
+                        stroke="#3b82f6"
+                        strokeWidth={1.5}
+                        strokeDasharray="5 3"
+                        dot={false}
+                        connectNulls={false}
+                        isAnimationActive={false}
+                      />
+                    )}
                   </ComposedChart>
                 </ResponsiveContainer>
+                </div>
 
                 <div className="flex gap-6 mt-3 text-xs text-slate-500">
                   <span className="flex items-center gap-1.5">
@@ -393,7 +555,84 @@ export function GarminActivityClient({ id }: { id: string }) {
                     <span className="w-4 h-0.5 bg-orange-400 inline-block rounded" />
                     Cadence (SPM)
                   </span>
+                  {mix && (
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-4 h-0.5 bg-blue-500 inline-block rounded" />
+                      Target pace /mi
+                    </span>
+                  )}
                 </div>
+              </div>
+            )}
+
+            {/* "Today's Run" mix vs pace */}
+            {mix && mix.tracks.length > 0 && (
+              <div className={CARD}>
+                <h2 className="font-semibold text-sm text-slate-300 mb-1">🎧 Mix vs Pace</h2>
+                <p className="text-xs text-slate-500 mb-3">
+                  Expected pace while each song played (±10 s/mi tolerance) —
+                  <span className="text-green-400"> on pace</span> ·
+                  <span className="text-red-400"> too fast</span> ·
+                  <span className="text-sky-400"> too slow</span>.
+                  👎 drops a song from mixes at this pace, 👍 plays it more often.
+                </p>
+                <div className="space-y-1 max-h-80 overflow-y-auto pr-1">
+                  {mix.tracks.map((t, i) => {
+                    const v = voteFor(t);
+                    const isDeleted = t.uri !== null && (deletedUris.has(t.uri) || t.inLibrary === false);
+                    return (
+                      <div
+                        key={i}
+                        className={`flex items-center gap-2 text-xs rounded border px-2 py-1.5 ${MIX_ROW_STYLE[t.verdict]} ${isDeleted ? "opacity-40 line-through" : ""}`}
+                        title={t.segment}
+                      >
+                        <span className="text-slate-600 shrink-0 tabular-nums w-10">{fmtTimeTick(t.startsAtSec)}</span>
+                        {t.uri ? (
+                          <button
+                            onClick={() => openInSpotify(t.uri!)}
+                            className="flex-1 min-w-0 truncate text-left hover:underline"
+                            title={`${t.name} — open in Spotify`}
+                          >
+                            {t.name} <span className="opacity-60">— {t.artist}</span>
+                          </button>
+                        ) : (
+                          <span className="flex-1 min-w-0 truncate">{t.name} <span className="opacity-60">— {t.artist}</span></span>
+                        )}
+                        <span className="shrink-0 tabular-nums" title="actual / expected pace per mile">
+                          {t.actualPaceSec ? fmtPaceSecs(t.actualPaceSec) : "—"}
+                          {t.targetPaceSec ? ` / ${fmtPaceSecs(t.targetPaceSec)}` : ""}
+                        </span>
+                        {t.uri && t.targetPaceSec != null && !isDeleted && (
+                          <span className="flex items-center gap-1 shrink-0 ml-1">
+                            <button
+                              onClick={() => castVote(t, "up")}
+                              className={`px-1 rounded transition-all ${v === "up" ? "opacity-100 scale-110 bg-green-500/20" : "opacity-35 hover:opacity-80"}`}
+                              title="Play this more often at this pace"
+                            >
+                              👍
+                            </button>
+                            <button
+                              onClick={() => castVote(t, "down")}
+                              className={`px-1 rounded transition-all ${v === "down" ? "opacity-100 scale-110 bg-red-500/20" : "opacity-35 hover:opacity-80"}`}
+                              title="Exclude from runs at this pace"
+                            >
+                              👎
+                            </button>
+                            <button
+                              onClick={() => deleteTrack(t)}
+                              className="px-1 rounded opacity-35 hover:opacity-100 hover:text-red-400 transition-all"
+                              title="Delete from the Running playlist and library"
+                            >
+                              🗑
+                            </button>
+                          </span>
+                        )}
+                        {isDeleted && <span className="shrink-0 ml-1 text-slate-500 no-underline">deleted</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+                {mix.summary && <p className="text-xs text-slate-400 mt-2">{mix.summary}</p>}
               </div>
             )}
 

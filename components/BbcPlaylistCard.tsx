@@ -5,8 +5,7 @@ import { useSession } from "next-auth/react";
 import Link from "next/link";
 import { FunnelIcon, SparklesIcon, MetronomeIcon, MiniSpinner } from "./TrackRow";
 import { FloatingCard } from "./FloatingCard";
-
-const RUNNING_PLAYLIST_ID = process.env.NEXT_PUBLIC_RUNNING_PLAYLIST_ID ?? "";
+import { useRunningPlaylist } from "./useRunningPlaylist";
 
 interface Track {
   uri: string;
@@ -150,6 +149,7 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy }: {
 
 export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref, onSimilar, onSuggest, suggestBusy, inlineCard }: Props) {
   const { data: session } = useSession();
+  const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);

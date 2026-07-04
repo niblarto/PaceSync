@@ -1,9 +1,12 @@
 ﻿"use client";
 
 import { useState, useEffect } from "react";
+import { useSession } from "next-auth/react";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 import type { TrackWithBPM } from "@/types";
 import { RouteMapLightbox } from "./RouteMapLightbox";
+import { openInSpotify } from "./TrackRow";
+import { useRunningPlaylist } from "./useRunningPlaylist";
 
 interface PaceSpmRow { bucket: number; avg_spm: number; records: number; }
 
@@ -164,9 +167,112 @@ function useRunnaData(): RunnaData {
 
 // ── Runna Summary Card (past 8 days) ─────────────────────────────────────────
 
+interface PacingTrack {
+  uri: string | null;
+  name: string;
+  artist: string;
+  segment: string;
+  targetPaceSec: number | null;
+  actualPaceSec: number | null;
+  verdict: "on" | "fast" | "slow" | "unknown";
+  inLibrary?: boolean; // false once the track has been deleted from the library
+}
+interface PacingState {
+  loading: boolean;
+  tracks: PacingTrack[];
+  summary: string | null;
+  none?: boolean;
+}
+
+const PACING_STYLE: Record<PacingTrack["verdict"], string> = {
+  on: "bg-green-500/10 border-green-500/30 text-green-300",
+  fast: "bg-red-500/10 border-red-500/30 text-red-300",
+  slow: "bg-sky-500/10 border-sky-500/30 text-sky-300",
+  unknown: "bg-slate-800/40 border-white/5 text-slate-500",
+};
+
+function fmtPaceSec(s: number | null): string {
+  if (!s) return "—";
+  return `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
+}
+
 export function RunnaSummaryCard() {
   const { pastRuns, loading, error } = useRunnaData();
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [pacing, setPacing] = useState<Record<string, PacingState>>({});
+  const [votes, setVotes] = useState<{ uri: string; paceSec: number; vote: "up" | "down" }[]>([]);
+  const [votesLoaded, setVotesLoaded] = useState(false);
+  const [deletedUris, setDeletedUris] = useState<Set<string>>(new Set());
+  const { data: session } = useSession();
+  const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
+
+  function loadVotes() {
+    if (votesLoaded) return;
+    setVotesLoaded(true);
+    fetch("/api/track-feedback")
+      .then(r => r.json())
+      .then((d: { votes?: { uri: string; paceSec: number; vote: "up" | "down" }[] }) => setVotes(d.votes ?? []))
+      .catch(() => {});
+  }
+
+  function voteFor(t: PacingTrack): "up" | "down" | null {
+    if (!t.uri || t.targetPaceSec == null) return null;
+    const v = votes.find(v => v.uri === t.uri && Math.abs(v.paceSec - (t.targetPaceSec as number)) <= 10);
+    return v?.vote ?? null;
+  }
+
+  function castVote(t: PacingTrack, vote: "up" | "down") {
+    if (!t.uri || t.targetPaceSec == null) return;
+    const next = voteFor(t) === vote ? null : vote;
+    fetch("/api/track-feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uri: t.uri, paceSec: t.targetPaceSec, vote: next }),
+    })
+      .then(r => r.json())
+      .then((d: { votes?: { uri: string; paceSec: number; vote: "up" | "down" }[] }) => { if (d.votes) setVotes(d.votes); })
+      .catch(() => {});
+  }
+
+  // Same delete as the dashboard/activity page: Spotify Running playlist +
+  // library CSV; the row stays struck through as a record of what played.
+  function deleteTrack(t: PacingTrack) {
+    if (!t.uri) return;
+    const uri = t.uri;
+    setDeletedUris(prev => { const next = new Set(Array.from(prev)); next.add(uri); return next; });
+    const token = session?.accessToken;
+    if (token && RUNNING_PLAYLIST_ID) {
+      fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ items: [{ uri }] }),
+      }).catch(err => console.error("[delete] Spotify fetch error:", err));
+    }
+    fetch("/api/tracks/delete", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ spotifyUri: uri }),
+    }).catch(() => {});
+  }
+
+  function fetchPacing(date: string) {
+    if (pacing[date]) return;
+    setPacing(p => ({ ...p, [date]: { loading: true, tracks: [], summary: null } }));
+    fetch(`/api/garmin/run-pacing?date=${date}`)
+      .then(r => r.json())
+      .then((d: { entry?: { workoutTitle?: string } | null; tracks?: PacingTrack[]; summary?: string | null; error?: string }) => {
+        setPacing(p => ({
+          ...p,
+          [date]: {
+            loading: false,
+            tracks: d.tracks ?? [],
+            summary: d.summary ?? null,
+            none: !d.entry || !(d.tracks?.length),
+          },
+        }));
+      })
+      .catch(() => setPacing(p => ({ ...p, [date]: { loading: false, tracks: [], summary: null, none: true } })));
+  }
 
   return (
     <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
@@ -204,7 +310,10 @@ export function RunnaSummaryCard() {
             return (
               <div key={run.uid}>
                 <button
-                  onClick={() => setExpanded(isOpen ? null : run.uid)}
+                  onClick={() => {
+                    setExpanded(isOpen ? null : run.uid);
+                    if (!isOpen) { fetchPacing(run.date); loadVotes(); }
+                  }}
                   className="w-full px-5 py-3 flex items-center gap-3 text-left hover:bg-slate-800/40 transition-colors"
                 >
                   <span className={`text-xs shrink-0 w-20 ${isToday(run.date) ? "text-green-400 font-semibold" : "text-slate-500"}`}>
@@ -241,6 +350,78 @@ export function RunnaSummaryCard() {
                         ))}
                       </div>
                     )}
+                    {(() => {
+                      const pd = pacing[run.date];
+                      if (!pd) return null;
+                      if (pd.loading) return <p className="text-xs text-slate-600">Loading mix pacing…</p>;
+                      if (pd.none || pd.tracks.length === 0) return null;
+                      return (
+                        <div className="space-y-1">
+                          <p className="text-xs text-slate-500 font-medium mb-1">
+                            🎧 &quot;Today&apos;s Run&quot; mix vs actual pace
+                            <span className="ml-2 font-normal text-slate-600">
+                              green = on pace · red = too fast · blue = too slow
+                            </span>
+                          </p>
+                          <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
+                            {pd.tracks.map((t, i) => {
+                              const v = voteFor(t);
+                              const isDeleted = t.uri !== null && (deletedUris.has(t.uri) || t.inLibrary === false);
+                              return (
+                                <div
+                                  key={i}
+                                  className={`flex items-center gap-2 text-xs rounded border px-2 py-1 ${PACING_STYLE[t.verdict]} ${isDeleted ? "opacity-40 line-through" : ""}`}
+                                  title={t.segment}
+                                >
+                                  {t.uri ? (
+                                    <button
+                                      onClick={() => openInSpotify(t.uri!)}
+                                      className="flex-1 min-w-0 truncate text-left hover:underline"
+                                      title={`${t.name} — open in Spotify`}
+                                    >
+                                      {t.name} — {t.artist}
+                                    </button>
+                                  ) : (
+                                    <span className="flex-1 min-w-0 truncate">{t.name} — {t.artist}</span>
+                                  )}
+                                  <span className="shrink-0 tabular-nums" title="actual / target pace per mile">
+                                    {fmtPaceSec(t.actualPaceSec)}
+                                    {t.targetPaceSec ? ` / ${fmtPaceSec(t.targetPaceSec)}` : ""}
+                                  </span>
+                                  {t.uri && t.targetPaceSec != null && !isDeleted && (
+                                    <span className="flex items-center gap-1 shrink-0 ml-1">
+                                      <button
+                                        onClick={() => castVote(t, "up")}
+                                        className={`px-1 rounded transition-all ${v === "up" ? "opacity-100 scale-110 bg-green-500/20" : "opacity-35 hover:opacity-80"}`}
+                                        title="Play this more often at this pace"
+                                      >
+                                        👍
+                                      </button>
+                                      <button
+                                        onClick={() => castVote(t, "down")}
+                                        className={`px-1 rounded transition-all ${v === "down" ? "opacity-100 scale-110 bg-red-500/20" : "opacity-35 hover:opacity-80"}`}
+                                        title="Exclude from runs at this pace"
+                                      >
+                                        👎
+                                      </button>
+                                      <button
+                                        onClick={() => deleteTrack(t)}
+                                        className="px-1 rounded opacity-35 hover:opacity-100 hover:text-red-400 transition-all"
+                                        title="Delete from the Running playlist and library"
+                                      >
+                                        🗑
+                                      </button>
+                                    </span>
+                                  )}
+                                  {isDeleted && <span className="shrink-0 ml-1 text-slate-500 no-underline">deleted</span>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {pd.summary && <p className="text-xs text-slate-400 mt-1">{pd.summary}</p>}
+                        </div>
+                      );
+                    })()}
                     {run.appUrl && (
                       <a
                         href={run.appUrl}
@@ -265,9 +446,10 @@ export function RunnaSummaryCard() {
 
 // ── Runna Schedule Card (upcoming) ────────────────────────────────────────────
 
-interface AiDjTrack { uri: string; name: string; artist: string; startsAt: string; tempo: number; camelot: string | null; energy: number; }
-interface AiDjTimelineSegment { segment: string; targetBpm: number; tracks: AiDjTrack[]; }
+interface AiDjTrack { uri: string; name: string; artist: string; startsAt: string; durationSec?: number; tempo: number; camelot: string | null; energy: number; }
+interface AiDjTimelineSegment { segment: string; targetBpm: number; targetPaceSec?: number | null; tracks: AiDjTrack[]; }
 interface AiDjMixResponse { trackUris: string[]; totalSec: number; timeline: AiDjTimelineSegment[]; }
+export type AiDjTimeline = AiDjTimelineSegment[];
 
 interface RunnaScheduleProps {
   garminConfigured?: boolean;
@@ -275,7 +457,7 @@ interface RunnaScheduleProps {
   activePaces?: string[];
   aiDjEnabled?: boolean;
   /** Called once a mix is built — the parent populates the central track list/save UI rather than saving directly */
-  onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string) => void;
+  onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimelineSegment[]) => void;
 }
 
 type MixStatus = { status: "building" | "done" | "error"; error?: string };
@@ -369,7 +551,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
         energy: t.energy,
       }));
 
-      onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, w.segments, w.date);
+      onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, w.segments, w.date, mix.timeline);
       setMixState(s => ({ ...s, [w.uid]: { status: "done" } }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to build mix";

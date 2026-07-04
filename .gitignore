@@ -22,3 +22,6 @@ spotify-cache.json
 .analysis/
 .analysys/*
 cron-activity.log
+todays-run-history.json
+track-pace-feedback.json
+running-playlist.json

@@ -252,10 +252,10 @@ export function GarminClient() {
         )}
 
         {data && (
-          <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-6 items-start">
+          <div className="grid grid-cols-1 gap-6 items-start">
 
-            {/* Left column — Pace / Cadence reference */}
-            <div className="sticky top-20">
+            {/* Left column — Pace / Cadence reference (hidden by request; data still available via API) */}
+            <div className="sticky top-20 hidden">
               <div className={CARD}>
                 <h2 className="font-semibold text-sm text-slate-300 mb-1">Pace / Cadence</h2>
                 <p className="text-xs text-slate-500 mb-3">Avg SPM by pace from all activities</p>

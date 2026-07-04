@@ -1,5 +1,7 @@
 import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { loadGarminConfig } from "@/lib/garmin-config";
+import { computeEasyPaceBias } from "@/lib/run-pace-bias";
+import { getAllTrackVotes } from "@/lib/track-feedback";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { spawn } from "child_process";
@@ -16,7 +18,8 @@ export interface AiDjMixResponse {
   timeline: {
     segment: string;
     targetBpm: number;
-    tracks: { uri: string; name: string; artist: string; startsAt: string; tempo: number; camelot: string | null; energy: number }[];
+    targetPaceSec?: number | null;
+    tracks: { uri: string; name: string; artist: string; startsAt: string; durationSec?: number; tempo: number; camelot: string | null; energy: number }[];
   }[];
 }
 
@@ -75,11 +78,15 @@ export async function buildAiDjMix(title: string, segments: string[]): Promise<A
     return { ok: false, error: "No library CSV - upload Running.csv in Settings first" };
   }
 
+  const easyBias = computeEasyPaceBias();
+  if (easyBias > 0) console.log(`[ai-dj] recent easy runs ran ~${easyBias}s/mi fast — easing easy segments`);
+  const trackFeedback = getAllTrackVotes();
+
   try {
     const res = await fetch(`${config.url}/mix`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, segments, csv, cadenceBuckets: loadCadenceBuckets() }),
+      body: JSON.stringify({ title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback }),
       signal: AbortSignal.timeout(MIX_TIMEOUT_MS),
     });
     const data = await res.json() as AiDjMixResponse & { error?: string };
@@ -93,7 +100,7 @@ export async function buildAiDjMix(title: string, segments: string[]): Promise<A
     // shape, and it uses the local Garmin DB for exact pace->BPM.
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[ai-dj] remote service failed (${msg}) — trying on-Pi fallback`);
-    const local = await buildMixLocally(segments);
+    const local = await buildMixLocally(segments, easyBias, trackFeedback);
     if (local.ok) return local;
     const hint = /timeout|abort/i.test(msg)
       ? "AI DJ service timed out"
@@ -102,7 +109,7 @@ export async function buildAiDjMix(title: string, segments: string[]): Promise<A
   }
 }
 
-function buildMixLocally(segments: string[]): Promise<AiDjMixResult> {
+function buildMixLocally(segments: string[], easyBias = 0, trackFeedback: object[] = []): Promise<AiDjMixResult> {
   const script = join(process.cwd(), "scripts", "ai_dj_bridge.py");
   const csvPath = join(process.cwd(), "public", "Running.csv");
 
@@ -133,7 +140,7 @@ function buildMixLocally(segments: string[]): Promise<AiDjMixResult> {
       resolve({ ok: false, error: e.message });
     });
 
-    proc.stdin.write(JSON.stringify({ segments }));
+    proc.stdin.write(JSON.stringify({ segments, easyBias, trackFeedback }));
     proc.stdin.end();
   });
 }

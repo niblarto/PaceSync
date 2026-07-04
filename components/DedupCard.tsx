@@ -2,8 +2,7 @@
 
 import { useState } from "react";
 import { useSession } from "next-auth/react";
-
-const RUNNING_PLAYLIST_ID = process.env.NEXT_PUBLIC_RUNNING_PLAYLIST_ID ?? "";
+import { useRunningPlaylist } from "./useRunningPlaylist";
 
 function Spinner() {
   return (
@@ -16,6 +15,7 @@ function Spinner() {
 
 export function DedupCard() {
   const { data: session } = useSession();
+  const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);

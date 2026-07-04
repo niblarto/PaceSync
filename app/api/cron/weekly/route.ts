@@ -7,7 +7,10 @@ import { appendCronLog } from "@/lib/cron-log";
 import fs from "fs";
 import path from "path";
 
-const RUNNING_PLAYLIST_ID = process.env.NEXT_PUBLIC_RUNNING_PLAYLIST_ID ?? "";
+import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+
+// Resolved per call so a playlist change in Settings applies immediately.
+const runningPlaylistId = () => loadRunningPlaylistConfig().id;
 const CACHE_FILE = path.join(process.cwd(), "spotify-cache.json");
 const BBC_PROGRAMMES_FILE = path.join(process.cwd(), "bbc-programmes.json");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
@@ -215,7 +218,7 @@ async function processPlaylist(
 
   // Add matched URIs to Running playlist in chunks of 100
   for (let i = 0; i < uris.length; i += 100) {
-    const res = await fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
+    const res = await fetch(`https://api.spotify.com/v1/playlists/${runningPlaylistId()}/items`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ uris: uris.slice(i, i + 100) }),
@@ -230,7 +233,7 @@ async function processPlaylist(
 
 async function dedup(token: string): Promise<{ removed: number; remaining: number }> {
   const uris: string[] = [];
-  let url: string | null = `https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items?limit=100`;
+  let url: string | null = `https://api.spotify.com/v1/playlists/${runningPlaylistId()}/items?limit=100`;
 
   while (url) {
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -255,7 +258,7 @@ async function dedup(token: string): Promise<{ removed: number; remaining: numbe
   const chunks: string[][] = [];
   for (let i = 0; i < deduped.length; i += 100) chunks.push(deduped.slice(i, i + 100));
 
-  const putRes = await fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
+  const putRes = await fetch(`https://api.spotify.com/v1/playlists/${runningPlaylistId()}/items`, {
     method: "PUT",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ uris: chunks[0] ?? [] }),
@@ -263,7 +266,7 @@ async function dedup(token: string): Promise<{ removed: number; remaining: numbe
   if (!putRes.ok) throw new Error(`PUT ${putRes.status}: ${await putRes.text()}`);
 
   for (let i = 1; i < chunks.length; i++) {
-    const postRes = await fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
+    const postRes = await fetch(`https://api.spotify.com/v1/playlists/${runningPlaylistId()}/items`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ uris: chunks[i] }),

@@ -64,10 +64,21 @@ def main():
         print(json.dumps({"error": "No runnable segments recognized in the workout"}))
         sys.exit(1)
 
+    try:
+        easy_bias = float(payload.get("easyBias") or 0.0)
+    except (TypeError, ValueError):
+        easy_bias = 0.0
+
+    feedback = payload.get("trackFeedback")
+    if not isinstance(feedback, list):
+        feedback = None
+
     library = _load_library(csv_path)
     try:
         playlist = build_workout_playlist(
-            segments, library, model="", use_llm=False, cadence_buckets=_cadence_buckets()
+            segments, library, model="", use_llm=False,
+            cadence_buckets=_cadence_buckets(), easy_bias_sec=easy_bias,
+            track_feedback=feedback,
         )
     except ValueError as e:
         print(json.dumps({"error": str(e)}))
@@ -75,15 +86,18 @@ def main():
 
     timeline = []
     for seg_label, group in playlist.groupby("Segment", sort=False):
+        target_pace = group["Target Pace"].iloc[0] if "Target Pace" in group.columns else None
         timeline.append({
             "segment": seg_label,
             "targetBpm": float(group["Target BPM"].iloc[0]),
+            "targetPaceSec": float(target_pace) if pd.notna(target_pace) else None,
             "tracks": [
                 {
                     "uri": row.get("Track URI"),
                     "name": row["Track Name"],
                     "artist": row["Artist Name(s)"],
                     "startsAt": row["Starts At"],
+                    "durationSec": float(row["Duration (ms)"] / 1000),
                     "tempo": float(row["Tempo"]),
                     "camelot": row["Camelot"],
                     "energy": float(row["Energy"]),

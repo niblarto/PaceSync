@@ -9,6 +9,7 @@ import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { fetchRunnaSchedule, TODAYS_RUN_PLAYLIST, type RunnaWorkout } from "@/lib/runna-schedule";
 import { loadNtfyTopic } from "@/lib/ntfy-config";
 import { appendCronLog } from "@/lib/cron-log";
+import { saveTodaysRunEntry, timelineToHistoryTracks } from "@/lib/todays-run-history";
 
 // Runs daily at 15:30 (Pi local time, installed by deploy.py): if there's a
 // run scheduled for tomorrow, pre-build its AI DJ mix and save it straight to
@@ -101,6 +102,12 @@ async function runAiDjPrebuild() {
     const description = `${w.title} - ${dd}-${mm}-${yy}`;
     try {
       const saved = await upsertPlaylist(token, user.id, TODAYS_RUN_PLAYLIST, description, trackUris);
+      saveTodaysRunEntry({
+        date: w.date,
+        workoutTitle: w.title,
+        savedAt: new Date().toISOString(),
+        tracks: timelineToHistoryTracks(mixResult.mix.timeline),
+      });
       results.push({ title: w.title, ok: true, tracks: trackUris.length, url: saved.url });
       await notify(
         `"${w.title}" ready for ${tomorrow} — ${trackUris.length} tracks saved as "${TODAYS_RUN_PLAYLIST}"`,

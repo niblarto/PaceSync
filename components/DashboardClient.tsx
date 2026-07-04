@@ -9,7 +9,8 @@ import { ZoneCard } from "./ZoneCard";
 import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl } from "./TrackRow";
 import { BbcPlaylistCard } from "./BbcPlaylistCard";
 import { DedupCard } from "./DedupCard";
-import { RunnaSummaryCard, RunnaScheduleCard } from "./RunnaCard";
+import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline } from "./RunnaCard";
+import { useRunningPlaylist } from "./useRunningPlaylist";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
 
 function prewarmArt(tracks: TrackWithBPM[]) {
@@ -96,7 +97,6 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy,
   );
 }
 
-const RUNNING_PLAYLIST_ID = process.env.NEXT_PUBLIC_RUNNING_PLAYLIST_ID ?? "";
 const TODAYS_RUN_PLAYLIST = "Today's Run";
 
 const BBC_DEFAULTS = [
@@ -240,6 +240,7 @@ function parseExportifyCsv(text: string): CsvParseResult {
 
 export function DashboardClient({ spotifyUser }: Props) {
   const { data: session } = useSession();
+  const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
   const [zones, setZones]               = useState<RunningZone[]>([]);
   const [selectedZones, setSelectedZones] = useState<RunningZone[]>([]);
   const [allTracks, setAllTracks]       = useState<TrackWithBPM[]>([]);
@@ -264,7 +265,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [enriching, setEnriching] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
   const enrichAttempted = useRef(false);
-  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; stale: boolean } | null>(null);
+  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean } | null>(null);
   const [remixing, setRemixing] = useState(false);
   const [todaysRunSaving, setTodaysRunSaving] = useState(false);
   const [todaysRunSaved, setTodaysRunSaved] = useState(false);
@@ -474,13 +475,13 @@ export function DashboardClient({ spotifyUser }: Props) {
   // Populates the central track list/save UI from an AI DJ mix (built in
   // RunnaScheduleCard) instead of saving straight to Spotify — the user picks
   // which playlist(s) to save to from here.
-  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string) {
+  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimeline) {
     setSelectedZones([]);
     setPaceFilter(null);
     setSimilarFilter(null);
     setNoBpmFilter(false);
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
-    setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, stale: false });
+    setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false });
     setPlaylistName(name);
     setStep("ready");
     setSaveError(null);
@@ -510,7 +511,7 @@ export function DashboardClient({ spotifyUser }: Props) {
         error?: string;
         trackUris?: string[];
         totalSec?: number;
-        timeline?: { tracks: { uri: string; name: string; artist: string; tempo: number; energy: number }[] }[];
+        timeline?: AiDjTimeline;
       };
       if (!res.ok || mix.error) throw new Error(mix.error ?? `Mix failed (${res.status})`);
       const tracks: TrackWithBPM[] = (mix.timeline ?? []).flatMap(seg => seg.tracks).map(t => ({
@@ -524,7 +525,7 @@ export function DashboardClient({ spotifyUser }: Props) {
         energy: t.energy,
       })).filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
       if (tracks.length === 0) throw new Error("No tracks matched this workout");
-      setAiDjMix(prev => prev ? { ...prev, tracks, totalSec: mix.totalSec ?? prev.totalSec, stale: false } : prev);
+      setAiDjMix(prev => prev ? { ...prev, tracks, totalSec: mix.totalSec ?? prev.totalSec, timeline: mix.timeline ?? prev.timeline, stale: false } : prev);
       setStep("ready");
       setSavedUrl(null);
       setTodaysRunSaved(false);
@@ -598,6 +599,15 @@ export function DashboardClient({ spotifyUser }: Props) {
         }
       } else {
         setTodaysRunSaved(true);
+      }
+      // Snapshot which mix "Today's Run" now holds, so the past run can be
+      // reviewed song-by-song against the pace actually run.
+      if (aiDjMix?.timeline?.length) {
+        fetch("/api/todays-run/history", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ date: aiDjMix.date, workoutTitle: aiDjMix.workoutTitle, timeline: aiDjMix.timeline }),
+        }).catch(() => {});
       }
     } catch (e) {
       setTodaysRunError(e instanceof Error ? e.message : "Failed to save playlist");
