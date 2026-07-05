@@ -460,7 +460,32 @@ interface RunnaScheduleProps {
   onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimelineSegment[]) => void;
 }
 
-type MixStatus = { status: "building" | "done" | "error"; error?: string };
+type MixStatus = { status: "building" | "done" | "error"; error?: string; startedAt?: number };
+
+// The mix build is one blocking backend call (remote LLM service or on-Pi
+// fallback) with no progress events, so this bar is time-based: it eases
+// toward 95% over a typical ~45s build and jumps to done when the response
+// lands. Better than a static "Mixing…" label for a call that can run 1-3 min.
+function MixProgressBar({ startedAt }: { startedAt: number }) {
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => forceTick(n => n + 1), 500);
+    return () => clearInterval(t);
+  }, []);
+  const elapsedSec = (Date.now() - startedAt) / 1000;
+  const pct = Math.min(95, 100 * (1 - Math.exp(-elapsedSec / 45)));
+  return (
+    <div className="flex items-center gap-2 flex-1 min-w-[120px] max-w-[240px]">
+      <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+        <div
+          className="h-full rounded-full bg-purple-400 transition-[width] duration-500 ease-linear"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="text-xs text-slate-500 tabular-nums shrink-0">{Math.floor(elapsedSec)}s</span>
+    </div>
+  );
+}
 
 // "2026-07-08" + "Steady into Tempo" -> "08-07-26 Steady into Tempo"
 function mixName(w: RunnaWorkout): string {
@@ -529,7 +554,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
   }, [expanded, garminConfigured, workouts]);
 
   async function buildMix(w: RunnaWorkout) {
-    setMixState(s => ({ ...s, [w.uid]: { status: "building" } }));
+    setMixState(s => ({ ...s, [w.uid]: { status: "building", startedAt: Date.now() } }));
     try {
       const mixRes = await fetch("/api/ai-dj/mix", {
         method: "POST",
@@ -689,7 +714,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                             {st?.status === "building" ? "🎧 Mixing…" : st?.status === "done" ? "🎧 Remix" : "🎧 AI DJ Mix"}
                           </button>
                           {st?.status === "building" && (
-                            <span className="text-xs text-slate-500">Building pace-matched playlist…</span>
+                            <MixProgressBar startedAt={st.startedAt ?? Date.now()} />
                           )}
                           {st?.status === "done" && (
                             <span className="text-xs text-purple-300/80">Loaded into the track list — review &amp; save from there ↑</span>
