@@ -7,7 +7,7 @@ import { upsertPlaylist } from "@/lib/spotify-playlist";
 import { buildAiDjMix } from "@/lib/ai-dj-mix";
 import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { fetchRunnaSchedule, TODAYS_RUN_PLAYLIST, type RunnaWorkout } from "@/lib/runna-schedule";
-import { sendNtfy } from "@/lib/ntfy";
+import { sendNtfy, trackLinkLines } from "@/lib/ntfy";
 import { appendCronLog } from "@/lib/cron-log";
 import { saveTodaysRunEntry, timelineToHistoryTracks } from "@/lib/todays-run-history";
 
@@ -97,8 +97,11 @@ async function runAiDjPrebuild() {
         tracks: timelineToHistoryTracks(mixResult.mix.timeline),
       });
       results.push({ title: w.title, ok: true, tracks: trackUris.length, url: saved.url });
+      const trackList = trackLinkLines(
+        mixResult.mix.timeline.flatMap(seg => seg.tracks.map(t => ({ uri: t.uri, name: t.name, artist: t.artist })))
+      );
       await notify(
-        `"${w.title}" ready for ${tomorrow} — ${trackUris.length} tracks saved as "${TODAYS_RUN_PLAYLIST}"`,
+        `"${w.title}" ready for ${tomorrow} — ${trackUris.length} tracks saved as "${TODAYS_RUN_PLAYLIST}"\n\n${trackList}`,
         { title: "🎧 AI DJ Mix Ready", tags: "musical_note,white_check_mark" }
       );
       appendCronLog("AI DJ", `✓ "${w.title}" (${tomorrow}) — ${trackUris.length} tracks saved to "${TODAYS_RUN_PLAYLIST}"`);

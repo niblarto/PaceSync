@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getFreshToken } from "@/lib/tokenStore";
-import { sendNtfy } from "@/lib/ntfy";
+import { sendNtfy, trackLinkLines } from "@/lib/ntfy";
 import { appendCronLog } from "@/lib/cron-log";
 import fs from "fs";
 import path from "path";
@@ -148,7 +148,10 @@ async function processPlaylist(
   name: string,
   token: string,
   cache: Map<string, CacheEntry>
-): Promise<{ found: number; matched: number; skipped: number; retryAfter: number | null }> {
+): Promise<{
+  found: number; matched: number; skipped: number; retryAfter: number | null;
+  added: { uri: string; name: string; artist: string }[];
+}> {
   const pageRes = await fetch(`https://www.bbc.co.uk/programmes/${pid}`, {
     headers: { "User-Agent": UA }, signal: AbortSignal.timeout(10000),
   });
@@ -160,7 +163,7 @@ async function processPlaylist(
   if (tracks === null && episodePid !== pid) tracks = await getSegments(pid);
   if (tracks === null) throw new Error("No segments data");
 
-  const uris: string[] = [];
+  const added: { uri: string; name: string; artist: string }[] = [];
   let retryAfter: number | null = null;
   let newCacheEntries = 0;
 
@@ -170,7 +173,7 @@ async function processPlaylist(
 
     if (cache.has(key)) {
       const entry = cache.get(key)!;
-      if (entry?.uri) uris.push(entry.uri);
+      if (entry?.uri) added.push({ uri: entry.uri, name: entry.name, artist: entry.artistName });
       continue;
     }
 
@@ -196,7 +199,7 @@ async function processPlaylist(
         : null;
       cache.set(key, entry);
       newCacheEntries++;
-      if (entry?.uri) uris.push(entry.uri);
+      if (entry?.uri) added.push({ uri: entry.uri, name: entry.name, artist: entry.artistName });
     }
 
     await sleep(150);
@@ -205,6 +208,7 @@ async function processPlaylist(
   if (newCacheEntries > 0) saveCache(cache);
 
   // Add matched URIs to Running playlist in chunks of 100
+  const uris = added.map(a => a.uri);
   for (let i = 0; i < uris.length; i += 100) {
     const res = await fetch(`https://api.spotify.com/v1/playlists/${runningPlaylistId()}/items`, {
       method: "POST",
@@ -214,7 +218,7 @@ async function processPlaylist(
     if (!res.ok) throw new Error(`Add tracks ${res.status}: ${await res.text()}`);
   }
 
-  return { found: tracks.length, matched: uris.length, skipped: tracks.length - uris.length, retryAfter };
+  return { found: tracks.length, matched: uris.length, skipped: tracks.length - uris.length, retryAfter, added };
 }
 
 // ── Dedup ──────────────────────────────────────────────────────────────────
@@ -321,8 +325,9 @@ async function runUpdate(): Promise<{
         : "";
       const songWord = r.matched === 1 ? "song" : "songs";
       const targetName = loadRunningPlaylistConfig().name || "the running playlist";
+      const trackList = r.added.length ? `\n\n${trackLinkLines(r.added)}` : "";
       await notify(
-        `${r.matched} ${songWord} added to "${targetName}" from ${r.found} BBC tracks${rateLimitNote}`,
+        `${r.matched} ${songWord} added to "${targetName}" from ${r.found} BBC tracks${rateLimitNote}${trackList}`,
         { title: `✅ ${playlist.name}`, tags: "white_check_mark,musical_note" }
       );
       programmeResults.push({

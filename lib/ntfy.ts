@@ -14,6 +14,29 @@ export interface NtfyOptions {
 
 const PRIORITY = { min: 1, low: 2, default: 3, high: 4, max: 5 } as const;
 
+// Tappable Spotify links for a notification body — the ntfy apps auto-link
+// plain URLs. Bodies are capped around 4 KB, so the list truncates with a
+// "+N more" line rather than losing the whole notification.
+export function trackLinkLines(
+  tracks: { uri: string; name: string; artist: string }[],
+  maxChars = 3200
+): string {
+  const lines: string[] = [];
+  let used = 0;
+  for (let i = 0; i < tracks.length; i++) {
+    const t = tracks[i];
+    const id = t.uri.split(":")[2] ?? t.uri;
+    const line = `${t.name} — ${t.artist}\nhttps://open.spotify.com/track/${id}`;
+    if (used + line.length > maxChars) {
+      lines.push(`…and ${tracks.length - i} more`);
+      break;
+    }
+    lines.push(line);
+    used += line.length + 2;
+  }
+  return lines.join("\n\n");
+}
+
 export async function sendNtfy(message: string, options: NtfyOptions = {}): Promise<boolean> {
   const topic = options.topic || loadNtfyTopic() || process.env.NTFY_TOPIC || "";
   if (!topic) return false;
