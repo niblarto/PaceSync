@@ -7,13 +7,16 @@ export async function GET() {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const config = loadAiDjConfig();
-  return NextResponse.json({ url: config?.url ?? "", enabled: config?.enabled ?? false, autoPlaylist: config?.autoPlaylist ?? true });
+  return NextResponse.json({
+    url: config?.url ?? "", enabled: config?.enabled ?? false,
+    autoPlaylist: config?.autoPlaylist ?? true, wolMac: config?.wolMac ?? "",
+  });
 }
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const { url, enabled, autoPlaylist } = await req.json() as { url: string; enabled: boolean; autoPlaylist?: boolean };
-  saveAiDjConfig({ url: url.trim().replace(/\/+$/, ""), enabled: !!enabled, autoPlaylist: autoPlaylist !== false });
+  const { url, enabled, autoPlaylist, wolMac } = await req.json() as { url: string; enabled: boolean; autoPlaylist?: boolean; wolMac?: string };
+  saveAiDjConfig({ url: url.trim().replace(/\/+$/, ""), enabled: !!enabled, autoPlaylist: autoPlaylist !== false, wolMac: (wolMac ?? "").trim() });
   return NextResponse.json({ ok: true });
 }

@@ -129,6 +129,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [aiDjHealth, setAiDjHealth] = useState<"idle" | "checking" | "ok" | "down">("idle");
   const [aiDjHealthLlm, setAiDjHealthLlm] = useState(false);
   const [aiDjHealthMsg, setAiDjHealthMsg] = useState<string | null>(null);
+  const [aiDjWolMac, setAiDjWolMac] = useState("");
+  const [waking, setWaking] = useState(false);
+  const [wakeMsg, setWakeMsg] = useState<string | null>(null);
+  const wakePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── 2FA state ────────────────────────────────────────────────────────────
   const [totpEnabled, setTotpEnabled] = useState<boolean | null>(null);
@@ -223,10 +227,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   useEffect(() => {
     fetch("/api/settings/ai-dj")
       .then(r => r.json())
-      .then((d: { url?: string; enabled?: boolean; autoPlaylist?: boolean }) => {
+      .then((d: { url?: string; enabled?: boolean; autoPlaylist?: boolean; wolMac?: string }) => {
         if (d.url) setAiDjUrl(d.url);
         setAiDjEnabled(d.enabled ?? false);
         setAiDjAutoPlaylist(d.autoPlaylist ?? true);
+        setAiDjWolMac(d.wolMac ?? "");
       })
       .catch(() => {});
   }, []);
@@ -631,6 +636,39 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }
 
+  // Send a WOL magic packet, then poll the health check until the PC answers
+  // (a cold boot can take a minute or two).
+  async function wakeAiDjPc() {
+    setWaking(true);
+    setWakeMsg(null);
+    try {
+      const res = await fetch("/api/ai-dj/wake", { method: "POST" });
+      const d = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Wake failed");
+      setWakeMsg("Magic packet sent — waiting for the PC to come up…");
+      if (wakePollRef.current) clearInterval(wakePollRef.current);
+      wakePollRef.current = setInterval(() => setAiDjCheckNonce(n => n + 1), 8000);
+      setTimeout(() => {
+        if (wakePollRef.current) { clearInterval(wakePollRef.current); wakePollRef.current = null; }
+        setWaking(w => {
+          if (w) setWakeMsg("Still no response after 2 minutes — check the BIOS WOL setting.");
+          return false;
+        });
+      }, 120_000);
+    } catch (e) {
+      setWakeMsg(e instanceof Error ? e.message : "Wake failed");
+      setWaking(false);
+    }
+  }
+
+  useEffect(() => {
+    if (waking && aiDjHealth === "ok") {
+      if (wakePollRef.current) { clearInterval(wakePollRef.current); wakePollRef.current = null; }
+      setWaking(false);
+      setWakeMsg("PC is up.");
+    }
+  }, [aiDjHealth, waking]);
+
   async function saveAiDj(enabled: boolean, autoPlaylist: boolean = aiDjAutoPlaylist) {
     setAiDjSaving(true);
     setAiDjSaved(false);
@@ -639,7 +677,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       const res = await fetch("/api/settings/ai-dj", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: aiDjUrl.trim(), enabled, autoPlaylist }),
+        body: JSON.stringify({ url: aiDjUrl.trim(), enabled, autoPlaylist, wolMac: aiDjWolMac.trim() }),
       });
       if (!res.ok) throw new Error();
       setAiDjEnabled(enabled);
@@ -1643,6 +1681,35 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           <p className="text-xs text-slate-500">
             Where the AI DJ service is running (<code className="text-slate-400">python -m ai_dj.server</code> —
             on a PC with Ollama, or on this Pi with <code className="text-slate-400">--no-llm</code>).
+          </p>
+        </div>
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-slate-300">PC MAC address (Wake-on-LAN)</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={aiDjWolMac}
+              onChange={e => { setAiDjWolMac(e.target.value); setAiDjSaved(false); }}
+              placeholder="50-EB-F6-23-7F-AF"
+              className="flex-1 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500 font-mono"
+            />
+            <button
+              onClick={wakeAiDjPc}
+              disabled={waking || !aiDjWolMac.trim()}
+              className="rounded-lg border border-purple-500/30 bg-purple-500/15 hover:bg-purple-500/25 disabled:opacity-40 text-purple-300 font-medium text-sm px-4 py-2 transition-colors shrink-0"
+              title="Send a Wake-on-LAN magic packet to the PC"
+            >
+              {waking ? "Waking…" : "⏻ Wake PC"}
+            </button>
+          </div>
+          {wakeMsg && (
+            <p className={`text-xs ${wakeMsg === "PC is up." ? "text-green-400" : wakeMsg.startsWith("Magic packet") ? "text-slate-400" : "text-red-400"}`}>
+              {wakeMsg}
+            </p>
+          )}
+          <p className="text-xs text-slate-500">
+            Save after changing the MAC — the wake button uses the saved value. The Connected/Unreachable
+            dot above doubles as the PC&apos;s up/down indicator (rechecked every minute).
           </p>
         </div>
         {aiDjError && <p className="text-sm text-red-400">{aiDjError}</p>}

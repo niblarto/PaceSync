@@ -7,7 +7,6 @@ import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
 import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArtError } from "./TrackRow";
-import { BbcPlaylistCard } from "./BbcPlaylistCard";
 import { DedupCard } from "./DedupCard";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline } from "./RunnaCard";
 import { useRunningPlaylist } from "./useRunningPlaylist";
@@ -99,12 +98,6 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy,
 
 const TODAYS_RUN_PLAYLIST = "Today's Run";
 
-const BBC_DEFAULTS = [
-  { pid: "m001j52w", name: "6 Music Playlist", synopsis: "" },
-  { pid: "m0012v02", name: "6 Music's Indie Forever", synopsis: "" },
-  { pid: "m002xsbn", name: "Lauren Laverne", synopsis: "" },
-];
-
 interface Props {
   spotifyUser: { name: string; image: string | null };
 }
@@ -129,21 +122,6 @@ interface Suggestion {
 function spotifyIdFromUrl(url: string | null): string | null {
   const m = url?.match(/open\.spotify\.com\/track\/([A-Za-z0-9]+)/);
   return m ? m[1] : null;
-}
-
-// BBC card tracks are a slimmer shape — lift one into a TrackWithBPM so the
-// similar/suggest handlers can treat all seeds uniformly.
-function bbcToTrack(t: { uri: string; name: string; artistName: string }): TrackWithBPM {
-  return {
-    id: t.uri.split(":")[2] ?? t.uri,
-    name: t.name,
-    artists: [{ name: t.artistName }],
-    album: { name: "", images: [] },
-    duration_ms: 0,
-    uri: t.uri,
-    bpm: 0,
-    energy: 0,
-  };
 }
 
 interface SuggestState {
@@ -259,7 +237,6 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [copied, setCopied]             = useState(false);
   const [playlistName, setPlaylistName] = useState("");
   const [saveError, setSaveError]       = useState<string | null>(null);
-  const [bbcProgrammes, setBbcProgrammes] = useState<{ pid: string; name: string; synopsis?: string }[]>(BBC_DEFAULTS);
   const [garminConfigured, setGarminConfigured] = useState(false);
   const [aiDjEnabled, setAiDjEnabled] = useState(false);
   const [paceFilter, setPaceFilter] = useState<{ paces: Array<{ paceStr: string; bpm: number }> } | null>(null);
@@ -292,35 +269,6 @@ export function DashboardClient({ spotifyUser }: Props) {
       .then((d: { enabled?: boolean }) => { setAiDjEnabled(d.enabled ?? false); })
       .catch(() => {});
   }, []);
-
-  useEffect(() => {
-    fetch("/api/bbc/programmes")
-      .then(r => r.json())
-      .then((d: { programmes?: { pid: string; name: string }[] }) => {
-        if (d.programmes?.length) setBbcProgrammes(d.programmes);
-      })
-      .catch(() => {});
-  }, []);
-
-  async function saveBbcProgrammes(list: { pid: string; name: string }[]) {
-    setBbcProgrammes(list);
-    fetch("/api/bbc/programmes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ programmes: list }),
-    }).catch(() => {});
-  }
-
-  function handleAddBbcProgramme(prog: { pid: string; name: string; synopsis?: string }) {
-    const updated = bbcProgrammes.some(p => p.pid === prog.pid)
-      ? bbcProgrammes
-      : [...bbcProgrammes, prog];
-    saveBbcProgrammes(updated);
-  }
-
-  function handleRemoveBbcProgramme(pid: string) {
-    saveBbcProgrammes(bbcProgrammes.filter(p => p.pid !== pid));
-  }
 
   useEffect(() => {
     fetch("/api/settings/hr-zones")
@@ -858,6 +806,9 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 Garmin
               </Link>
             )}
+            <Link href="/bbc" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
+              BBC Radio
+            </Link>
             <Link
               href="/settings"
               className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
@@ -1255,36 +1206,6 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 </Link>
               </div>
             )}
-
-            {/* BBC Programme Cards */}
-            {bbcProgrammes.map(p => (
-              <BbcPlaylistCard
-                key={p.pid}
-                pid={p.pid}
-                defaultName={p.name}
-                synopsis={p.synopsis}
-                onRemove={() => handleRemoveBbcProgramme(p.pid)}
-                editHref={`/settings?bbc=replace&pid=${p.pid}&name=${encodeURIComponent(p.name)}`}
-                onSimilar={t => handleSimilar(bbcToTrack(t))}
-                onSuggest={(t, mode) => handleSuggest(bbcToTrack(t), mode, "bbc")}
-                suggestBusy={suggest && suggest.results === null && !suggest.error
-                  ? { trackId: suggest.seed.id, mode: suggest.mode }
-                  : null}
-                inlineCard={suggest && suggest.origin === "bbc"
-                  ? { trackId: suggest.seed.id, node: suggestCardNode }
-                  : null}
-              />
-            ))}
-            {/* Add BBC Programme card */}
-            <Link
-              href="/settings?bbc=add"
-              className="flex items-center justify-center gap-2 rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 border-dashed p-5 text-slate-500 hover:text-slate-300 hover:border-white/20 transition-colors"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                <path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
-              </svg>
-              <span className="text-sm font-medium">Add BBC Programme</span>
-            </Link>
 
           </main>
 

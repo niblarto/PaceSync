@@ -8,12 +8,16 @@ export interface AiDjConfig {
   enabled: boolean;
   // Daily 15:30 cron pre-builds tomorrow's mix into "Today's Run" (on by default).
   autoPlaylist: boolean;
+  // MAC of the AI DJ service host, for Wake-on-LAN from the settings page.
+  wolMac?: string;
 }
 
 export function loadAiDjConfig(): AiDjConfig | null {
   try {
     const data = JSON.parse(fs.readFileSync(FILE, "utf-8")) as AiDjConfig;
-    if (data?.url) return { url: data.url, enabled: !!data.enabled, autoPlaylist: data.autoPlaylist !== false };
+    if (data?.url) {
+      return { url: data.url, enabled: !!data.enabled, autoPlaylist: data.autoPlaylist !== false, wolMac: data.wolMac ?? "" };
+    }
   } catch {}
   return null;
 }
