@@ -10,7 +10,7 @@ import { activeCsvPath } from "@/lib/running-playlist-config";
 // The AI DJ service may run a local LLM per workout segment — allow it time.
 const MIX_TIMEOUT_MS = 180_000;
 // The on-Pi fallback is deterministic (no LLM) but a Pi is slow at pandas.
-const LOCAL_MIX_TIMEOUT_MS = 120_000;
+const LOCAL_MIX_TIMEOUT_MS = 180_000;
 const PYTHON = process.platform === "win32" ? "python" : "python3";
 
 export interface AiDjMixResponse {

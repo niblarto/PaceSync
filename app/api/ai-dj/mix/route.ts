@@ -22,6 +22,11 @@ export async function POST(req: NextRequest) {
       const send = (data: object) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
       };
+      // Heartbeat comments keep the browser connection alive through any
+      // proxy/tunnel idle timeout (~90-100s) while a segment builds silently.
+      const heartbeat = setInterval(() => {
+        try { controller.enqueue(encoder.encode(`: hb\n\n`)); } catch { /* stream closed */ }
+      }, 15000);
       try {
         // Padding comment flushes past browsers' 1 KB SSE buffer
         controller.enqueue(encoder.encode(`: ${"x".repeat(1024)}\n\n`));
@@ -39,6 +44,7 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         send({ type: "error", error: err instanceof Error ? err.message : "Mix failed" });
       } finally {
+        clearInterval(heartbeat);
         controller.close();
       }
     },
