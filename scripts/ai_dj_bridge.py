@@ -74,11 +74,17 @@ def main():
         feedback = None
 
     library = _load_library(csv_path)
+
+    # One NDJSON progress line per segment; the final line is the mix (or
+    # error) JSON. lib/ai-dj-mix.ts parses stdout line-by-line for these.
+    def _progress(done, total, label):
+        print(json.dumps({"type": "progress", "current": done, "total": total, "segment": label}), flush=True)
+
     try:
         playlist = build_workout_playlist(
             segments, library, model="", use_llm=False,
             cadence_buckets=_cadence_buckets(), easy_bias_sec=easy_bias,
-            track_feedback=feedback,
+            track_feedback=feedback, progress=_progress,
         )
     except ValueError as e:
         print(json.dumps({"error": str(e)}))

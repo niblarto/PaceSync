@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useSession } from "next-auth/react";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 import type { TrackWithBPM } from "@/types";
@@ -460,29 +460,45 @@ interface RunnaScheduleProps {
   onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimelineSegment[]) => void;
 }
 
-type MixStatus = { status: "building" | "done" | "error"; error?: string; startedAt?: number };
+type MixProgress = { current: number; total: number; segment: string };
+type MixStatus = { status: "building" | "done" | "error"; error?: string; startedAt?: number; progress?: MixProgress };
 
-// The mix build is one blocking backend call (remote LLM service or on-Pi
-// fallback) with no progress events, so this bar is time-based: it eases
-// toward 95% over a typical ~45s build and jumps to done when the response
-// lands. Better than a static "Mixing…" label for a call that can run 1-3 min.
-function MixProgressBar({ startedAt }: { startedAt: number }) {
+// Real per-segment progress streamed over SSE from /api/ai-dj/mix. Between
+// segment events the bar eases partway toward the next step (a segment's LLM
+// pick can take ~30s), so it never looks stalled. Falls back to a pure
+// time-based curve if no progress events arrive (older AI DJ service).
+function MixProgressBar({ startedAt, progress }: { startedAt: number; progress?: MixProgress }) {
   const [, forceTick] = useState(0);
+  const stepStartRef = useRef(startedAt);
+  const lastStepRef = useRef(-1);
   useEffect(() => {
     const t = setInterval(() => forceTick(n => n + 1), 500);
     return () => clearInterval(t);
   }, []);
+  if (progress && progress.current !== lastStepRef.current) {
+    lastStepRef.current = progress.current;
+    stepStartRef.current = Date.now();
+  }
   const elapsedSec = (Date.now() - startedAt) / 1000;
-  const pct = Math.min(95, 100 * (1 - Math.exp(-elapsedSec / 45)));
+  let pct: number;
+  if (progress) {
+    // Ease up to 90% of the current step's width while it builds
+    const stepFrac = Math.min(0.9, ((Date.now() - stepStartRef.current) / 1000 / 30) * 0.9);
+    pct = Math.min(98, ((progress.current + stepFrac) / progress.total) * 100);
+  } else {
+    pct = Math.min(95, 100 * (1 - Math.exp(-elapsedSec / 45)));
+  }
   return (
-    <div className="flex items-center gap-2 flex-1 min-w-[120px] max-w-[240px]">
+    <div className="flex items-center gap-2 flex-1 min-w-[140px] max-w-[280px]">
       <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
         <div
           className="h-full rounded-full bg-purple-400 transition-[width] duration-500 ease-linear"
           style={{ width: `${pct}%` }}
         />
       </div>
-      <span className="text-xs text-slate-500 tabular-nums shrink-0">{Math.floor(elapsedSec)}s</span>
+      <span className="text-xs text-slate-500 tabular-nums shrink-0">
+        {progress ? `${Math.min(progress.current + 1, progress.total)}/${progress.total} · ` : ""}{Math.floor(elapsedSec)}s
+      </span>
     </div>
   );
 }
@@ -561,8 +577,40 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: w.title, segments: w.segments }),
       });
-      const mix = await mixRes.json() as AiDjMixResponse & { error?: string };
-      if (!mixRes.ok) throw new Error(mix.error ?? `Mix failed (${mixRes.status})`);
+      if (!mixRes.ok || !mixRes.body) {
+        const err = await mixRes.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `Mix failed (${mixRes.status})`);
+      }
+
+      // SSE: progress events per workout segment, then done/error
+      let mix: AiDjMixResponse | null = null;
+      const reader = mixRes.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const msg = JSON.parse(dataLine.slice(6)) as
+            & Partial<AiDjMixResponse>
+            & { type: string; current?: number; total?: number; segment?: string; error?: string };
+          if (msg.type === "progress") {
+            const progress = { current: msg.current ?? 0, total: msg.total ?? 1, segment: msg.segment ?? "" };
+            setMixState(s => ({ ...s, [w.uid]: { ...s[w.uid], status: "building", progress } }));
+          } else if (msg.type === "error") {
+            throw new Error(msg.error ?? "Mix failed");
+          } else if (msg.type === "done") {
+            mix = { trackUris: msg.trackUris ?? [], totalSec: msg.totalSec ?? 0, timeline: msg.timeline ?? [] };
+          }
+        }
+      }
+      if (!mix) throw new Error("Mix stream ended without a result");
       if (!mix.trackUris?.length) throw new Error("No tracks matched this workout");
 
       const tracks: TrackWithBPM[] = mix.timeline.flatMap(seg => seg.tracks).map(t => ({
@@ -714,7 +762,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                             {st?.status === "building" ? "🎧 Mixing…" : st?.status === "done" ? "🎧 Remix" : "🎧 AI DJ Mix"}
                           </button>
                           {st?.status === "building" && (
-                            <MixProgressBar startedAt={st.startedAt ?? Date.now()} />
+                            <MixProgressBar startedAt={st.startedAt ?? Date.now()} progress={st.progress} />
                           )}
                           {st?.status === "done" && (
                             <span className="text-xs text-purple-300/80">Loaded into the track list — review &amp; save from there ↑</span>

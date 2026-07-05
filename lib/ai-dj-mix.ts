@@ -28,6 +28,10 @@ export type AiDjMixResult =
   | { ok: true; mix: AiDjMixResponse }
   | { ok: false; error: string };
 
+// Fired as each workout segment starts building (the per-segment LLM call is
+// the slow part) — lets the API route stream a real progress bar.
+export type AiDjProgress = (current: number, total: number, segment: string) => void;
+
 // Real cadence per 5s pace bucket from GarminDB (sec/mi -> SPM), sent to the
 // remote AI DJ service so its pace->BPM uses measured turnover instead of a
 // linear guess — the service host has no Garmin data of its own.
@@ -63,7 +67,55 @@ function loadCadenceBuckets(): Record<string, number> | null {
   }
 }
 
-export async function buildAiDjMix(title: string, segments: string[]): Promise<AiDjMixResult> {
+// Parses the SSE stream from the AI DJ service's /mix/stream endpoint.
+// Returns null when the endpoint doesn't exist (service not yet restarted on
+// the new code) so the caller can fall back to the plain /mix endpoint.
+async function fetchMixStream(url: string, body: string, onProgress: AiDjProgress): Promise<AiDjMixResult | null> {
+  const res = await fetch(`${url}/mix/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    signal: AbortSignal.timeout(MIX_TIMEOUT_MS),
+  });
+  if (res.status === 404 || res.status === 405) return null; // old service build
+  if (!res.ok || !res.body) {
+    let msg = `AI DJ service ${res.status}`;
+    try {
+      const data = await res.json() as { error?: string };
+      if (data.error) msg = data.error;
+    } catch { /* non-JSON error body */ }
+    return { ok: false, error: msg };
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep;
+    while ((sep = buf.indexOf("\n\n")) !== -1) {
+      const chunk = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+      if (!dataLine) continue; // padding/comment frame
+      const msg = JSON.parse(dataLine.slice(6)) as
+        & Partial<AiDjMixResponse>
+        & { type: string; current?: number; total?: number; segment?: string; error?: string };
+      if (msg.type === "progress") {
+        onProgress(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "");
+      } else if (msg.type === "done") {
+        return { ok: true, mix: { trackUris: msg.trackUris!, totalSec: msg.totalSec!, timeline: msg.timeline! } };
+      } else if (msg.type === "error") {
+        return { ok: false, error: msg.error ?? "AI DJ service error" };
+      }
+    }
+  }
+  return { ok: false, error: "AI DJ stream ended without a result" };
+}
+
+export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress): Promise<AiDjMixResult> {
   const config = loadAiDjConfig();
   if (!config?.enabled) {
     return { ok: false, error: "AI DJ is not enabled in Settings" };
@@ -83,11 +135,17 @@ export async function buildAiDjMix(title: string, segments: string[]): Promise<A
   if (easyBias > 0) console.log(`[ai-dj] recent easy runs ran ~${easyBias}s/mi fast — easing easy segments`);
   const trackFeedback = getAllTrackVotes();
 
+  const body = JSON.stringify({ title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback });
   try {
+    if (onProgress) {
+      const streamed = await fetchMixStream(config.url, body, onProgress);
+      if (streamed) return streamed;
+      // null = service predates /mix/stream — fall through to plain /mix
+    }
     const res = await fetch(`${config.url}/mix`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback }),
+      body,
       signal: AbortSignal.timeout(MIX_TIMEOUT_MS),
     });
     const data = await res.json() as AiDjMixResponse & { error?: string };
@@ -101,7 +159,7 @@ export async function buildAiDjMix(title: string, segments: string[]): Promise<A
     // shape, and it uses the local Garmin DB for exact pace->BPM.
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[ai-dj] remote service failed (${msg}) — trying on-Pi fallback`);
-    const local = await buildMixLocally(segments, easyBias, trackFeedback);
+    const local = await buildMixLocally(segments, easyBias, trackFeedback, onProgress);
     if (local.ok) return local;
     const hint = /timeout|abort/i.test(msg)
       ? "AI DJ service timed out"
@@ -110,7 +168,9 @@ export async function buildAiDjMix(title: string, segments: string[]): Promise<A
   }
 }
 
-function buildMixLocally(segments: string[], easyBias = 0, trackFeedback: object[] = []): Promise<AiDjMixResult> {
+function buildMixLocally(
+  segments: string[], easyBias = 0, trackFeedback: object[] = [], onProgress?: AiDjProgress
+): Promise<AiDjMixResult> {
   const script = join(process.cwd(), "scripts", "ai_dj_bridge.py");
   const csvPath = activeCsvPath();
 
@@ -118,14 +178,36 @@ function buildMixLocally(segments: string[], easyBias = 0, trackFeedback: object
     const proc = spawn(PYTHON, [script, csvPath]);
     const timer = setTimeout(() => { proc.kill(); }, LOCAL_MIX_TIMEOUT_MS);
 
-    let stdout = "";
+    // The bridge prints NDJSON: {"type":"progress",...} lines as segments
+    // build, then a final mix (or {"error":...}) JSON line.
+    let lineBuf = "";
+    let lastPayload = "";
     let stderrTail = "";
-    proc.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+    const takeLine = (line: string) => {
+      if (!line.trim()) return;
+      try {
+        const msg = JSON.parse(line) as { type?: string; current?: number; total?: number; segment?: string };
+        if (msg.type === "progress") {
+          onProgress?.(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "");
+          return;
+        }
+      } catch { /* partial or non-JSON line — treat as payload candidate */ }
+      lastPayload = line;
+    };
+    proc.stdout.on("data", (d: Buffer) => {
+      lineBuf += d.toString();
+      let nl;
+      while ((nl = lineBuf.indexOf("\n")) !== -1) {
+        takeLine(lineBuf.slice(0, nl));
+        lineBuf = lineBuf.slice(nl + 1);
+      }
+    });
     proc.stderr.on("data", (d: Buffer) => { stderrTail = (stderrTail + d.toString()).slice(-1000); });
     proc.on("close", (code) => {
       clearTimeout(timer);
+      takeLine(lineBuf);
       try {
-        const data = JSON.parse(stdout) as AiDjMixResponse & { error?: string };
+        const data = JSON.parse(lastPayload) as AiDjMixResponse & { error?: string };
         if (code !== 0 || data.error) {
           resolve({ ok: false, error: data.error ?? `bridge exited ${code}` });
           return;
