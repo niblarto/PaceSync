@@ -2,8 +2,10 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { useSession } from "next-auth/react";
 import type { RunningZone } from "@/types";
 import { BbcBrowserCard } from "@/components/BbcBrowserCard";
+import { useRunningPlaylist } from "@/components/useRunningPlaylist";
 
 const ZONE_DETAILS = [
   {
@@ -83,6 +85,8 @@ interface SettingsClientProps {
 
 export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: SettingsClientProps = {}) {
   const router = useRouter();
+  const { data: session } = useSession();
+  const { id: RUNNING_PLAYLIST_ID, name: runningPlaylistName } = useRunningPlaylist();
 
   // ── HR zone state ──────────────────────────────────────────────────────────
   const [maxHR, setMaxHR] = useState(166);
@@ -156,7 +160,20 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [csvError, setCsvError] = useState<string | null>(null);
   const [csvSaving, setCsvSaving] = useState(false);
   const [csvSaved, setCsvSaved] = useState(false);
+  const [csvImportMode, setCsvImportMode] = useState<"overwrite" | "append">("overwrite");
   const csvFileRef = useRef<HTMLInputElement>(null);
+
+  // ── AI DJ library import state ─────────────────────────────────────────────
+  const aiDjLibraryFileRef = useRef<HTMLInputElement>(null);
+  const [libImportMode, setLibImportMode] = useState<"overwrite" | "append">("append");
+  const [libLoading, setLibLoading] = useState(false);
+  const [libProgress, setLibProgress] = useState(0);
+  const [libProgressTotal, setLibProgressTotal] = useState(0);
+  const [libTracks, setLibTracks] = useState<{ uri: string; name: string; artistName: string }[]>([]);
+  const [libError, setLibError] = useState<string | null>(null);
+  const [libSaving, setLibSaving] = useState(false);
+  const [libSavedMsg, setLibSavedMsg] = useState<string | null>(null);
+  const [libFileName, setLibFileName] = useState<string | null>(null);
 
   const [cronRunning, setCronRunning] = useState(false);
   const [cronResults, setCronResults] = useState<{ name: string; matched: number; found: number; error?: string }[] | null>(null);
@@ -612,13 +629,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       }
       setCsvSaving(true);
       try {
-        await fetch("/api/save-default-playlist", {
+        const res = await fetch(`/api/save-default-playlist?mode=${csvImportMode}`, {
           method: "POST",
           headers: { "Content-Type": "text/plain" },
           body: text,
         });
+        const d = await res.json() as { appended?: number; skipped?: number };
         setCsvFileName(file.name);
-        setCsvTrackCount(lines.length - 1);
+        setCsvTrackCount(csvImportMode === "append" && d.appended !== undefined ? d.appended : lines.length - 1);
         setCsvSaved(true);
       } catch {
         setCsvError("Failed to save — try again.");
@@ -627,6 +645,145 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       }
     };
     reader.readAsText(file);
+  }
+
+  function parseCsvRowLocal(line: string): string[] {
+    const result: string[] = [];
+    let current = "";
+    let inQuotes = false;
+    for (const ch of line) {
+      if (ch === '"') { inQuotes = !inQuotes; }
+      else if (ch === "," && !inQuotes) { result.push(current.trim()); current = ""; }
+      else { current += ch; }
+    }
+    result.push(current.trim());
+    return result;
+  }
+
+  async function addTracksBrowser(playlistId: string, uris: string[], token: string): Promise<void> {
+    for (let i = 0; i < uris.length; i += 100) {
+      const res = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ uris: uris.slice(i, i + 100) }),
+      });
+      if (!res.ok) throw new Error(`Spotify ${res.status}: ${await res.text()}`);
+    }
+  }
+
+  async function replacePlaylistTracksBrowser(playlistId: string, uris: string[], token: string): Promise<void> {
+    const putRes = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ uris: uris.slice(0, 100) }),
+    });
+    if (!putRes.ok) throw new Error(`Spotify ${putRes.status}: ${await putRes.text()}`);
+    if (uris.length > 100) await addTracksBrowser(playlistId, uris.slice(100), token);
+  }
+
+  function handleAiDjLibraryUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setLibError(null);
+    setLibSavedMsg(null);
+    setLibTracks([]);
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      const text = ev.target?.result as string;
+      const stripped = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
+      const lines = stripped.replace(/\r/g, "").split("\n").filter(Boolean);
+      if (lines.length < 2) { setLibError("File appears to be empty."); return; }
+
+      const headers = parseCsvRowLocal(lines[0]).map(h => h.toLowerCase());
+      const idxName = headers.findIndex(h => h === "track name");
+      const idxArtist = headers.findIndex(h => h === "artist name(s)" || h === "artist");
+      if (idxName === -1 || idxArtist === -1) {
+        setLibError(`Could not find Track Name / Artist Name(s) columns. Found: ${headers.join(", ")}`);
+        return;
+      }
+
+      const parsed = lines.slice(1).map(l => parseCsvRowLocal(l)).filter(row => row[idxName] && row[idxArtist]);
+      if (parsed.length === 0) { setLibError("No usable rows found in this CSV."); return; }
+
+      setLibFileName(file.name);
+      setLibLoading(true);
+      setLibProgress(0);
+      setLibProgressTotal(0);
+
+      try {
+        const token = session?.accessToken;
+        if (!token) throw new Error("Not signed in");
+
+        const res = await fetch("/api/ai-dj-library/lookup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            tracks: parsed.map(row => ({ title: row[idxName], artist: row[idxArtist] })),
+          }),
+        });
+        if (!res.body) throw new Error("No response body");
+
+        const reader2 = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader2.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+
+          for (const part of parts) {
+            if (!part.startsWith("data: ")) continue;
+            const msg = JSON.parse(part.slice(6)) as Record<string, unknown>;
+            if (msg.type === "start") {
+              setLibProgressTotal(msg.total as number);
+            } else if (msg.type === "progress") {
+              setLibProgress(msg.current as number);
+            } else if (msg.type === "done") {
+              setLibTracks((msg.tracks as { uri: string; name: string; artistName: string }[]) ?? []);
+            } else if (msg.type === "error") {
+              setLibError(msg.error as string);
+            }
+          }
+        }
+      } catch (err) {
+        setLibError(err instanceof Error ? err.message : "Failed to look up tracks");
+      } finally {
+        setLibLoading(false);
+        setLibProgress(0);
+        setLibProgressTotal(0);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  async function saveAiDjLibraryToPlaylist() {
+    const token = session?.accessToken;
+    if (!token) { setLibError("Not signed in"); return; }
+    const uris = libTracks.filter(t => t.uri).map(t => t.uri);
+    if (!uris.length) { setLibError("No matched tracks to save."); return; }
+
+    setLibSaving(true);
+    setLibError(null);
+    setLibSavedMsg(null);
+    try {
+      if (libImportMode === "overwrite") {
+        await replacePlaylistTracksBrowser(RUNNING_PLAYLIST_ID, uris, token);
+      } else {
+        await addTracksBrowser(RUNNING_PLAYLIST_ID, uris, token);
+      }
+      const noMatch = libTracks.length - uris.length;
+      setLibSavedMsg(
+        `${libImportMode === "overwrite" ? "Replaced" : "Added"} ${uris.length} track${uris.length !== 1 ? "s" : ""} in "${runningPlaylistName}"` +
+        (noMatch > 0 ? ` · ${noMatch} not found on Spotify` : "")
+      );
+    } catch (e) {
+      setLibError(e instanceof Error ? e.message : "Failed to save to Spotify");
+    } finally {
+      setLibSaving(false);
+    }
   }
 
   async function runCronNow() {
@@ -848,9 +1005,23 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           >
             {csvSaving ? "Saving…" : "Upload CSV"}
           </button>
+          <div className="inline-flex rounded-lg border border-white/10 overflow-hidden text-xs">
+            <button
+              onClick={() => setCsvImportMode("overwrite")}
+              className={`px-3 py-1.5 transition-colors ${csvImportMode === "overwrite" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
+            >
+              Overwrite
+            </button>
+            <button
+              onClick={() => setCsvImportMode("append")}
+              className={`px-3 py-1.5 transition-colors ${csvImportMode === "append" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
+            >
+              Append
+            </button>
+          </div>
           {csvSaved && csvFileName && (
             <span className="text-sm text-green-400">
-              {csvFileName} saved — {csvTrackCount} tracks
+              {csvFileName} saved — {csvTrackCount} tracks{csvImportMode === "append" ? " added" : ""}
             </span>
           )}
         </div>
@@ -880,6 +1051,72 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </div>
           {playlistMsg && <p className="text-xs text-green-400">{playlistMsg}</p>}
           {playlistError && <p className="text-xs text-red-400">{playlistError}</p>}
+        </div>
+
+        <div className="pt-3 border-t border-white/10 space-y-2">
+          <label className="block text-sm font-medium text-slate-300">Import AI DJ playlist library</label>
+          <p className="text-xs text-slate-500">
+            Browse to a local library CSV (Track Name / Artist Name(s) columns) — each track is
+            looked up on Spotify, then saved to your current default playlist ({runningPlaylistName}).
+          </p>
+          <div className="flex items-center gap-3 flex-wrap">
+            <input ref={aiDjLibraryFileRef} type="file" accept=".csv" onChange={handleAiDjLibraryUpload} className="hidden" />
+            <button
+              onClick={() => aiDjLibraryFileRef.current?.click()}
+              disabled={libLoading}
+              className="inline-flex items-center gap-2 rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 text-sm font-medium px-4 py-2 transition-colors"
+            >
+              {libLoading ? "Looking up…" : "Browse CSV"}
+            </button>
+            <div className="inline-flex rounded-lg border border-white/10 overflow-hidden text-xs">
+              <button
+                onClick={() => setLibImportMode("append")}
+                className={`px-3 py-1.5 transition-colors ${libImportMode === "append" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
+              >
+                Append
+              </button>
+              <button
+                onClick={() => setLibImportMode("overwrite")}
+                className={`px-3 py-1.5 transition-colors ${libImportMode === "overwrite" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
+              >
+                Overwrite
+              </button>
+            </div>
+          </div>
+
+          {libLoading && libProgressTotal > 0 && (
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs text-slate-500">
+                <span>Matching tracks on Spotify…</span>
+                <span>{libProgress}/{libProgressTotal} · {Math.round((libProgress / libProgressTotal) * 100)}%</span>
+              </div>
+              <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-green-500 rounded-full transition-all duration-200"
+                  style={{ width: `${Math.round((libProgress / libProgressTotal) * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {libError && <p className="text-xs text-red-400">{libError}</p>}
+
+          {!libLoading && libTracks.length > 0 && (
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-xs text-slate-400">
+                {libFileName} — {libTracks.filter(t => t.uri).length}/{libTracks.length} matched on Spotify
+              </span>
+              <button
+                onClick={saveAiDjLibraryToPlaylist}
+                disabled={libSaving}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
+              >
+                {libSaving ? "Saving…" : libImportMode === "overwrite" ? `Overwrite "${runningPlaylistName}"` : `Add to "${runningPlaylistName}"`}
+              </button>
+            </div>
+          )}
+
+          {libSavedMsg && <p className="text-xs text-green-400">{libSavedMsg}</p>}
         </div>
       </div>
 

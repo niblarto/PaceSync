@@ -186,6 +186,8 @@ function parseExportifyCsv(text: string): CsvParseResult {
 
   // Accept "Track URI" (current Exportify), "Spotify URI", "Spotify ID"
   const idxId       = col("Track URI", "Spotify URI", "Spotify ID", "uri", "id");
+  // Fallback for scanner-style exports that only have a full Spotify web URL
+  const idxUrl      = col("Spotify URL", "Spotify Url", "URL", "Url");
   const idxName     = col("Track Name", "Name", "Song", "Title");
   const idxArtist   = col("Artist Name(s)", "Artist", "Artists");
   const idxAlbum    = col("Album Name", "Album");
@@ -193,7 +195,7 @@ function parseExportifyCsv(text: string): CsvParseResult {
   const idxBpm      = col("BPM", "Tempo", "bpm", "tempo");
   const idxEnergy   = col("Energy", "energy");
 
-  if (idxId === -1 || idxName === -1) {
+  if ((idxId === -1 && idxUrl === -1) || idxName === -1) {
     return {
       ok: false,
       error: `Could not find track columns. Found: ${headers.join(", ")}`,
@@ -205,7 +207,12 @@ function parseExportifyCsv(text: string): CsvParseResult {
 
   for (let i = 1; i < lines.length; i++) {
     const row = parseCsvRow(lines[i]);
-    let raw = row[idxId]?.trim() ?? "";
+    let raw = (idxId !== -1 ? row[idxId]?.trim() : "") ?? "";
+    if (!raw && idxUrl !== -1) {
+      // e.g. https://open.spotify.com/track/<id>?si=...
+      const urlMatch = row[idxUrl]?.match(/track[/:]([A-Za-z0-9]+)/);
+      raw = urlMatch ? urlMatch[1] : "";
+    }
     // Exportify new format uses full URI like "spotify:track:XXXX"
     const id = raw.startsWith("spotify:track:") ? raw.slice("spotify:track:".length) : raw;
     if (!id) continue;
