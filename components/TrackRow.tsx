@@ -1,6 +1,7 @@
 "use client";
 
 import { useSession } from "next-auth/react";
+import type { SyntheticEvent } from "react";
 import type { TrackWithBPM } from "@/types";
 
 interface Props {
@@ -113,6 +114,22 @@ function TrashIcon() {
   );
 }
 
+// Tracks with no album art fall back to one of four CD placeholder images in
+// /public/cd-art. Picked by a stable hash of the track's id/name so the choice
+// looks random across a listing but each track keeps the same cover between
+// renders. If the placeholder is also missing, the image hides as before.
+export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string) {
+  const img = e.target as HTMLImageElement;
+  if (!img.dataset.cdFallback) {
+    img.dataset.cdFallback = "1";
+    let h = 0;
+    for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
+    img.src = `/cd-art/cd-${(Math.abs(h) % 4) + 1}.jpg`;
+  } else {
+    img.style.display = "none";
+  }
+}
+
 export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, onSuggestTempo, suggestBusy }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
@@ -131,7 +148,7 @@ export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, on
             src={artSrc}
             alt=""
             className="h-full w-full object-cover"
-            onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
+            onError={e => handleArtError(e, track.id || track.name)}
           />
         </div>
 

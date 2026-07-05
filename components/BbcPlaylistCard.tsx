@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useSession } from "next-auth/react";
 import Link from "next/link";
-import { FunnelIcon, SparklesIcon, MetronomeIcon, MiniSpinner } from "./TrackRow";
+import { FunnelIcon, SparklesIcon, MetronomeIcon, MiniSpinner, handleArtError } from "./TrackRow";
 import { FloatingCard } from "./FloatingCard";
 import { useRunningPlaylist } from "./useRunningPlaylist";
 
@@ -96,7 +96,7 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy }: {
             alt=""
             loading="lazy"
             className="h-full w-full object-cover"
-            onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
+            onError={e => handleArtError(e, track.uri || track.name)}
           />
         </div>
         <div className="min-w-0 flex-1">

@@ -6,7 +6,7 @@ import { signOut, useSession } from "next-auth/react";
 import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
-import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl } from "./TrackRow";
+import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArtError } from "./TrackRow";
 import { BbcPlaylistCard } from "./BbcPlaylistCard";
 import { DedupCard } from "./DedupCard";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline } from "./RunnaCard";
@@ -1475,7 +1475,7 @@ function SuggestionsCard({ suggest, onClose, onAdd }: {
                       src={`/api/itunes-art?artist=${encodeURIComponent(s.artist)}&title=${encodeURIComponent(s.name)}`}
                       alt=""
                       className="h-full w-full object-cover"
-                      onError={e => { (e.target as HTMLImageElement).style.display = "none"; }}
+                      onError={e => handleArtError(e, `${s.artist}-${s.name}`)}
                     />
                   </div>
                   <div className="flex-1 min-w-0">
