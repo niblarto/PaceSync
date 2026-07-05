@@ -116,6 +116,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [ntfySaving, setNtfySaving] = useState(false);
   const [ntfySaved, setNtfySaved] = useState(false);
   const [ntfyError, setNtfyError] = useState<string | null>(null);
+  const [ntfyTesting, setNtfyTesting] = useState(false);
+  const [ntfyTestMsg, setNtfyTestMsg] = useState<string | null>(null);
 
   // ── AI DJ state ────────────────────────────────────────────────────────────
   const [aiDjUrl, setAiDjUrl] = useState("");
@@ -544,6 +546,26 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setNtfyError("Failed to save — try again.");
     } finally {
       setNtfySaving(false);
+    }
+  }
+
+  async function testNtfyTopic() {
+    setNtfyTesting(true);
+    setNtfyTestMsg(null);
+    setNtfyError(null);
+    try {
+      const res = await fetch("/api/settings/ntfy", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic: ntfyTopic.trim() }),
+      });
+      const data = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(data.error ?? "Test failed");
+      setNtfyTestMsg("Test sent — check your phone.");
+    } catch (e) {
+      setNtfyError(e instanceof Error ? e.message : "Test failed — try again.");
+    } finally {
+      setNtfyTesting(false);
     }
   }
 
@@ -1978,13 +2000,23 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           />
         </div>
         {ntfyError && <p className="text-sm text-red-400">{ntfyError}</p>}
-        <button
-          onClick={saveNtfyTopic}
-          disabled={ntfySaving}
-          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
-        >
-          {ntfySaving ? "Saving…" : ntfySaved ? "Saved!" : "Save topic"}
-        </button>
+        {ntfyTestMsg && <p className="text-sm text-green-400">{ntfyTestMsg}</p>}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={saveNtfyTopic}
+            disabled={ntfySaving}
+            className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+          >
+            {ntfySaving ? "Saving…" : ntfySaved ? "Saved!" : "Save topic"}
+          </button>
+          <button
+            onClick={testNtfyTopic}
+            disabled={ntfyTesting || !ntfyTopic.trim()}
+            className="rounded-lg border border-white/10 hover:border-green-500/40 hover:text-green-300 disabled:opacity-40 text-slate-300 font-medium text-sm px-5 py-2 transition-colors"
+          >
+            {ntfyTesting ? "Sending…" : "Send test"}
+          </button>
+        </div>
       </div>
 
       {/* Two-factor authentication */}

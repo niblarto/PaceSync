@@ -1,16 +1,7 @@
 import { NextRequest } from "next/server";
-import { loadNtfyTopic } from "@/lib/ntfy-config";
+import { sendNtfy } from "@/lib/ntfy";
 
-async function notify(message: string, options: { title?: string; tags?: string; priority?: string } = {}) {
-  const topic = loadNtfyTopic() ?? process.env.NTFY_TOPIC ?? "";
-  if (!topic) return false;
-  const headers: Record<string, string> = { "Content-Type": "text/plain" };
-  if (options.title) headers["Title"] = options.title;
-  if (options.tags) headers["Tags"] = options.tags;
-  if (options.priority) headers["Priority"] = options.priority;
-  const res = await fetch(`https://ntfy.sh/${topic}`, { method: "POST", headers, body: message });
-  return res.ok;
-}
+const notify = sendNtfy;
 
 export async function GET(req: NextRequest) {
   if (req.nextUrl.searchParams.get("secret") !== process.env.CRON_SECRET) {

@@ -105,6 +105,7 @@ FILES = [
     ('lib/tokenStore.ts',                         'lib/tokenStore.ts'),
     ('lib/runna-config.ts',                       'lib/runna-config.ts'),
     ('lib/ntfy-config.ts',                        'lib/ntfy-config.ts'),
+    ('lib/ntfy.ts',                               'lib/ntfy.ts'),
     ('public/Running.csv',                        'public/Running.csv'),
     ('public/favicon.svg',                        'public/favicon.svg'),
     ('public/settings-hero.png',                  'public/settings-hero.png'),

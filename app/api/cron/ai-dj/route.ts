@@ -7,7 +7,7 @@ import { upsertPlaylist } from "@/lib/spotify-playlist";
 import { buildAiDjMix } from "@/lib/ai-dj-mix";
 import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { fetchRunnaSchedule, TODAYS_RUN_PLAYLIST, type RunnaWorkout } from "@/lib/runna-schedule";
-import { loadNtfyTopic } from "@/lib/ntfy-config";
+import { sendNtfy } from "@/lib/ntfy";
 import { appendCronLog } from "@/lib/cron-log";
 import { saveTodaysRunEntry, timelineToHistoryTracks } from "@/lib/todays-run-history";
 
@@ -17,19 +17,7 @@ import { saveTodaysRunEntry, timelineToHistoryTracks } from "@/lib/todays-run-hi
 // up to run it. (The dated per-workout playlist is only created when the
 // user explicitly saves it from the dashboard.)
 
-async function notify(message: string, options: { title?: string; tags?: string; priority?: string } = {}) {
-  const topic = loadNtfyTopic() ?? process.env.NTFY_TOPIC ?? "";
-  if (!topic) return;
-  try {
-    const headers: Record<string, string> = { "Content-Type": "text/plain" };
-    if (options.title) headers["Title"] = options.title;
-    if (options.tags) headers["Tags"] = options.tags;
-    if (options.priority) headers["Priority"] = options.priority;
-    await fetch(`https://ntfy.sh/${topic}`, { method: "POST", headers, body: message });
-  } catch (e) {
-    console.warn("[cron/ai-dj] ntfy failed:", e);
-  }
-}
+const notify = sendNtfy;
 
 function isRunnableWorkout(w: RunnaWorkout): boolean {
   return w.type !== "strength" && w.type !== "rest" && w.segments.length > 0;

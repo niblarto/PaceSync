@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getFreshToken } from "@/lib/tokenStore";
-import { loadNtfyTopic } from "@/lib/ntfy-config";
+import { sendNtfy } from "@/lib/ntfy";
 import { appendCronLog } from "@/lib/cron-log";
 import fs from "fs";
 import path from "path";
@@ -31,19 +31,7 @@ function loadBbcProgrammes(): { pid: string; name: string }[] {
 
 // ── ntfy.sh ────────────────────────────────────────────────────────────────
 
-async function notify(message: string, options: { title?: string; tags?: string; priority?: string } = {}) {
-  const topic = loadNtfyTopic() ?? process.env.NTFY_TOPIC ?? "";
-  if (!topic) return;
-  try {
-    const headers: Record<string, string> = { "Content-Type": "text/plain" };
-    if (options.title) headers["Title"] = options.title;
-    if (options.tags) headers["Tags"] = options.tags;
-    if (options.priority) headers["Priority"] = options.priority;
-    await fetch(`https://ntfy.sh/${topic}`, { method: "POST", headers, body: message });
-  } catch (e) {
-    console.warn("[cron] ntfy failed:", e);
-  }
-}
+const notify = sendNtfy;
 
 // ── Disk cache ─────────────────────────────────────────────────────────────
 
@@ -332,8 +320,9 @@ async function runUpdate(): Promise<{
         ? ` (rate limited — ${r.retryAfter}s wait, ${r.skipped} tracks skipped)`
         : "";
       const songWord = r.matched === 1 ? "song" : "songs";
+      const targetName = loadRunningPlaylistConfig().name || "the running playlist";
       await notify(
-        `${r.matched} ${songWord} added from ${r.found} BBC tracks${rateLimitNote}`,
+        `${r.matched} ${songWord} added to "${targetName}" from ${r.found} BBC tracks${rateLimitNote}`,
         { title: `✅ ${playlist.name}`, tags: "white_check_mark,musical_note" }
       );
       programmeResults.push({
@@ -380,7 +369,7 @@ async function runUpdate(): Promise<{
       ? `${dedupRemoved} duplicate${dedupRemoved !== 1 ? "s" : ""} removed · ${dedupRemaining} tracks in playlist`
       : `No duplicates · ${dedupRemaining} tracks in playlist`;
 
-  const totalLine = `${totalMatched} new song${totalMatched !== 1 ? "s" : ""} added in total`;
+  const totalLine = `${totalMatched} new song${totalMatched !== 1 ? "s" : ""} added to "${loadRunningPlaylistConfig().name || "the running playlist"}" in total`;
 
   await notify(
     `${lines.join("\n")}\n\n${totalLine}\n${dedupLine}`,
