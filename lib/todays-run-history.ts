@@ -78,3 +78,24 @@ export function getTodaysRunEntry(date: string): TodaysRunEntry | null {
 export function getAllTodaysRunEntries(): TodaysRunEntry[] {
   return Object.values(loadAll()).sort((a, b) => b.date.localeCompare(a.date));
 }
+
+// Tracks that have already featured in a run (entries up to today — a mix
+// pre-built for tomorrow hasn't been played yet). Sent to the mix builder so
+// played-but-unvoted tracks rank below unplayed ones at the pace band they
+// were played at. Deduped by uri+pace.
+export function getPlayedTracks(): { uri: string; paceSec: number | null }[] {
+  const today = new Date().toISOString().slice(0, 10);
+  const seen = new Set<string>();
+  const played: { uri: string; paceSec: number | null }[] = [];
+  Object.values(loadAll()).forEach(entry => {
+    if (entry.date > today) return;
+    entry.tracks.forEach(t => {
+      if (!t.uri) return;
+      const key = `${t.uri}|${t.targetPaceSec ?? ""}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      played.push({ uri: t.uri, paceSec: t.targetPaceSec });
+    });
+  });
+  return played;
+}

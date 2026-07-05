@@ -2,6 +2,7 @@ import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { computeEasyPaceBias } from "@/lib/run-pace-bias";
 import { getAllTrackVotes } from "@/lib/track-feedback";
+import { getPlayedTracks } from "@/lib/todays-run-history";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { spawn } from "child_process";
@@ -135,7 +136,10 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   if (easyBias > 0) console.log(`[ai-dj] recent easy runs ran ~${easyBias}s/mi fast — easing easy segments`);
   const trackFeedback = getAllTrackVotes();
 
-  const body = JSON.stringify({ title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback });
+  const body = JSON.stringify({
+    title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback,
+    playedTracks: getPlayedTracks(),
+  });
   try {
     if (onProgress) {
       const streamed = await fetchMixStream(config.url, body, onProgress);
@@ -223,7 +227,7 @@ function buildMixLocally(
       resolve({ ok: false, error: e.message });
     });
 
-    proc.stdin.write(JSON.stringify({ segments, easyBias, trackFeedback }));
+    proc.stdin.write(JSON.stringify({ segments, easyBias, trackFeedback, playedTracks: getPlayedTracks() }));
     proc.stdin.end();
   });
 }
