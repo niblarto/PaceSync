@@ -179,6 +179,7 @@ FILES = [
     # AI DJ workout mixer (on-Pi fallback when the remote service is down;
     # source of truth lives in ../AI_DJ)
     ('scripts/ai_dj_bridge.py',                   'scripts/ai_dj_bridge.py'),
+    ('scripts/garmin_notify.sh',                  'scripts/garmin_notify.sh'),
     ('../AI_DJ/ai_dj/__init__.py',                'ai_dj/__init__.py'),
     ('../AI_DJ/ai_dj/workout.py',                 'ai_dj/workout.py'),
     ('../AI_DJ/ai_dj/selector.py',                'ai_dj/selector.py'),
@@ -320,6 +321,16 @@ ai_dj_cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/ai-dj' || {{ (crontab -l 2>/dev/null; echo '{ai_dj_cron_line}') | crontab -; }}""")
+
+# Garmin sync completion notification: sftp doesn't carry the exec bit (and a
+# Windows checkout may add CRLFs), so normalise the script, then append it to
+# the existing garmin cron line if the hook isn't there yet. The garmin cron
+# itself is user-installed (garmin_run.py pre-dates this app), so there's no
+# install-if-missing step for it here.
+print('  Ensuring Garmin sync ntfy hook...')
+notify_sh = f'{PI_REMOTE}/scripts/garmin_notify.sh'
+run(ssh, f"sed -i 's/\\r$//' {notify_sh} && chmod +x {notify_sh}")
+run(ssh, f"""crontab -l 2>/dev/null | grep 'garmin_run.py' | grep -q 'garmin_notify' || {{ crontab -l 2>/dev/null | sed '/garmin_run.py/ {{ /garmin_notify/! s|$|; {notify_sh} $?| }}' | crontab -; }}""")
 
 ssh.close()
 
