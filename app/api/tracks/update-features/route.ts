@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { readFile, writeFile } from "fs/promises";
-import { join } from "path";
+import { activeCsvPath } from "@/lib/running-playlist-config";
 
 // Fills in audio features (Tempo/Key/Mode/Energy/Danceability/Valence) on
 // EXISTING Running.csv rows, matched by Track URI. Used after ReccoBeats
@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
   if (!tracks?.length) return NextResponse.json({ error: "No tracks" }, { status: 400 });
 
   const byUri = new Map(tracks.map(t => [t.uri, t]));
-  const csvPath = join(process.cwd(), "public", "Running.csv");
+  const csvPath = activeCsvPath();
 
   try {
     const csv = await readFile(csvPath, "utf8");

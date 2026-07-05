@@ -141,6 +141,8 @@ FILES = [
     ('lib/track-feedback.ts',                     'lib/track-feedback.ts'),
     ('lib/running-playlist-config.ts',            'lib/running-playlist-config.ts'),
     ('app/api/settings/playlist/route.ts',        'app/api/settings/playlist/route.ts'),
+    ('app/api/settings/playlists/route.ts',       'app/api/settings/playlists/route.ts'),
+    ('app/api/playlist-csv/route.ts',             'app/api/playlist-csv/route.ts'),
     ('app/api/ai-dj-library/lookup/route.ts',     'app/api/ai-dj-library/lookup/route.ts'),
     ('components/useRunningPlaylist.ts',          'components/useRunningPlaylist.ts'),
     ('app/api/track-feedback/route.ts',           'app/api/track-feedback/route.ts'),

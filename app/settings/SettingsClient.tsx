@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import type { RunningZone } from "@/types";
 import { BbcBrowserCard } from "@/components/BbcBrowserCard";
-import { useRunningPlaylist } from "@/components/useRunningPlaylist";
+import { invalidateRunningPlaylistCache } from "@/components/useRunningPlaylist";
 
 const ZONE_DETAILS = [
   {
@@ -86,7 +86,6 @@ interface SettingsClientProps {
 export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: SettingsClientProps = {}) {
   const router = useRouter();
   const { data: session } = useSession();
-  const { id: RUNNING_PLAYLIST_ID, name: runningPlaylistName } = useRunningPlaylist();
 
   // ── HR zone state ──────────────────────────────────────────────────────────
   const [maxHR, setMaxHR] = useState(166);
@@ -155,6 +154,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   } | null>(null);
 
   // ── CSV import state ───────────────────────────────────────────────────────
+  const [csvPlaylistName, setCsvPlaylistName] = useState("");
+  const [csvStagedText, setCsvStagedText] = useState<string | null>(null);
   const [csvFileName, setCsvFileName] = useState<string | null>(null);
   const [csvTrackCount, setCsvTrackCount] = useState<number | null>(null);
   const [csvError, setCsvError] = useState<string | null>(null);
@@ -164,12 +165,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const csvFileRef = useRef<HTMLInputElement>(null);
 
   // ── AI DJ library import state ─────────────────────────────────────────────
+  const [libPlaylistName, setLibPlaylistName] = useState("");
   const aiDjLibraryFileRef = useRef<HTMLInputElement>(null);
   const [libImportMode, setLibImportMode] = useState<"overwrite" | "append">("append");
   const [libLoading, setLibLoading] = useState(false);
   const [libProgress, setLibProgress] = useState(0);
   const [libProgressTotal, setLibProgressTotal] = useState(0);
-  const [libTracks, setLibTracks] = useState<{ uri: string; name: string; artistName: string }[]>([]);
+  const [libTracks, setLibTracks] = useState<{ uri: string; name: string; artistName: string; originalTitle: string; originalArtist: string }[]>([]);
   const [libError, setLibError] = useState<string | null>(null);
   const [libSaving, setLibSaving] = useState(false);
   const [libSavedMsg, setLibSavedMsg] = useState<string | null>(null);
@@ -278,39 +280,88 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [cronJobsError, setCronJobsError] = useState<string | null>(null);
   const [cronLog, setCronLog] = useState<{ ts: string; job: string; message: string }[]>([]);
 
-  // ── Default Spotify playlist (where BBC adds / dedup / deletes apply) ─────
-  const [playlistName, setPlaylistNameCfg] = useState("Running");
-  const [playlistSaving, setPlaylistSaving] = useState(false);
-  const [playlistMsg, setPlaylistMsg] = useState<string | null>(null);
-  const [playlistError, setPlaylistError] = useState<string | null>(null);
+  // ── Known playlists (switch / delete) ──────────────────────────────────────
+  const [knownPlaylists, setKnownPlaylists] = useState<{ name: string; id: string; csvFile: string }[]>([]);
+  const [playlistsLoaded, setPlaylistsLoaded] = useState(false);
+  const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
+  const [switchingId, setSwitchingId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ name: string; id: string; csvFile: string } | null>(null);
+  const [deleteUnfollow, setDeleteUnfollow] = useState(true);
+  const [deleting, setDeleting] = useState(false);
+  const [playlistListError, setPlaylistListError] = useState<string | null>(null);
+
+  function loadPlaylistList() {
+    fetch("/api/settings/playlists")
+      .then(r => r.json())
+      .then((d: { playlists?: { name: string; id: string; csvFile: string }[]; activeId?: string }) => {
+        setKnownPlaylists(d.playlists ?? []);
+        setActivePlaylistId(d.activeId ?? null);
+        setPlaylistsLoaded(true);
+      })
+      .catch(() => {});
+  }
 
   useEffect(() => {
-    fetch("/api/settings/playlist")
-      .then(r => r.json())
-      .then((d: { name?: string }) => { if (d.name) setPlaylistNameCfg(d.name); })
-      .catch(() => {});
+    loadPlaylistList();
   }, []);
 
-  async function saveDefaultPlaylist() {
-    setPlaylistSaving(true);
-    setPlaylistMsg(null);
-    setPlaylistError(null);
+  async function switchActivePlaylist(id: string) {
+    setSwitchingId(id);
+    setPlaylistListError(null);
     try {
-      const res = await fetch("/api/settings/playlist", {
-        method: "POST",
+      const res = await fetch("/api/settings/playlists", {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: playlistName }),
+        body: JSON.stringify({ id }),
       });
-      const d = await res.json() as { error?: string; name?: string; created?: boolean };
-      if (!res.ok) throw new Error(d.error ?? "Failed to save");
-      setPlaylistMsg(d.created
-        ? `Created "${d.name}" on Spotify and set as default`
-        : `Linked to your existing "${d.name}" playlist`);
+      const d = await res.json() as { error?: string; name?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to switch");
+      invalidateRunningPlaylistCache();
+      setActivePlaylistId(id);
     } catch (e) {
-      setPlaylistError(e instanceof Error ? e.message : "Failed to save — try again.");
+      setPlaylistListError(e instanceof Error ? e.message : "Failed to switch playlist");
     } finally {
-      setPlaylistSaving(false);
+      setSwitchingId(null);
     }
+  }
+
+  async function confirmDeletePlaylist() {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setPlaylistListError(null);
+    try {
+      const res = await fetch("/api/settings/playlists", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: deleteTarget.id, unfollowSpotify: deleteUnfollow }),
+      });
+      const d = await res.json() as { error?: string; spotifyError?: string | null };
+      if (!res.ok) throw new Error(d.error ?? "Failed to delete");
+      if (d.spotifyError) setPlaylistListError(`Removed locally, but Spotify unfollow failed: ${d.spotifyError}`);
+      invalidateRunningPlaylistCache();
+      setDeleteTarget(null);
+      loadPlaylistList();
+    } catch (e) {
+      setPlaylistListError(e instanceof Error ? e.message : "Failed to delete playlist");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  // Resolve/create a playlist by name via the Spotify API and make it the
+  // active one — shared by both import flows below, which each ask for a
+  // name up front rather than relying on a separate "default playlist" field.
+  async function resolvePlaylistByName(name: string): Promise<{ id: string; name: string; csvFile: string }> {
+    const res = await fetch("/api/settings/playlist", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const d = await res.json() as { error?: string; id?: string; name?: string; csvFile?: string };
+    if (!res.ok || !d.id) throw new Error(d.error ?? "Failed to resolve playlist");
+    invalidateRunningPlaylistCache();
+    loadPlaylistList();
+    return { id: d.id, name: d.name ?? name, csvFile: d.csvFile ?? "Running.csv" };
   }
   useEffect(() => {
     const url = aiDjUrl.trim();
@@ -613,13 +664,17 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setBbcSaveMsg(null);
   }
 
+  // Browse only stages the file locally — nothing is written to the Pi or
+  // Spotify until Save is pressed, so append/overwrite can be picked after
+  // seeing the file's track count.
   function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     setCsvError(null);
     setCsvSaved(false);
+    setCsvStagedText(null);
     const reader = new FileReader();
-    reader.onload = async (ev) => {
+    reader.onload = (ev) => {
       const text = ev.target?.result as string;
       const lines = text.replace(/\r/g, "").split("\n").filter(Boolean);
       if (lines.length < 2) { setCsvError("File appears to be empty."); return; }
@@ -627,24 +682,36 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       if (!header.includes("track") && !header.includes("name") && !header.includes("uri")) {
         setCsvError("Doesn't look like an Exportify CSV — check the file and try again."); return;
       }
-      setCsvSaving(true);
-      try {
-        const res = await fetch(`/api/save-default-playlist?mode=${csvImportMode}`, {
-          method: "POST",
-          headers: { "Content-Type": "text/plain" },
-          body: text,
-        });
-        const d = await res.json() as { appended?: number; skipped?: number };
-        setCsvFileName(file.name);
-        setCsvTrackCount(csvImportMode === "append" && d.appended !== undefined ? d.appended : lines.length - 1);
-        setCsvSaved(true);
-      } catch {
-        setCsvError("Failed to save — try again.");
-      } finally {
-        setCsvSaving(false);
-      }
+      setCsvFileName(file.name);
+      setCsvTrackCount(lines.length - 1);
+      setCsvStagedText(text);
     };
     reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  async function saveCsvToPlaylist() {
+    const name = csvPlaylistName.trim();
+    if (!name) { setCsvError("Enter a playlist name first — this is both its name on Spotify and its filename on the Pi."); return; }
+    if (!csvStagedText) return;
+    setCsvSaving(true);
+    setCsvError(null);
+    try {
+      await resolvePlaylistByName(name);
+      const res = await fetch(`/api/save-default-playlist?mode=${csvImportMode}`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: csvStagedText,
+      });
+      const d = await res.json() as { appended?: number; skipped?: number };
+      if (csvImportMode === "append" && d.appended !== undefined) setCsvTrackCount(d.appended);
+      setCsvSaved(true);
+      setCsvStagedText(null);
+    } catch {
+      setCsvError("Failed to save — try again.");
+    } finally {
+      setCsvSaving(false);
+    }
   }
 
   function parseCsvRowLocal(line: string): string[] {
@@ -681,6 +748,98 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     if (uris.length > 100) await addTracksBrowser(playlistId, uris.slice(100), token);
   }
 
+  // A single request over ~1500+ tracks can run for several minutes (each
+  // miss now tries up to 4 search variants) — long enough to risk a timeout
+  // somewhere between the browser and the server regardless of what's
+  // fronting it. Chunking keeps every individual request short.
+  const LIBRARY_LOOKUP_CHUNK_SIZE = 150;
+
+  type LibTrack = { uri: string; name: string; artistName: string; originalTitle: string; originalArtist: string };
+
+  // Streams the SSE lookup for a batch of {title, artist} pairs, chunking
+  // large batches into several requests. Shared by the initial upload and
+  // "Retry all misses" — bypassCache skips the disk cache so a retry with
+  // the looser search variants isn't short-circuited by a previously-cached
+  // miss. Returns whatever matched even if Spotify rate-limits partway
+  // through (via `warning`) rather than throwing and losing that progress.
+  async function runLibraryLookup(
+    tracks: { title: string; artist: string }[],
+    bypassCache: boolean
+  ): Promise<{ tracks: LibTrack[]; warning: string | null }> {
+    const token = session?.accessToken;
+    if (!token) throw new Error("Not signed in");
+
+    setLibLoading(true);
+    setLibProgress(0);
+    setLibProgressTotal(tracks.length);
+
+    try {
+      const combined: LibTrack[] = [];
+
+      for (let chunkStart = 0; chunkStart < tracks.length; chunkStart += LIBRARY_LOOKUP_CHUNK_SIZE) {
+        const chunk = tracks.slice(chunkStart, chunkStart + LIBRARY_LOOKUP_CHUNK_SIZE);
+
+        const res = await fetch("/api/ai-dj-library/lookup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ tracks: chunk, bypassCache }),
+        });
+        if (!res.body) throw new Error("No response body");
+
+        const reader2 = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let chunkRetryAfter: number | null = null;
+
+        while (true) {
+          const { done, value } = await reader2.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+
+          for (const part of parts) {
+            if (!part.startsWith("data: ")) continue;
+            const msg = JSON.parse(part.slice(6)) as Record<string, unknown>;
+            if (msg.type === "progress") {
+              setLibProgress(chunkStart + (msg.current as number));
+            } else if (msg.type === "done") {
+              combined.push(...((msg.tracks as LibTrack[]) ?? []));
+              chunkRetryAfter = (msg.retryAfter as number | null) ?? null;
+            } else if (msg.type === "error") {
+              throw new Error(msg.error as string);
+            }
+          }
+        }
+
+        // Spotify rate-limited us partway through this chunk — the remaining
+        // tracks in it came back as misses with no real search attempted.
+        // Stop here rather than silently continuing to burn through misses;
+        // whatever matched so far is still returned to the caller.
+        if (chunkRetryAfter !== null) {
+          const clearsAt = new Date(Date.now() + chunkRetryAfter * 1000);
+          const today = new Date();
+          const isTomorrow = clearsAt.toDateString() !== today.toDateString();
+          const timeStr = clearsAt.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).toLowerCase().replace(" ", "");
+          const clearsAtStr = isTomorrow ? `${timeStr} tomorrow` : timeStr;
+          return {
+            tracks: combined,
+            warning: `Spotify rate-limited the search — stopped after ${chunkStart + chunk.length}/${tracks.length} tracks checked. Clears around ${clearsAtStr}.`,
+          };
+        }
+
+        // Brief pause between chunks so a burst of many small requests
+        // doesn't itself trip Spotify's rate limit.
+        if (chunkStart + LIBRARY_LOOKUP_CHUNK_SIZE < tracks.length) await new Promise(r => setTimeout(r, 300));
+      }
+      return { tracks: combined, warning: null };
+    } finally {
+      setLibLoading(false);
+      setLibProgress(0);
+      setLibProgressTotal(0);
+    }
+  }
+
   function handleAiDjLibraryUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -706,77 +865,83 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       if (parsed.length === 0) { setLibError("No usable rows found in this CSV."); return; }
 
       setLibFileName(file.name);
-      setLibLoading(true);
-      setLibProgress(0);
-      setLibProgressTotal(0);
-
       try {
-        const token = session?.accessToken;
-        if (!token) throw new Error("Not signed in");
-
-        const res = await fetch("/api/ai-dj-library/lookup", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify({
-            tracks: parsed.map(row => ({ title: row[idxName], artist: row[idxArtist] })),
-          }),
-        });
-        if (!res.body) throw new Error("No response body");
-
-        const reader2 = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader2.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split("\n\n");
-          buffer = parts.pop() ?? "";
-
-          for (const part of parts) {
-            if (!part.startsWith("data: ")) continue;
-            const msg = JSON.parse(part.slice(6)) as Record<string, unknown>;
-            if (msg.type === "start") {
-              setLibProgressTotal(msg.total as number);
-            } else if (msg.type === "progress") {
-              setLibProgress(msg.current as number);
-            } else if (msg.type === "done") {
-              setLibTracks((msg.tracks as { uri: string; name: string; artistName: string }[]) ?? []);
-            } else if (msg.type === "error") {
-              setLibError(msg.error as string);
-            }
-          }
-        }
+        const { tracks, warning } = await runLibraryLookup(
+          parsed.map(row => ({ title: row[idxName], artist: row[idxArtist] })),
+          false
+        );
+        setLibTracks(tracks);
+        if (warning) setLibError(warning);
       } catch (err) {
         setLibError(err instanceof Error ? err.message : "Failed to look up tracks");
-      } finally {
-        setLibLoading(false);
-        setLibProgress(0);
-        setLibProgressTotal(0);
       }
     };
     reader.readAsText(file);
   }
 
+  // Re-searches every currently-unmatched track with the disk cache bypassed,
+  // so the server's looser fallback query variants get a real shot instead of
+  // being short-circuited by a previously-cached miss for the exact query.
+  async function retryLibraryMisses() {
+    const misses = libTracks.filter(t => !t.uri);
+    if (!misses.length) return;
+    setLibError(null);
+    try {
+      const { tracks: result, warning } = await runLibraryLookup(
+        misses.map(t => ({ title: t.originalTitle, artist: t.originalArtist })),
+        true
+      );
+      const byKey = new Map(result.map(r => [`${r.originalTitle}|||${r.originalArtist}`, r]));
+      setLibTracks(prev => prev.map(t => {
+        if (t.uri) return t;
+        const updated = byKey.get(`${t.originalTitle}|||${t.originalArtist}`);
+        return updated ?? t;
+      }));
+      if (warning) setLibError(warning);
+    } catch (err) {
+      setLibError(err instanceof Error ? err.message : "Failed to retry misses");
+    }
+  }
+
+  function csvEscapeLocal(v: string): string {
+    return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  }
+
   async function saveAiDjLibraryToPlaylist() {
     const token = session?.accessToken;
     if (!token) { setLibError("Not signed in"); return; }
-    const uris = libTracks.filter(t => t.uri).map(t => t.uri);
-    if (!uris.length) { setLibError("No matched tracks to save."); return; }
+    const name = libPlaylistName.trim();
+    if (!name) { setLibError("Enter a playlist name first."); return; }
+    const matched = libTracks.filter(t => t.uri);
+    if (!matched.length) { setLibError("No matched tracks to save."); return; }
+    const uris = matched.map(t => t.uri);
 
     setLibSaving(true);
     setLibError(null);
     setLibSavedMsg(null);
     try {
+      const playlist = await resolvePlaylistByName(name);
+
       if (libImportMode === "overwrite") {
-        await replacePlaylistTracksBrowser(RUNNING_PLAYLIST_ID, uris, token);
+        await replacePlaylistTracksBrowser(playlist.id, uris, token);
       } else {
-        await addTracksBrowser(RUNNING_PLAYLIST_ID, uris, token);
+        await addTracksBrowser(playlist.id, uris, token);
       }
+
+      // Keep the local library CSV (used for BPM/pace matching) in step with
+      // whatever just landed in the Spotify playlist — same append/overwrite mode.
+      const header = "Track URI,Track Name,Artist Name(s)";
+      const rows = matched.map(t => [t.uri, t.name, t.artistName].map(csvEscapeLocal).join(","));
+      const csvBody = `${header}\n${rows.join("\n")}\n`;
+      await fetch(`/api/save-default-playlist?mode=${libImportMode}`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: csvBody,
+      });
+
       const noMatch = libTracks.length - uris.length;
       setLibSavedMsg(
-        `${libImportMode === "overwrite" ? "Replaced" : "Added"} ${uris.length} track${uris.length !== 1 ? "s" : ""} in "${runningPlaylistName}"` +
+        `${libImportMode === "overwrite" ? "Replaced" : "Added"} ${uris.length} track${uris.length !== 1 ? "s" : ""} in "${playlist.name}" (Spotify + local library)` +
         (noMatch > 0 ? ` · ${noMatch} not found on Spotify` : "")
       );
     } catch (e) {
@@ -978,87 +1143,153 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     {/* ── Column 2: BBC ── */}
     <div className="space-y-6">
 
-      {/* Import Playlist */}
-      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
-        <div>
-          <h3 className="font-semibold text-slate-200">Import Playlist</h3>
-          <p className="text-sm text-slate-400 mt-1">
-            Export your Spotify playlist via{" "}
-            <a href="https://exportify.net" target="_blank" rel="noopener noreferrer"
-              className="text-green-400 hover:text-green-300 underline">
-              exportify.net
-            </a>
-            , then upload the CSV here. It will be saved as your default Running playlist.
-          </p>
+      {/* Playlist Management */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+        <div className="px-5 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-lg">Playlist Management</h2>
         </div>
+        <div className="p-5 space-y-4">
+        <p className="text-sm text-slate-400">
+          Export your Spotify playlist via{" "}
+          <a href="https://exportify.net" target="_blank" rel="noopener noreferrer"
+            className="text-green-400 hover:text-green-300 underline">
+            exportify.net
+          </a>
+          , then upload the CSV here.
+        </p>
         <ol className="text-xs text-slate-500 space-y-1 list-decimal list-inside">
           <li>Go to <span className="text-slate-300">exportify.net</span> and log in with Spotify</li>
-          <li>Find your Running playlist and click <span className="text-slate-300">Export</span></li>
-          <li>Upload the downloaded CSV below</li>
+          <li>Find your playlist and click <span className="text-slate-300">Export</span></li>
+          <li>Name it below, then browse to the downloaded CSV</li>
         </ol>
-        <div className="flex items-center gap-3 flex-wrap">
-          <input ref={csvFileRef} type="file" accept=".csv" onChange={handleCsvUpload} className="hidden" />
-          <button
-            onClick={() => csvFileRef.current?.click()}
-            disabled={csvSaving}
-            className="inline-flex items-center gap-2 rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 text-sm font-medium px-4 py-2 transition-colors"
-          >
-            {csvSaving ? "Saving…" : "Upload CSV"}
-          </button>
-          <div className="inline-flex rounded-lg border border-white/10 overflow-hidden text-xs">
+        <div className="space-y-2">
+          <input
+            type="text"
+            value={csvPlaylistName}
+            onChange={e => { setCsvPlaylistName(e.target.value); setCsvError(null); }}
+            placeholder="Playlist name (Spotify name + Pi filename)"
+            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+          />
+          <div className="flex items-center gap-3 flex-wrap">
+            <input ref={csvFileRef} type="file" accept=".csv" onChange={handleCsvUpload} className="hidden" />
             <button
-              onClick={() => setCsvImportMode("overwrite")}
-              className={`px-3 py-1.5 transition-colors ${csvImportMode === "overwrite" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
+              onClick={() => csvFileRef.current?.click()}
+              disabled={csvSaving}
+              className="inline-flex items-center gap-2 rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 text-sm font-medium px-4 py-2 transition-colors"
             >
-              Overwrite
+              Browse CSV
             </button>
-            <button
-              onClick={() => setCsvImportMode("append")}
-              className={`px-3 py-1.5 transition-colors ${csvImportMode === "append" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
-            >
-              Append
-            </button>
+            {csvSaved && csvFileName && (
+              <span className="text-sm text-green-400">
+                {csvFileName} saved to "{csvPlaylistName}" — {csvTrackCount} tracks{csvImportMode === "append" ? " added" : ""}
+              </span>
+            )}
           </div>
-          {csvSaved && csvFileName && (
-            <span className="text-sm text-green-400">
-              {csvFileName} saved — {csvTrackCount} tracks{csvImportMode === "append" ? " added" : ""}
-            </span>
+
+          {/* Nothing is written to the Pi or Spotify until Save is pressed here —
+              pick append/overwrite after seeing the file's track count */}
+          {csvStagedText && (
+            <div className="rounded-lg bg-slate-800/40 border border-white/10 p-3 space-y-2">
+              <p className="text-xs text-slate-400">
+                {csvFileName} — {csvTrackCount} tracks
+              </p>
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="inline-flex rounded-lg border border-white/10 overflow-hidden text-xs">
+                  <button
+                    onClick={() => setCsvImportMode("overwrite")}
+                    className={`px-3 py-1.5 transition-colors ${csvImportMode === "overwrite" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
+                  >
+                    Overwrite
+                  </button>
+                  <button
+                    onClick={() => setCsvImportMode("append")}
+                    className={`px-3 py-1.5 transition-colors ${csvImportMode === "append" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
+                  >
+                    Append
+                  </button>
+                </div>
+                <button
+                  onClick={saveCsvToPlaylist}
+                  disabled={csvSaving || !csvPlaylistName.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
+                >
+                  {csvSaving ? "Saving…" : csvImportMode === "overwrite" ? `Overwrite "${csvPlaylistName || "…"}"` : `Add to "${csvPlaylistName || "…"}"`}
+                </button>
+              </div>
+            </div>
           )}
         </div>
         {csvError && <p className="text-sm text-red-400">{csvError}</p>}
 
+        {/* Select Playlist — switch/delete, always visible so it's discoverable
+            even when only one playlist has ever been configured */}
         <div className="pt-3 border-t border-white/10 space-y-2">
-          <label className="block text-sm font-medium text-slate-300">Default Spotify playlist</label>
+          <label className="block text-sm font-medium text-slate-300">Select playlist</label>
           <p className="text-xs text-slate-500">
-            Where BBC tracks are added, dedup runs, and deletes apply. Matched to a playlist you
-            own by name — created on Spotify if it doesn&apos;t exist yet.
+            Switch which playlist is active, or delete one you no longer need (locally, with an
+            option to also unfollow it on Spotify).
           </p>
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={playlistName}
-              onChange={e => { setPlaylistNameCfg(e.target.value); setPlaylistMsg(null); }}
-              placeholder="Running"
-              className="flex-1 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
-            />
-            <button
-              onClick={saveDefaultPlaylist}
-              disabled={playlistSaving || !playlistName.trim()}
-              className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-4 py-2 transition-colors shrink-0"
-            >
-              {playlistSaving ? "Linking…" : "Save"}
-            </button>
-          </div>
-          {playlistMsg && <p className="text-xs text-green-400">{playlistMsg}</p>}
-          {playlistError && <p className="text-xs text-red-400">{playlistError}</p>}
+          {!playlistsLoaded ? (
+            <p className="text-xs text-slate-500 italic">Loading…</p>
+          ) : knownPlaylists.length === 0 ? (
+            <p className="text-xs text-slate-500 italic">No playlists yet — import one below.</p>
+          ) : (
+            <div className="space-y-1.5">
+              {knownPlaylists.map(p => (
+                <div
+                  key={p.id}
+                  className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-2 ${
+                    p.id === activePlaylistId ? "border-green-500/40 bg-green-500/5" : "border-white/10 bg-slate-800/40"
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm text-slate-200 truncate">
+                      {p.name}
+                      {p.id === activePlaylistId && <span className="ml-2 text-xs text-green-400">active</span>}
+                    </p>
+                    <p className="text-xs text-slate-500 font-mono truncate">{p.csvFile}</p>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {p.id !== activePlaylistId && (
+                      <button
+                        onClick={() => switchActivePlaylist(p.id)}
+                        disabled={switchingId === p.id}
+                        className="text-xs rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 px-2.5 py-1 transition-colors"
+                      >
+                        {switchingId === p.id ? "Switching…" : "Use"}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { setDeleteTarget(p); setDeleteUnfollow(true); }}
+                      className="p-1.5 text-slate-500 hover:text-red-400 transition-colors rounded"
+                      title="Delete this playlist"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                        <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {playlistListError && <p className="text-xs text-red-400">{playlistListError}</p>}
         </div>
 
         <div className="pt-3 border-t border-white/10 space-y-2">
           <label className="block text-sm font-medium text-slate-300">Import AI DJ playlist library</label>
           <p className="text-xs text-slate-500">
             Browse to a local library CSV (Track Name / Artist Name(s) columns) — each track is
-            looked up on Spotify, then saved to your current default playlist ({runningPlaylistName}).
+            looked up on Spotify, then saved as the playlist you name below (created on Spotify if
+            it doesn&apos;t exist yet, with a matching CSV file on the Pi).
           </p>
+          <input
+            type="text"
+            value={libPlaylistName}
+            onChange={e => { setLibPlaylistName(e.target.value); setLibError(null); }}
+            placeholder="Playlist name (Spotify name + Pi filename)"
+            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+          />
           <div className="flex items-center gap-3 flex-wrap">
             <input ref={aiDjLibraryFileRef} type="file" accept=".csv" onChange={handleAiDjLibraryUpload} className="hidden" />
             <button
@@ -1068,20 +1299,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             >
               {libLoading ? "Looking up…" : "Browse CSV"}
             </button>
-            <div className="inline-flex rounded-lg border border-white/10 overflow-hidden text-xs">
-              <button
-                onClick={() => setLibImportMode("append")}
-                className={`px-3 py-1.5 transition-colors ${libImportMode === "append" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
-              >
-                Append
-              </button>
-              <button
-                onClick={() => setLibImportMode("overwrite")}
-                className={`px-3 py-1.5 transition-colors ${libImportMode === "overwrite" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
-              >
-                Overwrite
-              </button>
-            </div>
           </div>
 
           {libLoading && libProgressTotal > 0 && (
@@ -1101,22 +1318,66 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
           {libError && <p className="text-xs text-red-400">{libError}</p>}
 
+          {/* Nothing is written to disk or Spotify until Save is pressed here —
+              this gives a chance to pick append/overwrite after seeing the match count */}
           {!libLoading && libTracks.length > 0 && (
-            <div className="flex items-center gap-3 flex-wrap">
-              <span className="text-xs text-slate-400">
+            <div className="rounded-lg bg-slate-800/40 border border-white/10 p-3 space-y-2">
+              <p className="text-xs text-slate-400">
                 {libFileName} — {libTracks.filter(t => t.uri).length}/{libTracks.length} matched on Spotify
-              </span>
-              <button
-                onClick={saveAiDjLibraryToPlaylist}
-                disabled={libSaving}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
-              >
-                {libSaving ? "Saving…" : libImportMode === "overwrite" ? `Overwrite "${runningPlaylistName}"` : `Add to "${runningPlaylistName}"`}
-              </button>
+              </p>
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="inline-flex rounded-lg border border-white/10 overflow-hidden text-xs">
+                  <button
+                    onClick={() => setLibImportMode("append")}
+                    className={`px-3 py-1.5 transition-colors ${libImportMode === "append" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
+                  >
+                    Append
+                  </button>
+                  <button
+                    onClick={() => setLibImportMode("overwrite")}
+                    className={`px-3 py-1.5 transition-colors ${libImportMode === "overwrite" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
+                  >
+                    Overwrite
+                  </button>
+                </div>
+                <button
+                  onClick={saveAiDjLibraryToPlaylist}
+                  disabled={libSaving || !libPlaylistName.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
+                >
+                  {libSaving ? "Saving…" : libImportMode === "overwrite" ? `Overwrite "${libPlaylistName || "…"}"` : `Add to "${libPlaylistName || "…"}"`}
+                </button>
+              </div>
+
+              {libTracks.some(t => !t.uri) && (
+                <div className="pt-2 border-t border-white/10 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs text-amber-400">
+                      {libTracks.filter(t => !t.uri).length} not found on Spotify
+                    </p>
+                    <button
+                      onClick={retryLibraryMisses}
+                      disabled={libLoading}
+                      className="text-xs rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 px-2.5 py-1 transition-colors whitespace-nowrap"
+                    >
+                      {libLoading ? "Retrying…" : "Retry all misses"}
+                    </button>
+                  </div>
+                  <div className="max-h-40 overflow-y-auto no-scrollbar rounded-lg border border-white/10 divide-y divide-white/5">
+                    {libTracks.filter(t => !t.uri).map((t, i) => (
+                      <div key={`${t.originalTitle}-${t.originalArtist}-${i}`} className="px-2.5 py-1.5 text-xs">
+                        <span className="text-slate-300">{t.originalTitle}</span>
+                        <span className="text-slate-500"> — {t.originalArtist}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
           {libSavedMsg && <p className="text-xs text-green-400">{libSavedMsg}</p>}
+        </div>
         </div>
       </div>
 
@@ -1821,6 +2082,44 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       </div>
     </div>
 
+    {deleteTarget && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+        <div className="rounded-xl bg-slate-900 border border-white/10 p-5 max-w-sm w-full space-y-4">
+          <div>
+            <h3 className="font-semibold text-slate-100">Delete "{deleteTarget.name}"?</h3>
+            <p className="text-sm text-slate-400 mt-1">
+              This removes the playlist from PaceSync and deletes its local library file
+              ({deleteTarget.csvFile}) from the Pi.
+            </p>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-slate-300">
+            <input
+              type="checkbox"
+              checked={deleteUnfollow}
+              onChange={e => setDeleteUnfollow(e.target.checked)}
+              className="rounded border-white/20 bg-slate-800"
+            />
+            Also unfollow on Spotify (removes it from your Spotify library)
+          </label>
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={() => setDeleteTarget(null)}
+              disabled={deleting}
+              className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 text-sm font-medium px-4 py-2 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmDeletePlaylist}
+              disabled={deleting}
+              className="rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white text-sm font-semibold px-4 py-2 transition-colors"
+            >
+              {deleting ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
 
     </div>
   );

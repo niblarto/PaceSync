@@ -36,8 +36,8 @@ export async function POST(req: NextRequest) {
       id = ((await res.json()) as { id: string }).id;
       created = true;
     }
-    saveRunningPlaylistConfig({ name: trimmed, id });
-    return NextResponse.json({ name: trimmed, id, created });
+    const entry = saveRunningPlaylistConfig({ name: trimmed, id });
+    return NextResponse.json({ ...entry, created });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

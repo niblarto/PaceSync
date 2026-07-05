@@ -9,11 +9,13 @@ import { useEffect, useState } from "react";
 export interface RunningPlaylist {
   id: string;
   name: string;
+  csvFile: string;
 }
 
 const FALLBACK: RunningPlaylist = {
   id: process.env.NEXT_PUBLIC_RUNNING_PLAYLIST_ID ?? "",
   name: "Running",
+  csvFile: "Running.csv",
 };
 
 let cached: RunningPlaylist | null = null;
@@ -27,8 +29,8 @@ export function useRunningPlaylist(): RunningPlaylist {
     if (!pending) {
       pending = fetch("/api/settings/playlist")
         .then(r => r.json())
-        .then((d: { id?: string; name?: string }) => {
-          cached = { id: d.id || FALLBACK.id, name: d.name || FALLBACK.name };
+        .then((d: { id?: string; name?: string; csvFile?: string }) => {
+          cached = { id: d.id || FALLBACK.id, name: d.name || FALLBACK.name, csvFile: d.csvFile || FALLBACK.csvFile };
           return cached;
         })
         .catch(() => (cached = FALLBACK));

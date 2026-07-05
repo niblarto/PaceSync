@@ -5,6 +5,7 @@ import { getAllTrackVotes } from "@/lib/track-feedback";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { spawn } from "child_process";
+import { activeCsvPath } from "@/lib/running-playlist-config";
 
 // The AI DJ service may run a local LLM per workout segment — allow it time.
 const MIX_TIMEOUT_MS = 180_000;
@@ -73,9 +74,9 @@ export async function buildAiDjMix(title: string, segments: string[]): Promise<A
 
   let csv: string;
   try {
-    csv = await readFile(join(process.cwd(), "public", "Running.csv"), "utf8");
+    csv = await readFile(activeCsvPath(), "utf8");
   } catch {
-    return { ok: false, error: "No library CSV - upload Running.csv in Settings first" };
+    return { ok: false, error: "No library CSV - upload a playlist library in Settings first" };
   }
 
   const easyBias = computeEasyPaceBias();
@@ -111,7 +112,7 @@ export async function buildAiDjMix(title: string, segments: string[]): Promise<A
 
 function buildMixLocally(segments: string[], easyBias = 0, trackFeedback: object[] = []): Promise<AiDjMixResult> {
   const script = join(process.cwd(), "scripts", "ai_dj_bridge.py");
-  const csvPath = join(process.cwd(), "public", "Running.csv");
+  const csvPath = activeCsvPath();
 
   return new Promise((resolve) => {
     const proc = spawn(PYTHON, [script, csvPath]);

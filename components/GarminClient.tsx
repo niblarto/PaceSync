@@ -108,6 +108,14 @@ function fmtDate(dateStr: string): string {
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
+// Same as fmtDate but prefixed with the day of week, for the sleep table
+function fmtDateWithDay(dateStr: string): string {
+  if (!dateStr) return "—";
+  const d = new Date(dateStr.slice(0, 10) + "T12:00:00");
+  if (isNaN(d.getTime())) return dateStr.slice(0, 10);
+  return d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+}
+
 function fmtDateTime(ts: string): string {
   if (!ts) return "—";
   // "2026-06-27 09:36:28.000000" → replace space with T for reliable parsing
@@ -119,7 +127,7 @@ function fmtDateTime(ts: string): string {
 function scoreColor(score: number | null): string {
   if (!score) return "text-slate-500";
   if (score >= 80) return "text-green-400";
-  if (score >= 60) return "text-yellow-400";
+  if (score >= 70) return "text-orange-400";
   return "text-red-400";
 }
 
@@ -154,6 +162,11 @@ function sportColor(activity: Activity): string {
 const CARD = "rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5";
 const TH = "text-left text-xs font-medium text-slate-500 uppercase tracking-wider pb-2";
 const TD = "py-1.5 text-sm text-slate-300";
+// Same as TD but without a text color, so callers can apply their own
+// (e.g. score/stress coloring) without fighting TD's text-slate-300 in the
+// generated stylesheet — same-specificity utility classes are resolved by
+// their order in Tailwind's output, not by source order in className.
+const TD_NC = "py-1.5 text-sm";
 
 interface PaceSpmRow {
   bucket: number;
@@ -357,12 +370,12 @@ export function GarminClient() {
                   <tbody className="divide-y divide-slate-800/50">
                     {data.sleep.map(row => (
                       <tr key={row.day}>
-                        <td className={TD}>{fmtDate(row.day)}</td>
+                        <td className={TD}>{fmtDateWithDay(row.day)}</td>
                         <td className={TD}>{fmtDuration(row.total_sleep)}</td>
-                        <td className={`${TD} text-blue-400`}>{fmtDuration(row.deep_sleep)}</td>
-                        <td className={`${TD} text-purple-400`}>{fmtDuration(row.rem_sleep)}</td>
+                        <td className={`${TD_NC} text-blue-400`}>{fmtDuration(row.deep_sleep)}</td>
+                        <td className={`${TD_NC} text-purple-400`}>{fmtDuration(row.rem_sleep)}</td>
                         <td className={TD}>{fmtDuration(row.light_sleep)}</td>
-                        <td className={`${TD} font-medium ${scoreColor(row.score)}`}>
+                        <td className={`${TD_NC} font-medium ${scoreColor(row.score)}`}>
                           {row.score ?? "—"}
                         </td>
                       </tr>
@@ -394,7 +407,7 @@ export function GarminClient() {
                         <td className={TD}>{w.steps?.toLocaleString() ?? "—"}</td>
                         <td className={TD}>{fmtDuration(w.sleep_avg)}</td>
                         <td className={TD}>{w.rhr_avg ? `${Math.round(w.rhr_avg)} bpm` : "—"}</td>
-                        <td className={`${TD} ${stressColor(w.stress_avg)}`}>
+                        <td className={`${TD_NC} ${stressColor(w.stress_avg)}`}>
                           {w.stress_avg ? Math.round(w.stress_avg) : "—"}
                         </td>
                         <td className={TD}>{w.activities ?? "—"}</td>
@@ -426,7 +439,7 @@ export function GarminClient() {
                         <td className={`${TD} text-slate-500`}>{fmtDate(d.day)}</td>
                         <td className={TD}>{d.steps?.toLocaleString() ?? "—"}</td>
                         <td className={TD}>{d.rhr ? `${d.rhr} bpm` : "—"}</td>
-                        <td className={`${TD} ${stressColor(d.stress_avg)}`}>
+                        <td className={`${TD_NC} ${stressColor(d.stress_avg)}`}>
                           {d.stress_avg ? Math.round(d.stress_avg) : "—"}
                         </td>
                         <td className={TD}>{fmtDist(d.distance)}</td>

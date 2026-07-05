@@ -43,6 +43,52 @@ function parseRetryAfter(raw: string): number {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+// At most 2 attempts per track — the exact query, then one cleaned-up
+// fallback combining suffix-stripping and feat.-stripping in a single shot.
+// Deliberately capped at 2 (not 4): a large batch of misses can mean
+// thousands of tracks, and each extra variant multiplies Spotify API calls
+// across the whole batch — a prior 4-variant version tripped a ~22-hour
+// app-level rate limit on a ~2500-track library.
+function searchVariants(title: string, artist: string): { title: string; artist: string }[] {
+  // Strip "(Remix)", "(Extended Mix)", "[Radio Edit]", "- Radio Edit" etc.
+  const cleanTitle = title
+    .replace(/\s*[\(\[][^)\]]*(?:mix|remix|edit|version|rework|vip|dub|bootleg)[^)\]]*[\)\]]/gi, "")
+    .replace(/\s*-\s*(?:[\w\s]*)(mix|remix|edit|version|rework|vip|dub|bootleg)\s*$/i, "")
+    .trim();
+  // Drop "feat./ft./featuring X" and any secondary credited artists
+  const cleanArtist = artist.split(/[,;]|feat\.?|ft\.?|featuring|&|\bx\b/i)[0].trim();
+
+  const fallback = { title: cleanTitle || title, artist: cleanArtist || artist };
+  const exact = { title, artist };
+  if (fallback.title.toLowerCase() === exact.title.toLowerCase() && fallback.artist.toLowerCase() === exact.artist.toLowerCase()) {
+    return [exact];
+  }
+  return [exact, fallback];
+}
+
+async function searchSpotify(token: string, title: string, artist: string): Promise<{ result: CacheEntry; rateLimited: number | null }> {
+  for (const variant of searchVariants(title, artist)) {
+    const q = encodeURIComponent(variant.artist ? `${variant.title} ${variant.artist}` : variant.title);
+    const res = await fetch(
+      `https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (res.status === 429) {
+      return { result: null, rateLimited: parseRetryAfter(res.headers.get("Retry-After") ?? "30") };
+    }
+    if (!res.ok) continue;
+    const data = await res.json() as {
+      tracks?: { items?: { uri: string; name: string; artists: { name: string }[] }[] };
+    };
+    const item = data.tracks?.items?.[0];
+    if (item) {
+      return { result: { uri: item.uri, name: item.name, artistName: item.artists[0]?.name ?? artist }, rateLimited: null };
+    }
+    await sleep(80); // stay polite between variant attempts on the same track
+  }
+  return { result: null, rateLimited: null };
+}
+
 export async function POST(req: NextRequest) {
   const authHeader = req.headers.get("Authorization");
   const spotifyToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -54,8 +100,9 @@ export async function POST(req: NextRequest) {
   }
   const token = spotifyToken ?? (await getServerSession(authOptions))?.accessToken!;
 
-  const body = await req.json() as { tracks?: { artist: string; title: string }[] };
+  const body = await req.json() as { tracks?: { artist: string; title: string }[]; bypassCache?: boolean };
   const inputTracks = (body.tracks ?? []).filter(t => t.artist && t.title);
+  const bypassCache = !!body.bypassCache;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -81,7 +128,7 @@ export async function POST(req: NextRequest) {
           const t = inputTracks[i];
           const cacheKey = `${t.title}|||${t.artist}`.toLowerCase();
 
-          if (spotifyCache.has(cacheKey)) {
+          if (!bypassCache && spotifyCache.has(cacheKey)) {
             spotifyResults.push(spotifyCache.get(cacheKey)!);
             cacheHits++;
             send({ type: "progress", current: i + 1, total: inputTracks.length, cached: true });
@@ -94,34 +141,18 @@ export async function POST(req: NextRequest) {
             continue;
           }
 
-          const q = encodeURIComponent(`${t.title} ${t.artist}`);
-          const res = await fetch(
-            `https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`,
-            { headers: { Authorization: `Bearer ${token}` } }
-          );
+          const { result, rateLimited } = await searchSpotify(token, t.title, t.artist);
 
-          if (res.status === 429) {
-            retryAfter = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
+          if (rateLimited !== null) {
+            retryAfter = rateLimited;
             spotifyResults.push(null);
             send({ type: "progress", current: i + 1, total: inputTracks.length, skipped: true });
             continue;
           }
 
-          if (!res.ok) {
-            spotifyResults.push(null);
-            misses++;
-          } else {
-            const data = await res.json() as {
-              tracks?: { items?: { uri: string; name: string; artists: { name: string }[] }[] };
-            };
-            const item = data.tracks?.items?.[0];
-            const result: CacheEntry = item
-              ? { uri: item.uri, name: item.name, artistName: item.artists[0]?.name ?? t.artist }
-              : null;
-            if (!result) misses++; else newHits++;
-            spotifyCache.set(cacheKey, result);
-            spotifyResults.push(result);
-          }
+          if (!result) misses++; else newHits++;
+          spotifyCache.set(cacheKey, result);
+          spotifyResults.push(result);
 
           send({ type: "progress", current: i + 1, total: inputTracks.length });
           await sleep(120);
@@ -140,6 +171,8 @@ export async function POST(req: NextRequest) {
           uri: spotifyResults[i]?.uri ?? "",
           name: spotifyResults[i]?.name ?? t.title,
           artistName: spotifyResults[i]?.artistName ?? t.artist,
+          originalTitle: t.title,
+          originalArtist: t.artist,
         }));
 
         send({ type: "done", tracks, retryAfter });

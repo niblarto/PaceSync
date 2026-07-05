@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { readFile, writeFile } from "fs/promises";
-import { join } from "path";
+import { activeCsvPath } from "@/lib/running-playlist-config";
 
 // Extracts a "Track URI" (or equivalent) column value per data row, used to
 // dedup when appending rather than overwriting public/Running.csv.
@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No CSV data" }, { status: 400 });
   }
 
-  const dest = join(process.cwd(), "public", "Running.csv");
+  const dest = activeCsvPath();
 
   if (mode === "append") {
     let existing = "";

@@ -4,6 +4,7 @@ import { authOptions } from "@/lib/auth";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { garminCacheGet, garminCacheSet } from "@/lib/garmin-cache";
 import { getTodaysRunEntry } from "@/lib/todays-run-history";
+import { activeCsvPath } from "@/lib/running-playlist-config";
 import path from "path";
 import fs from "fs";
 
@@ -13,7 +14,7 @@ import fs from "fs";
 function libraryUris(): Set<string> {
   const uris = new Set<string>();
   try {
-    const csv = fs.readFileSync(path.join(process.cwd(), "public", "Running.csv"), "utf-8");
+    const csv = fs.readFileSync(activeCsvPath(), "utf-8");
     csv.split("\n").forEach(line => {
       const uri = line.split(",")[0]?.trim();
       if (uri?.startsWith("spotify:track:")) uris.add(uri);

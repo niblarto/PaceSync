@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { readFile, writeFile } from "fs/promises";
-import { join } from "path";
+import { activeCsvPath } from "@/lib/running-playlist-config";
 
 // CSV-only deletion — Spotify removal is handled client-side with the browser token
 export async function DELETE(req: NextRequest) {
@@ -18,7 +18,7 @@ export async function DELETE(req: NextRequest) {
     ? spotifyUri.slice("spotify:track:".length)
     : spotifyUri;
 
-  const csvPath = join(process.cwd(), "public", "Running.csv");
+  const csvPath = activeCsvPath();
   try {
     const csv = await readFile(csvPath, "utf8");
     const lines = csv.split("\n");

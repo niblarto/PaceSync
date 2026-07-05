@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { readFile, writeFile } from "fs/promises";
-import { join } from "path";
+import { activeCsvPath } from "@/lib/running-playlist-config";
 
 // Appends accepted song suggestions to public/Running.csv so they join the
 // local BPM pool. Spotify playlist addition happens client-side with the
@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
   const { tracks } = await req.json() as { tracks?: AddTrack[] };
   if (!tracks?.length) return NextResponse.json({ error: "No tracks" }, { status: 400 });
 
-  const csvPath = join(process.cwd(), "public", "Running.csv");
+  const csvPath = activeCsvPath();
   try {
     const csv = await readFile(csvPath, "utf8");
     const lines = csv.split("\n");

@@ -329,20 +329,28 @@ export function DashboardClient({ spotifyUser }: Props) {
       .catch(() => {});
   }, []);
 
-  // Auto-load default playlist on mount
+  // Auto-load default playlist on mount — the active playlist's CSV is served
+  // via an API route (not a static /public fetch): files written at runtime,
+  // like a freshly imported playlist's CSV, don't exist at Next.js build time
+  // and would 404 if fetched directly from /public.
   useEffect(() => {
-    fetch("/Running.csv")
-      .then((r) => r.text())
-      .then((text) => {
-        const result = parseExportifyCsv(text);
-        if (!result.ok) return;
-        setCsvName("Running");
-        setAllTracks(result.tracks);
-        setStep("ready");
-        // Start on the full playlist so the track list is populated immediately
-        setSelectedZones([ALL_ZONE]);
-        setPlaylistName("Running");
-        prewarmArt(result.tracks);
+    fetch("/api/settings/playlist")
+      .then(r => r.json())
+      .then((d: { name?: string }) => {
+        const name = d.name || "Running";
+        return fetch("/api/playlist-csv")
+          .then(r => { if (!r.ok) throw new Error("no csv"); return r.text(); })
+          .then((text) => {
+            const result = parseExportifyCsv(text);
+            if (!result.ok) return;
+            setCsvName(name);
+            setAllTracks(result.tracks);
+            setStep("ready");
+            // Start on the full playlist so the track list is populated immediately
+            setSelectedZones([ALL_ZONE]);
+            setPlaylistName(name);
+            prewarmArt(result.tracks);
+          });
       })
       .catch(() => {/* silently ignore if file missing */});
   }, []);

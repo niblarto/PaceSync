@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { spawn } from "child_process";
 import path from "path";
+import { activeCsvPath } from "@/lib/running-playlist-config";
 
 const PYTHON = process.platform === "win32" ? "python" : "python3";
 
@@ -14,7 +15,7 @@ export async function POST(req: NextRequest) {
   if (!uri) return NextResponse.json({ error: "Missing uri" }, { status: 400 });
 
   const script = path.join(process.cwd(), "scripts", "bpm_bridge.py");
-  const csv = path.join(process.cwd(), "public", "Running.csv");
+  const csv = activeCsvPath();
 
   const args = [script, "similar", csv, uri, String(n ?? 25)];
   if (seed) args.push(JSON.stringify(seed));
