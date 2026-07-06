@@ -447,7 +447,7 @@ export function RunnaSummaryCard() {
 // ── Runna Schedule Card (upcoming) ────────────────────────────────────────────
 
 interface AiDjTrack { uri: string; name: string; artist: string; startsAt: string; durationSec?: number; tempo: number; camelot: string | null; energy: number; }
-interface AiDjTimelineSegment { segment: string; targetBpm: number; targetPaceSec?: number | null; tracks: AiDjTrack[]; }
+interface AiDjTimelineSegment { segment: string; targetBpm: number | null; targetPaceSec?: number | null; tracks: AiDjTrack[]; }
 interface AiDjMixResponse { trackUris: string[]; totalSec: number; timeline: AiDjTimelineSegment[]; }
 export type AiDjTimeline = AiDjTimelineSegment[];
 
@@ -460,6 +460,29 @@ interface RunnaScheduleProps {
   onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimelineSegment[]) => void;
   /** Bumped by the parent after a mix is saved — invalidates the saved-mix tracklist cache */
   mixSavedNonce?: number;
+}
+
+// Strength sessions have no pace segments — synthesize one the mixer's
+// strength kind understands (high energy, any BPM, session-length budget).
+// durationSec comes straight from Runna's ICS estimate, which is occasionally
+// missing/wrong for strength sessions — clamp to a sane range so a bad value
+// can't produce a runaway-length mix.
+const STRENGTH_MIN_SEC = 10 * 60;
+const STRENGTH_MAX_SEC = 90 * 60;
+function mixSegmentsFor(w: RunnaWorkout): string[] {
+  if (w.type !== "strength") return w.segments;
+  const raw = w.durationSec;
+  const clamped = Math.min(Math.max(raw || 45 * 60, STRENGTH_MIN_SEC), STRENGTH_MAX_SEC);
+  if (raw !== clamped) {
+    console.warn(`[ai-dj] strength duration ${raw}s out of range — using ${clamped}s`);
+  }
+  const mins = Math.round(clamped / 60);
+  // The "•"-delimited summary line lets the mixer's max_projected_duration
+  // parse this as the workout's target length (same as a run's card summary,
+  // e.g. "Long Run • 13.1mi • 1h50m - 2h10m") — without it, the mixer falls
+  // back to a fixed +5min pad, which let strength mixes run well past the
+  // stated session length (a 45min target became a 60min playlist).
+  return [`Strength • ${mins}m - ${mins}m`, `${mins} min strength session`];
 }
 
 type MixProgress = { current: number; total: number; segment: string };
@@ -563,7 +586,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
 
   // On expand, show the saved AI DJ mix for this workout's date (pre-built by
   // the nightly cron or saved from the dashboard) — keyed by workout date.
-  interface MixSnapshot { workoutTitle: string; tracks: { name: string; artist: string; startsAtSec: number }[] }
+  interface MixSnapshot { workoutTitle: string; tracks: { name: string; artist: string; startsAtSec: number }[]; pinned?: boolean }
   const [mixSnapshots, setMixSnapshots] = useState<Record<string, MixSnapshot | null>>({});
 
   // A save on the dashboard bumps mixSavedNonce — drop the cache so the
@@ -575,7 +598,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
   useEffect(() => {
     if (!expanded || !aiDjEnabled) return;
     const w = workouts.find(x => x.uid === expanded);
-    if (!w || w.type === "strength" || w.type === "rest") return;
+    if (!w || w.type === "rest") return;
     if (mixSnapshots[w.date] !== undefined) return;
     fetch(`/api/todays-run/history?date=${w.date}`)
       .then(r => r.json())
@@ -602,7 +625,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
       const mixRes = await fetch("/api/ai-dj/mix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: w.title, segments: w.segments }),
+        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w) }),
       });
       if (!mixRes.ok || !mixRes.body) {
         const err = await mixRes.json().catch(() => ({})) as { error?: string };
@@ -651,7 +674,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
         energy: t.energy,
       }));
 
-      onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, w.segments, w.date, mix.timeline);
+      onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w), w.date, mix.timeline);
       setMixState(s => ({ ...s, [w.uid]: { status: "done" } }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to build mix";
@@ -777,7 +800,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                         </div>
                       );
                     })()}
-                    {aiDjEnabled && isRun && w.segments.length > 0 && (() => {
+                    {aiDjEnabled && ((isRun && w.segments.length > 0) || (w.type === "strength" && w.durationSec > 0)) && (() => {
                       const st = mixState[w.uid];
                       const snap = mixSnapshots[w.date];
                       return (
@@ -803,7 +826,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                           {snap && snap.tracks?.length > 0 && (
                             <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-1">
                               <p className="text-xs text-purple-300/80 font-medium">
-                                🎧 Saved mix — {snap.tracks.length} tracks
+                                {snap.pinned ? "📌 Pinned mix" : "🎧 Saved mix"} — {snap.tracks.length} tracks
                               </p>
                               <div className="max-h-44 overflow-y-auto no-scrollbar space-y-0.5">
                                 {snap.tracks.map((t, i) => (

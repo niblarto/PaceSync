@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { saveTodaysRunEntry, timelineToHistoryTracks, getTodaysRunEntry } from "@/lib/todays-run-history";
+import { getPinnedMix } from "@/lib/pinned-mixes";
 import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 
 // Records which mix "Today's Run" held for a workout date (called after a
@@ -13,6 +14,20 @@ export async function GET(req: NextRequest) {
   const date = req.nextUrl.searchParams.get("date") ?? "";
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return NextResponse.json({ error: "date required (YYYY-MM-DD)" }, { status: 400 });
+  }
+  // A pinned mix outranks the history snapshot — it's what the nightly
+  // pre-build will actually put in "Today's Run" for that date.
+  const pin = getPinnedMix(date);
+  if (pin?.timeline?.length) {
+    return NextResponse.json({
+      entry: {
+        date,
+        workoutTitle: pin.workoutTitle,
+        savedAt: pin.pinnedAt,
+        tracks: timelineToHistoryTracks(pin.timeline),
+        pinned: true,
+      },
+    });
   }
   return NextResponse.json({ entry: getTodaysRunEntry(date) });
 }

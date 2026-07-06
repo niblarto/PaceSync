@@ -22,7 +22,30 @@ import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 const notify = sendNtfy;
 
 function isRunnableWorkout(w: RunnaWorkout): boolean {
-  return w.type !== "strength" && w.type !== "rest" && w.segments.length > 0;
+  if (w.type === "rest") return false;
+  if (w.type === "strength") return w.durationSec > 0;
+  return w.segments.length > 0;
+}
+
+// Strength sessions have no pace segments — synthesize one the mixer's
+// strength kind understands (high energy, any BPM, session-length budget).
+// durationSec comes straight from Runna's ICS estimate, which is occasionally
+// missing/wrong for strength sessions — clamp to a sane range so a bad value
+// can't produce a runaway-length mix.
+const STRENGTH_MIN_SEC = 10 * 60;
+const STRENGTH_MAX_SEC = 90 * 60;
+function mixSegmentsFor(w: RunnaWorkout): string[] {
+  if (w.type !== "strength") return w.segments;
+  const raw = w.durationSec;
+  const clamped = Math.min(Math.max(raw || 45 * 60, STRENGTH_MIN_SEC), STRENGTH_MAX_SEC);
+  if (raw !== clamped) {
+    console.warn(`[cron/ai-dj] strength duration ${raw}s out of range — using ${clamped}s`);
+  }
+  const mins = Math.round(clamped / 60);
+  // The "•"-delimited line lets the mixer parse this as the target duration
+  // (same as a run's "Long Run • 13.1mi • 1h50m - 2h10m" summary) instead of
+  // falling back to a fixed +5min pad, which let mixes overshoot the session.
+  return [`Strength • ${mins}m - ${mins}m`, `${mins} min strength session`];
 }
 
 async function runAiDjPrebuild() {
@@ -80,7 +103,7 @@ async function runAiDjPrebuild() {
       mix = { trackUris: uris, totalSec: pinned.totalSec, timeline: pinned.timeline };
       console.log(`[cron/ai-dj] using pinned mix for ${w.date} (pinned ${pinned.pinnedAt})`);
     } else {
-      const mixResult = await buildAiDjMix(w.title, w.segments);
+      const mixResult = await buildAiDjMix(w.title, mixSegmentsFor(w));
       if (!mixResult.ok) {
         results.push({ title: w.title, ok: false, error: mixResult.error });
         await notify(`"${w.title}" (${tomorrow}): ${mixResult.error}`, { title: "❌ AI DJ Pre-build Failed", tags: "x", priority: "high" });

@@ -569,6 +569,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       const d = await res.json() as { error?: string };
       if (!res.ok) throw new Error(d.error ?? "Pin failed");
       setPinSaved(true);
+      setMixSavedNonce(n => n + 1); // refresh the Runna card's tracklist panel
     } catch (e) {
       setPinError(e instanceof Error ? e.message : "Pin failed");
     } finally {
@@ -1139,32 +1140,34 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                           placeholder="Playlist name"
                           className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 w-full min-w-40"
                         />
-                      <button
-                        onClick={savePlaylist}
-                        disabled={!playlistName || step === "saving"}
-                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors w-full"
-                      >
-                        {step === "saving" ? <><Spinner />Saving…</> : "Save to Spotify"}
-                      </button>
-                      {aiDjMix && (
+                      <div className="flex items-center gap-1.5">
                         <button
-                          onClick={saveTodaysRun}
-                          disabled={todaysRunSaving}
-                          className="inline-flex items-center justify-center gap-2 rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors w-full"
+                          onClick={savePlaylist}
+                          disabled={!playlistName || step === "saving"}
+                          className="inline-flex items-center justify-center gap-2 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors whitespace-nowrap"
                         >
-                          {todaysRunSaving ? <><Spinner />Saving…</> : todaysRunSaved ? "Saved to Today's Run!" : "Save to Today's Running Playlist"}
+                          {step === "saving" ? <><Spinner />Saving…</> : "Save to Spotify"}
                         </button>
-                      )}
-                      {aiDjMix && (
-                        <button
-                          onClick={pinMixToWorkout}
-                          disabled={pinSaving || pinSaved}
-                          className="inline-flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/15 hover:bg-purple-500/25 disabled:opacity-60 text-purple-300 font-semibold text-xs px-4 py-1.5 transition-colors w-full"
-                          title="The nightly pre-build will use this exact mix for the workout instead of generating a new one"
-                        >
-                          {pinSaving ? <><Spinner />Pinning…</> : pinSaved ? "📌 Pinned to workout!" : "📌 Pin to workout"}
-                        </button>
-                      )}
+                        {aiDjMix && (
+                          <button
+                            onClick={saveTodaysRun}
+                            disabled={todaysRunSaving}
+                            className="inline-flex items-center justify-center gap-2 rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors whitespace-nowrap"
+                          >
+                            {todaysRunSaving ? <><Spinner />Saving…</> : todaysRunSaved ? "Saved to Today's Run!" : "Save to Today's Running Playlist"}
+                          </button>
+                        )}
+                        {aiDjMix && (
+                          <button
+                            onClick={pinMixToWorkout}
+                            disabled={pinSaving || pinSaved}
+                            className="inline-flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/15 hover:bg-purple-500/25 disabled:opacity-60 text-purple-300 font-semibold text-xs px-4 py-1.5 transition-colors whitespace-nowrap"
+                            title="The nightly pre-build will use this exact mix for the workout instead of generating a new one"
+                          >
+                            {pinSaving ? <><Spinner />Pinning…</> : pinSaved ? "📌 Pinned!" : "📌 Pin to workout"}
+                          </button>
+                        )}
+                      </div>
                       {pinError && <p className="text-xs text-red-400">{pinError}</p>}
                       {todaysRunError && <p className="text-xs text-red-400">{todaysRunError}</p>}
                       {todaysRunSaved && todaysRunUrl && (

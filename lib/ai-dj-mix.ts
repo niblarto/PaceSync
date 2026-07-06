@@ -20,7 +20,7 @@ export interface AiDjMixResponse {
   totalSec: number;
   timeline: {
     segment: string;
-    targetBpm: number;
+    targetBpm: number | null;
     targetPaceSec?: number | null;
     tracks: { uri: string; name: string; artist: string; startsAt: string; durationSec?: number; tempo: number; camelot: string | null; energy: number }[];
   }[];

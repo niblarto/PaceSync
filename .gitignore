@@ -25,3 +25,4 @@ cron-activity.log
 todays-run-history.json
 track-pace-feedback.json
 running-playlist.json
+.deploy-manifest.json

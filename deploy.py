@@ -6,6 +6,8 @@ Before deploying:
   3. In Spotify dashboard, add redirect URI: {NEXTAUTH_URL}/api/auth/callback/spotify
 """
 
+import hashlib
+import json
 import paramiko
 import time
 import os
@@ -199,6 +201,33 @@ FILES = [
 # would silently disable 2FA and reset credentials.
 SKIP_IF_REMOTE_EXISTS = {'public/Running.csv', 'local-auth.json'}
 
+# ── Upload-skip manifest ──────────────────────────────────────────────────────
+# Hashes of every file as of the last SUCCESSFUL deploy: only files whose
+# hash changed are uploaded (hashing all ~130 files takes ~40 ms; uploading
+# them over SFTP takes ~30 s). Written only after the build passes and the
+# service restarts, so a failed deploy never marks its uploads as done.
+# Run "python deploy.py --all" (or delete the file) to force a full upload.
+MANIFEST_PATH = os.path.join(RUNNING_DIR, '.deploy-manifest.json')
+FORCE_ALL = '--all' in sys.argv
+
+
+def file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_manifest() -> dict:
+    if FORCE_ALL:
+        return {}
+    try:
+        with open(MANIFEST_PATH, encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
 
 def run(ssh, cmd):
     _, stdout, stderr = ssh.exec_command(cmd)
@@ -235,8 +264,13 @@ run(ssh, f'mkdir -p {PI_REMOTE}')
 for d in unique_dirs:
     run(ssh, f'mkdir -p "{d}"')
 
-# Upload files
+# Upload files (only those whose hash changed since the last successful deploy)
 sftp = ssh.open_sftp()
+manifest = load_manifest()
+new_manifest = {}
+uploaded = 0
+skipped_unchanged = 0
+package_json_changed = False
 for local_rel, remote_rel in FILES:
     local_path  = os.path.join(RUNNING_DIR, local_rel.replace('/', os.sep))
     remote_path = f'{PI_REMOTE}/{remote_rel}'
@@ -250,13 +284,31 @@ for local_rel, remote_rel in FILES:
             continue
         except FileNotFoundError:
             pass  # not on Pi yet — upload seed
+    digest = file_sha256(local_path)
+    if manifest.get(remote_rel) == digest:
+        new_manifest[remote_rel] = digest
+        skipped_unchanged += 1
+        continue
+    if local_rel == 'package.json':
+        package_json_changed = True
     print(f'  Uploading {local_rel}...')
     sftp.put(local_path, remote_path)
+    new_manifest[remote_rel] = digest
+    uploaded += 1
 sftp.close()
+print(f'  Uploaded {uploaded} changed file(s); {skipped_unchanged} unchanged.')
 
-# Install dependencies + build
-print('  Installing npm dependencies...')
-run(ssh, f'cd {PI_REMOTE} && npm install 2>&1 | tail -5')
+if uploaded == 0 and manifest:
+    print('\nNothing changed since the last deploy — skipping build and restart.')
+    ssh.close()
+    sys.exit(0)
+
+# Install dependencies + build (npm install only when package.json changed)
+if package_json_changed or not manifest:
+    print('  Installing npm dependencies...')
+    run(ssh, f'cd {PI_REMOTE} && npm install 2>&1 | tail -5')
+else:
+    print('  package.json unchanged — skipping npm install.')
 
 # Python deps for the AI_BPM matcher (apt = prebuilt Pi packages, idempotent)
 print('  Checking Python matcher dependencies...')
@@ -340,6 +392,10 @@ run(ssh, f"sed -i 's/\\r$//' {notify_sh} && chmod +x {notify_sh}")
 run(ssh, f"""crontab -l 2>/dev/null | grep 'garmin_run.py' | grep -q 'garmin_notify' || {{ crontab -l 2>/dev/null | sed '/garmin_run.py/ {{ /garmin_notify/! s|$|; {notify_sh} $?| }}' | crontab -; }}""")
 
 ssh.close()
+
+# Record what's now on the Pi — next deploy only uploads files changed since.
+with open(MANIFEST_PATH, 'w', encoding='utf-8') as f:
+    json.dump(new_manifest, f)
 
 print(f'\nDeploy complete.')
 print(f'  App:  http://{PI["host"]}:{PORT}')
