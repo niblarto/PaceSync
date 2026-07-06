@@ -266,6 +266,9 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [todaysRunError, setTodaysRunError] = useState<string | null>(null);
   const [todaysRunUrl, setTodaysRunUrl] = useState<string | null>(null);
   const [mixSavedNonce, setMixSavedNonce] = useState(0);
+  const [pinSaving, setPinSaving] = useState(false);
+  const [pinSaved, setPinSaved] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/settings/garmin")
@@ -457,6 +460,8 @@ export function DashboardClient({ spotifyUser }: Props) {
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
     setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false });
     setPlaylistName(name);
+    setPinSaved(false);
+    setPinError(null);
     setStep("ready");
     setSaveError(null);
     setSavedUrl(null);
@@ -542,6 +547,33 @@ export function DashboardClient({ spotifyUser }: Props) {
       `spotify:search:${encodeURIComponent(TODAYS_RUN_PLAYLIST)}`,
       `https://open.spotify.com/search/${encodeURIComponent(TODAYS_RUN_PLAYLIST)}`,
     );
+  }
+
+  // Pin the built mix to its workout date — the nightly pre-build then uses
+  // this exact tracklist for "Today's Run" instead of generating a fresh one.
+  async function pinMixToWorkout() {
+    if (!aiDjMix?.timeline?.length) return;
+    setPinSaving(true);
+    setPinError(null);
+    try {
+      const res = await fetch("/api/ai-dj/pin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date: aiDjMix.date,
+          workoutTitle: aiDjMix.workoutTitle,
+          totalSec: aiDjMix.totalSec,
+          timeline: aiDjMix.timeline,
+        }),
+      });
+      const d = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Pin failed");
+      setPinSaved(true);
+    } catch (e) {
+      setPinError(e instanceof Error ? e.message : "Pin failed");
+    } finally {
+      setPinSaving(false);
+    }
   }
 
   async function saveTodaysRun() {
@@ -1123,6 +1155,17 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                           {todaysRunSaving ? <><Spinner />Saving…</> : todaysRunSaved ? "Saved to Today's Run!" : "Save to Today's Running Playlist"}
                         </button>
                       )}
+                      {aiDjMix && (
+                        <button
+                          onClick={pinMixToWorkout}
+                          disabled={pinSaving || pinSaved}
+                          className="inline-flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/15 hover:bg-purple-500/25 disabled:opacity-60 text-purple-300 font-semibold text-xs px-4 py-1.5 transition-colors w-full"
+                          title="The nightly pre-build will use this exact mix for the workout instead of generating a new one"
+                        >
+                          {pinSaving ? <><Spinner />Pinning…</> : pinSaved ? "📌 Pinned to workout!" : "📌 Pin to workout"}
+                        </button>
+                      )}
+                      {pinError && <p className="text-xs text-red-400">{pinError}</p>}
                       {todaysRunError && <p className="text-xs text-red-400">{todaysRunError}</p>}
                       {todaysRunSaved && todaysRunUrl && (
                         <button

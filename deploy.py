@@ -140,6 +140,8 @@ FILES = [
     ('app/api/ai-dj/mix/route.ts',                'app/api/ai-dj/mix/route.ts'),
     ('app/api/ai-dj/health/route.ts',             'app/api/ai-dj/health/route.ts'),
     ('app/api/ai-dj/wake/route.ts',               'app/api/ai-dj/wake/route.ts'),
+    ('app/api/ai-dj/pin/route.ts',                'app/api/ai-dj/pin/route.ts'),
+    ('lib/pinned-mixes.ts',                       'lib/pinned-mixes.ts'),
     ('app/api/settings/bpm-overrides/route.ts',   'app/api/settings/bpm-overrides/route.ts'),
     ('lib/bpm-overrides.ts',                      'lib/bpm-overrides.ts'),
     ('app/api/settings/ai-dj/route.ts',           'app/api/settings/ai-dj/route.ts'),

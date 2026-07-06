@@ -10,6 +10,8 @@ import { fetchRunnaSchedule, TODAYS_RUN_PLAYLIST, type RunnaWorkout } from "@/li
 import { sendNtfy, trackLinkLines } from "@/lib/ntfy";
 import { appendCronLog } from "@/lib/cron-log";
 import { saveTodaysRunEntry, timelineToHistoryTracks } from "@/lib/todays-run-history";
+import { getPinnedMix } from "@/lib/pinned-mixes";
+import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 
 // Runs daily at 15:30 (Pi local time, installed by deploy.py): if there's a
 // run scheduled for tomorrow, pre-build its AI DJ mix and save it straight to
@@ -69,14 +71,25 @@ async function runAiDjPrebuild() {
   const results: { title: string; ok: boolean; tracks?: number; url?: string; error?: string }[] = [];
 
   for (const w of tomorrowWorkouts) {
-    const mixResult = await buildAiDjMix(w.title, w.segments);
-    if (!mixResult.ok) {
-      results.push({ title: w.title, ok: false, error: mixResult.error });
-      await notify(`"${w.title}" (${tomorrow}): ${mixResult.error}`, { title: "❌ AI DJ Pre-build Failed", tags: "x", priority: "high" });
-      appendCronLog("AI DJ", `✗ "${w.title}": ${mixResult.error}`);
-      continue;
+    // A mix pinned to this workout from the dashboard wins over a fresh build
+    const pinned = getPinnedMix(w.date);
+    let mix: AiDjMixResponse;
+    if (pinned?.timeline?.length) {
+      const uris: string[] = [];
+      pinned.timeline.forEach(seg => seg.tracks.forEach(t => { if (t.uri) uris.push(t.uri); }));
+      mix = { trackUris: uris, totalSec: pinned.totalSec, timeline: pinned.timeline };
+      console.log(`[cron/ai-dj] using pinned mix for ${w.date} (pinned ${pinned.pinnedAt})`);
+    } else {
+      const mixResult = await buildAiDjMix(w.title, w.segments);
+      if (!mixResult.ok) {
+        results.push({ title: w.title, ok: false, error: mixResult.error });
+        await notify(`"${w.title}" (${tomorrow}): ${mixResult.error}`, { title: "❌ AI DJ Pre-build Failed", tags: "x", priority: "high" });
+        appendCronLog("AI DJ", `✗ "${w.title}": ${mixResult.error}`);
+        continue;
+      }
+      mix = mixResult.mix;
     }
-    const trackUris = mixResult.mix.trackUris;
+    const trackUris = mix.trackUris;
     if (!trackUris.length) {
       results.push({ title: w.title, ok: false, error: "No tracks matched this workout" });
       await notify(`"${w.title}" (${tomorrow}): no tracks matched`, { title: "❌ AI DJ Pre-build Failed", tags: "x", priority: "high" });
@@ -94,17 +107,18 @@ async function runAiDjPrebuild() {
         date: w.date,
         workoutTitle: w.title,
         savedAt: new Date().toISOString(),
-        tracks: timelineToHistoryTracks(mixResult.mix.timeline),
+        tracks: timelineToHistoryTracks(mix.timeline),
       });
       results.push({ title: w.title, ok: true, tracks: trackUris.length, url: saved.url });
       const trackList = trackLinkLines(
-        mixResult.mix.timeline.flatMap(seg => seg.tracks.map(t => ({ uri: t.uri, name: t.name, artist: t.artist })))
+        mix.timeline.flatMap(seg => seg.tracks.map(t => ({ uri: t.uri, name: t.name, artist: t.artist })))
       );
+      const pinNote = pinned ? " (pinned mix)" : "";
       await notify(
-        `"${w.title}" ready for ${tomorrow} — ${trackUris.length} tracks saved as "${TODAYS_RUN_PLAYLIST}"\n\n${trackList}`,
-        { title: "🎧 AI DJ Mix Ready", tags: "musical_note,white_check_mark" }
+        `"${w.title}" ready for ${tomorrow} — ${trackUris.length} tracks saved as "${TODAYS_RUN_PLAYLIST}"${pinNote}\n\n${trackList}`,
+        { title: pinned ? "📌 Pinned Mix Ready" : "🎧 AI DJ Mix Ready", tags: "musical_note,white_check_mark" }
       );
-      appendCronLog("AI DJ", `✓ "${w.title}" (${tomorrow}) — ${trackUris.length} tracks saved to "${TODAYS_RUN_PLAYLIST}"`);
+      appendCronLog("AI DJ", `✓ "${w.title}" (${tomorrow}) — ${trackUris.length} tracks saved to "${TODAYS_RUN_PLAYLIST}"${pinNote}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       results.push({ title: w.title, ok: false, error: msg });
