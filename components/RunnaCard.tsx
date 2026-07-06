@@ -586,7 +586,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
 
   // On expand, show the saved AI DJ mix for this workout's date (pre-built by
   // the nightly cron or saved from the dashboard) — keyed by workout date.
-  interface MixSnapshot { workoutTitle: string; tracks: { name: string; artist: string; startsAtSec: number }[]; pinned?: boolean }
+  interface MixSnapshot { workoutTitle: string; tracks: { name: string; artist: string; startsAtSec: number; tempo: number | null }[]; pinned?: boolean }
   const [mixSnapshots, setMixSnapshots] = useState<Record<string, MixSnapshot | null>>({});
 
   // A save on the dashboard bumps mixSavedNonce — drop the cache so the
@@ -829,14 +829,20 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                                 {snap.pinned ? "📌 Pinned mix" : "🎧 Saved mix"} — {snap.tracks.length} tracks
                               </p>
                               <div className="max-h-44 overflow-y-auto no-scrollbar space-y-0.5">
-                                {snap.tracks.map((t, i) => (
-                                  <p key={i} className="text-[11px] text-slate-400 truncate">
-                                    <span className="text-slate-600 font-mono">
-                                      {Math.floor(t.startsAtSec / 60)}:{String(Math.floor(t.startsAtSec % 60)).padStart(2, "0")}
-                                    </span>{" "}
-                                    {t.name} — <span className="text-slate-500">{t.artist}</span>
-                                  </p>
-                                ))}
+                                {snap.tracks.map((t, i) => {
+                                  const mm = String(Math.floor(t.startsAtSec / 60)).padStart(2, "0");
+                                  const ss = String(Math.floor(t.startsAtSec % 60)).padStart(2, "0");
+                                  const spm = t.tempo != null ? String(Math.round(t.tempo)).padStart(3, "0") : "—";
+                                  return (
+                                    <p key={i} className="text-[11px] text-slate-400 truncate">
+                                      <span className="text-slate-600 font-mono">
+                                        {mm}:{ss} - {spm}
+                                      </span>
+                                      {"   "}
+                                      {t.name} — <span className="text-slate-500">{t.artist}</span>
+                                    </p>
+                                  );
+                                })}
                               </div>
                             </div>
                           )}

@@ -17,6 +17,7 @@ export interface HistoryTrack {
   durationSec: number;
   targetPaceSec: number | null; // sec/mi the segment was built for
   segment: string;
+  tempo: number | null; // track BPM, for the saved-mix tracklist display
 }
 
 export interface TodaysRunEntry {
@@ -43,6 +44,7 @@ export function timelineToHistoryTracks(timeline: AiDjMixResponse["timeline"]): 
         durationSec: t.durationSec ?? 0,
         targetPaceSec: seg.targetPaceSec ?? null,
         segment: seg.segment,
+        tempo: t.tempo ?? null,
       });
     });
   });
