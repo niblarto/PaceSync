@@ -458,6 +458,8 @@ interface RunnaScheduleProps {
   aiDjEnabled?: boolean;
   /** Called once a mix is built — the parent populates the central track list/save UI rather than saving directly */
   onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimelineSegment[]) => void;
+  /** Bumped by the parent after a mix is saved — invalidates the saved-mix tracklist cache */
+  mixSavedNonce?: number;
 }
 
 type MixProgress = { current: number; total: number; segment: string };
@@ -540,7 +542,7 @@ function routeDate(a: RouteActivity): string {
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
-export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix }: RunnaScheduleProps = {}) {
+export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0 }: RunnaScheduleProps = {}) {
   const { workouts, loading, error } = useRunnaData();
   const [expanded, setExpanded] = useState<string | null>(null);
   const paceSpm = usePaceSpm(garminConfigured);
@@ -558,6 +560,31 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
       })
       .catch(() => setRoutes(r => ({ ...r, [uid]: { items: [], offset, total: 0 } })));
   }
+
+  // On expand, show the saved AI DJ mix for this workout's date (pre-built by
+  // the nightly cron or saved from the dashboard) — keyed by workout date.
+  interface MixSnapshot { workoutTitle: string; tracks: { name: string; artist: string; startsAtSec: number }[] }
+  const [mixSnapshots, setMixSnapshots] = useState<Record<string, MixSnapshot | null>>({});
+
+  // A save on the dashboard bumps mixSavedNonce — drop the cache so the
+  // fetch effect below (which depends on mixSnapshots) re-reads fresh data.
+  useEffect(() => {
+    if (mixSavedNonce > 0) setMixSnapshots({});
+  }, [mixSavedNonce]);
+
+  useEffect(() => {
+    if (!expanded || !aiDjEnabled) return;
+    const w = workouts.find(x => x.uid === expanded);
+    if (!w || w.type === "strength" || w.type === "rest") return;
+    if (mixSnapshots[w.date] !== undefined) return;
+    fetch(`/api/todays-run/history?date=${w.date}`)
+      .then(r => r.json())
+      .then((d: { entry?: MixSnapshot | null }) => {
+        setMixSnapshots(s => ({ ...s, [w.date]: d.entry ?? null }));
+      })
+      .catch(() => setMixSnapshots(s => ({ ...s, [w.date]: null })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, aiDjEnabled, workouts, mixSnapshots]);
 
   // On expand, fetch past runs at (workout distance … +0.5mi) as route options
   useEffect(() => {
@@ -618,7 +645,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
         name: t.name,
         artists: [{ name: t.artist }],
         album: { name: "", images: [] },
-        duration_ms: 0,
+        duration_ms: Math.round((t.durationSec ?? 0) * 1000),
         uri: t.uri,
         bpm: Math.round(t.tempo),
         energy: t.energy,
@@ -752,25 +779,45 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                     })()}
                     {aiDjEnabled && isRun && w.segments.length > 0 && (() => {
                       const st = mixState[w.uid];
+                      const snap = mixSnapshots[w.date];
                       return (
-                        <div className="flex flex-wrap items-center gap-2 pt-1">
-                          <button
-                            onClick={e => { e.stopPropagation(); if (st?.status !== "building") buildMix(w); }}
-                            disabled={st?.status === "building"}
-                            className="text-xs px-2.5 py-1 rounded-lg border bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25 disabled:opacity-60 disabled:cursor-wait transition-colors"
-                          >
-                            {st?.status === "building" ? "🎧 Mixing…" : st?.status === "done" ? "🎧 Remix" : "🎧 AI DJ Mix"}
-                          </button>
-                          {st?.status === "building" && (
-                            <MixProgressBar startedAt={st.startedAt ?? Date.now()} progress={st.progress} />
+                        <>
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <button
+                              onClick={e => { e.stopPropagation(); if (st?.status !== "building") buildMix(w); }}
+                              disabled={st?.status === "building"}
+                              className="text-xs px-2.5 py-1 rounded-lg border bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25 disabled:opacity-60 disabled:cursor-wait transition-colors"
+                            >
+                              {st?.status === "building" ? "🎧 Mixing…" : st?.status === "done" ? "🎧 Remix" : "🎧 AI DJ Mix"}
+                            </button>
+                            {st?.status === "building" && (
+                              <MixProgressBar startedAt={st.startedAt ?? Date.now()} progress={st.progress} />
+                            )}
+                            {st?.status === "done" && (
+                              <span className="text-xs text-purple-300/80">Loaded into the track list — review &amp; save from there ↑</span>
+                            )}
+                            {st?.status === "error" && (
+                              <span className="text-xs text-red-400">{st.error}</span>
+                            )}
+                          </div>
+                          {snap && snap.tracks?.length > 0 && (
+                            <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-1">
+                              <p className="text-xs text-purple-300/80 font-medium">
+                                🎧 Saved mix — {snap.tracks.length} tracks
+                              </p>
+                              <div className="max-h-44 overflow-y-auto no-scrollbar space-y-0.5">
+                                {snap.tracks.map((t, i) => (
+                                  <p key={i} className="text-[11px] text-slate-400 truncate">
+                                    <span className="text-slate-600 font-mono">
+                                      {Math.floor(t.startsAtSec / 60)}:{String(Math.floor(t.startsAtSec % 60)).padStart(2, "0")}
+                                    </span>{" "}
+                                    {t.name} — <span className="text-slate-500">{t.artist}</span>
+                                  </p>
+                                ))}
+                              </div>
+                            </div>
                           )}
-                          {st?.status === "done" && (
-                            <span className="text-xs text-purple-300/80">Loaded into the track list — review &amp; save from there ↑</span>
-                          )}
-                          {st?.status === "error" && (
-                            <span className="text-xs text-red-400">{st.error}</span>
-                          )}
-                        </div>
+                        </>
                       );
                     })()}
                     {garminConfigured && isRun && w.distanceMi && (() => {

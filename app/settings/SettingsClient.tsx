@@ -130,6 +130,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [aiDjHealthLlm, setAiDjHealthLlm] = useState(false);
   const [aiDjHealthMsg, setAiDjHealthMsg] = useState<string | null>(null);
   const [aiDjWolMac, setAiDjWolMac] = useState("");
+  // ── Run-type BPM override state (blank = no override) ─────────────────────
+  const [bpmOv, setBpmOv] = useState<Record<string, { min: string; max: string }>>({
+    warmup: { min: "", max: "" }, work: { min: "", max: "" }, easy: { min: "", max: "" },
+    cooldown: { min: "", max: "" }, rest: { min: "", max: "" },
+  });
+  const [bpmOvSaving, setBpmOvSaving] = useState(false);
+  const [bpmOvSaved, setBpmOvSaved] = useState(false);
+  const [bpmOvError, setBpmOvError] = useState<string | null>(null);
   const [waking, setWaking] = useState(false);
   const [wakeMsg, setWakeMsg] = useState<string | null>(null);
   const wakePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -235,6 +243,43 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    fetch("/api/settings/bpm-overrides")
+      .then(r => r.json())
+      .then((d: { overrides?: Record<string, { min?: number; max?: number }> }) => {
+        if (!d.overrides) return;
+        setBpmOv(prev => {
+          const next = { ...prev };
+          Object.keys(next).forEach(kind => {
+            const o = d.overrides![kind];
+            if (o) next[kind] = { min: o.min ? String(o.min) : "", max: o.max ? String(o.max) : "" };
+          });
+          return next;
+        });
+      })
+      .catch(() => {});
+  }, []);
+
+  async function saveBpmOverrides() {
+    setBpmOvSaving(true);
+    setBpmOvSaved(false);
+    setBpmOvError(null);
+    try {
+      const res = await fetch("/api/settings/bpm-overrides", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ overrides: bpmOv }),
+      });
+      const d = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to save");
+      setBpmOvSaved(true);
+    } catch (e) {
+      setBpmOvError(e instanceof Error ? e.message : "Failed to save — try again.");
+    } finally {
+      setBpmOvSaving(false);
+    }
+  }
 
   useEffect(() => {
     fetch("/api/settings/cron")
@@ -1722,115 +1767,57 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </button>
       </div>
 
-      {/* Scheduled jobs */}
+      {/* Run-type BPM limits */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
         <div>
-          <h2 className="font-semibold text-base">⏰ Scheduled Jobs</h2>
+          <h3 className="font-semibold text-slate-200">Run BPM limits</h3>
           <p className="text-sm text-slate-400 mt-1">
-            The automatic jobs on the Pi&apos;s crontab — set when each runs, or switch them off.
+            Min/max music BPM per run type for AI DJ mixes. Leave blank for automatic
+            cadence matching — anything set here becomes a hard limit.
+            Half-time tracks count at double tempo (an 87 BPM track counts as 174).
           </p>
         </div>
-        {!cronAvailable ? (
-          <p className="text-sm text-slate-500">
-            The schedule can only be managed on the Pi itself (crontab isn&apos;t available here).
-          </p>
-        ) : (
-          <>
-            {([
-              { key: "garmin", label: "Garmin sync", desc: "Downloads new activities into GarminDB" },
-              { key: "weekly", label: "BBC playlist refresh", desc: "Re-fetches BBC programme tracks and removes duplicates" },
-              { key: "aidj", label: "AI DJ pre-build", desc: "Builds tomorrow's mix and saves it to “Today's Run”" },
-            ] as const).map(meta => {
-              const job = cronJobs.find(j => j.key === meta.key);
-              if (!job) return null;
-              return (
-                <div key={meta.key} className="rounded-lg bg-slate-800/40 border border-white/5 px-3 py-2.5 space-y-2">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium text-slate-300">{meta.label}</p>
-                      <p className="text-xs text-slate-500 mt-0.5">{meta.desc}</p>
-                    </div>
-                    <button
-                      role="switch"
-                      aria-checked={job.enabled}
-                      onClick={() => { if (job.installed) patchCronJob(job.key, { enabled: !job.enabled }); }}
-                      disabled={!job.installed || cronSaving}
-                      className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-40 ${
-                        job.enabled ? "bg-sky-500" : "bg-slate-700"
-                      }`}
-                    >
-                      <span
-                        className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
-                          job.enabled ? "translate-x-5" : "translate-x-0"
-                        }`}
-                      />
-                    </button>
-                  </div>
-                  {job.installed ? (
-                    <div className="flex items-center gap-2">
-                      <select
-                        value={job.day === null ? "" : String(job.day)}
-                        onChange={e => patchCronJob(job.key, { day: e.target.value === "" ? null : parseInt(e.target.value, 10) })}
-                        disabled={!job.enabled || cronSaving}
-                        className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-2 py-1.5 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-sky-500"
-                      >
-                        <option value="">Every day</option>
-                        {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((d, i) => (
-                          <option key={d} value={i}>{d}</option>
-                        ))}
-                      </select>
-                      <span className="text-xs text-slate-500">at</span>
-                      <input
-                        type="time"
-                        value={job.time}
-                        onChange={e => patchCronJob(job.key, { time: e.target.value })}
-                        disabled={!job.enabled || cronSaving}
-                        className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-2 py-1.5 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-sky-500"
-                      />
-                    </div>
-                  ) : (
-                    <p className="text-xs text-slate-600">Not installed on this machine&apos;s crontab.</p>
-                  )}
-                </div>
-              );
-            })}
-            {cronJobsError && <p className="text-sm text-red-400">{cronJobsError}</p>}
-            <button
-              onClick={saveCronJobs}
-              disabled={cronSaving || cronJobs.every(j => !j.installed)}
-              className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
-            >
-              {cronSaving ? "Saving…" : cronSaved ? "Saved!" : "Save schedule"}
-            </button>
-
-            {/* Activity log — last 48h, newest first (same style as the GarminDB sync log) */}
-            {cronLog.length > 0 && (
-              <div className="space-y-1">
-                <p className="text-xs font-medium text-slate-400">Latest activity</p>
-                <div className="rounded bg-slate-950/60 border border-white/5 px-2.5 py-2 space-y-px max-h-44 overflow-y-auto">
-                  {[...cronLog].reverse().map((e, i) => {
-                    const d = new Date(e.ts);
-                    const ts = isNaN(d.getTime())
-                      ? ""
-                      : `${d.toLocaleDateString([], { weekday: "short" })} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
-                    const ok = e.message.startsWith("✓");
-                    const fail = e.message.startsWith("✗");
-                    return (
-                      <div key={i} className="flex gap-2 items-baseline font-mono text-[10px] leading-relaxed">
-                        {ts && <span className="text-slate-600 shrink-0">{ts}</span>}
-                        <span className="text-sky-500/70 shrink-0">{e.job}</span>
-                        <span className={`truncate ${ok ? "text-green-500/70" : fail ? "text-red-400/80" : "text-slate-500"}`} title={e.message}>
-                          {e.message}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </>
-        )}
+        <div className="space-y-2">
+          {([
+            ["warmup", "Warm up"],
+            ["work", "Work / intervals"],
+            ["easy", "Easy / conversational"],
+            ["cooldown", "Cool down"],
+            ["rest", "Rest / recovery"],
+          ] as [string, string][]).map(([kind, label]) => (
+            <div key={kind} className="flex items-center gap-3">
+              <span className="text-sm text-slate-300 w-44 shrink-0">{label}</span>
+              <input
+                type="number"
+                min={0}
+                value={bpmOv[kind].min}
+                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], min: e.target.value } })); setBpmOvSaved(false); }}
+                placeholder="164"
+                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+              />
+              <span className="text-slate-600 text-xs">–</span>
+              <input
+                type="number"
+                min={0}
+                value={bpmOv[kind].max}
+                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], max: e.target.value } })); setBpmOvSaved(false); }}
+                placeholder="180"
+                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+              />
+              <span className="text-xs text-slate-600">BPM</span>
+            </div>
+          ))}
+        </div>
+        {bpmOvError && <p className="text-sm text-red-400">{bpmOvError}</p>}
+        <button
+          onClick={saveBpmOverrides}
+          disabled={bpmOvSaving}
+          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+        >
+          {bpmOvSaving ? "Saving…" : bpmOvSaved ? "Saved!" : "Save BPM limits"}
+        </button>
       </div>
+
     </div>
 
     {/* ── Column 3: Runna + ntfy ── */}
@@ -2084,6 +2071,116 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             {ntfyTesting ? "Sending…" : "Send test"}
           </button>
         </div>
+      </div>
+
+      {/* Scheduled jobs */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h2 className="font-semibold text-base">⏰ Scheduled Jobs</h2>
+          <p className="text-sm text-slate-400 mt-1">
+            The automatic jobs on the Pi&apos;s crontab — set when each runs, or switch them off.
+          </p>
+        </div>
+        {!cronAvailable ? (
+          <p className="text-sm text-slate-500">
+            The schedule can only be managed on the Pi itself (crontab isn&apos;t available here).
+          </p>
+        ) : (
+          <>
+            {([
+              { key: "garmin", label: "Garmin sync", desc: "Downloads new activities into GarminDB" },
+              { key: "weekly", label: "BBC playlist refresh", desc: "Re-fetches BBC programme tracks and removes duplicates" },
+              { key: "aidj", label: "AI DJ pre-build", desc: "Builds tomorrow's mix and saves it to “Today's Run”" },
+            ] as const).map(meta => {
+              const job = cronJobs.find(j => j.key === meta.key);
+              if (!job) return null;
+              return (
+                <div key={meta.key} className="rounded-lg bg-slate-800/40 border border-white/5 px-3 py-2.5 space-y-2">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium text-slate-300">{meta.label}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">{meta.desc}</p>
+                    </div>
+                    <button
+                      role="switch"
+                      aria-checked={job.enabled}
+                      onClick={() => { if (job.installed) patchCronJob(job.key, { enabled: !job.enabled }); }}
+                      disabled={!job.installed || cronSaving}
+                      className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-40 ${
+                        job.enabled ? "bg-sky-500" : "bg-slate-700"
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                          job.enabled ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  {job.installed ? (
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={job.day === null ? "" : String(job.day)}
+                        onChange={e => patchCronJob(job.key, { day: e.target.value === "" ? null : parseInt(e.target.value, 10) })}
+                        disabled={!job.enabled || cronSaving}
+                        className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-2 py-1.5 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                      >
+                        <option value="">Every day</option>
+                        {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((d, i) => (
+                          <option key={d} value={i}>{d}</option>
+                        ))}
+                      </select>
+                      <span className="text-xs text-slate-500">at</span>
+                      <input
+                        type="time"
+                        value={job.time}
+                        onChange={e => patchCronJob(job.key, { time: e.target.value })}
+                        disabled={!job.enabled || cronSaving}
+                        className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-2 py-1.5 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-600">Not installed on this machine&apos;s crontab.</p>
+                  )}
+                </div>
+              );
+            })}
+            {cronJobsError && <p className="text-sm text-red-400">{cronJobsError}</p>}
+            <button
+              onClick={saveCronJobs}
+              disabled={cronSaving || cronJobs.every(j => !j.installed)}
+              className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+            >
+              {cronSaving ? "Saving…" : cronSaved ? "Saved!" : "Save schedule"}
+            </button>
+
+            {/* Activity log — last 48h, newest first (same style as the GarminDB sync log) */}
+            {cronLog.length > 0 && (
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-slate-400">Latest activity</p>
+                <div className="rounded bg-slate-950/60 border border-white/5 px-2.5 py-2 space-y-px max-h-44 overflow-y-auto">
+                  {[...cronLog].reverse().map((e, i) => {
+                    const d = new Date(e.ts);
+                    const ts = isNaN(d.getTime())
+                      ? ""
+                      : `${d.toLocaleDateString([], { weekday: "short" })} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+                    const ok = e.message.startsWith("✓");
+                    const fail = e.message.startsWith("✗");
+                    return (
+                      <div key={i} className="flex gap-2 items-baseline font-mono text-[10px] leading-relaxed">
+                        {ts && <span className="text-slate-600 shrink-0">{ts}</span>}
+                        <span className="text-sky-500/70 shrink-0">{e.job}</span>
+                        <span className={`truncate ${ok ? "text-green-500/70" : fail ? "text-red-400/80" : "text-slate-500"}`} title={e.message}>
+                          {e.message}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {/* Two-factor authentication */}

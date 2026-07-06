@@ -102,6 +102,16 @@ interface Props {
   spotifyUser: { name: string; image: string | null };
 }
 
+// Inline SVG avatar used when the Spotify profile image can't load (e.g. a
+// work network blocking scdn.co) — a data URI needs no network, so it always
+// renders.
+const FALLBACK_AVATAR = "data:image/svg+xml;utf8," + encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#64748b">
+     <rect width="24" height="24" rx="12" fill="#1e293b"/>
+     <path fill-rule="evenodd" d="M18.685 19.097A9.723 9.723 0 0021.75 12c0-5.385-4.365-9.75-9.75-9.75S2.25 6.615 2.25 12a9.723 9.723 0 003.065 7.097A9.716 9.716 0 0012 21.75a9.716 9.716 0 006.685-2.653zm-12.54-1.285A7.486 7.486 0 0112 15a7.486 7.486 0 015.855 2.812A8.224 8.224 0 0112 20.25a8.224 8.224 0 01-5.855-2.438zM15.75 9a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" clip-rule="evenodd"/>
+   </svg>`
+);
+
 type Step = "idle" | "ready" | "saving" | "saved" | "partial";
 
 interface Suggestion {
@@ -255,6 +265,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [todaysRunSaved, setTodaysRunSaved] = useState(false);
   const [todaysRunError, setTodaysRunError] = useState<string | null>(null);
   const [todaysRunUrl, setTodaysRunUrl] = useState<string | null>(null);
+  const [mixSavedNonce, setMixSavedNonce] = useState(0);
 
   useEffect(() => {
     fetch("/api/settings/garmin")
@@ -482,7 +493,7 @@ export function DashboardClient({ spotifyUser }: Props) {
         name: t.name,
         artists: [{ name: t.artist }],
         album: { name: "", images: [] },
-        duration_ms: 0,
+        duration_ms: Math.round((t.durationSec ?? 0) * 1000),
         uri: t.uri,
         bpm: Math.round(t.tempo),
         energy: t.energy,
@@ -570,7 +581,9 @@ export function DashboardClient({ spotifyUser }: Props) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ date: aiDjMix.date, workoutTitle: aiDjMix.workoutTitle, timeline: aiDjMix.timeline }),
-        }).catch(() => {});
+        })
+          .then(() => setMixSavedNonce(n => n + 1)) // refresh the Runna card's saved-mix tracklist
+          .catch(() => {});
       }
     } catch (e) {
       setTodaysRunError(e instanceof Error ? e.message : "Failed to save playlist");
@@ -797,7 +810,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2 text-sm text-slate-400">
               {spotifyUser.image && (
-                <img src={spotifyUser.image} alt="" className="h-7 w-7 rounded-full" />
+                <img
+                  src={spotifyUser.image}
+                  alt=""
+                  className="h-7 w-7 rounded-full"
+                  onError={e => { (e.target as HTMLImageElement).src = FALLBACK_AVATAR; }}
+                />
               )}
               <span>{spotifyUser.name}</span>
             </div>
@@ -1215,6 +1233,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             <RunnaScheduleCard
               aiDjEnabled={aiDjEnabled}
               garminConfigured={garminConfigured}
+              mixSavedNonce={mixSavedNonce}
               activePaces={paceFilter?.paces.map(p => p.paceStr) ?? []}
               onAiDjMix={handleAiDjMix}
               onPaceFilter={(paceStr, bpm, multiSelect) => {

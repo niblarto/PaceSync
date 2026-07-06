@@ -3,6 +3,7 @@ import { loadGarminConfig } from "@/lib/garmin-config";
 import { computeEasyPaceBias } from "@/lib/run-pace-bias";
 import { getAllTrackVotes } from "@/lib/track-feedback";
 import { getPlayedTracks } from "@/lib/todays-run-history";
+import { loadBpmOverrides } from "@/lib/bpm-overrides";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { spawn } from "child_process";
@@ -138,7 +139,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
 
   const body = JSON.stringify({
     title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback,
-    playedTracks: getPlayedTracks(),
+    playedTracks: getPlayedTracks(), bpmOverrides: loadBpmOverrides(),
   });
   try {
     if (onProgress) {
@@ -227,7 +228,10 @@ function buildMixLocally(
       resolve({ ok: false, error: e.message });
     });
 
-    proc.stdin.write(JSON.stringify({ segments, easyBias, trackFeedback, playedTracks: getPlayedTracks() }));
+    proc.stdin.write(JSON.stringify({
+      segments, easyBias, trackFeedback,
+      playedTracks: getPlayedTracks(), bpmOverrides: loadBpmOverrides(),
+    }));
     proc.stdin.end();
   });
 }

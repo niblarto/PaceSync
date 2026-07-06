@@ -77,6 +77,10 @@ def main():
     if not isinstance(played, list):
         played = None
 
+    bpm_overrides = payload.get("bpmOverrides")
+    if not isinstance(bpm_overrides, dict):
+        bpm_overrides = None
+
     library = _load_library(csv_path)
 
     # One NDJSON progress line per segment; the final line is the mix (or
@@ -88,7 +92,8 @@ def main():
         playlist = build_workout_playlist(
             segments, library, model="", use_llm=False,
             cadence_buckets=_cadence_buckets(), easy_bias_sec=easy_bias,
-            track_feedback=feedback, played_tracks=played, progress=_progress,
+            track_feedback=feedback, played_tracks=played,
+            bpm_overrides=bpm_overrides, progress=_progress,
         )
     except ValueError as e:
         print(json.dumps({"error": str(e)}))
