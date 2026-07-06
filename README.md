@@ -374,6 +374,11 @@ crontab -e
 0 15 * * * /home/pi/garmindb-venv/bin/python3 /home/pi/garmindb-venv/bin/garmindb_cli.py --all --download --import --analyze --latest
 ```
 
+Deploys append a completion hook to this cron line (if it isn't there yet):
+`scripts/garmin_notify.sh` pushes an ntfy notification when the sync finishes —
+"Garmin sync finished" on success, or the exit status on failure — using the
+same topic as the other push notifications below.
+
 > **Sync status card:** Settings also shows a live sync status card with a log tail and a "Sync now" button. This launches GarminDB through a small wrapper script that timestamps each log line (so tqdm progress bars can be parsed) and reads back from a fixed log path. If you want that card to work, write a timestamping wrapper around `garmindb_cli.py` on the Pi (it just needs to prefix each output line with a time and write to a log file) and set `GARMINDB_SYNC_WRAPPER`, `GARMINDB_PYTHON_BIN`, and `GARMINDB_LOG_PATH` in `.env.local` to match your paths. Without it, you can still sync GarminDB manually via cron/SSH — only the status card's live log and "Sync now" button won't work.
 
 ### Notes
@@ -404,6 +409,7 @@ Alternatively, set `NTFY_TOPIC` in `.env.local` before deploying — the Setting
 - A per-programme notification with how many tracks were found and added — including which playlist they went to and a tappable Spotify link for each track
 - A final summary with total tracks added and deduplication results
 - The same treatment for the AI DJ pre-build: track count, destination playlist, and per-track links (or "📌 Pinned Mix Ready" if a pinned mix was used instead of a fresh build)
+- A daily "Garmin sync finished" (or failed, with the exit status) push when the GarminDB cron completes
 - Error notifications (with high priority) if anything goes wrong
 - A **Send test** button next to the topic field in Settings, to confirm delivery without waiting for a scheduled job
 
