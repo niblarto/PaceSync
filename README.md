@@ -6,20 +6,22 @@ A Next.js web app for managing a Spotify running playlist based on heart rate zo
 
 **Features**
 - Browse tracks by BPM / heart rate zone (Z1–Z5)
-- Add tracks from BBC Radio playlists directly to Spotify — with BPM data fetched automatically
+- **Multiple playlists**: manage several Spotify playlists/libraries side by side, switch the active one, or delete one (locally and optionally unfollow on Spotify) from **Settings**
+- Add tracks from BBC Radio playlists directly to Spotify — with BPM data fetched automatically. BBC programme cards live on their own **BBC Radio** page (`/bbc`), linked from the dashboard header
 - Click any track to play it **instantly on your active Spotify device** (falls back to opening the app/web player if nothing's active)
 - Delete tracks from Spotify and local CSV simultaneously
-- Import and auto-save your Exportify CSV export
+- Import and auto-save your Exportify CSV export, or import a full AI DJ track library — both support append/overwrite and a browse-then-save review step before anything is written
 - Runna training calendar integration with zone suggestions and per-pace BPM filter buttons (driven by your real Garmin cadence data)
 - **Song matching**: filter the playlist to songs similar to any track (BPM, musical key, energy)
 - **Song suggestions**: discover new tracks *not* in your playlist that match a seed track by style or tempo (via Last.fm / Deezer / ReccoBeats), and add them to the playlist with one click
 - **Automatic BPM enrichment**: tracks without BPM data are looked up on ReccoBeats automatically
-- **🎧 AI DJ Mix** (optional): build a pace-matched playlist for any Runna workout — each section's tempo and intensity track your target pace, with an optional local LLM for smarter track choices. Powered by the [AI_DJ companion app](https://github.com/niblarto/AI_DJ). See [AI DJ Mix](#ai-dj-mix-optional) below
+- **🎧 AI DJ Mix** (optional): build a pace-matched playlist for any Runna workout — including strength sessions (up-tempo, high-energy, any BPM) — with a live progress bar, per-run-type BPM limits, and a pin option so a mix survives future rule changes. Powered by the [AI_DJ companion app](https://github.com/niblarto/AI_DJ). See [AI DJ Mix](#ai-dj-mix-optional) below
 - Dedup playlist, to remove duplicate tracks
 - Garmin activity stats: pace/cadence/HR charts and activity summaries, read directly from a local [GarminDB](https://github.com/tcgoetz/GarminDB) database
 - Weekly cron job to keep the playlist fresh:-
     - Pull down the tracks of the last show, for the BBC programmes that are currently subcribed to
-    - Upload to the Spotify "Running" playlist, then dedupe the "Running" playlist.
+    - Upload to the active Spotify playlist, then dedupe it.
+- Push notifications (ntfy.sh) for every automated job that touches a playlist — what was added, where, and tappable Spotify links per track, or a clear error if something failed
 
 ---
 
@@ -137,9 +139,11 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 
 1. Open the app and sign in with Spotify.
 2. Go to **Settings**.
-3. Under **Import Playlist**, click **Upload CSV** and select the file downloaded from Exportify.
-4. The file is saved on the Pi as `Running.csv`.
+3. Under **Import Playlist**, click **Browse CSV** and select the file downloaded from Exportify.
+4. Enter a playlist name (this becomes both the Spotify playlist name and the local CSV filename, e.g. `Uber-Running` → `public/Uber-Running.csv`), choose **Overwrite** or **Append**, and click **Save**.
 5. Return to the **Dashboard** — your tracks will load automatically.
+
+You can import more playlists the same way at any time. Use **Select playlist** (in the same Import Playlist section) to switch which one is active, or delete one you no longer need.
 
 ---
 
@@ -175,23 +179,23 @@ Ctrl+clicking an already-selected zone removes it. Clicking any zone without Ctr
 
 ## BBC Radio Cards
 
-PaceSync can pull tracks from BBC Radio programmes and add them directly to your Spotify running playlist.
+PaceSync can pull tracks from BBC Radio programmes and add them directly to your active Spotify playlist. BBC programme cards live on their own page — **BBC Radio** (`/bbc`), linked from the dashboard header.
 
 **Setting up a BBC card:**
 
-1. Go to the **Dashboard** and click **Add BBC Programme** (or the BBC browser card).
+1. Go to the **BBC Radio** page and click **Add BBC Programme**.
 2. Click on a Station (e.g. Radio 2, Radio 6 Music)
 3. Search for a BBC programme by name (e.g. "6 Music's 90s Forever", "Sarah Cox Breakfast Show").
-4. Select the programme from the results — a card will appear on the dashboard showing the most recent episode's tracklist.
-5. Click **Add to Spotify** on the card to add all tracks from that episode to your Running playlist immediately.
+4. Select the programme from the results — a card will appear showing the most recent episode's tracklist.
+5. Click **Add to Spotify** on the card to add all tracks from that episode to your active playlist immediately.
 
 **Automatic weekly updates:**
 
-Once a programme card is added, the weekly cron job (Fridays at 14:00) will automatically fetch the latest episode's tracks and add them to your playlist. You can also trigger this manually from **Settings** → **Run Now**.
+Once a programme card is added, the weekly cron job (Fridays at 14:00) will automatically fetch the latest episode's tracks and add them to your active playlist. You can also trigger this manually from **Settings** → **Run Now**.
 
 **BPM data is fetched automatically.**
 
-When you click **Update Running playlist** on a BBC card, PaceSync looks up each track's audio features (tempo, key, energy, danceability, valence) on [ReccoBeats](https://reccobeats.com) — a free, keyless API that accepts Spotify track IDs — and appends them to `Running.csv`. The status message shows how many tracks got BPM data (e.g. *"Added 12 tracks · 11 with BPM data"*), and they appear in zone/pace filters straight away.
+When you click **Add to Spotify** on a BBC card, PaceSync looks up each track's audio features (tempo, key, energy, danceability, valence) on [ReccoBeats](https://reccobeats.com) — a free, keyless API that accepts Spotify track IDs — and appends them to the active playlist's CSV. The status message shows how many tracks got BPM data (e.g. *"Added 12 tracks · 11 with BPM data"*), and they appear in zone/pace filters straight away.
 
 The rare track ReccoBeats doesn't know stays BPM-less; see [Tracks without BPM data](#tracks-without-bpm-data) below for how to handle those.
 
@@ -263,25 +267,29 @@ Alternatively, you can set `RUNNA_ICS_URL` in `.env.local` before deploying — 
 
 ## AI DJ Mix (optional)
 
-Builds a pace-matched Spotify playlist for a Runna workout: each section of the run (warm up, tempo/interval reps, walking rest, cool down) is filled with tracks matched to that section's target BPM and intensity, timed to last as long as the section itself.
+Builds a pace-matched Spotify playlist for a Runna workout: each section of the run (warm up, tempo/interval reps, walking rest, cool down) is filled with tracks matched to that section's target BPM and intensity, timed to last as long as the section itself. **Strength sessions** get a mix too — no pace to match, so tracks are chosen purely for high energy at any BPM, sized to the session's estimated duration.
 
 The mixing engine is **[AI_DJ](https://github.com/niblarto/AI_DJ)**, a companion app published separately — a natural-language DJ setlist builder with a dedicated workout mode. It runs as a small HTTP service that PaceSync calls; see its README for full installation, CLI usage (it can also build M3U playlists for Mixxx), and configuration.
 
 **How the mix is built:**
-- **Tempo** scales continuously with pace — each segment's pace is converted to a target BPM via your Garmin cadence data (falling back to a linear fit if GarminDB isn't configured), and tracks are filtered to that BPM band.
-- **Intensity** (Spotify's energy feature) is bucketed by segment type: warm up 0.45–0.85, work (tempo/intervals) 0.60–1.00, walking rest 0.00–0.50, cool down 0.00–0.60 — so hard efforts pull driving, high-energy tracks and rest/cool-down periods pull calmer ones.
-- Section changes land on track boundaries — the playlist doesn't cut a song off mid-way when the pace changes.
+- **Tempo** scales continuously with pace — each segment's pace is converted to a target BPM via your Garmin cadence data (falling back to a linear fit if GarminDB isn't configured), and tracks are filtered to that BPM band. BPM matching outranks intensity: the tempo tolerance stays tight and the energy window widens if the pool runs dry, since cadence is what you actually run to.
+- **Intensity** (Spotify's energy feature) is bucketed by segment type: warm up 0.45–0.85, work (tempo/intervals) 0.60–1.00, easy/walking rest/cool down calmer bands, strength 0.70–1.00.
+- **Run BPM limits** (Settings → AI DJ card): set a min/max BPM per run type (warm up, work, easy, cool down, rest) that overrides the automatic cadence matching — leave blank for automatic. A half-time track (e.g. 87 BPM under a 174 cadence) counts at its doubled tempo for these limits.
+- Every mix has **one track per artist** (no repeats, even across collaborations) and demotes tracks you've already run to at that pace band in favour of unplayed ones — unless you've thumbs-upped them, which always keeps them at the front.
+- The playlist is sized to the workout's slowest projected duration (from Runna's own estimate) rather than padded with arbitrary extra tracks; section changes land on track boundaries so a song never cuts off mid-way when the pace changes.
 
 **Using it:**
-1. Expand any runnable workout in the **Runna Schedule** card and click **🎧 AI DJ Mix**.
-2. The mix builds (takes a few seconds to a minute, longer if the optional LLM is enabled) and populates the **central track list card** — it does *not* save to Spotify automatically.
-3. From there:
+1. Expand any runnable workout — or a strength session — in the **Runna Schedule** card and click **🎧 AI DJ Mix**. A live progress bar tracks each section as it builds.
+2. The mix populates the **central track list card** — it does *not* save to Spotify automatically. From there:
    - **Save to Spotify** saves it under the pre-filled dated name (e.g. `08-07-26 Steady into Tempo`, editable).
-   - **Save to Today's Running Playlist** saves the same tracks to a standing playlist named **"Today's Run"** (created on first use, overwritten each time).
-   - Neither happens until you click one — review the tracklist first.
-4. Click **🎧 Remix** to rebuild and refresh the central list with a different pick (e.g. after adding new tracks to your library).
+   - **Save to Today's Running Playlist** saves the same tracks to a standing playlist named **"Today's Run"**.
+   - **📌 Pin to workout** locks this exact tracklist to the workout's date — the nightly pre-build will use it verbatim instead of generating a fresh mix, so a mix you're happy with survives future rule changes. The workout card shows the pinned (or last-saved) tracklist with each track's start time and BPM once one exists.
+   - Nothing saves until you click one of these — review the tracklist first.
+3. Click **🎧 Remix** to rebuild with a different pick (e.g. after adding new tracks to your library, or after changing a BPM limit).
 
-**Daily automatic pre-build:** if enabled, a cron job runs at **15:30 Pi-local time** every day. If there's a runnable workout scheduled for *tomorrow*, it builds the mix and saves it straight to **"Today's Run"** on Spotify — no dated playlist, no manual step — then sends an ntfy push notification (success with track count, or a clear failure reason) if you have a topic configured. By the time you wake up for the run, "Today's Run" is already correct.
+**Daily automatic pre-build:** if enabled, a cron job runs at **15:30 Pi-local time** every day. If there's a runnable workout (or strength session) scheduled for *tomorrow*, it uses a pinned mix if one exists, otherwise builds a fresh one, and saves it straight to **"Today's Run"** on Spotify — then sends an ntfy push with the track count and a tappable Spotify link per track (or a clear failure reason). By the time you wake up, "Today's Run" is already correct.
+
+**Wake-on-LAN:** if the AI DJ service runs on a PC that sleeps, Settings has a **⏻ Wake PC** button next to a saved MAC address — it sends a magic packet from the Pi and polls until the service answers. The Connected/Unreachable indicator on the service URL doubles as an up/down status for the PC.
 
 ### Optional local LLM
 
@@ -393,9 +401,13 @@ Alternatively, set `NTFY_TOPIC` in `.env.local` before deploying — the Setting
 **What you'll receive:**
 
 - A notification when the weekly update starts, listing the BBC programmes being processed
-- A per-programme notification with how many tracks were found and added
+- A per-programme notification with how many tracks were found and added — including which playlist they went to and a tappable Spotify link for each track
 - A final summary with total tracks added and deduplication results
+- The same treatment for the AI DJ pre-build: track count, destination playlist, and per-track links (or "📌 Pinned Mix Ready" if a pinned mix was used instead of a fresh build)
 - Error notifications (with high priority) if anything goes wrong
+- A **Send test** button next to the topic field in Settings, to confirm delivery without waiting for a scheduled job
+
+> Notifications are sent via ntfy's JSON publish format rather than HTTP headers, so titles with emoji (e.g. "🎧 AI DJ Mix Ready") deliver reliably — HTTP headers are Latin-1 only and would silently drop the notification.
 
 ---
 
@@ -407,7 +419,9 @@ After making code changes, redeploy with:
 python deploy.py
 ```
 
-Your `Running.csv` on the Pi will not be overwritten.
+`deploy.py` keeps a local hash manifest (`.deploy-manifest.json`, gitignored) of every file as of the last successful deploy, and only uploads files that actually changed — `npm install` is also skipped unless `package.json` changed, and the build/restart step is skipped entirely if nothing changed. Use `python deploy.py --all` (or delete the manifest) to force a full re-upload if you suspect drift.
+
+Your `Running.csv` (and any other playlist's CSV) on the Pi will not be overwritten.
 
 ---
 
