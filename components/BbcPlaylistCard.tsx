@@ -149,7 +149,7 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy }: {
 
 export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref, onSimilar, onSuggest, suggestBusy, inlineCard }: Props) {
   const { data: session } = useSession();
-  const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
+  const { id: RUNNING_PLAYLIST_ID, name: runningPlaylistName } = useRunningPlaylist();
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -410,9 +410,10 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
               <button
                 onClick={updateRunningPlaylist}
                 disabled={updating}
+                title={`Add these tracks to your active playlist, "${runningPlaylistName}"`}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-slate-600 hover:bg-slate-500 disabled:opacity-40 text-slate-200 text-xs font-medium px-3 py-1.5 transition-colors whitespace-nowrap"
               >
-                {updating ? <><Spinner />Updating…</> : "Update Running Playlist"}
+                {updating ? <><Spinner />Updating…</> : `Update "${runningPlaylistName}"`}
               </button>
             </>
           )}
