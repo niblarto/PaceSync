@@ -31,6 +31,7 @@ from bpm_matcher.camelot import to_camelot  # noqa: E402
 from ai_dj.workout import (  # noqa: E402
     build_workout_playlist,
     garmin_cadence_buckets,
+    max_projected_duration,
     parse_workout,
 )
 
@@ -93,7 +94,8 @@ def main():
             segments, library, model="", use_llm=False,
             cadence_buckets=_cadence_buckets(), easy_bias_sec=easy_bias,
             track_feedback=feedback, played_tracks=played,
-            bpm_overrides=bpm_overrides, progress=_progress,
+            bpm_overrides=bpm_overrides,
+            min_total_sec=max_projected_duration(segments_text), progress=_progress,
         )
     except ValueError as e:
         print(json.dumps({"error": str(e)}))
