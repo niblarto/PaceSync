@@ -92,6 +92,9 @@ export function getAthleteZones(token: string) {
   return stravaGet<StravaZones>(token, "/athlete/zones");
 }
 
-export function listActivities(token: string, perPage = 30, page = 1) {
-  return stravaGet<StravaActivity[]>(token, `/athlete/activities?per_page=${perPage}&page=${page}`);
+export function listActivities(token: string, perPage = 30, page = 1, opts?: { before?: number; after?: number }) {
+  const params = new URLSearchParams({ per_page: String(perPage), page: String(page) });
+  if (opts?.before) params.set("before", String(opts.before));
+  if (opts?.after) params.set("after", String(opts.after));
+  return stravaGet<StravaActivity[]>(token, `/athlete/activities?${params}`);
 }

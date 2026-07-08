@@ -51,6 +51,8 @@ export interface TrackPacing {
   targetPaceSec: number | null;
   actualPaceSec: number | null; // null when the run ended before this song
   verdict: "on" | "fast" | "slow" | "unknown";
+  tempo: number | null;
+  energy: number | null;
 }
 
 export async function GET(req: NextRequest) {

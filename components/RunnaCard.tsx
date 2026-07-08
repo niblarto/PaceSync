@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import { useState, useEffect, useRef } from "react";
+import Link from "next/link";
 import { useSession } from "next-auth/react";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 import type { TrackWithBPM } from "@/types";
@@ -202,6 +203,7 @@ export function RunnaSummaryCard() {
   const { pastRuns, loading, error } = useRunnaData();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [pacing, setPacing] = useState<Record<string, PacingState>>({});
+  const [activityLinks, setActivityLinks] = useState<Record<string, { garminId: string | number | null; stravaId: number | null } | null>>({});
   const [votes, setVotes] = useState<{ uri: string; paceSec: number; vote: "up" | "down" }[]>([]);
   const [votesLoaded, setVotesLoaded] = useState(false);
   const [deletedUris, setDeletedUris] = useState<Set<string>>(new Set());
@@ -294,6 +296,17 @@ export function RunnaSummaryCard() {
       .catch(() => setPacing(p => ({ ...p, [date]: { loading: false, tracks: [], summary: null, none: true } })));
   }
 
+  function fetchActivityLinks(date: string) {
+    if (activityLinks[date] !== undefined) return;
+    setActivityLinks(l => ({ ...l, [date]: null }));
+    fetch(`/api/garmin/activity-for-date?date=${date}`)
+      .then(r => r.json())
+      .then((d: { garminId?: string | number | null; stravaId?: number | null }) => {
+        setActivityLinks(l => ({ ...l, [date]: { garminId: d.garminId ?? null, stravaId: d.stravaId ?? null } }));
+      })
+      .catch(() => setActivityLinks(l => ({ ...l, [date]: { garminId: null, stravaId: null } })));
+  }
+
   const [approving, setApproving] = useState<string | null>(null);
   function setApproval(date: string, approved: boolean) {
     setApproving(date);
@@ -348,7 +361,7 @@ export function RunnaSummaryCard() {
                 <button
                   onClick={() => {
                     setExpanded(isOpen ? null : run.uid);
-                    if (!isOpen) { fetchPacing(run.date); loadVotes(); }
+                    if (!isOpen) { fetchPacing(run.date); loadVotes(); fetchActivityLinks(run.date); }
                   }}
                   className="w-full px-5 py-3 flex items-center gap-3 text-left hover:bg-slate-800/40 transition-colors"
                 >
@@ -378,6 +391,53 @@ export function RunnaSummaryCard() {
 
                 {isOpen && (
                   <div className="px-5 pb-4 pt-1 bg-slate-800/20 space-y-2">
+                    {(() => {
+                      const links = activityLinks[run.date];
+                      if (!run.appUrl && (!links || (!links.garminId && !links.stravaId))) return null;
+                      return (
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                          {run.appUrl && (
+                            <a
+                              href={run.appUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-green-400 hover:text-green-300 underline"
+                              onClick={e => e.stopPropagation()}
+                            >
+                              View in Runna app ↗
+                            </a>
+                          )}
+                          {links?.garminId && (
+                            <>
+                              <Link
+                                href={`/garmin/activity/${links.garminId}`}
+                                className="text-sky-400 hover:text-sky-300 underline"
+                              >
+                                Garmin activity ↗
+                              </Link>
+                              <a
+                                href={`https://connect.garmin.com/modern/activity/${links.garminId}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-sky-400 hover:text-sky-300 underline"
+                              >
+                                Garmin Connect ↗
+                              </a>
+                            </>
+                          )}
+                          {links?.stravaId && (
+                            <a
+                              href={`https://www.strava.com/activities/${links.stravaId}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-orange-400 hover:text-orange-300 underline"
+                            >
+                              Strava ↗
+                            </a>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {run.laps.length > 0 && (
                       <div className="space-y-0.5">
                         <p className="text-xs text-slate-500 font-medium mb-1">Laps</p>
@@ -494,17 +554,6 @@ export function RunnaSummaryCard() {
                         </div>
                       );
                     })()}
-                    {run.appUrl && (
-                      <a
-                        href={run.appUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-block text-xs text-green-400 hover:text-green-300 underline mt-1"
-                        onClick={e => e.stopPropagation()}
-                      >
-                        View in Runna app ↗
-                      </a>
-                    )}
                   </div>
                 )}
               </div>

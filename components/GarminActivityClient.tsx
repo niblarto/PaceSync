@@ -91,6 +91,8 @@ interface MixTrack {
   targetPaceSec: number | null;
   actualPaceSec: number | null;
   verdict: "on" | "fast" | "slow" | "unknown";
+  tempo: number | null;
+  energy: number | null;
   inLibrary?: boolean; // false once the track has been deleted from the library
 }
 
@@ -168,8 +170,15 @@ function fmtDate(ts: string): string {
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
-// Format elapsed seconds as "M:SS" for chart X axis
-function fmtTimeTick(secs: number): string {
+// Format elapsed seconds for the chart X axis. Whole-run views (large spans)
+// show "Nm"; zoomed-in views (e.g. a single song, spans under ~4 min) show
+// "M:SS" so ticks a few seconds apart don't all collapse to the same label.
+function fmtTimeTick(secs: number, spanSec?: number): string {
+  if (spanSec !== undefined && spanSec < 240) {
+    const m = Math.floor(secs / 60);
+    const s = Math.round(secs % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
   const m = Math.floor(secs / 60);
   return `${m}m`;
 }
@@ -386,13 +395,45 @@ export function GarminActivityClient({ id }: { id: string }) {
 
   const hasHr = hasChart && (data?.records ?? []).some(r => r.hr !== null);
 
+  // Track timeline strip beneath the pace/cadence chart: each song's slice of
+  // the chart's current time domain, positioned/sized to line up with the X
+  // axis above it. Clipped to the visible domain so the strip stays in sync
+  // while zoomed.
+  const timelineDomain: [number, number] = xDomain ?? (hasChart
+    ? [data!.records[0].t, data!.records[data!.records.length - 1].t]
+    : [0, 0]);
+
+  // Explicit X-axis ticks within the zoomed domain — Recharts' own
+  // interval="preserveStartEnd" computes against the full dataset's min/max,
+  // not the current domain, so it kept forcing stray ticks at 0:00/end-of-run
+  // even when zoomed into one song. Picking "nice" round intervals ourselves
+  // (5/10/30/60s, else whole minutes) avoids that and keeps ticks legible.
+  const xTicks = (() => {
+    const [lo, hi] = timelineDomain;
+    const span = hi - lo;
+    if (!hasChart || span <= 0) return undefined;
+    const step = span < 60 ? 5 : span < 150 ? 10 : span < 300 ? 30 : span < 600 ? 60 : Math.ceil(span / 8 / 60) * 60;
+    const ticks: number[] = [];
+    for (let t = Math.ceil(lo / step) * step; t <= hi; t += step) ticks.push(t);
+    return ticks;
+  })();
+  const timelineTracks = mix
+    ? mix.tracks
+        .map(t => ({
+          ...t,
+          clipStart: Math.max(t.startsAtSec, timelineDomain[0]),
+          clipEnd: Math.min(t.startsAtSec + t.durationSec, timelineDomain[1]),
+        }))
+        .filter(t => t.clipEnd > t.clipStart)
+    : [];
+
   return (
     <div
       className="min-h-screen flex flex-col bg-cover bg-fixed bg-center bg-no-repeat"
       style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.65), rgba(2,6,23,0.65)), url('/dashboard-hero.png')" }}
     >
       <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-4xl mx-auto px-4 h-14 flex items-center justify-between">
+        <div className="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between">
           <Link href="/garmin" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">
             ← Garmin Stats
           </Link>
@@ -401,7 +442,7 @@ export function GarminActivityClient({ id }: { id: string }) {
         </div>
       </header>
 
-      <div className="max-w-4xl mx-auto px-4 py-8 flex-1 w-full space-y-5">
+      <div className="max-w-6xl mx-auto px-4 py-8 flex-1 w-full space-y-5">
         {loading && <div className="text-slate-500 text-sm">Loading…</div>}
         {error && (
           <div className="rounded-xl bg-red-950/50 border border-red-800/50 p-4 text-red-400 text-sm">{error}</div>
@@ -472,12 +513,11 @@ export function GarminActivityClient({ id }: { id: string }) {
                       scale="linear"
                       domain={xDomain ?? ["dataMin", "dataMax"]}
                       allowDataOverflow
-                      tickFormatter={fmtTimeTick}
+                      tickFormatter={t => fmtTimeTick(t, timelineDomain[1] - timelineDomain[0])}
                       tick={{ fill: "#64748b", fontSize: 10 }}
                       axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
                       tickLine={false}
-                      interval="preserveStartEnd"
-                      tickCount={8}
+                      {...(xTicks ? { ticks: xTicks } : { interval: "preserveStartEnd", tickCount: 8 })}
                     />
 
                     {/* Left Y: pace (reversed → faster at top) */}
@@ -491,6 +531,8 @@ export function GarminActivityClient({ id }: { id: string }) {
                       axisLine={false}
                       tickLine={false}
                       width={36}
+                      tickCount={5}
+                      allowDecimals={false}
                     />
 
                     {/* Right Y: cadence SPM */}
@@ -502,6 +544,8 @@ export function GarminActivityClient({ id }: { id: string }) {
                       axisLine={false}
                       tickLine={false}
                       width={36}
+                      tickCount={5}
+                      allowDecimals={false}
                     />
 
                     <Tooltip content={<ChartTooltip />} />
@@ -545,6 +589,57 @@ export function GarminActivityClient({ id }: { id: string }) {
                   </ComposedChart>
                 </ResponsiveContainer>
                 </div>
+
+                {timelineTracks.length > 0 && (
+                  // Padding must match the chart's actual plot-area insets, not
+                  // just its margin — each Y axis (width 36) sits inside the
+                  // margin too, so the true left/right offsets are
+                  // margin + axis width (4+36=40, 52+36=88), not just the margin.
+                  <div className="mt-2" style={{ paddingLeft: 40, paddingRight: 88 }}>
+                    <div className="relative h-6 rounded overflow-hidden border border-white/5 bg-slate-800/40">
+                      {timelineTracks.map((t, i) => {
+                        const span = timelineDomain[1] - timelineDomain[0];
+                        const leftPct = span > 0 ? ((t.clipStart - timelineDomain[0]) / span) * 100 : 0;
+                        const widthPct = span > 0 ? ((t.clipEnd - t.clipStart) / span) * 100 : 0;
+                        const isZoomedToThis = xDomain
+                          && Math.abs(xDomain[0] - t.startsAtSec) < 1
+                          && Math.abs(xDomain[1] - (t.startsAtSec + t.durationSec)) < 1;
+                        return (
+                          <button
+                            key={i}
+                            onClick={() => setXDomain([t.startsAtSec, t.startsAtSec + t.durationSec])}
+                            title={`${t.name} — ${t.artist}`}
+                            className={`absolute top-0 h-full flex items-center justify-center overflow-hidden border-r border-slate-950/60 transition-colors ${
+                              isZoomedToThis
+                                ? "bg-purple-500/50 hover:bg-purple-500/60"
+                                : i % 2 === 0
+                                  ? "bg-slate-700/50 hover:bg-purple-500/40"
+                                  : "bg-slate-700/30 hover:bg-purple-500/40"
+                            }`}
+                            style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                          >
+                            {widthPct > 4 && (
+                              <span className="text-[10px] text-slate-200 px-1 truncate whitespace-nowrap">
+                                {t.name}
+                                {isZoomedToThis && (t.tempo != null || t.energy != null) && (
+                                  <span className="text-slate-400">
+                                    {" · "}
+                                    {t.tempo != null ? `${Math.round(t.tempo)} BPM` : ""}
+                                    {t.tempo != null && t.energy != null ? " · " : ""}
+                                    {t.energy != null ? `energy ${t.energy.toFixed(2)}` : ""}
+                                  </span>
+                                )}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10px] text-slate-600 mt-1">
+                      🎧 Song playing at each point — click a song to zoom the chart to it
+                    </p>
+                  </div>
+                )}
 
                 <div className="flex gap-6 mt-3 text-xs text-slate-500">
                   <span className="flex items-center gap-1.5">

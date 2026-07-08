@@ -18,6 +18,7 @@ export interface HistoryTrack {
   targetPaceSec: number | null; // sec/mi the segment was built for
   segment: string;
   tempo: number | null; // track BPM, for the saved-mix tracklist display
+  energy: number | null; // 0-1 Spotify energy, for the saved-mix tracklist display
 }
 
 export interface TodaysRunEntry {
@@ -50,6 +51,7 @@ export function timelineToHistoryTracks(timeline: AiDjMixResponse["timeline"]): 
         targetPaceSec: seg.targetPaceSec ?? null,
         segment: seg.segment,
         tempo: t.tempo ?? null,
+        energy: t.energy ?? null,
       });
     });
   });

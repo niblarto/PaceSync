@@ -92,6 +92,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [maxHR, setMaxHR] = useState(166);
   const [restingHR, setRestingHR] = useState(39);
   const [zones, setZones] = useState<ZoneRow[]>(calcZones(166, 39));
+  const [zoneSource, setZoneSource] = useState<"manual" | "garmin" | "strava">("manual");
+  const [zoneSourceLoading, setZoneSourceLoading] = useState(false);
+  const [zoneSourceError, setZoneSourceError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -210,10 +213,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   useEffect(() => {
     fetch("/api/settings/hr-zones")
       .then(r => r.json())
-      .then((data: { zones: RunningZone[]; maxHR?: number; restingHR?: number }) => {
+      .then((data: { zones: RunningZone[]; maxHR?: number; restingHR?: number; source?: "manual" | "garmin" | "strava" }) => {
         if (data.zones) setZones(data.zones.map(z => ({ min: z.hrMin, max: z.hrMax })));
         if (data.maxHR)     setMaxHR(data.maxHR);
         if (data.restingHR) setRestingHR(data.restingHR);
+        if (data.source)    setZoneSource(data.source);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -539,34 +543,81 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const handleMaxHR = (val: string) => {
     const n = parseInt(val) || 0;
     setMaxHR(n);
-    if (n > restingHR) { setZones(calcZones(n, restingHR)); setSaved(false); }
+    if (n > restingHR) { setZones(calcZones(n, restingHR)); setZoneSource("manual"); setSaved(false); }
   };
 
   const handleRestingHR = (val: string) => {
     const n = parseInt(val) || 0;
     setRestingHR(n);
-    if (maxHR > n) { setZones(calcZones(maxHR, n)); setSaved(false); }
+    if (maxHR > n) { setZones(calcZones(maxHR, n)); setZoneSource("manual"); setSaved(false); }
   };
 
   const updateZone = (i: number, field: "min" | "max", val: string) => {
     const n = parseInt(val) || 0;
     setZones(prev => prev.map((z, idx) => idx === i ? { ...z, [field]: n } : z));
+    setZoneSource("manual");
     setSaved(false);
   };
 
-  const resetToCalc = () => { setZones(calcZones(maxHR, restingHR)); setSaved(false); };
+  const resetToCalc = () => { setZones(calcZones(maxHR, restingHR)); setZoneSource("manual"); setSaved(false); };
+
+  async function persistZones(zonesToSave: ZoneRow[], source: "manual" | "garmin" | "strava") {
+    const res = await fetch("/api/settings/hr-zones", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ maxHR, restingHR, zones: zonesToSave, source }),
+    });
+    const data = await res.json() as { ok?: boolean; error?: string };
+    if (!res.ok) throw new Error(data.error ?? "Failed to save");
+  }
+
+  // Pull a 5-zone HR set from Garmin (last activity's device-configured
+  // zones) or Strava (account zones) and apply it immediately — picking a
+  // source is a complete action (fully replaces the zone set), unlike manual
+  // Max/Resting HR edits which stay a draft until "Save zones" is clicked.
+  async function fetchZonesFrom(source: "garmin" | "strava") {
+    setZoneSourceLoading(true);
+    setZoneSourceError(null);
+    try {
+      const res = await fetch(`/api/settings/hr-zones/external?source=${source}`);
+      const d = await res.json() as { zones?: ZoneRow[]; error?: string };
+      if (!res.ok || !d.zones) throw new Error(d.error ?? "Failed to fetch zones");
+      setZones(d.zones);
+      setZoneSource(source);
+      await persistZones(d.zones, source);
+      setSaved(true);
+    } catch (e) {
+      setZoneSourceError(e instanceof Error ? e.message : "Failed to fetch zones");
+    } finally {
+      setZoneSourceLoading(false);
+    }
+  }
+
+  async function handleZoneSourceChange(source: "manual" | "garmin" | "strava") {
+    if (source === "manual") {
+      const manualZones = calcZones(maxHR, restingHR);
+      setZones(manualZones);
+      setZoneSource("manual");
+      setZoneSourceError(null);
+      setZoneSourceLoading(true);
+      try {
+        await persistZones(manualZones, "manual");
+        setSaved(true);
+      } catch (e) {
+        setZoneSourceError(e instanceof Error ? e.message : "Failed to save");
+      } finally {
+        setZoneSourceLoading(false);
+      }
+    } else {
+      fetchZonesFrom(source);
+    }
+  }
 
   const save = async () => {
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch("/api/settings/hr-zones", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ maxHR, restingHR, zones }),
-      });
-      const data = await res.json() as { ok?: boolean; error?: string };
-      if (!res.ok) throw new Error(data.error ?? "Failed to save");
+      await persistZones(zones, zoneSource);
       setSaved(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save");
@@ -1160,6 +1211,30 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
         <div className="p-5 space-y-5">
         <div className="space-y-1.5">
+          <label className="block text-sm font-medium text-slate-300">Zone Source</label>
+          <p className="text-xs text-slate-500">
+            Manual uses Max/Resting HR below. Garmin/Strava pull that service&apos;s zones directly — still editable after.
+          </p>
+          <div className="flex gap-1.5">
+            {(["manual", "garmin", "strava"] as const).map(s => (
+              <button
+                key={s}
+                onClick={() => handleZoneSourceChange(s)}
+                disabled={zoneSourceLoading}
+                className={`flex-1 rounded-lg border text-xs font-medium px-3 py-2 capitalize transition-colors disabled:opacity-50 ${
+                  zoneSource === s
+                    ? "bg-green-500/20 border-green-500/40 text-green-300"
+                    : "bg-slate-800/60 border-white/10 text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {zoneSourceLoading && zoneSource !== s ? "…" : s}
+              </button>
+            ))}
+          </div>
+          {zoneSourceError && <p className="text-xs text-red-400">{zoneSourceError}</p>}
+        </div>
+
+        <div className={`space-y-1.5 ${zoneSource !== "manual" ? "opacity-50" : ""}`}>
           <label className="block text-sm font-medium text-slate-300">Max Heart Rate</label>
           <p className="text-xs text-slate-500">Normally measured from a Max HR Stress Test.</p>
           <input
@@ -1168,11 +1243,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             max={220}
             value={maxHR || ""}
             onChange={e => handleMaxHR(e.target.value)}
-            className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
+            disabled={zoneSource !== "manual"}
+            className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500 disabled:opacity-50"
           />
         </div>
 
-        <div className="space-y-1.5">
+        <div className={`space-y-1.5 ${zoneSource !== "manual" ? "opacity-50" : ""}`}>
           <label className="block text-sm font-medium text-slate-300">Resting Heart Rate</label>
           <p className="text-xs text-slate-500">Measure first thing in the morning, standing still.</p>
           <input
@@ -1181,11 +1257,18 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             max={100}
             value={restingHR || ""}
             onChange={e => handleRestingHR(e.target.value)}
-            className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
+            disabled={zoneSource !== "manual"}
+            className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500 disabled:opacity-50"
           />
         </div>
 
-        {hrrValid && (
+        {zoneSource !== "manual" && (
+          <p className="text-xs text-slate-500 italic">
+            Zones loaded from {zoneSource === "garmin" ? "Garmin" : "Strava"}. Editing a zone below or changing Max/Resting HR switches back to manual.
+          </p>
+        )}
+
+        {hrrValid && zoneSource === "manual" && (
           <div className="rounded-lg bg-slate-800/50 border border-white/5 px-4 py-3 space-y-0.5">
             <p className="text-sm text-slate-400">
               Heart Rate Reserve:{" "}
@@ -1199,7 +1282,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       </div>
 
       {/* Zone Summary */}
-      {hrrValid && (
+      {(hrrValid || zoneSource !== "manual") && (
         <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
           <div className="px-4 py-3 border-b border-white/10">
             <h3 className="font-semibold text-slate-300">Zone Summary</h3>
