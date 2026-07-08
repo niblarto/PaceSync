@@ -182,6 +182,8 @@ interface PacingState {
   tracks: PacingTrack[];
   summary: string | null;
   none?: boolean;
+  workoutTitle?: string;
+  approved?: boolean; // undefined = not yet reviewed, false = disputed
 }
 
 const PACING_STYLE: Record<PacingTrack["verdict"], string> = {
@@ -205,6 +207,22 @@ export function RunnaSummaryCard() {
   const [deletedUris, setDeletedUris] = useState<Set<string>>(new Set());
   const { data: session } = useSession();
   const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
+
+  // Today's run appearing here means Runna has marked it complete — kick off
+  // a GarminDB sync so its stats (and the pacing review below) are fresh
+  // without waiting for the 15:00 cron. The route dedupes per day itself.
+  const autoSyncTriggeredRef = useRef(false);
+  useEffect(() => {
+    if (autoSyncTriggeredRef.current || loading) return;
+    const today = new Date().toISOString().slice(0, 10);
+    if (!pastRuns.some(r => r.date === today)) return;
+    autoSyncTriggeredRef.current = true;
+    fetch("/api/garmin/auto-sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date: today }),
+    }).catch(() => {});
+  }, [pastRuns, loading]);
 
   function loadVotes() {
     if (votesLoaded) return;
@@ -255,23 +273,41 @@ export function RunnaSummaryCard() {
     }).catch(() => {});
   }
 
-  function fetchPacing(date: string) {
-    if (pacing[date]) return;
+  function fetchPacing(date: string, force = false) {
+    if (pacing[date] && !force) return;
     setPacing(p => ({ ...p, [date]: { loading: true, tracks: [], summary: null } }));
     fetch(`/api/garmin/run-pacing?date=${date}`)
       .then(r => r.json())
-      .then((d: { entry?: { workoutTitle?: string } | null; tracks?: PacingTrack[]; summary?: string | null; error?: string }) => {
+      .then((d: { entry?: { workoutTitle?: string; approved?: boolean } | null; tracks?: PacingTrack[]; summary?: string | null; error?: string }) => {
         setPacing(p => ({
           ...p,
           [date]: {
             loading: false,
             tracks: d.tracks ?? [],
             summary: d.summary ?? null,
-            none: !d.entry || !(d.tracks?.length),
+            none: !d.entry || (!(d.tracks?.length) && d.entry.approved !== false),
+            workoutTitle: d.entry?.workoutTitle,
+            approved: d.entry?.approved,
           },
         }));
       })
       .catch(() => setPacing(p => ({ ...p, [date]: { loading: false, tracks: [], summary: null, none: true } })));
+  }
+
+  const [approving, setApproving] = useState<string | null>(null);
+  function setApproval(date: string, approved: boolean) {
+    setApproving(date);
+    fetch("/api/todays-run/history", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date, approved }),
+    })
+      .then(r => r.json())
+      .then((d: { error?: string }) => {
+        if (d.error) return;
+        fetchPacing(date, true);
+      })
+      .finally(() => setApproving(a => (a === date ? null : a)));
   }
 
   return (
@@ -354,9 +390,45 @@ export function RunnaSummaryCard() {
                       const pd = pacing[run.date];
                       if (!pd) return null;
                       if (pd.loading) return <p className="text-xs text-slate-600">Loading mix pacing…</p>;
+
+                      if (pd.approved === false) {
+                        return (
+                          <p className="text-xs text-slate-500 italic">
+                            You said this wasn&apos;t the playlist you ran to — pacing not compared.{" "}
+                            <button
+                              onClick={() => setApproval(run.date, true)}
+                              disabled={approving === run.date}
+                              className="not-italic text-sky-400 hover:text-sky-300 underline disabled:opacity-40"
+                            >
+                              Undo
+                            </button>
+                          </p>
+                        );
+                      }
+
                       if (pd.none || pd.tracks.length === 0) return null;
+
                       return (
                         <div className="space-y-1">
+                          {pd.approved === undefined && (
+                            <div className="flex items-center gap-2 text-xs bg-amber-500/10 border border-amber-500/30 text-amber-300 rounded px-2 py-1.5">
+                              <span className="flex-1">Did you actually listen to this playlist on this run?</span>
+                              <button
+                                onClick={() => setApproval(run.date, true)}
+                                disabled={approving === run.date}
+                                className="rounded bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 px-2 py-0.5 font-medium transition-colors"
+                              >
+                                Yes
+                              </button>
+                              <button
+                                onClick={() => setApproval(run.date, false)}
+                                disabled={approving === run.date}
+                                className="rounded bg-slate-700/50 hover:bg-slate-700/80 disabled:opacity-40 px-2 py-0.5 font-medium transition-colors"
+                              >
+                                No, discard
+                              </button>
+                            </div>
+                          )}
                           <p className="text-xs text-slate-500 font-medium mb-1">
                             🎧 &quot;Today&apos;s Run&quot; mix vs actual pace
                             <span className="ml-2 font-normal text-slate-600">

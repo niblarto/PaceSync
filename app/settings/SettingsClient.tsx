@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useSession } from "next-auth/react";
 import type { RunningZone } from "@/types";
 import { BbcBrowserCard } from "@/components/BbcBrowserCard";
@@ -110,6 +111,16 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [runnaSaving, setRunnaSaving] = useState(false);
   const [runnaSaved, setRunnaSaved] = useState(false);
   const [runnaError, setRunnaError] = useState<string | null>(null);
+
+  // ── Strava state ───────────────────────────────────────────────────────────
+  const [stravaClientId, setStravaClientId] = useState("");
+  const [stravaClientSecret, setStravaClientSecret] = useState("");
+  const [stravaHasSecret, setStravaHasSecret] = useState(false);
+  const [stravaConnected, setStravaConnected] = useState(false);
+  const [stravaAthleteName, setStravaAthleteName] = useState<string | null>(null);
+  const [stravaSaving, setStravaSaving] = useState(false);
+  const [stravaSaved, setStravaSaved] = useState(false);
+  const [stravaError, setStravaError] = useState<string | null>(null);
 
   // ── ntfy state ─────────────────────────────────────────────────────────────
   const [ntfyTopic, setNtfyTopic] = useState("");
@@ -221,6 +232,41 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .then((d: { topic?: string | null }) => { if (d.topic) setNtfyTopic(d.topic); })
       .catch(() => {});
   }, []);
+
+  function loadStravaStatus() {
+    fetch("/api/settings/strava")
+      .then(r => r.json())
+      .then((d: { clientId?: string; hasSecret?: boolean; connected?: boolean; athleteName?: string | null }) => {
+        if (d.clientId) setStravaClientId(d.clientId);
+        setStravaHasSecret(!!d.hasSecret);
+        setStravaConnected(!!d.connected);
+        setStravaAthleteName(d.athleteName ?? null);
+      })
+      .catch(() => {});
+  }
+  useEffect(loadStravaStatus, []);
+
+  async function saveStrava() {
+    setStravaSaving(true);
+    setStravaSaved(false);
+    setStravaError(null);
+    try {
+      const res = await fetch("/api/settings/strava", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId: stravaClientId.trim(), clientSecret: stravaClientSecret.trim() }),
+      });
+      const d = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to save");
+      setStravaSaved(true);
+      setStravaClientSecret("");
+      loadStravaStatus();
+    } catch (e) {
+      setStravaError(e instanceof Error ? e.message : "Failed to save — try again.");
+    } finally {
+      setStravaSaving(false);
+    }
+  }
 
   useEffect(() => {
     fetch("/api/settings/garmin")
@@ -1860,6 +1906,69 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         >
           {runnaSaving ? "Saving…" : runnaSaved ? "Saved!" : "Save URL"}
         </button>
+        </div>
+      </div>
+
+      {/* Strava */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h2 className="font-semibold text-lg">Strava</h2>
+          <p className="text-sm text-slate-400 mt-1">
+            Connect Strava for activity stats and heart-rate zones on the{" "}
+            <Link href="/strava" className="text-orange-400 hover:text-orange-300 underline">Strava Stats</Link> page.
+          </p>
+        </div>
+        <div className="rounded-lg bg-slate-800/50 border border-white/5 p-4 space-y-2 text-xs text-slate-400">
+          <p className="font-medium text-slate-300">How to get a Client ID/Secret:</p>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>Go to <a href="https://www.strava.com/settings/api" target="_blank" rel="noopener noreferrer" className="text-orange-400 hover:text-orange-300 underline">strava.com/settings/api</a> and create an app</li>
+            <li>Set <span className="text-slate-200">Authorization Callback Domain</span> to this app&apos;s domain (no https://, no path)</li>
+            <li>Copy the <span className="text-slate-200">Client ID</span> and <span className="text-slate-200">Client Secret</span> below</li>
+          </ol>
+        </div>
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-slate-300">Client ID</label>
+          <input
+            type="text"
+            value={stravaClientId}
+            onChange={e => { setStravaClientId(e.target.value); setStravaSaved(false); }}
+            placeholder="123456"
+            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-orange-500 font-mono"
+          />
+        </div>
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-slate-300">Client Secret</label>
+          <input
+            type="password"
+            value={stravaClientSecret}
+            onChange={e => { setStravaClientSecret(e.target.value); setStravaSaved(false); }}
+            placeholder={stravaHasSecret ? "•••••••••••••••••••• (saved — enter to replace)" : "Client secret"}
+            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-orange-500 font-mono"
+          />
+        </div>
+        {stravaError && <p className="text-sm text-red-400">{stravaError}</p>}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={saveStrava}
+            disabled={stravaSaving || !stravaClientId.trim() || (!stravaClientSecret.trim() && !stravaHasSecret)}
+            className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+          >
+            {stravaSaving ? "Saving…" : stravaSaved ? "Saved!" : "Save"}
+          </button>
+          {stravaHasSecret && (
+            stravaConnected ? (
+              <span className="text-xs text-green-400">
+                ✓ Connected{stravaAthleteName ? ` as ${stravaAthleteName}` : ""}
+              </span>
+            ) : (
+              <a
+                href="/api/strava/connect"
+                className="rounded-lg border border-orange-500/40 bg-orange-500/15 hover:bg-orange-500/25 text-orange-300 font-medium text-sm px-4 py-2 transition-colors"
+              >
+                Connect Strava →
+              </a>
+            )
+          )}
         </div>
       </div>
 

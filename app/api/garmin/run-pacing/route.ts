@@ -65,10 +65,20 @@ export async function GET(req: NextRequest) {
   const entry = getTodaysRunEntry(date);
   if (!entry) return NextResponse.json({ entry: null, tracks: [] });
 
+  // Disputed — the user confirmed this mix wasn't actually run to. Return the
+  // record (so the UI can still show/re-toggle the approval prompt) but no
+  // pacing comparison, since it would be comparing against the wrong music.
+  if (entry.approved === false) {
+    return NextResponse.json({
+      entry: { workoutTitle: entry.workoutTitle, savedAt: entry.savedAt, approved: false },
+      tracks: [],
+    });
+  }
+
   const config = loadGarminConfig();
   if (!config) return NextResponse.json({ error: "Garmin DB not configured" }, { status: 404 });
 
-  const cacheKey = `run-pacing-${date}-${entry.savedAt}`;
+  const cacheKey = `run-pacing-${date}-${entry.savedAt}-${entry.approved ?? "unreviewed"}`;
   const cached = garminCacheGet<{ tracks?: { uri: string | null }[] }>(cacheKey, config.dbPath);
   if (cached) return NextResponse.json(withLibraryFlag(cached));
 
@@ -92,7 +102,7 @@ export async function GET(req: NextRequest) {
 
     if (!activity) {
       db.close();
-      const result = { entry: { workoutTitle: entry.workoutTitle, savedAt: entry.savedAt }, activityId: null, tracks: [] };
+      const result = { entry: { workoutTitle: entry.workoutTitle, savedAt: entry.savedAt, approved: entry.approved }, activityId: null, tracks: [] };
       garminCacheSet(cacheKey, config.dbPath, result);
       return NextResponse.json(result);
     }
@@ -145,7 +155,7 @@ export async function GET(req: NextRequest) {
           : "Pacing was broadly on target";
 
     const result = {
-      entry: { workoutTitle: entry.workoutTitle, savedAt: entry.savedAt },
+      entry: { workoutTitle: entry.workoutTitle, savedAt: entry.savedAt, approved: entry.approved },
       activityId: activity.activity_id,
       tracks,
       summary,

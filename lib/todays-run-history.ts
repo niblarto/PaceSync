@@ -25,6 +25,11 @@ export interface TodaysRunEntry {
   workoutTitle: string;
   savedAt: string;       // ISO timestamp of the save
   tracks: HistoryTrack[];
+  // Set when the user confirms/denies this was the playlist actually run to
+  // (e.g. they listened to something else that day). Undefined = not yet
+  // reviewed. A disputed entry is excluded from pacing review and from
+  // getPlayedTracks() so it can't demote tracks that never really played.
+  approved?: boolean;
 }
 
 function mmssToSec(v: string): number {
@@ -77,6 +82,18 @@ export function getTodaysRunEntry(date: string): TodaysRunEntry | null {
   return loadAll()[date] ?? null;
 }
 
+// Record whether the saved mix was actually what played that day. Doesn't
+// remove the entry — just marks it so pacing review and getPlayedTracks()
+// can exclude it without losing the record.
+export function setTodaysRunApproval(date: string, approved: boolean): TodaysRunEntry | null {
+  const all = loadAll();
+  const entry = all[date];
+  if (!entry) return null;
+  entry.approved = approved;
+  fs.writeFileSync(FILE, JSON.stringify(all), "utf-8");
+  return entry;
+}
+
 export function getAllTodaysRunEntries(): TodaysRunEntry[] {
   return Object.values(loadAll()).sort((a, b) => b.date.localeCompare(a.date));
 }
@@ -91,6 +108,7 @@ export function getPlayedTracks(): { uri: string; paceSec: number | null }[] {
   const played: { uri: string; paceSec: number | null }[] = [];
   Object.values(loadAll()).forEach(entry => {
     if (entry.date > today) return;
+    if (entry.approved === false) return; // disputed — didn't actually play
     entry.tracks.forEach(t => {
       if (!t.uri) return;
       const key = `${t.uri}|${t.targetPaceSec ?? ""}`;

@@ -18,6 +18,8 @@ bbc-programmes.json
 runna-config.json
 spotify-tokens.json
 spotify-cache.json
+strava-tokens.json
+strava-config.json
 !bpm_matcher/tests/sample_playlist.csv
 .analysis/
 .analysys/*
@@ -26,3 +28,4 @@ todays-run-history.json
 track-pace-feedback.json
 running-playlist.json
 .deploy-manifest.json
+garmin-auto-sync-marker.json
