@@ -699,6 +699,35 @@ function routeDate(a: RouteActivity): string {
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
+// ── Garmin Connect courses ────────────────────────────────────────────────────
+
+interface GarminCourse {
+  id: number;
+  name: string;
+  distanceMi: number;
+  createdDate: number;
+}
+
+// ── Run-time weather (Met Office) ─────────────────────────────────────────────
+
+interface DayWeather {
+  tempC: number;
+  feelsLikeC: number;
+  precipProb: number;
+  windMph: number;
+  description: string;
+  emoji: string;
+  sampledAt: string;
+}
+
+// True if the course title contains the workout's date in any of the formats
+// used in course names: "11-07-26", "11-07-2026", "110726", "11.07.26".
+function courseMatchesDate(name: string, date: string): boolean {
+  const [y, m, d] = date.split("-");
+  const re = new RegExp(`(^|\\D)${d}[-/. ]?${m}[-/. ]?(?:${y}|${y.slice(2)})(\\D|$)`);
+  return re.test(name);
+}
+
 export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0 }: RunnaScheduleProps = {}) {
   const { workouts, loading, error } = useRunnaData();
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -707,6 +736,17 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
   interface RoutePage { items: RouteActivity[]; offset: number; total: number; loading?: boolean }
   const [routes, setRoutes] = useState<Record<string, RoutePage>>({});
   const [routeMap, setRouteMap] = useState<{ id: string | number; label: string } | null>(null);
+  const [courses, setCourses] = useState<GarminCourse[] | null>(null);
+  const [courseOffsets, setCourseOffsets] = useState<Record<string, number>>({});
+  const [weather, setWeather] = useState<Record<string, DayWeather>>({});
+
+  // Run-time weather for the week ahead — one fetch covers every card.
+  useEffect(() => {
+    fetch("/api/weather")
+      .then(r => r.json())
+      .then((d: { days?: Record<string, DayWeather> }) => setWeather(d.days ?? {}))
+      .catch(() => {});
+  }, []);
 
   function fetchRoutes(uid: string, distanceMi: number, offset: number) {
     setRoutes(r => ({ ...r, [uid]: { ...(r[uid] ?? { items: [], total: 0 }), offset, loading: true } }));
@@ -752,6 +792,17 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
     fetchRoutes(w.uid, w.distanceMi, 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, garminConfigured, workouts]);
+
+  // Garmin Connect course library — fetched once, filtered per card below.
+  useEffect(() => {
+    if (!expanded || !garminConfigured || courses !== null) return;
+    const w = workouts.find(x => x.uid === expanded);
+    if (!w || !w.distanceMi || w.type === "strength" || w.type === "rest") return;
+    fetch("/api/garmin/courses")
+      .then(r => r.json())
+      .then((d: { courses?: GarminCourse[] }) => setCourses(d.courses ?? []))
+      .catch(() => setCourses([]));
+  }, [expanded, garminConfigured, workouts, courses]);
 
   async function buildMix(w: RunnaWorkout) {
     setMixState(s => ({ ...s, [w.uid]: { status: "building", startedAt: Date.now() } }));
@@ -844,7 +895,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
       )}
 
       {!loading && !error && workouts.length > 0 && (
-        <div className="overflow-y-auto max-h-[600px] no-scrollbar divide-y divide-white/10">
+        <div className="overflow-y-auto max-h-[900px] no-scrollbar divide-y divide-white/10">
           {workouts.map(w => {
             const meta = TYPE_META[w.type];
             const isOpen = expanded === w.uid;
@@ -873,6 +924,12 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                     <span className="text-xs text-slate-500 shrink-0">{formatDuration(w.durationSec)}</span>
                   )}
 
+                  {weather[w.date] && (
+                    <span className="text-xs text-slate-400 shrink-0" title={`${weather[w.date].description} · feels ${weather[w.date].feelsLikeC}° · ${weather[w.date].precipProb}% rain · ${weather[w.date].windMph}mph at ${weather[w.date].sampledAt}`}>
+                      {weather[w.date].emoji} {weather[w.date].tempC}°
+                    </span>
+                  )}
+
                   <span className={`text-xs font-medium px-2 py-0.5 rounded-full border shrink-0 ${meta.color}`}>
                     {meta.label}
                   </span>
@@ -888,6 +945,13 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
 
                 {isOpen && (
                   <div className="px-5 pb-4 pt-1 bg-slate-800/20 space-y-2">
+                    {weather[w.date] && (
+                      <p className="text-xs text-sky-300/90">
+                        {weather[w.date].emoji} {weather[w.date].description} · {weather[w.date].tempC}°C
+                        (feels {weather[w.date].feelsLikeC}°) · {weather[w.date].precipProb}% rain ·{" "}
+                        {weather[w.date].windMph}mph · at {weather[w.date].sampledAt}
+                      </p>
+                    )}
                     <div className="space-y-1">
                       {w.segments.map((seg, i) => (
                         <p key={i} className="text-xs text-slate-400 leading-relaxed">{seg}</p>
@@ -1026,6 +1090,67 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                               disabled={!canOlder || r.loading}
                               className={pagerBtn}
                               title="Older runs"
+                            >
+                              &gt;
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    {garminConfigured && isRun && w.distanceMi && courses && (() => {
+                      // Courses close to this run's distance — a shade under
+                      // through +0.25mi over — newest first (the API already
+                      // sorts by creation date descending).
+                      const matching = courses.filter(c =>
+                        c.distanceMi >= w.distanceMi! - 0.05 && c.distanceMi <= w.distanceMi! + 0.25
+                      );
+                      if (!matching.length) return null;
+                      const offset = courseOffsets[w.uid] ?? 0;
+                      const canNewer = offset > 0;
+                      const canOlder = offset + 3 < matching.length;
+                      const pagerBtn = "px-1.5 py-1 rounded-lg border border-white/10 text-slate-400 hover:text-green-300 hover:border-green-500/30 disabled:opacity-25 disabled:hover:text-slate-400 disabled:hover:border-white/10 transition-colors text-xs shrink-0";
+                      const page = (o: number) => setCourseOffsets(s => ({ ...s, [w.uid]: o }));
+                      return (
+                        <div className="pt-1 space-y-1.5">
+                          <p className="text-xs text-slate-500">
+                            Courses at this distance ({(w.distanceMi - 0.05).toFixed(2)}–{(w.distanceMi + 0.25).toFixed(2)}mi) · {offset + 1}–{Math.min(offset + 3, matching.length)} of {matching.length}
+                          </p>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={e => { e.stopPropagation(); if (canNewer) page(Math.max(0, offset - 3)); }}
+                              disabled={!canNewer}
+                              className={pagerBtn}
+                              title="Newer courses"
+                            >
+                              &lt;
+                            </button>
+                            <div className="flex flex-nowrap gap-1.5 flex-1 min-w-0">
+                              {matching.slice(offset, offset + 3).map(c => {
+                                const highlight = courseMatchesDate(c.name, w.date);
+                                return (
+                                  <a
+                                    key={c.id}
+                                    href={`https://connect.garmin.com/modern/course/${c.id}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={e => e.stopPropagation()}
+                                    className={`flex-1 min-w-0 truncate whitespace-nowrap text-center text-xs px-1.5 py-1 rounded-lg border transition-colors ${
+                                      highlight
+                                        ? "bg-green-500/40 border-green-300/70 text-green-50 font-medium hover:bg-green-500/50"
+                                        : "bg-green-500/15 border-green-500/30 text-green-300 hover:bg-green-500/25"
+                                    }`}
+                                    title={`${c.name} · ${c.distanceMi.toFixed(1)}mi`}
+                                  >
+                                    {c.name} · {c.distanceMi.toFixed(1)}mi
+                                  </a>
+                                );
+                              })}
+                            </div>
+                            <button
+                              onClick={e => { e.stopPropagation(); if (canOlder) page(offset + 3); }}
+                              disabled={!canOlder}
+                              className={pagerBtn}
+                              title="Older courses"
                             >
                               &gt;
                             </button>

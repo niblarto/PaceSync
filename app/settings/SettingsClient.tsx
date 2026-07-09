@@ -128,6 +128,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [stravaWebhookLoading, setStravaWebhookLoading] = useState(false);
   const [stravaWebhookError, setStravaWebhookError] = useState<string | null>(null);
 
+  // ── Met Office weather state ───────────────────────────────────────────────
+  const [metofficeKey, setMetofficeKey] = useState("");
+  const [metofficePostcode, setMetofficePostcode] = useState("");
+  const [metofficeHasKey, setMetofficeHasKey] = useState(false);
+  const [metofficeSaving, setMetofficeSaving] = useState(false);
+  const [metofficeSaved, setMetofficeSaved] = useState(false);
+  const [metofficeError, setMetofficeError] = useState<string | null>(null);
+
   // ── ntfy state ─────────────────────────────────────────────────────────────
   const [ntfyTopic, setNtfyTopic] = useState("");
   const [ntfySaving, setNtfySaving] = useState(false);
@@ -260,6 +268,38 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .catch(() => {});
   }
   useEffect(loadStravaWebhookStatus, []);
+
+  useEffect(() => {
+    fetch("/api/settings/metoffice")
+      .then(r => r.json())
+      .then((d: { hasKey?: boolean; postcode?: string }) => {
+        setMetofficeHasKey(!!d.hasKey);
+        if (d.postcode) setMetofficePostcode(d.postcode);
+      })
+      .catch(() => {});
+  }, []);
+
+  async function saveMetoffice() {
+    setMetofficeSaving(true);
+    setMetofficeSaved(false);
+    setMetofficeError(null);
+    try {
+      const res = await fetch("/api/settings/metoffice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: metofficeKey.trim(), postcode: metofficePostcode.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setMetofficeSaved(true);
+      setMetofficeHasKey(true);
+      setMetofficeKey("");
+    } catch (e) {
+      setMetofficeError(e instanceof Error ? e.message : "Failed to save — try again.");
+    } finally {
+      setMetofficeSaving(false);
+    }
+  }
 
   async function unsubscribeStravaWebhook() {
     setStravaWebhookLoading(true);
@@ -2137,6 +2177,54 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             {stravaWebhookError && <p className="text-xs text-red-400">{stravaWebhookError}</p>}
           </div>
         )}
+      </div>
+
+      {/* Met Office weather */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h2 className="font-semibold text-base">Weather (Met Office)</h2>
+          <p className="text-sm text-slate-400 mt-1">
+            Shows run-time weather on the Runna schedule (midday weekdays, 10:00 weekends).
+            Get a free API key at{" "}
+            <a href="https://datahub.metoffice.gov.uk/" target="_blank" rel="noopener noreferrer" className="text-green-400 hover:text-green-300 underline">
+              datahub.metoffice.gov.uk
+            </a>{" "}
+            — subscribe to the Site-Specific Forecast (free plan).
+          </p>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <div className="space-y-1.5">
+            <label className="text-sm text-slate-300">API Key</label>
+            <input
+              type="password"
+              value={metofficeKey}
+              onChange={e => { setMetofficeKey(e.target.value); setMetofficeSaved(false); }}
+              placeholder={metofficeHasKey ? "•••••••••••••••••••• (saved — enter to replace)" : "API key"}
+              className="w-full rounded-lg bg-slate-800/80 border border-white/10 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-green-500/50"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-sm text-slate-300">Postcode</label>
+            <input
+              type="text"
+              value={metofficePostcode}
+              onChange={e => { setMetofficePostcode(e.target.value); setMetofficeSaved(false); }}
+              placeholder="NG12 4BD"
+              className="w-full rounded-lg bg-slate-800/80 border border-white/10 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-green-500/50"
+            />
+          </div>
+        </div>
+        {metofficeError && <p className="text-sm text-red-400">{metofficeError}</p>}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={saveMetoffice}
+            disabled={metofficeSaving || (!metofficeKey.trim() && !metofficeHasKey)}
+            className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+          >
+            {metofficeSaving ? "Saving…" : metofficeSaved ? "Saved!" : "Save"}
+          </button>
+          {metofficeHasKey && <span className="text-xs text-green-400">✓ Configured</span>}
+        </div>
       </div>
 
       {/* Garmin DB */}

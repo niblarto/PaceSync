@@ -885,7 +885,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
       </header>
 
       <div className="max-w-[1800px] mx-auto px-4 py-8 flex-1 w-full">
-        <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] xl:grid-cols-[280px_1fr_570px] gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] xl:grid-cols-[280px_1fr_740px] gap-6">
 
           {/* Col 1: Zones */}
           <aside className="space-y-4">
@@ -1278,7 +1278,6 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
           {/* Col 3: Right rail — Runna */}
           <div className="space-y-6 min-w-0">
-            <RunnaSummaryCard />
             <RunnaScheduleCard
               aiDjEnabled={aiDjEnabled}
               garminConfigured={garminConfigured}
@@ -1305,6 +1304,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 }
               }}
             />
+            <RunnaSummaryCard />
           </div>
 
         </div>
