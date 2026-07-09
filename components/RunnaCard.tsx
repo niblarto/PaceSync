@@ -75,7 +75,7 @@ const TYPE_META: Record<WorkoutType, { label: string; color: string }> = {
   tempo:     { label: "Tempo",      color: "bg-orange-500/20 text-orange-400 border-orange-500/30" },
   interval:  { label: "Intervals",  color: "bg-red-500/20 text-red-400 border-red-500/30" },
   race:      { label: "Race",       color: "bg-red-600/20 text-red-300 border-red-500/30" },
-  strength:  { label: "Strength",   color: "bg-slate-500/20 text-slate-400 border-slate-500/30" },
+  strength:  { label: "Strength",   color: "bg-amber-500/20 text-amber-400 border-amber-500/30" },
   other_run: { label: "Run",        color: "bg-blue-500/20 text-blue-400 border-blue-500/30" },
   rest:      { label: "Rest",       color: "bg-slate-700/20 text-slate-500 border-slate-700/30" },
 };

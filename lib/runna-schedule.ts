@@ -49,7 +49,7 @@ function extractField(block: string, field: string): string {
   return m[0].replace(/^[^:]+:/, "").trim();
 }
 
-function classifyType(uid: string, summary: string): WorkoutType {
+function classifyType(uid: string, summary: string, description: string): WorkoutType {
   const u = uid.toUpperCase();
   const s = summary.toUpperCase();
   if (u.includes("LEGS_AND_CORE") || u.includes("STRENGTH") || s.includes("🏋") || s.includes("STRENGTH")) return "strength";
@@ -59,6 +59,12 @@ function classifyType(uid: string, summary: string): WorkoutType {
   if (u.includes("INTERVAL") || u.includes("REPEAT") || u.includes("FARTLEK")) return "interval";
   if (u.includes("RACE"))      return "race";
   if (s.includes("🏃"))        return "other_run";
+  // Untagged events (bare-GUID UID, plain-text summary like "Loading Up"):
+  // everything on the Runna calendar is a run or a strength session, so fall
+  // back to the description — strength plans are exercise-set lists, runs
+  // always carry distance/pace text.
+  if (/\d+ sets? of:/i.test(description)) return "strength";
+  if (/[\d.]+\s*(mi|km)\b|\/mi|\/km/i.test(`${summary} ${description}`)) return "other_run";
   return "rest";
 }
 
@@ -184,7 +190,7 @@ function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPast
     const durStr     = extractField(block, "X-WORKOUT-ESTIMATED-DURATION");
 
     const date       = parseDate(rawDate);
-    const type       = classifyType(uid, rawSummary);
+    const type       = classifyType(uid, rawSummary, rawDesc);
     const appUrlMatch = rawDesc.match(/https:\/\/club\.runna\.com\/\S+/);
     const appUrl     = appUrlMatch ? appUrlMatch[0] : null;
 
