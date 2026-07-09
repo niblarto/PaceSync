@@ -111,6 +111,7 @@ FILES = [
     ('lib/ntfy.ts',                               'lib/ntfy.ts'),
     ('lib/strava-config.ts',                      'lib/strava-config.ts'),
     ('lib/metoffice-config.ts',                   'lib/metoffice-config.ts'),
+    ('lib/spotify-browser.ts',                    'lib/spotify-browser.ts'),
     ('lib/strava-tokens.ts',                      'lib/strava-tokens.ts'),
     ('lib/strava.ts',                             'lib/strava.ts'),
     ('lib/strava-workout-sync.ts',                'lib/strava-workout-sync.ts'),

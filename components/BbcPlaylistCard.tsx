@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useSession } from "next-auth/react";
+import { freshSpotifyToken } from "@/lib/spotify-browser";
 import Link from "next/link";
 import { FunnelIcon, SparklesIcon, MetronomeIcon, MiniSpinner, handleArtError } from "./TrackRow";
 import { FloatingCard } from "./FloatingCard";
@@ -63,7 +64,7 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy }: {
 
   async function playTrack() {
     if (!trackId) return;
-    const token = session?.accessToken;
+    const token = await freshSpotifyToken();
     if (token) {
       try {
         const res = await fetch("https://api.spotify.com/v1/me/player/play", {
@@ -198,7 +199,7 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
   }, [retryAfter]);
 
   async function addTracksBrowser(playlistId: string, uris: string[]): Promise<void> {
-    const token = session?.accessToken;
+    const token = await freshSpotifyToken();
     if (!token) throw new Error("No access token");
     for (let i = 0; i < uris.length; i += 100) {
       const res = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
@@ -211,7 +212,7 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
   }
 
   const loadTracks = async () => {
-    const token = session?.accessToken;
+    const token = await freshSpotifyToken();
     if (!token) { setError("Not signed in"); return; }
     setLoading(true);
     setError(null);

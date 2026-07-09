@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useSession } from "next-auth/react";
+import { freshSpotifyToken } from "@/lib/spotify-browser";
 import { useRunningPlaylist } from "./useRunningPlaylist";
 
 function Spinner() {
@@ -21,7 +22,7 @@ export function DedupCard() {
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const token = session?.accessToken;
+    const token = await freshSpotifyToken();
     if (!token) return;
     setRunning(true);
     setStatus("Reading Running playlist…");

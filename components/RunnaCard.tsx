@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
+import { freshSpotifyToken } from "@/lib/spotify-browser";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 import type { TrackWithBPM } from "@/types";
 import { RouteMapLightbox } from "./RouteMapLightbox";
@@ -260,12 +261,14 @@ export function RunnaSummaryCard() {
     if (!t.uri) return;
     const uri = t.uri;
     setDeletedUris(prev => { const next = new Set(Array.from(prev)); next.add(uri); return next; });
-    const token = session?.accessToken;
-    if (token && RUNNING_PLAYLIST_ID) {
-      fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ items: [{ uri }] }),
+    if (RUNNING_PLAYLIST_ID) {
+      freshSpotifyToken().then(token => {
+        if (!token) return;
+        return fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ items: [{ uri }] }),
+        });
       }).catch(err => console.error("[delete] Spotify fetch error:", err));
     }
     fetch("/api/tracks/delete", {

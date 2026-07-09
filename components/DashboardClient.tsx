@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { FloatingCard } from "./FloatingCard";
 import { signOut, useSession } from "next-auth/react";
+import { freshSpotifyToken } from "@/lib/spotify-browser";
 import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
@@ -525,7 +526,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       openSpotifyAppFirst(`spotify:playlist:${id}`, `https://open.spotify.com/playlist/${id}`);
     if (todaysRunIdRef.current) { openById(todaysRunIdRef.current); return; }
     if (todaysRunUrl) { openSpotifyUrl(todaysRunUrl); return; }
-    const token = session?.accessToken;
+    const token = await freshSpotifyToken();
     if (token) {
       try {
         let url: string | null = "https://api.spotify.com/v1/me/playlists?limit=50";
@@ -720,7 +721,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   }
 
   async function handleDeleteTrack(track: TrackWithBPM) {
-    const token = session?.accessToken;
+    const token = await freshSpotifyToken();
 
     // Optimistically remove from local state immediately
     setAllTracks(prev => prev.filter(t => t.id !== track.id));
@@ -804,7 +805,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   };
 
   async function addTracksBrowser(playlistId: string, uris: string[]): Promise<void> {
-    const token = session?.accessToken;
+    const token = await freshSpotifyToken();
     if (!token) throw new Error("No access token");
     for (let i = 0; i < uris.length; i += 100) {
       const res = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
