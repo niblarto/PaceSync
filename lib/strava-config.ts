@@ -9,6 +9,8 @@ const FILE = path.join(process.cwd(), "strava-config.json");
 export interface StravaConfig {
   clientId: string;
   clientSecret: string;
+  webhookVerifyToken?: string;   // random string Strava echoes back to prove the subscribe callback is genuine
+  webhookSubscriptionId?: number; // Strava's subscription ID, once created
 }
 
 export function loadStravaConfig(): StravaConfig | null {
@@ -24,4 +26,11 @@ export function loadStravaConfig(): StravaConfig | null {
 
 export function saveStravaConfig(config: StravaConfig): void {
   fs.writeFileSync(FILE, JSON.stringify(config), "utf-8");
+}
+
+export function updateStravaConfig(patch: Partial<StravaConfig>): StravaConfig {
+  const current = loadStravaConfig() ?? { clientId: "", clientSecret: "" };
+  const next = { ...current, ...patch };
+  saveStravaConfig(next);
+  return next;
 }

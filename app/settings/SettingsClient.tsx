@@ -124,6 +124,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [stravaSaving, setStravaSaving] = useState(false);
   const [stravaSaved, setStravaSaved] = useState(false);
   const [stravaError, setStravaError] = useState<string | null>(null);
+  const [stravaWebhookSubscribed, setStravaWebhookSubscribed] = useState(false);
+  const [stravaWebhookLoading, setStravaWebhookLoading] = useState(false);
+  const [stravaWebhookError, setStravaWebhookError] = useState<string | null>(null);
 
   // ── ntfy state ─────────────────────────────────────────────────────────────
   const [ntfyTopic, setNtfyTopic] = useState("");
@@ -249,6 +252,44 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .catch(() => {});
   }
   useEffect(loadStravaStatus, []);
+
+  function loadStravaWebhookStatus() {
+    fetch("/api/strava/webhook/subscribe")
+      .then(r => r.json())
+      .then((d: { subscribed?: boolean }) => setStravaWebhookSubscribed(!!d.subscribed))
+      .catch(() => {});
+  }
+  useEffect(loadStravaWebhookStatus, []);
+
+  async function unsubscribeStravaWebhook() {
+    setStravaWebhookLoading(true);
+    setStravaWebhookError(null);
+    try {
+      const res = await fetch("/api/strava/webhook/subscribe", { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setStravaWebhookSubscribed(false);
+    } catch (e) {
+      setStravaWebhookError(e instanceof Error ? e.message : "Failed to unsubscribe");
+    } finally {
+      setStravaWebhookLoading(false);
+    }
+  }
+
+  async function subscribeStravaWebhook() {
+    setStravaWebhookLoading(true);
+    setStravaWebhookError(null);
+    try {
+      const res = await fetch("/api/strava/webhook/subscribe", { method: "POST" });
+      const d = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to subscribe");
+      setStravaWebhookSubscribed(true);
+    } catch (e) {
+      setStravaWebhookError(e instanceof Error ? e.message : "Failed to subscribe");
+    } finally {
+      setStravaWebhookLoading(false);
+    }
+  }
 
   async function saveStrava() {
     setStravaSaving(true);
@@ -2040,9 +2081,17 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </button>
           {stravaHasSecret && (
             stravaConnected ? (
-              <span className="text-xs text-green-400">
-                ✓ Connected{stravaAthleteName ? ` as ${stravaAthleteName}` : ""}
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-green-400">
+                  ✓ Connected{stravaAthleteName ? ` as ${stravaAthleteName}` : ""}
+                </span>
+                <a
+                  href="/api/strava/connect"
+                  className="text-xs text-orange-400 hover:text-orange-300 underline"
+                >
+                  Reconnect (needed if permissions changed)
+                </a>
+              </div>
             ) : (
               <a
                 href="/api/strava/connect"
@@ -2053,6 +2102,41 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             )
           )}
         </div>
+
+        {stravaConnected && (
+          <div className="space-y-2 pt-2 border-t border-white/5">
+            <p className="text-sm font-medium text-slate-300">Auto-update activities from Runna</p>
+            <p className="text-xs text-slate-500">
+              When a new Strava activity is created, PaceSync appends the matching Runna workout&apos;s
+              name and prepends its planned steps to the description — e.g. &quot;Morning Run&quot; becomes
+              &quot;Morning Run — Steady into Tempo&quot;. Requires re-connecting Strava if you connected
+              before this feature existed (needs the activity:write permission).
+            </p>
+            <div className="flex items-center gap-2">
+              {stravaWebhookSubscribed ? (
+                <>
+                  <span className="text-xs text-green-400">✓ Subscribed — new activities will be updated automatically</span>
+                  <button
+                    onClick={unsubscribeStravaWebhook}
+                    disabled={stravaWebhookLoading}
+                    className="rounded-lg border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 disabled:opacity-40 text-red-300 font-medium text-xs px-3 py-1.5 transition-colors"
+                  >
+                    {stravaWebhookLoading ? "Disabling…" : "Disable"}
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={subscribeStravaWebhook}
+                  disabled={stravaWebhookLoading}
+                  className="rounded-lg border border-orange-500/40 bg-orange-500/15 hover:bg-orange-500/25 disabled:opacity-40 text-orange-300 font-medium text-sm px-4 py-2 transition-colors"
+                >
+                  {stravaWebhookLoading ? "Subscribing…" : "Enable auto-update"}
+                </button>
+              )}
+            </div>
+            {stravaWebhookError && <p className="text-xs text-red-400">{stravaWebhookError}</p>}
+          </div>
+        )}
       </div>
 
       {/* Garmin DB */}

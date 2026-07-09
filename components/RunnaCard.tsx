@@ -446,6 +446,19 @@ export function RunnaSummaryCard() {
                         ))}
                       </div>
                     )}
+                    {run.planSteps.length > 0 && (
+                      <div className="space-y-0.5">
+                        <p className="text-xs text-slate-500 font-medium mb-1">Workout</p>
+                        {run.planSteps.map((step, i) => (
+                          <p
+                            key={i}
+                            className={`text-xs text-slate-400 ${step.startsWith("•") ? "pl-3" : "pt-1 first:pt-0"}`}
+                          >
+                            {step}
+                          </p>
+                        ))}
+                      </div>
+                    )}
                     {(() => {
                       const pd = pacing[run.date];
                       if (!pd) return null;

@@ -22,6 +22,7 @@ export interface RunnaPastRun {
   durationStr: string | null;   // e.g. "28:24"
   avgPace: string | null;       // e.g. "9:15 /mi"
   laps: string[];
+  planSteps: string[];    // the original planned steps, e.g. "1.5mi at 8:35/mi"
   appUrl: string | null;
 }
 
@@ -51,7 +52,7 @@ function extractField(block: string, field: string): string {
 function classifyType(uid: string, summary: string): WorkoutType {
   const u = uid.toUpperCase();
   const s = summary.toUpperCase();
-  if (u.includes("LEGS_AND_CORE") || u.includes("STRENGTH") || s.includes("🏋")) return "strength";
+  if (u.includes("LEGS_AND_CORE") || u.includes("STRENGTH") || s.includes("🏋") || s.includes("STRENGTH")) return "strength";
   if (u.includes("LONG_RUN"))  return "long_run";
   if (u.includes("EASY_RUN"))  return "easy_run";
   if (u.includes("TEMPO"))     return "tempo";
@@ -111,36 +112,59 @@ function parseDistance(summary: string): number | null {
 }
 
 function stripEmoji(summary: string): string {
+  // Only drop the first token if it's actually a leading emoji (Runna
+  // sometimes omits it, e.g. a completed "Legs & Core Strength" with no 🏋 —
+  // blindly chopping the first word off in that case truncated the title to
+  // "& Core Strength").
   const i = summary.indexOf(" ");
-  const title = i !== -1 ? summary.slice(i).trim() : summary;
+  const firstToken = i !== -1 ? summary.slice(0, i) : "";
+  const startsWithEmoji = firstToken.length > 0 && firstToken.charCodeAt(0) > 127;
+  const title = startsWithEmoji ? summary.slice(i).trim() : summary;
   // Remove trailing " • Xmi" distance (redundant with the distance field)
   return title.replace(/\s*•\s*[\d.]+[a-zA-Z]+(?:\s*-\s*[\d.]+[a-zA-Z]+)?\s*$/, "").trim();
 }
 
-function isCompletedRun(description: string): boolean {
+function isCompletedRun(uid: string, description: string): boolean {
+  // The UID prefix is set by Runna regardless of workout type and is the
+  // reliable signal — description.includes("Summary:") used to be the only
+  // check, but strength workouts have no distance/pace/time Summary section
+  // even once completed, so a completed strength day was misclassified as
+  // upcoming (showing as a "Rest" card with a truncated title).
+  if (uid.startsWith("COMPLETED_PLAN_WORKOUT")) return true;
+  if (uid.startsWith("UPCOMING_PLAN_WORKOUT")) return false;
   return description.includes("Summary:");
 }
 
-function parsePastRunStats(description: string): Pick<RunnaPastRun, "durationStr" | "avgPace" | "laps"> {
+function parsePastRunStats(description: string): Pick<RunnaPastRun, "durationStr" | "avgPace" | "laps" | "planSteps"> {
   const lines = description.split("\n").map(l => l.trim());
   let durationStr: string | null = null;
   let avgPace: string | null = null;
   const laps: string[] = [];
+  const planSteps: string[] = [];
   let inLaps = false;
+  let inPlan = false;
+
+  // Stop a section at the next emoji-prefixed header line, e.g. "♻️ Laps:"
+  const isSectionHeader = (line: string) => line.length > 2 && line.charCodeAt(0) > 127 && line.includes(":");
 
   for (const line of lines) {
     if (line.startsWith("Time:")) { durationStr = line.replace("Time:", "").trim(); continue; }
     if (line.startsWith("Avg Pace:")) { avgPace = line.replace("Avg Pace:", "").trim(); continue; }
-    if (line.includes("Laps:")) { inLaps = true; continue; }
+    if (line.includes("Description:")) { inPlan = true; inLaps = false; continue; }
+    if (line.includes("Laps:")) { inLaps = true; inPlan = false; continue; }
+    if (inPlan) {
+      if (isSectionHeader(line)) { inPlan = false; continue; }
+      if (line && line !== "----------") planSteps.push(line);
+      continue;
+    }
     if (inLaps) {
       if (!line || line.startsWith("📲") || line.startsWith("http")) continue;
-      // Stop at next emoji section header (non-ASCII first char = emoji)
-      if (line.length > 2 && line.charCodeAt(0) > 127 && line.includes(":")) { inLaps = false; continue; }
+      if (isSectionHeader(line)) { inLaps = false; continue; }
       laps.push(line);
     }
   }
 
-  return { durationStr, avgPace, laps };
+  return { durationStr, avgPace, laps, planSteps };
 }
 
 function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPastRun[] } {
@@ -164,7 +188,7 @@ function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPast
     const appUrlMatch = rawDesc.match(/https:\/\/club\.runna\.com\/\S+/);
     const appUrl     = appUrlMatch ? appUrlMatch[0] : null;
 
-    if (isCompletedRun(rawDesc) && date >= lookback && date <= today) {
+    if (isCompletedRun(uid, rawDesc) && date >= lookback && date <= today) {
       const stats = parsePastRunStats(rawDesc);
       pastRuns.push({
         uid,
@@ -175,7 +199,7 @@ function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPast
         ...stats,
         appUrl,
       });
-    } else if (!isCompletedRun(rawDesc) && date >= today && date <= cutoff) {
+    } else if (!isCompletedRun(uid, rawDesc) && date >= today && date <= cutoff) {
       const segments = parseSegments(rawDesc);
       workouts.push({
         uid,
@@ -211,7 +235,11 @@ export async function fetchRunnaSchedule(): Promise<RunnaScheduleResult> {
   try {
     const res = await fetch(url, { next: { revalidate: 3600 } });
     if (!res.ok) throw new Error(`ICS fetch ${res.status}`);
-    const text = await res.text();
+    // Force UTF-8 decoding — the ICS server's Content-Type omits a charset,
+    // and res.text() falling back to Latin-1 mangles multi-byte characters
+    // like "•" (becomes "â€¢") in the exercise-list descriptions.
+    const buf = await res.arrayBuffer();
+    const text = new TextDecoder("utf-8").decode(buf);
     const { workouts, pastRuns } = parseIcs(text);
     return { ok: true, workouts, pastRuns };
   } catch (err) {

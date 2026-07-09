@@ -93,7 +93,11 @@ export async function GET(req: NextRequest) {
     });
     db.pragma("busy_timeout = 30000");
 
-    // The day's longest run is taken as the workout the mix was built for.
+    // The day's longest running activity is taken as the workout the mix was
+    // built for. Strength/other non-running days have no pace to compare, but
+    // the track list itself (tempo/energy, no pace verdict) still applies —
+    // handled below by falling back to a plain listing when no activity or
+    // no speed samples are found, instead of returning an empty track array.
     const activity = db.prepare(`
       SELECT activity_id, start_time, distance
       FROM activities
@@ -104,9 +108,14 @@ export async function GET(req: NextRequest) {
 
     if (!activity) {
       db.close();
-      const result = { entry: { workoutTitle: entry.workoutTitle, savedAt: entry.savedAt, approved: entry.approved }, activityId: null, tracks: [] };
+      const tracks: TrackPacing[] = entry.tracks.map(t => ({ ...t, actualPaceSec: null, verdict: "unknown" as const }));
+      const result = {
+        entry: { workoutTitle: entry.workoutTitle, savedAt: entry.savedAt, approved: entry.approved },
+        activityId: null,
+        tracks,
+      };
       garminCacheSet(cacheKey, config.dbPath, result);
-      return NextResponse.json(result);
+      return NextResponse.json(withLibraryFlag(result));
     }
 
     const records = db.prepare(`

@@ -21,8 +21,8 @@ export async function GET(req: NextRequest) {
     client_id: config.clientId,
     redirect_uri: redirectUri,
     response_type: "code",
-    approval_prompt: "auto",
-    scope: "read,activity:read_all,profile:read_all",
+    approval_prompt: "force",
+    scope: "read,activity:read_all,activity:write,profile:read_all",
   });
   return NextResponse.redirect(`https://www.strava.com/oauth/authorize?${params}`);
 }

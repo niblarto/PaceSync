@@ -50,6 +50,29 @@ async function stravaGet<T>(token: string, path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface StravaActivityDetail extends StravaActivity {
+  description: string | null;
+}
+
+export function getActivity(token: string, activityId: number | string) {
+  return stravaGet<StravaActivityDetail>(token, `/activities/${activityId}`);
+}
+
+// Requires the activity:write scope, granted alongside read scopes at
+// connect time — see app/api/strava/connect/route.ts.
+export async function updateActivity(
+  token: string,
+  activityId: number | string,
+  fields: { name?: string; description?: string }
+): Promise<void> {
+  const res = await fetch(`https://www.strava.com/api/v3/activities/${activityId}`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) throw new Error(`Strava update activity ${activityId} -> ${res.status}: ${await res.text().catch(() => "")}`);
+}
+
 export interface StravaActivity {
   id: number;
   name: string;

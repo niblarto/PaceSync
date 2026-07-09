@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { saveTodaysRunEntry, timelineToHistoryTracks, getTodaysRunEntry, setTodaysRunApproval } from "@/lib/todays-run-history";
 import { getPinnedMix } from "@/lib/pinned-mixes";
+import { appendTracksToStravaActivity } from "@/lib/strava-workout-sync";
 import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 
 // Records which mix "Today's Run" held for a workout date (called after a
@@ -67,5 +68,20 @@ export async function PATCH(req: NextRequest) {
   }
   const entry = setTodaysRunApproval(body.date, body.approved);
   if (!entry) return NextResponse.json({ error: "No saved mix for that date" }, { status: 404 });
+
+  // Playlist confirmed — now (and only now) append the tracklist to the
+  // day's Strava activity. Fire-and-forget: the approval itself shouldn't
+  // block on (or fail because of) Strava.
+  if (body.approved === true) {
+    const date = body.date;
+    appendTracksToStravaActivity(date)
+      .then(result => {
+        if (!result.ok) console.warn(`[todays-run] Strava track append failed for ${date}: ${result.error}`);
+        else if (result.updated) console.log(`[todays-run] appended tracks to Strava activity for ${date}`);
+        else console.log(`[todays-run] Strava tracks not appended for ${date}: ${result.reason}`);
+      })
+      .catch(e => console.warn(`[todays-run] Strava track append threw for ${date}:`, e));
+  }
+
   return NextResponse.json({ ok: true });
 }

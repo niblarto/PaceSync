@@ -19,12 +19,21 @@ function garminActivityForDate(dbPath: string, date: string): { id: string | num
     const Database = require("better-sqlite3") as typeof import("better-sqlite3");
     const db = new Database(path.join(dbPath, "garmin_activities.db"), { readonly: true, fileMustExist: true });
     db.pragma("busy_timeout = 30000");
-    // Same heuristic as run-pacing: the day's longest run is "the" workout.
-    const row = db.prepare(`
+    // Prefer the day's longest run (same heuristic as run-pacing), but fall
+    // back to any activity that day (e.g. strength training) so non-running
+    // workouts still get a "Garmin activity" link.
+    let row = db.prepare(`
       SELECT activity_id FROM activities
       WHERE LOWER(sport) LIKE '%running%' AND DATE(start_time) = ?
       ORDER BY distance DESC LIMIT 1
     `).get(date) as { activity_id: string | number } | undefined;
+    if (!row) {
+      row = db.prepare(`
+        SELECT activity_id FROM activities
+        WHERE DATE(start_time) = ?
+        ORDER BY elapsed_time DESC LIMIT 1
+      `).get(date) as { activity_id: string | number } | undefined;
+    }
     db.close();
     return row ? { id: row.activity_id } : null;
   } catch {
@@ -44,9 +53,13 @@ async function stravaActivityForDate(date: string): Promise<{ id: number } | nul
     const after = Math.floor((target - dayMs) / 1000);
     const before = Math.floor((target + dayMs) / 1000);
     const activities = await listActivities(tokenResult.token, 30, 1, { before, after });
-    const sameDay = activities.filter(a => a.start_date_local.slice(0, 10) === date && a.sport_type === "Run");
+    const sameDay = activities.filter(a => a.start_date_local.slice(0, 10) === date);
     if (!sameDay.length) return null;
-    const longest = sameDay.reduce((a, b) => (b.distance > a.distance ? b : a));
+    // Prefer a Run (matches the Garmin/mix-pacing heuristic); fall back to
+    // the longest-duration activity of any type for non-running days.
+    const runs = sameDay.filter(a => a.sport_type === "Run");
+    const pool = runs.length ? runs : sameDay;
+    const longest = pool.reduce((a, b) => (b.distance > a.distance || b.moving_time > a.moving_time ? b : a));
     return { id: longest.id };
   } catch {
     return null;
