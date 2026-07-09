@@ -907,6 +907,15 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                   onClick={() => setExpanded(isOpen ? null : w.uid)}
                   className="w-full px-5 py-3 flex items-center gap-3 text-left hover:bg-slate-800/40 transition-colors"
                 >
+                  {/* Fixed-width weather slot (empty past the forecast range)
+                      so the date column stays aligned all the way down. */}
+                  <span
+                    className="text-xs text-slate-400 shrink-0 w-12"
+                    title={weather[w.date] ? `${weather[w.date].description} · feels ${weather[w.date].feelsLikeC}° · ${weather[w.date].precipProb}% rain · ${weather[w.date].windMph}mph at ${weather[w.date].sampledAt}` : undefined}
+                  >
+                    {weather[w.date] ? `${weather[w.date].emoji} ${weather[w.date].tempC}°` : ""}
+                  </span>
+
                   <span className={`text-xs shrink-0 w-20 ${isToday(w.date) ? "text-green-400 font-semibold" : "text-slate-500"}`}>
                     {dayLabel(w.date)}
                   </span>
@@ -922,12 +931,6 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                   )}
                   {!isRun && w.durationSec > 0 && (
                     <span className="text-xs text-slate-500 shrink-0">{formatDuration(w.durationSec)}</span>
-                  )}
-
-                  {weather[w.date] && (
-                    <span className="text-xs text-slate-400 shrink-0" title={`${weather[w.date].description} · feels ${weather[w.date].feelsLikeC}° · ${weather[w.date].precipProb}% rain · ${weather[w.date].windMph}mph at ${weather[w.date].sampledAt}`}>
-                      {weather[w.date].emoji} {weather[w.date].tempC}°
-                    </span>
                   )}
 
                   <span className={`text-xs font-medium px-2 py-0.5 rounded-full border shrink-0 ${meta.color}`}>
