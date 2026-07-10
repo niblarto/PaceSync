@@ -802,7 +802,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
 
   // On expand, show the saved AI DJ mix for this workout's date (pre-built by
   // the nightly cron or saved from the dashboard) — keyed by workout date.
-  interface MixSnapshot { workoutTitle: string; tracks: { name: string; artist: string; startsAtSec: number; tempo: number | null }[]; pinned?: boolean }
+  interface MixSnapshot { workoutTitle: string; tracks: { uri: string | null; name: string; artist: string; startsAtSec: number; tempo: number | null }[]; pinned?: boolean }
   const [mixSnapshots, setMixSnapshots] = useState<Record<string, MixSnapshot | null>>({});
 
   // A save on the dashboard bumps mixSavedNonce — drop the cache so the
@@ -846,10 +846,13 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
       .catch(() => setCourses([]));
   }, [expanded, garminConfigured, workouts, courses]);
 
-  async function buildMix(w: RunnaWorkout) {
+  async function buildMix(w: RunnaWorkout, seedAvoidUris?: string[]) {
     // A remix should sound different: send the previous build's tracks so the
-    // mixer demotes them (they only reappear if the BPM pool runs dry).
-    const avoidUris = mixState[w.uid]?.uris;
+    // mixer demotes them (they only reappear if the BPM pool runs dry). On
+    // the very first remix of a session (no in-session mix yet), seed from
+    // the saved/pinned mix's tracks instead, so remixing a persisted mix
+    // still avoids repeating it rather than rebuilding the same setlist.
+    const avoidUris = mixState[w.uid]?.uris ?? seedAvoidUris;
     setMixState(s => ({ ...s, [w.uid]: { status: "building", startedAt: Date.now(), uris: avoidUris } }));
     try {
       const mixRes = await fetch("/api/ai-dj/mix", {
@@ -1066,15 +1069,21 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                     {aiDjEnabled && ((isRun && w.segments.length > 0) || (w.type === "strength" && w.durationSec > 0)) && (() => {
                       const st = mixState[w.uid];
                       const snap = mixSnapshots[w.date];
+                      // A saved/pinned mix already exists for this workout even
+                      // before anything is built this session — offer Remix
+                      // instead of a fresh AI DJ Mix, seeded to avoid repeating
+                      // that persisted mix's tracks.
+                      const hasExistingMix = st?.status === "done" || !!(snap && snap.tracks?.length > 0);
+                      const snapUris = snap?.tracks.map(t => t.uri).filter((u): u is string => !!u);
                       return (
                         <>
                           <div className="flex flex-wrap items-center gap-2 pt-1">
                             <button
-                              onClick={e => { e.stopPropagation(); if (st?.status !== "building") buildMix(w); }}
+                              onClick={e => { e.stopPropagation(); if (st?.status !== "building") buildMix(w, snapUris); }}
                               disabled={st?.status === "building"}
                               className="text-xs px-2.5 py-1 rounded-lg border bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25 disabled:opacity-60 disabled:cursor-wait transition-colors"
                             >
-                              {st?.status === "building" ? "🎧 Mixing…" : st?.status === "done" ? "🎧 Remix" : "🎧 AI DJ Mix"}
+                              {st?.status === "building" ? "🎧 Mixing…" : hasExistingMix ? "🎧 Remix" : "🎧 AI DJ Mix"}
                             </button>
                             {st?.status === "building" && (
                               <MixProgressBar startedAt={st.startedAt ?? Date.now()} progress={st.progress} />

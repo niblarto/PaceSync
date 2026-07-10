@@ -260,7 +260,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [enriching, setEnriching] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
   const enrichAttempted = useRef(false);
-  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean } | null>(null);
+  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[] } | null>(null);
   const [remixing, setRemixing] = useState(false);
   const [todaysRunSaving, setTodaysRunSaving] = useState(false);
   const [todaysRunSaved, setTodaysRunSaved] = useState(false);
@@ -472,12 +472,18 @@ export function DashboardClient({ spotifyUser }: Props) {
     setTodaysRunUrl(null);
   }
 
-  // Rebuild the AI DJ mix from the same workout segments after the library
-  // changed (a track in the mix was deleted).
+  // Rebuild the AI DJ mix from the same workout segments — either because a
+  // track in the mix was deleted (stale=true), or the user just wants a
+  // different mix. avoidUris accumulates across remixes (like RunnaCard's
+  // remix) so the mixer demotes tracks from every prior build in this
+  // session, not just the last one, and repeated remixes keep surfacing
+  // fresh tracks instead of alternating between the same couple of sets.
   async function remixAiDjMix() {
     if (!aiDjMix) return;
     setRemixing(true);
     setSaveError(null);
+    const priorUris = aiDjMix.tracks.map(t => t.uri);
+    const avoidUris = Array.from(new Set([...(aiDjMix.avoidUris ?? []), ...priorUris]));
     // Clear the old tracks immediately so the stale mix can't linger (or be
     // saved) while the rebuild runs.
     setAiDjMix(prev => prev ? { ...prev, tracks: [] } : prev);
@@ -485,7 +491,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       const res = await fetch("/api/ai-dj/mix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: aiDjMix.workoutTitle, segments: aiDjMix.segments }),
+        body: JSON.stringify({ title: aiDjMix.workoutTitle, segments: aiDjMix.segments, avoidUris }),
       });
       const mix = await res.json() as {
         error?: string;
@@ -505,7 +511,7 @@ export function DashboardClient({ spotifyUser }: Props) {
         energy: t.energy,
       })).filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
       if (tracks.length === 0) throw new Error("No tracks matched this workout");
-      setAiDjMix(prev => prev ? { ...prev, tracks, totalSec: mix.totalSec ?? prev.totalSec, timeline: mix.timeline ?? prev.timeline, stale: false } : prev);
+      setAiDjMix(prev => prev ? { ...prev, tracks, totalSec: mix.totalSec ?? prev.totalSec, timeline: mix.timeline ?? prev.timeline, stale: false, avoidUris } : prev);
       setStep("ready");
       setSavedUrl(null);
       setTodaysRunSaved(false);
@@ -1151,6 +1157,15 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                           className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 w-full min-w-40"
                         />
                       <div className="flex items-center gap-1.5">
+                        {aiDjMix && (
+                          <button
+                            onClick={remixAiDjMix}
+                            disabled={remixing}
+                            className="inline-flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/15 hover:bg-purple-500/25 disabled:opacity-60 disabled:cursor-not-allowed text-purple-300 font-semibold text-xs px-4 py-1.5 transition-colors whitespace-nowrap"
+                          >
+                            {remixing ? <><Spinner />Remixing…</> : "🎧 Remix"}
+                          </button>
+                        )}
                         <button
                           onClick={savePlaylist}
                           disabled={!playlistName || step === "saving"}
