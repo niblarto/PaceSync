@@ -66,7 +66,7 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy,
   }, [visibleCount, tracks.length, loadMore]);
 
   return (
-    <div ref={containerRef} className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto no-scrollbar">
+    <div ref={containerRef} className="divide-y divide-slate-800/50 h-full min-h-[400px] overflow-y-auto no-scrollbar">
       {tracks.slice(0, visibleCount).map((track, i) => (
         <div
           key={`${track.id}-${i}`}
@@ -886,10 +886,10 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
       </header>
 
       <div className="max-w-[1800px] mx-auto px-4 py-8 flex-1 w-full">
-        <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] xl:grid-cols-[280px_1fr_740px] gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] xl:grid-cols-[280px_1fr_740px] gap-6 items-stretch">
 
           {/* Col 1: Zones */}
-          <aside className="space-y-4">
+          <aside className="space-y-4 flex flex-col">
             <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
                 <h2 className="font-semibold text-sm">Heart Rate Zones</h2>
@@ -997,11 +997,15 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               </div>
             </div>
 
+            {allTracks.length > 0 && selectedZones.length > 0 && (
+              <BPMDistribution tracks={allTracks} zones={displayZones} selectedZones={selectedZones} />
+            )}
+
             <DedupCard />
           </aside>
 
           {/* Col 2: Main content */}
-          <main className="space-y-6 min-w-0">
+          <main className="space-y-6 min-w-0 flex flex-col min-h-0">
 
             {/* Target zone */}
             {csvName && (
@@ -1065,9 +1069,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               </div>
             )}
 
-            {/* Results */}
+            {/* Results — grows to fill the column's height (matched to the
+                taller Runna rail in col 3) so the track list, not empty
+                space, absorbs the extra room. */}
             {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || similarFilter || noBpmFilter || aiDjMix) && (
-              <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+              <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden flex-1 min-h-0 flex flex-col">
                 <div className="p-5 border-b border-white/10 flex items-start justify-between gap-4 flex-wrap">
                   <div>
                     <h3 className="font-semibold">
@@ -1233,25 +1239,27 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   </div>
                 )}
 
-                {filteredTracks.length === 0 ? (
-                  <div className="p-8 text-center text-slate-500 text-sm">
-                    {noBpmFilter ? "All tracks have BPM info 🎉" : aiDjMix ? (remixing ? "Rebuilding mix…" : "No tracks in this mix.") : "No tracks in this BPM range. Try a different zone."}
-                  </div>
-                ) : (
-                  <VirtualTrackList
-                    key={aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : selectedZones.map(z=>z.number).sort().join("-")}
-                    tracks={filteredTracks}
-                    onDelete={handleDeleteTrack}
-                    onSimilar={handleSimilar}
-                    onSuggest={handleSuggest}
-                    suggestBusy={suggest && suggest.results === null && !suggest.error
-                      ? { trackId: suggest.seed.id, mode: suggest.mode }
-                      : null}
-                    inlineCard={suggest && suggestSeedVisible
-                      ? { trackId: suggest.seed.id, node: suggestCardNode }
-                      : null}
-                  />
-                )}
+                <div className="flex-1 min-h-0 flex flex-col">
+                  {filteredTracks.length === 0 ? (
+                    <div className="p-8 text-center text-slate-500 text-sm">
+                      {noBpmFilter ? "All tracks have BPM info 🎉" : aiDjMix ? (remixing ? "Rebuilding mix…" : "No tracks in this mix.") : "No tracks in this BPM range. Try a different zone."}
+                    </div>
+                  ) : (
+                    <VirtualTrackList
+                      key={aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : selectedZones.map(z=>z.number).sort().join("-")}
+                      tracks={filteredTracks}
+                      onDelete={handleDeleteTrack}
+                      onSimilar={handleSimilar}
+                      onSuggest={handleSuggest}
+                      suggestBusy={suggest && suggest.results === null && !suggest.error
+                        ? { trackId: suggest.seed.id, mode: suggest.mode }
+                        : null}
+                      inlineCard={suggest && suggestSeedVisible
+                        ? { trackId: suggest.seed.id, node: suggestCardNode }
+                        : null}
+                    />
+                  )}
+                </div>
               </div>
             )}
 
@@ -1259,11 +1267,6 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 seed row isn't visible anywhere (rendered inline below the seed
                 row in the track list or BBC card otherwise) */}
             {suggest && suggest.origin === "list" && !suggestSeedVisible && suggestCardNode}
-
-            {/* BPM distribution */}
-            {allTracks.length > 0 && selectedZones.length > 0 && (
-              <BPMDistribution tracks={allTracks} zones={displayZones} selectedZones={selectedZones} />
-            )}
 
             {/* No CSV loaded */}
             {!csvName && (
@@ -1279,6 +1282,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
           {/* Col 3: Right rail — Runna */}
           <div className="space-y-6 min-w-0">
+            <RunnaSummaryCard />
             <RunnaScheduleCard
               aiDjEnabled={aiDjEnabled}
               garminConfigured={garminConfigured}
@@ -1305,7 +1309,6 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 }
               }}
             />
-            <RunnaSummaryCard />
           </div>
 
         </div>

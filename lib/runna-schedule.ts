@@ -105,10 +105,21 @@ function suggestZone(type: WorkoutType, segments: string[]): number | null {
   return Math.max(paceZone, keywordZone, floor);
 }
 
+// Runna appends a coaching aside to easy-effort steps, e.g. "...at a
+// conversational pace (no faster than 9:15/mi). This is a limit, not a
+// target - run at whatever pace feels truly easy!" — keep the pace clause,
+// drop everything after it (both here and in Strava descriptions/titles,
+// it's just noise once the step is already labeled "easy").
+function stripCoachingAside(line: string): string {
+  const m = line.match(/\(no faster than[^)]*\)/i);
+  if (!m) return line;
+  return line.slice(0, m.index! + m[0].length).trim();
+}
+
 function parseSegments(description: string): string[] {
   return description
     .split("\n")
-    .map(l => l.trim())
+    .map(l => stripCoachingAside(l.trim()))
     .filter(l => l && !l.startsWith("📲") && !l.startsWith("http") && l.length > 2);
 }
 
@@ -160,7 +171,7 @@ function parsePastRunStats(description: string): Pick<RunnaPastRun, "durationStr
     if (line.includes("Laps:")) { inLaps = true; inPlan = false; continue; }
     if (inPlan) {
       if (isSectionHeader(line)) { inPlan = false; continue; }
-      if (line && line !== "----------") planSteps.push(line);
+      if (line && line !== "----------") planSteps.push(stripCoachingAside(line));
       continue;
     }
     if (inLaps) {

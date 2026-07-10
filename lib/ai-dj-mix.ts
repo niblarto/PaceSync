@@ -150,6 +150,10 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
     title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback,
     playedTracks: getPlayedTracks(), bpmOverrides: loadBpmOverrides(),
     avoidTracks: avoidUris?.length ? avoidUris : undefined,
+    // Ollama when provider is "local" (server default); Claude model/effort
+    // otherwise — see ai_dj/llm.py CLAUDE_MODELS for accepted model IDs.
+    model: config.provider === "claude" ? config.claudeModel : undefined,
+    effort: config.provider === "claude" ? config.claudeEffort : undefined,
   });
   try {
     if (onProgress) {

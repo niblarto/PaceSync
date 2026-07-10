@@ -210,6 +210,27 @@ export function RunnaSummaryCard() {
   const [deletedUris, setDeletedUris] = useState<Set<string>>(new Set());
   const { data: session } = useSession();
   const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
+  const [titleSync, setTitleSync] = useState<Record<string, { status: "syncing" | "done" | "error"; message?: string }>>({});
+
+  function retrySyncTitle(stravaId: number) {
+    setTitleSync(s => ({ ...s, [stravaId]: { status: "syncing" } }));
+    fetch("/api/strava/sync-title", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ activityId: stravaId }),
+    })
+      .then(r => r.json())
+      .then((d: { error?: string; updated?: boolean; workoutTitle?: string; reason?: string }) => {
+        if (d.error) {
+          setTitleSync(s => ({ ...s, [stravaId]: { status: "error", message: d.error } }));
+        } else if (d.updated) {
+          setTitleSync(s => ({ ...s, [stravaId]: { status: "done", message: `Updated: "${d.workoutTitle}"` } }));
+        } else {
+          setTitleSync(s => ({ ...s, [stravaId]: { status: "error", message: d.reason ?? "No matching workout found" } }));
+        }
+      })
+      .catch(e => setTitleSync(s => ({ ...s, [stravaId]: { status: "error", message: e instanceof Error ? e.message : "Retry failed" } })));
+  }
 
   // Today's run appearing here means Runna has marked it complete — kick off
   // a GarminDB sync so its stats (and the pacing review below) are fresh
@@ -397,7 +418,9 @@ export function RunnaSummaryCard() {
                     {(() => {
                       const links = activityLinks[run.date];
                       if (!run.appUrl && (!links || (!links.garminId && !links.stravaId))) return null;
+                      const sync = links?.stravaId ? titleSync[links.stravaId] : undefined;
                       return (
+                        <>
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                           {run.appUrl && (
                             <a
@@ -438,7 +461,23 @@ export function RunnaSummaryCard() {
                               Strava ↗
                             </a>
                           )}
+                          {links?.stravaId && (
+                            <button
+                              onClick={e => { e.stopPropagation(); retrySyncTitle(links.stravaId!); }}
+                              disabled={sync?.status === "syncing"}
+                              className="text-orange-400/80 hover:text-orange-300 underline disabled:opacity-50 disabled:cursor-wait"
+                              title="Re-check Runna and update the Strava title/description if it's still missing"
+                            >
+                              {sync?.status === "syncing" ? "Syncing title…" : "Sync Strava title"}
+                            </button>
+                          )}
                         </div>
+                        {sync && sync.status !== "syncing" && sync.message && (
+                          <p className={`text-xs ${sync.status === "done" ? "text-green-400" : "text-red-400"}`}>
+                            {sync.message}
+                          </p>
+                        )}
+                        </>
                       );
                     })()}
                     {run.laps.length > 0 && (
@@ -918,7 +957,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
       )}
 
       {!loading && !error && workouts.length > 0 && (
-        <div className="overflow-y-auto max-h-[900px] no-scrollbar divide-y divide-white/10">
+        <div className="overflow-y-auto max-h-[700px] no-scrollbar divide-y divide-white/10">
           {workouts.map(w => {
             const meta = TYPE_META[w.type];
             const isOpen = expanded === w.uid;

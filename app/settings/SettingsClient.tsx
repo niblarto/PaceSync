@@ -153,8 +153,18 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [aiDjError, setAiDjError] = useState<string | null>(null);
   const [aiDjHealth, setAiDjHealth] = useState<"idle" | "checking" | "ok" | "down">("idle");
   const [aiDjHealthLlm, setAiDjHealthLlm] = useState(false);
+  const [aiDjHealthClaude, setAiDjHealthClaude] = useState(false);
   const [aiDjHealthMsg, setAiDjHealthMsg] = useState<string | null>(null);
   const [aiDjWolMac, setAiDjWolMac] = useState("");
+  const [aiDjProvider, setAiDjProvider] = useState<"local" | "claude">("local");
+  const [aiDjClaudeModel, setAiDjClaudeModel] = useState("claude-sonnet-5");
+  const [aiDjClaudeEffort, setAiDjClaudeEffort] = useState("medium");
+  const [claudeApiKey, setClaudeApiKey] = useState("");
+  const [claudeKeySaving, setClaudeKeySaving] = useState(false);
+  const [claudeKeySaved, setClaudeKeySaved] = useState(false);
+  const [claudeKeyError, setClaudeKeyError] = useState<string | null>(null);
+  const [claudeUsage, setClaudeUsage] = useState<Record<string, { inputTokens: number; outputTokens: number; requests: number; estimatedCostUsd: number }> | null>(null);
+  const [claudeUsageError, setClaudeUsageError] = useState<string | null>(null);
   // ── Run-type BPM override state (blank = no override) ─────────────────────
   const [bpmOv, setBpmOv] = useState<Record<string, { min: string; max: string }>>({
     warmup: { min: "", max: "" }, work: { min: "", max: "" }, easy: { min: "", max: "" },
@@ -366,14 +376,55 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   useEffect(() => {
     fetch("/api/settings/ai-dj")
       .then(r => r.json())
-      .then((d: { url?: string; enabled?: boolean; autoPlaylist?: boolean; wolMac?: string }) => {
+      .then((d: { url?: string; enabled?: boolean; autoPlaylist?: boolean; wolMac?: string; provider?: string; claudeModel?: string; claudeEffort?: string }) => {
         if (d.url) setAiDjUrl(d.url);
         setAiDjEnabled(d.enabled ?? false);
         setAiDjAutoPlaylist(d.autoPlaylist ?? true);
         setAiDjWolMac(d.wolMac ?? "");
+        setAiDjProvider(d.provider === "claude" ? "claude" : "local");
+        if (d.claudeModel) setAiDjClaudeModel(d.claudeModel);
+        if (d.claudeEffort) setAiDjClaudeEffort(d.claudeEffort);
       })
       .catch(() => {});
   }, []);
+
+  function loadClaudeUsage() {
+    setClaudeUsageError(null);
+    fetch("/api/settings/ai-dj/usage")
+      .then(r => r.json())
+      .then((d: { models?: typeof claudeUsage; error?: string }) => {
+        if (d.error) { setClaudeUsageError(d.error); return; }
+        setClaudeUsage(d.models ?? {});
+      })
+      .catch(() => setClaudeUsageError("Could not reach AI DJ service"));
+  }
+
+  useEffect(() => {
+    if (aiDjProvider === "claude" && aiDjUrl.trim()) loadClaudeUsage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiDjProvider]);
+
+  async function saveClaudeApiKey() {
+    setClaudeKeySaving(true);
+    setClaudeKeySaved(false);
+    setClaudeKeyError(null);
+    try {
+      const res = await fetch("/api/settings/ai-dj/claude-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: claudeApiKey.trim() }),
+      });
+      const d = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to save");
+      setClaudeKeySaved(true);
+      setClaudeApiKey("");
+      setAiDjCheckNonce(n => n + 1);
+    } catch (e) {
+      setClaudeKeyError(e instanceof Error ? e.message : "Failed to save — try again.");
+    } finally {
+      setClaudeKeySaving(false);
+    }
+  }
 
   useEffect(() => {
     fetch("/api/settings/bpm-overrides")
@@ -555,10 +606,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setAiDjHealth("checking");
       try {
         const res = await fetch(`/api/ai-dj/health?url=${encodeURIComponent(url)}`);
-        const d = await res.json() as { ok?: boolean; llm?: boolean; error?: string };
+        const d = await res.json() as { ok?: boolean; llm?: boolean; claude?: boolean; error?: string };
         if (cancelled) return;
         setAiDjHealth(d.ok ? "ok" : "down");
         setAiDjHealthLlm(!!d.llm);
+        setAiDjHealthClaude(!!d.claude);
         setAiDjHealthMsg(d.ok ? null : (d.error ?? "Unreachable"));
       } catch {
         if (!cancelled) { setAiDjHealth("down"); setAiDjHealthMsg("Unreachable"); }
@@ -892,7 +944,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }, [aiDjHealth, waking]);
 
-  async function saveAiDj(enabled: boolean, autoPlaylist: boolean = aiDjAutoPlaylist) {
+  async function saveAiDj(
+    enabled: boolean, autoPlaylist: boolean = aiDjAutoPlaylist,
+    provider: "local" | "claude" = aiDjProvider, claudeModel: string = aiDjClaudeModel, claudeEffort: string = aiDjClaudeEffort,
+  ) {
     setAiDjSaving(true);
     setAiDjSaved(false);
     setAiDjError(null);
@@ -900,11 +955,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       const res = await fetch("/api/settings/ai-dj", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: aiDjUrl.trim(), enabled, autoPlaylist, wolMac: aiDjWolMac.trim() }),
+        body: JSON.stringify({ url: aiDjUrl.trim(), enabled, autoPlaylist, wolMac: aiDjWolMac.trim(), provider, claudeModel, claudeEffort }),
       });
       if (!res.ok) throw new Error();
       setAiDjEnabled(enabled);
       setAiDjAutoPlaylist(autoPlaylist);
+      setAiDjProvider(provider);
+      setAiDjClaudeModel(claudeModel);
+      setAiDjClaudeEffort(claudeEffort);
       setAiDjSaved(true);
     } catch {
       setAiDjError("Failed to save — try again.");
@@ -1269,6 +1327,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const hrr = maxHR - restingHR;
   const hrrValid = maxHR > 0 && restingHR > 0 && hrr > 0;
 
+  const TABS = [
+    { key: "heart-rate", label: "Heart Rate & Zones" },
+    { key: "playlist", label: "Playlist & BBC" },
+    { key: "integrations", label: "Integrations" },
+    { key: "notifications", label: "Notifications & 2FA" },
+  ] as const;
+  type TabKey = typeof TABS[number]["key"];
+  const [activeTab, setActiveTab] = useState<TabKey>("heart-rate");
+
   if (loading) {
     return (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -1280,9 +1347,27 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
+    <div className="space-y-6">
 
-    {/* ── Column 1: Heart Rate ── */}
+    {/* ── Tab bar ── */}
+    <div className="flex flex-wrap gap-1.5 border-b border-white/10 pb-px">
+      {TABS.map(t => (
+        <button
+          key={t.key}
+          onClick={() => setActiveTab(t.key)}
+          className={`rounded-t-lg px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+            activeTab === t.key
+              ? "border-green-500 text-white"
+              : "border-transparent text-slate-500 hover:text-slate-300"
+          }`}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+
+    {/* ── Tab 1: Heart Rate & Zones ── */}
+    <div className={activeTab === "heart-rate" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
       {/* Max HR / Resting HR */}
@@ -1379,6 +1464,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
       )}
 
+    </div>
+    <div className="space-y-6">
+
       {/* Zone Details & Override */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
@@ -1453,9 +1541,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       >
         {saving ? "Saving…" : saved ? "Saved!" : "Save zones"}
       </button>
+
+    </div>
     </div>
 
-    {/* ── Column 2: BBC ── */}
+    {/* ── Tab 2: Playlist & BBC ── */}
+    <div className={activeTab === "playlist" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
       {/* Playlist Management */}
@@ -1696,6 +1787,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
       </div>
 
+    </div>
+    <div className="space-y-6">
+
       {/* BBC Programme list */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
@@ -1830,6 +1924,64 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
       </div>
 
+      {/* Run-type BPM limits */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h3 className="font-semibold text-slate-200">Run BPM limits</h3>
+          <p className="text-sm text-slate-400 mt-1">
+            Min/max music BPM per run type for AI DJ mixes. Leave blank for automatic
+            cadence matching — anything set here becomes a hard limit.
+            Half-time tracks count at double tempo (an 87 BPM track counts as 174).
+          </p>
+        </div>
+        <div className="space-y-2">
+          {([
+            ["warmup", "Warm up"],
+            ["work", "Work / intervals"],
+            ["easy", "Easy / conversational"],
+            ["cooldown", "Cool down"],
+            ["rest", "Rest / recovery"],
+          ] as [string, string][]).map(([kind, label]) => (
+            <div key={kind} className="flex items-center gap-3">
+              <span className="text-sm text-slate-300 w-44 shrink-0">{label}</span>
+              <input
+                type="number"
+                min={0}
+                value={bpmOv[kind].min}
+                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], min: e.target.value } })); setBpmOvSaved(false); }}
+                placeholder="164"
+                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+              />
+              <span className="text-slate-600 text-xs">–</span>
+              <input
+                type="number"
+                min={0}
+                value={bpmOv[kind].max}
+                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], max: e.target.value } })); setBpmOvSaved(false); }}
+                placeholder="180"
+                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+              />
+              <span className="text-xs text-slate-600">BPM</span>
+            </div>
+          ))}
+        </div>
+        {bpmOvError && <p className="text-sm text-red-400">{bpmOvError}</p>}
+        <button
+          onClick={saveBpmOverrides}
+          disabled={bpmOvSaving}
+          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+        >
+          {bpmOvSaving ? "Saving…" : bpmOvSaved ? "Saved!" : "Save BPM limits"}
+        </button>
+      </div>
+
+    </div>
+    </div>
+
+    {/* ── Tab 3: Integrations ── */}
+    <div className={activeTab === "integrations" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
+    <div className="space-y-6">
+
       {/* AI DJ */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
         <div className="flex items-start justify-between gap-3">
@@ -1888,6 +2040,140 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             </button>
           </div>
         )}
+
+        {aiDjEnabled && (
+          <div className="space-y-3 rounded-lg bg-slate-800/40 border border-white/5 px-3 py-2.5">
+            <div>
+              <p className="text-sm font-medium text-slate-300">Setlist model</p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Which model picks and orders tracks for each workout segment. Runs on the AI DJ service host either way.
+              </p>
+            </div>
+            <div className="flex gap-1.5">
+              {([["local", "Local LLM"], ["claude", "Claude"]] as const).map(([p, label]) => (
+                <button
+                  key={p}
+                  onClick={() => { if (!aiDjSaving) saveAiDj(aiDjEnabled, aiDjAutoPlaylist, p); }}
+                  disabled={aiDjSaving}
+                  className={`flex-1 rounded-lg border text-xs font-medium px-3 py-2 transition-colors disabled:opacity-50 ${
+                    aiDjProvider === p
+                      ? "bg-purple-500/20 border-purple-500/40 text-purple-300"
+                      : "bg-slate-800/60 border-white/10 text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {aiDjProvider === "claude" && (
+              <div className="space-y-3 pt-1">
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-xs text-slate-400">Model</label>
+                    <select
+                      value={aiDjClaudeModel}
+                      onChange={e => saveAiDj(aiDjEnabled, aiDjAutoPlaylist, "claude", e.target.value, aiDjClaudeEffort)}
+                      disabled={aiDjSaving}
+                      className="w-full rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-2 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                    >
+                      <option value="claude-sonnet-5">Sonnet 5</option>
+                      <option value="claude-opus-4-8">Opus 4.8</option>
+                      <option value="claude-haiku-4-5">Haiku 4.5</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs text-slate-400">Effort</label>
+                    <select
+                      value={aiDjClaudeEffort}
+                      onChange={e => saveAiDj(aiDjEnabled, aiDjAutoPlaylist, "claude", aiDjClaudeModel, e.target.value)}
+                      disabled={aiDjSaving}
+                      className="w-full rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-2 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                    >
+                      {["low", "medium", "high", "xhigh", "max"].map(e => (
+                        <option key={e} value={e}>{e[0].toUpperCase() + e.slice(1)}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {aiDjUrl.trim() && (
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className={`w-1.5 h-1.5 rounded-full ${aiDjHealthClaude ? "bg-green-400" : "bg-red-400"}`} />
+                    <span className={aiDjHealthClaude ? "text-green-400" : "text-red-400"}>
+                      {aiDjHealthClaude ? "Claude API key configured on the service" : "No Claude API key configured on the service"}
+                    </span>
+                  </div>
+                )}
+
+                <div className="space-y-1.5">
+                  <label className="text-xs text-slate-400">Claude API key</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="password"
+                      value={claudeApiKey}
+                      onChange={e => { setClaudeApiKey(e.target.value); setClaudeKeySaved(false); }}
+                      placeholder={aiDjHealthClaude ? "•••••••••••••••••••• (saved — enter to replace)" : "sk-ant-..."}
+                      className="flex-1 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500 font-mono"
+                    />
+                    <button
+                      onClick={saveClaudeApiKey}
+                      disabled={claudeKeySaving || !claudeApiKey.trim() || !aiDjUrl.trim()}
+                      className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-4 py-2 transition-colors shrink-0"
+                    >
+                      {claudeKeySaving ? "Saving…" : claudeKeySaved ? "Saved!" : "Save"}
+                    </button>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Sent to the AI DJ service and stored there — this key never touches the Pi.
+                  </p>
+                  {claudeKeyError && <p className="text-xs text-red-400">{claudeKeyError}</p>}
+                </div>
+
+                <div className="space-y-1.5 pt-1 border-t border-white/5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs text-slate-400">Session usage (since the service last started)</label>
+                    <button onClick={loadClaudeUsage} className="text-xs text-slate-500 hover:text-slate-300 underline transition-colors">
+                      Refresh
+                    </button>
+                  </div>
+                  {claudeUsageError && <p className="text-xs text-red-400">{claudeUsageError}</p>}
+                  {claudeUsage && Object.keys(claudeUsage).length === 0 && (
+                    <p className="text-xs text-slate-600 italic">No Claude calls made yet this session.</p>
+                  )}
+                  {claudeUsage && Object.entries(claudeUsage).map(([model, u]) => {
+                    const maxTokens = Math.max(u.inputTokens, u.outputTokens, 1);
+                    return (
+                      <div key={model} className="space-y-1 rounded-lg bg-slate-900/50 border border-white/5 px-3 py-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-slate-300 font-medium">{model}</span>
+                          <span className="text-slate-500">{u.requests} request{u.requests === 1 ? "" : "s"} · ${u.estimatedCostUsd.toFixed(4)}</span>
+                        </div>
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 text-[11px] text-slate-500">
+                            <span className="w-14 shrink-0">Input</span>
+                            <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                              <div className="h-full bg-sky-500 rounded-full" style={{ width: `${Math.round((u.inputTokens / maxTokens) * 100)}%` }} />
+                            </div>
+                            <span className="w-16 text-right tabular-nums">{u.inputTokens.toLocaleString()}</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[11px] text-slate-500">
+                            <span className="w-14 shrink-0">Output</span>
+                            <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                              <div className="h-full bg-purple-500 rounded-full" style={{ width: `${Math.round((u.outputTokens / maxTokens) * 100)}%` }} />
+                            </div>
+                            <span className="w-16 text-right tabular-nums">{u.outputTokens.toLocaleString()}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <label className="block text-sm font-medium text-slate-300">AI DJ service URL</label>
@@ -1977,62 +2263,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </button>
       </div>
 
-      {/* Run-type BPM limits */}
-      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
-        <div>
-          <h3 className="font-semibold text-slate-200">Run BPM limits</h3>
-          <p className="text-sm text-slate-400 mt-1">
-            Min/max music BPM per run type for AI DJ mixes. Leave blank for automatic
-            cadence matching — anything set here becomes a hard limit.
-            Half-time tracks count at double tempo (an 87 BPM track counts as 174).
-          </p>
-        </div>
-        <div className="space-y-2">
-          {([
-            ["warmup", "Warm up"],
-            ["work", "Work / intervals"],
-            ["easy", "Easy / conversational"],
-            ["cooldown", "Cool down"],
-            ["rest", "Rest / recovery"],
-          ] as [string, string][]).map(([kind, label]) => (
-            <div key={kind} className="flex items-center gap-3">
-              <span className="text-sm text-slate-300 w-44 shrink-0">{label}</span>
-              <input
-                type="number"
-                min={0}
-                value={bpmOv[kind].min}
-                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], min: e.target.value } })); setBpmOvSaved(false); }}
-                placeholder="164"
-                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
-              />
-              <span className="text-slate-600 text-xs">–</span>
-              <input
-                type="number"
-                min={0}
-                value={bpmOv[kind].max}
-                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], max: e.target.value } })); setBpmOvSaved(false); }}
-                placeholder="180"
-                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
-              />
-              <span className="text-xs text-slate-600">BPM</span>
-            </div>
-          ))}
-        </div>
-        {bpmOvError && <p className="text-sm text-red-400">{bpmOvError}</p>}
-        <button
-          onClick={saveBpmOverrides}
-          disabled={bpmOvSaving}
-          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
-        >
-          {bpmOvSaving ? "Saving…" : bpmOvSaved ? "Saved!" : "Save BPM limits"}
-        </button>
-      </div>
-
-    </div>
-
-    {/* ── Column 3: Runna + ntfy ── */}
-    <div className="space-y-6">
-
       {/* Runna */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
         <div className="px-5 py-4 border-b border-white/10">
@@ -2072,6 +2302,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </button>
         </div>
       </div>
+
+    </div>
+    <div className="space-y-6">
 
       {/* Strava */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
@@ -2387,6 +2620,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
       </div>
 
+    </div>
+    </div>
+
+    {/* ── Tab 4: Notifications & 2FA ── */}
+    <div className={activeTab === "notifications" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
+    <div className="space-y-6">
+
       {/* ntfy Notifications */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
         <div>
@@ -2547,6 +2787,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         )}
       </div>
 
+    </div>
+    <div className="space-y-6">
+
       {/* Two-factor authentication */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
         <div>
@@ -2640,6 +2883,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         {totpError && <p className="text-sm text-red-400">{totpError}</p>}
         {totpMsg && <p className="text-sm text-green-400">{totpMsg}</p>}
       </div>
+
+    </div>
     </div>
 
     {deleteTarget && (

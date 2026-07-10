@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loadStravaConfig } from "@/lib/strava-config";
 import { syncWorkoutToStravaActivity } from "@/lib/strava-workout-sync";
+import { sendNtfy } from "@/lib/ntfy";
 
 // Strava's push subscription callback. Not gated by getServerSession — Strava
 // calls this directly with no session cookie; the GET handshake is protected
@@ -29,6 +30,13 @@ interface StravaWebhookEvent {
   updates?: Record<string, string>;
 }
 
+function notifySyncFailed(activityId: number, reason: string) {
+  sendNtfy(
+    `Strava activity ${activityId} wasn't updated with the Runna workout title: ${reason}. Retry from the Runna Summary card.`,
+    { title: "⚠ Runna title update failed", tags: "warning,runner" },
+  ).catch(() => {});
+}
+
 // Strava expects a 200 within 2 seconds — do the actual Strava API calls
 // (fetch + update the activity) after responding, not before.
 export async function POST(req: NextRequest) {
@@ -42,11 +50,26 @@ export async function POST(req: NextRequest) {
   if (event.object_type === "activity" && event.aspect_type === "create") {
     syncWorkoutToStravaActivity(event.object_id)
       .then(result => {
-        if (!result.ok) console.warn(`[strava/webhook] sync failed for activity ${event.object_id}: ${result.error}`);
-        else if (result.updated) console.log(`[strava/webhook] updated activity ${event.object_id} with "${result.workoutTitle}"`);
-        else console.log(`[strava/webhook] no update for activity ${event.object_id}: ${result.reason}`);
+        if (!result.ok) {
+          console.warn(`[strava/webhook] sync failed for activity ${event.object_id}: ${result.error}`);
+          notifySyncFailed(event.object_id, result.error);
+        } else if (result.updated) {
+          console.log(`[strava/webhook] updated activity ${event.object_id} with "${result.workoutTitle}"`);
+        } else {
+          console.log(`[strava/webhook] no update for activity ${event.object_id}: ${result.reason}`);
+          // "No Runna run/workout found" after the full poll window means
+          // Runna genuinely hasn't caught up yet — the other "no update"
+          // reasons (already up to date, no plan steps, unhandled sport
+          // type) are expected outcomes, not failures worth paging for.
+          if (/^No Runna (run|strength workout) found/.test(result.reason)) {
+            notifySyncFailed(event.object_id, result.reason);
+          }
+        }
       })
-      .catch(e => console.warn(`[strava/webhook] sync threw for activity ${event.object_id}:`, e));
+      .catch(e => {
+        console.warn(`[strava/webhook] sync threw for activity ${event.object_id}:`, e);
+        notifySyncFailed(event.object_id, e instanceof Error ? e.message : String(e));
+      });
   }
 
   return NextResponse.json({ ok: true });

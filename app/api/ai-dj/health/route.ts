@@ -17,8 +17,8 @@ export async function GET(req: NextRequest) {
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return NextResponse.json({ ok: false, error: `HTTP ${res.status}` });
-    const data = await res.json() as { ok?: boolean; llm?: boolean };
-    return NextResponse.json({ ok: !!data.ok, llm: !!data.llm });
+    const data = await res.json() as { ok?: boolean; llm?: boolean; claude?: boolean; claudeModels?: Record<string, string> };
+    return NextResponse.json({ ok: !!data.ok, llm: !!data.llm, claude: !!data.claude, claudeModels: data.claudeModels ?? {} });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const hint = /timeout|abort/i.test(msg) ? "Timed out" : "Unreachable";

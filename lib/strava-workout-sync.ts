@@ -21,6 +21,14 @@ const RENAME_POLL_TIMEOUT_MS = 5 * 60_000;
 const RENAME_INITIAL_DELAY_MS = 30_000;
 const RENAME_PATTERNS = [/^Runna Strength Workout$/i, /^Run \d+ of \d+$/i];
 
+// Runna's own calendar feed only flips today's run to COMPLETED_PLAN_WORKOUT
+// (with the pace/distance stats findRunWorkout needs) once Runna has ingested
+// the Strava upload — which can lag well behind Strava's webhook firing (seen
+// taking ~35 min in practice), well past the rename-wait's 5 minutes. Poll
+// longer here rather than giving up on the first "no match" fetch.
+const SCHEDULE_POLL_INTERVAL_MS = 15_000;
+const SCHEDULE_POLL_TIMEOUT_MS = 20 * 60_000;
+
 async function waitForThirdPartyRename(token: string, activityId: number | string): Promise<StravaActivityDetail> {
   await sleep(RENAME_INITIAL_DELAY_MS);
   const deadline = Date.now() + RENAME_POLL_TIMEOUT_MS;
@@ -138,25 +146,34 @@ export async function syncWorkoutToStravaActivity(activityId: number | string, o
     return { ok: false, error: e instanceof Error ? e.message : "Failed to fetch activity" };
   }
 
-  const schedule = await fetchRunnaSchedule();
-  if (!schedule.ok) return { ok: false, error: schedule.error };
-
   const date = activity.start_date_local.slice(0, 10);
-
-  try {
-    if (activity.sport_type === "Workout") {
-      const workout = findStrengthWorkout(schedule.pastRuns, schedule.workouts, date);
-      if (!workout) return { ok: true, updated: false, reason: `No Runna strength workout found for ${date}` };
-      return await syncStrength(token, activity, workout);
-    }
-    if (activity.sport_type === "Run") {
-      const workout = findRunWorkout(schedule.pastRuns, date);
-      if (!workout) return { ok: true, updated: false, reason: `No Runna run found for ${date}` };
-      return await syncRun(token, activity, workout);
-    }
+  const isStrength = activity.sport_type === "Workout";
+  if (!isStrength && activity.sport_type !== "Run") {
     return { ok: true, updated: false, reason: `Unhandled sport_type "${activity.sport_type}"` };
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : "Failed to update activity" };
+  }
+
+  const deadline = Date.now() + SCHEDULE_POLL_TIMEOUT_MS;
+  const notFoundReason = `No Runna ${isStrength ? "strength workout" : "run"} found for ${date}`;
+  for (;;) {
+    const schedule = await fetchRunnaSchedule();
+    if (!schedule.ok) return { ok: false, error: schedule.error };
+
+    try {
+      if (isStrength) {
+        const workout = findStrengthWorkout(schedule.pastRuns, schedule.workouts, date);
+        if (workout) return await syncStrength(token, activity, workout);
+      } else {
+        const workout = findRunWorkout(schedule.pastRuns, date);
+        if (workout) return await syncRun(token, activity, workout);
+      }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : "Failed to update activity" };
+    }
+
+    if (opts?.skipWait || Date.now() >= deadline) {
+      return { ok: true, updated: false, reason: notFoundReason };
+    }
+    await sleep(SCHEDULE_POLL_INTERVAL_MS);
   }
 }
 
