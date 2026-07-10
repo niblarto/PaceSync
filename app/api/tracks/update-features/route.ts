@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { readFile, writeFile } from "fs/promises";
 import { activeCsvPath } from "@/lib/running-playlist-config";
+import { healActiveCsv } from "@/lib/csv-heal";
 
 // Fills in audio features (Tempo/Key/Mode/Energy/Danceability/Valence) on
 // EXISTING Running.csv rows, matched by Track URI. Used after ReccoBeats
@@ -74,7 +75,11 @@ export async function POST(req: NextRequest) {
       updated++;
     }
 
-    if (updated > 0) await writeFile(csvPath, lines.join("\n"), "utf8");
+    if (updated > 0) {
+      await writeFile(csvPath, lines.join("\n"), "utf8");
+      // Sweep for anything still missing (e.g. Duration) in the background
+      void healActiveCsv().catch(e => console.warn("[tracks/update-features] heal failed:", e));
+    }
     return NextResponse.json({ ok: true, updated });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

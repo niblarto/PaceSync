@@ -8,6 +8,7 @@ import { readFile } from "fs/promises";
 import { join } from "path";
 import { spawn } from "child_process";
 import { activeCsvPath } from "@/lib/running-playlist-config";
+import { healActiveCsv } from "@/lib/csv-heal";
 
 // The AI DJ service may run a local LLM per workout segment — allow it time.
 const MIX_TIMEOUT_MS = 180_000;
@@ -117,7 +118,9 @@ async function fetchMixStream(url: string, body: string, onProgress: AiDjProgres
   return { ok: false, error: "AI DJ stream ended without a result" };
 }
 
-export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress): Promise<AiDjMixResult> {
+// avoidUris: tracks from the mix being rebuilt ("Remix") — the mixer demotes
+// them like already-played tracks so a rebuild comes out mostly different.
+export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[]): Promise<AiDjMixResult> {
   const config = loadAiDjConfig();
   if (!config?.enabled) {
     return { ok: false, error: "AI DJ is not enabled in Settings" };
@@ -125,6 +128,12 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   if (!segments?.length) {
     return { ok: false, error: "segments required" };
   }
+
+  // Backfill any rows missing Duration/BPM data before reading the library —
+  // incomplete rows are excluded from the mix pool, so heal them while we can.
+  // (No-op when the CSV is complete; the /api/ai-dj/mix route scans and warns
+  // about anything that couldn't be healed.)
+  try { await healActiveCsv(); } catch { /* never block the mix */ }
 
   let csv: string;
   try {
@@ -140,6 +149,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   const body = JSON.stringify({
     title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback,
     playedTracks: getPlayedTracks(), bpmOverrides: loadBpmOverrides(),
+    avoidTracks: avoidUris?.length ? avoidUris : undefined,
   });
   try {
     if (onProgress) {
@@ -164,7 +174,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
     // shape, and it uses the local Garmin DB for exact pace->BPM.
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[ai-dj] remote service failed (${msg}) — trying on-Pi fallback`);
-    const local = await buildMixLocally(segments, easyBias, trackFeedback, onProgress);
+    const local = await buildMixLocally(segments, easyBias, trackFeedback, onProgress, avoidUris);
     if (local.ok) return local;
     const hint = /timeout|abort/i.test(msg)
       ? "AI DJ service timed out"
@@ -174,7 +184,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
 }
 
 function buildMixLocally(
-  segments: string[], easyBias = 0, trackFeedback: object[] = [], onProgress?: AiDjProgress
+  segments: string[], easyBias = 0, trackFeedback: object[] = [], onProgress?: AiDjProgress, avoidUris?: string[]
 ): Promise<AiDjMixResult> {
   const script = join(process.cwd(), "scripts", "ai_dj_bridge.py");
   const csvPath = activeCsvPath();
@@ -231,6 +241,7 @@ function buildMixLocally(
     proc.stdin.write(JSON.stringify({
       segments, easyBias, trackFeedback,
       playedTracks: getPlayedTracks(), bpmOverrides: loadBpmOverrides(),
+      avoidTracks: avoidUris?.length ? avoidUris : undefined,
     }));
     proc.stdin.end();
   });

@@ -30,10 +30,13 @@ def to_camelot(key, mode) -> str | None:
     """Convert a Spotify (key, mode) pair to a Camelot code like '8B', or None if unknown."""
     if key is None or mode is None:
         return None
-    key = int(key)
+    try:
+        key, mode = int(key), int(mode)  # NaN (pandas' None) raises here
+    except (TypeError, ValueError):
+        return None
     if key < 0 or key > 11:
         return None
-    table = _MAJOR_CAMELOT if int(mode) == 1 else _MINOR_CAMELOT
+    table = _MAJOR_CAMELOT if mode == 1 else _MINOR_CAMELOT
     return table[key]
 
 

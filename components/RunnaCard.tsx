@@ -623,7 +623,7 @@ function mixSegmentsFor(w: RunnaWorkout): string[] {
 }
 
 type MixProgress = { current: number; total: number; segment: string };
-type MixStatus = { status: "building" | "done" | "error"; error?: string; startedAt?: number; progress?: MixProgress };
+type MixStatus = { status: "building" | "done" | "error"; error?: string; warning?: string; startedAt?: number; progress?: MixProgress; uris?: string[] };
 
 // Real per-segment progress streamed over SSE from /api/ai-dj/mix. Between
 // segment events the bar eases partway toward the next step (a segment's LLM
@@ -808,12 +808,15 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
   }, [expanded, garminConfigured, workouts, courses]);
 
   async function buildMix(w: RunnaWorkout) {
-    setMixState(s => ({ ...s, [w.uid]: { status: "building", startedAt: Date.now() } }));
+    // A remix should sound different: send the previous build's tracks so the
+    // mixer demotes them (they only reappear if the BPM pool runs dry).
+    const avoidUris = mixState[w.uid]?.uris;
+    setMixState(s => ({ ...s, [w.uid]: { status: "building", startedAt: Date.now(), uris: avoidUris } }));
     try {
       const mixRes = await fetch("/api/ai-dj/mix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w) }),
+        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w), avoidUris }),
       });
       if (!mixRes.ok || !mixRes.body) {
         const err = await mixRes.json().catch(() => ({})) as { error?: string };
@@ -837,8 +840,17 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
           if (!dataLine) continue;
           const msg = JSON.parse(dataLine.slice(6)) as
             & Partial<AiDjMixResponse>
-            & { type: string; current?: number; total?: number; segment?: string; error?: string };
-          if (msg.type === "progress") {
+            & { type: string; current?: number; total?: number; segment?: string; error?: string;
+                count?: number; tracks?: string[]; fields?: string[] };
+          if (msg.type === "warning") {
+            // Library tracks missing data (duration/BPM/…) that couldn't be
+            // backfilled — they're excluded from the mix pool.
+            const names = (msg.tracks ?? []).join(", ");
+            const extra = (msg.count ?? 0) > (msg.tracks?.length ?? 0) ? ` +${msg.count! - msg.tracks!.length} more` : "";
+            const warning = `⚠ ${msg.count} track${msg.count === 1 ? "" : "s"} missing ${
+              (msg.fields ?? []).join("/") || "data"} left out of the mix: ${names}${extra}`;
+            setMixState(s => ({ ...s, [w.uid]: { ...s[w.uid], status: "building", warning } }));
+          } else if (msg.type === "progress") {
             const progress = { current: msg.current ?? 0, total: msg.total ?? 1, segment: msg.segment ?? "" };
             setMixState(s => ({ ...s, [w.uid]: { ...s[w.uid], status: "building", progress } }));
           } else if (msg.type === "error") {
@@ -863,10 +875,18 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
       }));
 
       onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w), w.date, mix.timeline);
-      setMixState(s => ({ ...s, [w.uid]: { status: "done" } }));
+      // Accumulate across remixes: avoiding only the latest build lets the
+      // mixer alternate between the same two setlists.
+      setMixState(s => ({
+        ...s,
+        [w.uid]: {
+          status: "done", warning: s[w.uid]?.warning,
+          uris: Array.from(new Set([...(s[w.uid]?.uris ?? []), ...mix.trackUris])),
+        },
+      }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to build mix";
-      setMixState(s => ({ ...s, [w.uid]: { status: "error", error: msg } }));
+      setMixState(s => ({ ...s, [w.uid]: { status: "error", error: msg, warning: s[w.uid]?.warning } }));
     }
   }
 
@@ -1027,6 +1047,9 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                               <span className="text-xs text-red-400">{st.error}</span>
                             )}
                           </div>
+                          {st?.warning && (
+                            <p className="text-xs text-amber-400/90 mt-1">{st.warning}</p>
+                          )}
                           {snap && snap.tracks?.length > 0 && (
                             <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-1">
                               <p className="text-xs text-purple-300/80 font-medium">

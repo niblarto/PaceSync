@@ -93,6 +93,13 @@ def cmd_similar(csv_path: str, track_uri: str, n: int, seed_json: str | None):
     print(json.dumps({"seedUri": track_uri, "matches": results}))
 
 
+# Tempo mode is a hard filter, not a preference: only candidates within
+# +/-1 BPM of the seed (half/double-time aware — an 84 BPM track runs like
+# 168) make the list. Without this, a thin candidate pool let 75–171 BPM
+# tracks rank into a 167 BPM search.
+TEMPO_TOLERANCE = 1.0
+
+
 def cmd_suggest(csv_path: str, track_uri: str, mode: str, n: int, seed_json: str | None):
     from bpm_matcher.suggest import suggest_tracks
 
@@ -101,7 +108,17 @@ def cmd_suggest(csv_path: str, track_uri: str, mode: str, n: int, seed_json: str
     seeds = seed_frame(df, track_uri, seed_json)
 
     log(f"Searching for songs like {seeds.iloc[0]['Track Name']} ({mode})...")
-    features = suggest_tracks(df, seeds, n=n, per_seed=60, max_candidates=80, weights=weights)
+    # Over-fetch in tempo mode: the hard BPM cut below discards most candidates.
+    fetch_n = n * 5 if mode == "tempo" else n
+    features = suggest_tracks(df, seeds, n=fetch_n, per_seed=60, max_candidates=80, weights=weights)
+
+    if mode == "tempo" and not features.empty:
+        seed_bpm = float(seeds.iloc[0]["Tempo"])
+        t = features["Tempo"].astype(float).to_numpy()
+        diff = np.minimum(np.abs(t - seed_bpm), np.minimum(np.abs(t * 2 - seed_bpm), np.abs(t / 2 - seed_bpm)))
+        kept = features[diff <= TEMPO_TOLERANCE].head(n)
+        log(f"Tempo filter: {len(kept)}/{len(features)} candidates within ±{TEMPO_TOLERANCE:g} BPM of {seed_bpm:.0f}.")
+        features = kept
 
     results = []
     for _, row in features.iterrows():

@@ -3,6 +3,13 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { readFile, writeFile } from "fs/promises";
 import { activeCsvPath } from "@/lib/running-playlist-config";
+import { healActiveCsv } from "@/lib/csv-heal";
+
+// Any CSV write can introduce rows with missing data — sweep afterwards
+// (in the background; upload responses shouldn't wait on API lookups).
+function healInBackground(context: string) {
+  void healActiveCsv().catch(e => console.warn(`[${context}] heal failed:`, e));
+}
 
 // Extracts a "Track URI" (or equivalent) column value per data row, used to
 // dedup when appending rather than overwriting public/Running.csv.
@@ -40,6 +47,7 @@ export async function POST(req: NextRequest) {
     if (!existing.trim()) {
       await writeFile(dest, csv, "utf8");
       console.log(`[save-default-playlist] no existing file — wrote ${csv.length} bytes to ${dest}`);
+      healInBackground("save-default-playlist");
       return NextResponse.json({ ok: true });
     }
 
@@ -62,10 +70,12 @@ export async function POST(req: NextRequest) {
     const body = existing.endsWith("\n") ? existing : existing + "\n";
     await writeFile(dest, body + rowsToAppend.join("\n") + (rowsToAppend.length ? "\n" : ""), "utf8");
     console.log(`[save-default-playlist] appended ${rowsToAppend.length}/${newRows.length} rows to ${dest}`);
+    if (rowsToAppend.length > 0) healInBackground("save-default-playlist");
     return NextResponse.json({ ok: true, appended: rowsToAppend.length, skipped: newRows.length - rowsToAppend.length });
   }
 
   await writeFile(dest, csv, "utf8");
   console.log(`[save-default-playlist] wrote ${csv.length} bytes to ${dest}`);
+  healInBackground("save-default-playlist");
   return NextResponse.json({ ok: true });
 }

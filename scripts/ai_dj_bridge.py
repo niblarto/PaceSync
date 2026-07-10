@@ -82,6 +82,10 @@ def main():
     if not isinstance(bpm_overrides, dict):
         bpm_overrides = None
 
+    avoid = payload.get("avoidTracks")
+    if not isinstance(avoid, list):
+        avoid = None
+
     library = _load_library(csv_path)
 
     # One NDJSON progress line per segment; the final line is the mix (or
@@ -94,7 +98,7 @@ def main():
             segments, library, model="", use_llm=False,
             cadence_buckets=_cadence_buckets(), easy_bias_sec=easy_bias,
             track_feedback=feedback, played_tracks=played,
-            bpm_overrides=bpm_overrides,
+            bpm_overrides=bpm_overrides, avoid_tracks=avoid,
             min_total_sec=max_projected_duration(segments_text), progress=_progress,
         )
     except ValueError as e:

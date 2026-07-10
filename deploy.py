@@ -195,6 +195,8 @@ FILES = [
     ('local-auth.json',                           'local-auth.json'),
     ('lib/ai-dj-config.ts',                       'lib/ai-dj-config.ts'),
     ('lib/ai-dj-mix.ts',                          'lib/ai-dj-mix.ts'),
+    ('lib/csv-heal.ts',                           'lib/csv-heal.ts'),
+    ('lib/track-enrich.ts',                       'lib/track-enrich.ts'),
     ('lib/spotify-playlist.ts',                   'lib/spotify-playlist.ts'),
     ('lib/runna-schedule.ts',                     'lib/runna-schedule.ts'),
     ('scripts/bpm_bridge.py',                     'scripts/bpm_bridge.py'),
