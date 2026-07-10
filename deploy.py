@@ -169,6 +169,7 @@ FILES = [
     ('lib/bpm-overrides.ts',                      'lib/bpm-overrides.ts'),
     ('app/api/settings/ai-dj/route.ts',           'app/api/settings/ai-dj/route.ts'),
     ('app/api/settings/ai-dj/claude-key/route.ts', 'app/api/settings/ai-dj/claude-key/route.ts'),
+    ('app/api/settings/ai-dj/gemini-key/route.ts', 'app/api/settings/ai-dj/gemini-key/route.ts'),
     ('app/api/settings/ai-dj/usage/route.ts',     'app/api/settings/ai-dj/usage/route.ts'),
     ('app/api/cron/ai-dj/route.ts',               'app/api/cron/ai-dj/route.ts'),
     ('lib/cron-schedule.ts',                      'lib/cron-schedule.ts'),
@@ -219,6 +220,7 @@ FILES = [
     ('../AI_DJ/ai_dj/selector.py',                'ai_dj/selector.py'),
     ('../AI_DJ/ai_dj/llm.py',                     'ai_dj/llm.py'),
     ('../AI_DJ/ai_dj/claude_config.py',           'ai_dj/claude_config.py'),
+    ('../AI_DJ/ai_dj/gemini_config.py',           'ai_dj/gemini_config.py'),
     ('.env.local',                                '.env.local'),
 ]
 
@@ -348,6 +350,11 @@ sudo_run(ssh, 'python3 -c "import pandas, numpy, requests" 2>/dev/null || apt-ge
 print('  Checking anthropic (Claude API) dependency...')
 run(ssh, 'python3 -c "import anthropic" 2>/dev/null && echo "anthropic OK" || echo "installing anthropic..."')
 run(ssh, 'python3 -c "import anthropic" 2>/dev/null || pip3 install --break-system-packages -q anthropic')
+
+# Same deal for google-genai (Gemini API).
+print('  Checking google-genai (Gemini API) dependency...')
+run(ssh, 'python3 -c "import google.genai" 2>/dev/null && echo "google-genai OK" || echo "installing google-genai..."')
+run(ssh, 'python3 -c "import google.genai" 2>/dev/null || pip3 install --break-system-packages -q google-genai')
 
 print('  Building Next.js app...')
 # Abort the deploy if the build fails — restarting the service without a

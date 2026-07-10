@@ -31,7 +31,7 @@ if not os.path.isdir(os.path.join(_APP_ROOT, "ai_dj")):
 import pandas as pd  # noqa: E402
 
 from bpm_matcher.camelot import to_camelot  # noqa: E402
-from ai_dj.llm import is_claude_model  # noqa: E402
+from ai_dj.llm import is_claude_model, is_gemini_model  # noqa: E402
 from ai_dj.workout import (  # noqa: E402
     build_workout_playlist,
     garmin_cadence_buckets,
@@ -92,7 +92,7 @@ def main():
 
     model = payload.get("model") or ""
     effort = payload.get("effort") or None
-    use_llm = is_claude_model(model)
+    use_llm = is_claude_model(model) or is_gemini_model(model)
 
     library = _load_library(csv_path)
 

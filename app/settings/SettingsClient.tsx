@@ -157,15 +157,23 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [claudeKeyConfigured, setClaudeKeyConfigured] = useState(false);
   const [aiDjHealthMsg, setAiDjHealthMsg] = useState<string | null>(null);
   const [aiDjWolMac, setAiDjWolMac] = useState("");
-  const [aiDjProvider, setAiDjProvider] = useState<"local" | "claude">("local");
+  const [aiDjProvider, setAiDjProvider] = useState<"local" | "claude" | "gemini">("local");
   const [aiDjClaudeModel, setAiDjClaudeModel] = useState("claude-sonnet-5");
   const [aiDjClaudeEffort, setAiDjClaudeEffort] = useState("medium");
+  const [aiDjGeminiModel, setAiDjGeminiModel] = useState("gemini-2.5-flash");
   const [claudeApiKey, setClaudeApiKey] = useState("");
   const [claudeKeySaving, setClaudeKeySaving] = useState(false);
   const [claudeKeySaved, setClaudeKeySaved] = useState(false);
   const [claudeKeyError, setClaudeKeyError] = useState<string | null>(null);
-  const [claudeUsage, setClaudeUsage] = useState<Record<string, { inputTokens: number; outputTokens: number; requests: number; estimatedCostUsd: number }> | null>(null);
-  const [claudeUsageError, setClaudeUsageError] = useState<string | null>(null);
+  const [geminiApiKey, setGeminiApiKey] = useState("");
+  const [geminiKeySaving, setGeminiKeySaving] = useState(false);
+  const [geminiKeySaved, setGeminiKeySaved] = useState(false);
+  const [geminiKeyError, setGeminiKeyError] = useState<string | null>(null);
+  const [geminiKeyConfigured, setGeminiKeyConfigured] = useState(false);
+  // Usage is keyed by model across providers (see ai_dj/llm.py get_usage) —
+  // one shared panel, not per-provider state.
+  const [aiDjUsage, setAiDjUsage] = useState<Record<string, { inputTokens: number; outputTokens: number; requests: number; estimatedCostUsd: number }> | null>(null);
+  const [aiDjUsageError, setAiDjUsageError] = useState<string | null>(null);
   // ── Run-type BPM override state (blank = no override) ─────────────────────
   const [bpmOv, setBpmOv] = useState<Record<string, { min: string; max: string }>>({
     warmup: { min: "", max: "" }, work: { min: "", max: "" }, easy: { min: "", max: "" },
@@ -377,27 +385,28 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   useEffect(() => {
     fetch("/api/settings/ai-dj")
       .then(r => r.json())
-      .then((d: { url?: string; enabled?: boolean; autoPlaylist?: boolean; wolMac?: string; provider?: string; claudeModel?: string; claudeEffort?: string }) => {
+      .then((d: { url?: string; enabled?: boolean; autoPlaylist?: boolean; wolMac?: string; provider?: string; claudeModel?: string; claudeEffort?: string; geminiModel?: string }) => {
         if (d.url) setAiDjUrl(d.url);
         setAiDjEnabled(d.enabled ?? false);
         setAiDjAutoPlaylist(d.autoPlaylist ?? true);
         setAiDjWolMac(d.wolMac ?? "");
-        setAiDjProvider(d.provider === "claude" ? "claude" : "local");
+        setAiDjProvider(d.provider === "claude" ? "claude" : d.provider === "gemini" ? "gemini" : "local");
         if (d.claudeModel) setAiDjClaudeModel(d.claudeModel);
         if (d.claudeEffort) setAiDjClaudeEffort(d.claudeEffort);
+        if (d.geminiModel) setAiDjGeminiModel(d.geminiModel);
       })
       .catch(() => {});
   }, []);
 
-  function loadClaudeUsage() {
-    setClaudeUsageError(null);
+  function loadAiDjUsage() {
+    setAiDjUsageError(null);
     fetch("/api/settings/ai-dj/usage")
       .then(r => r.json())
-      .then((d: { models?: typeof claudeUsage; error?: string }) => {
-        if (d.error) { setClaudeUsageError(d.error); return; }
-        setClaudeUsage(d.models ?? {});
+      .then((d: { models?: typeof aiDjUsage; error?: string }) => {
+        if (d.error) { setAiDjUsageError(d.error); return; }
+        setAiDjUsage(d.models ?? {});
       })
-      .catch(() => setClaudeUsageError("Could not read usage — try again."));
+      .catch(() => setAiDjUsageError("Could not read usage — try again."));
   }
 
   function loadClaudeKeyStatus() {
@@ -407,8 +416,16 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .catch(() => {});
   }
 
+  function loadGeminiKeyStatus() {
+    fetch("/api/settings/ai-dj/gemini-key")
+      .then(r => r.json())
+      .then((d: { configured?: boolean }) => setGeminiKeyConfigured(!!d.configured))
+      .catch(() => {});
+  }
+
   useEffect(() => {
-    if (aiDjProvider === "claude") { loadClaudeUsage(); loadClaudeKeyStatus(); }
+    if (aiDjProvider === "claude") { loadAiDjUsage(); loadClaudeKeyStatus(); }
+    else if (aiDjProvider === "gemini") { loadAiDjUsage(); loadGeminiKeyStatus(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiDjProvider]);
 
@@ -431,6 +448,28 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setClaudeKeyError(e instanceof Error ? e.message : "Failed to save — try again.");
     } finally {
       setClaudeKeySaving(false);
+    }
+  }
+
+  async function saveGeminiApiKey() {
+    setGeminiKeySaving(true);
+    setGeminiKeySaved(false);
+    setGeminiKeyError(null);
+    try {
+      const res = await fetch("/api/settings/ai-dj/gemini-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: geminiApiKey.trim() }),
+      });
+      const d = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to save");
+      setGeminiKeySaved(true);
+      setGeminiApiKey("");
+      setGeminiKeyConfigured(true);
+    } catch (e) {
+      setGeminiKeyError(e instanceof Error ? e.message : "Failed to save — try again.");
+    } finally {
+      setGeminiKeySaving(false);
     }
   }
 
@@ -954,7 +993,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
   async function saveAiDj(
     enabled: boolean, autoPlaylist: boolean = aiDjAutoPlaylist,
-    provider: "local" | "claude" = aiDjProvider, claudeModel: string = aiDjClaudeModel, claudeEffort: string = aiDjClaudeEffort,
+    provider: "local" | "claude" | "gemini" = aiDjProvider,
+    claudeModel: string = aiDjClaudeModel, claudeEffort: string = aiDjClaudeEffort,
+    geminiModel: string = aiDjGeminiModel,
   ) {
     setAiDjSaving(true);
     setAiDjSaved(false);
@@ -963,7 +1004,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       const res = await fetch("/api/settings/ai-dj", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: aiDjUrl.trim(), enabled, autoPlaylist, wolMac: aiDjWolMac.trim(), provider, claudeModel, claudeEffort }),
+        body: JSON.stringify({ url: aiDjUrl.trim(), enabled, autoPlaylist, wolMac: aiDjWolMac.trim(), provider, claudeModel, claudeEffort, geminiModel }),
       });
       if (!res.ok) throw new Error();
       setAiDjEnabled(enabled);
@@ -971,6 +1012,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setAiDjProvider(provider);
       setAiDjClaudeModel(claudeModel);
       setAiDjClaudeEffort(claudeEffort);
+      setAiDjGeminiModel(geminiModel);
       setAiDjSaved(true);
     } catch {
       setAiDjError("Failed to save — try again.");
@@ -2003,7 +2045,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           <button
             role="switch"
             aria-checked={aiDjEnabled}
-            onClick={() => { if (!aiDjSaving && (aiDjProvider === "claude" || aiDjUrl.trim())) saveAiDj(!aiDjEnabled); }}
+            onClick={() => { if (!aiDjSaving && (aiDjProvider !== "local" || aiDjUrl.trim())) saveAiDj(!aiDjEnabled); }}
             disabled={aiDjSaving || (aiDjProvider === "local" && !aiDjUrl.trim())}
             className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-40 ${
               aiDjEnabled ? "bg-purple-500" : "bg-slate-700"
@@ -2058,7 +2100,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               </p>
             </div>
             <div className="flex gap-1.5">
-              {([["local", "Local LLM"], ["claude", "Claude"]] as const).map(([p, label]) => (
+              {([["local", "Local LLM"], ["claude", "Claude"], ["gemini", "Gemini"]] as const).map(([p, label]) => (
                 <button
                   key={p}
                   onClick={() => { if (!aiDjSaving) saveAiDj(aiDjEnabled, aiDjAutoPlaylist, p); }}
@@ -2135,46 +2177,100 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   </p>
                   {claudeKeyError && <p className="text-xs text-red-400">{claudeKeyError}</p>}
                 </div>
+              </div>
+            )}
 
-                <div className="space-y-1.5 pt-1 border-t border-white/5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs text-slate-400">Usage (accumulated on this Pi)</label>
-                    <button onClick={loadClaudeUsage} className="text-xs text-slate-500 hover:text-slate-300 underline transition-colors">
-                      Refresh
+            {aiDjProvider === "gemini" && (
+              <div className="space-y-3 pt-1">
+                <div className="space-y-1.5">
+                  <label className="text-xs text-slate-400">Model</label>
+                  <select
+                    value={aiDjGeminiModel}
+                    onChange={e => saveAiDj(aiDjEnabled, aiDjAutoPlaylist, "gemini", aiDjClaudeModel, aiDjClaudeEffort, e.target.value)}
+                    disabled={aiDjSaving}
+                    className="w-full rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-2 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                  >
+                    <option value="gemini-2.5-flash">Flash 2.5</option>
+                    <option value="gemini-2.5-flash-lite">Flash 2.5 Lite</option>
+                  </select>
+                  <p className="text-xs text-slate-500">Free-tier models only — gemini-2.5-pro isn&apos;t available without billing.</p>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className={`w-1.5 h-1.5 rounded-full ${geminiKeyConfigured ? "bg-green-400" : "bg-red-400"}`} />
+                  <span className={geminiKeyConfigured ? "text-green-400" : "text-red-400"}>
+                    {geminiKeyConfigured ? "Gemini API key configured" : "No Gemini API key configured"}
+                  </span>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs text-slate-400">Gemini API key</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="password"
+                      value={geminiApiKey}
+                      onChange={e => { setGeminiApiKey(e.target.value); setGeminiKeySaved(false); }}
+                      placeholder={geminiKeyConfigured ? "•••••••••••••••••••• (saved — enter to replace)" : "AIza..."}
+                      className="flex-1 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500 font-mono"
+                    />
+                    <button
+                      onClick={saveGeminiApiKey}
+                      disabled={geminiKeySaving || !geminiApiKey.trim()}
+                      className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-4 py-2 transition-colors shrink-0"
+                    >
+                      {geminiKeySaving ? "Saving…" : geminiKeySaved ? "Saved!" : "Save"}
                     </button>
                   </div>
-                  {claudeUsageError && <p className="text-xs text-red-400">{claudeUsageError}</p>}
-                  {claudeUsage && Object.keys(claudeUsage).length === 0 && (
-                    <p className="text-xs text-slate-600 italic">No Claude calls made yet this session.</p>
-                  )}
-                  {claudeUsage && Object.entries(claudeUsage).map(([model, u]) => {
-                    const maxTokens = Math.max(u.inputTokens, u.outputTokens, 1);
-                    return (
-                      <div key={model} className="space-y-1 rounded-lg bg-slate-900/50 border border-white/5 px-3 py-2">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="text-slate-300 font-medium">{model}</span>
-                          <span className="text-slate-500">{u.requests} request{u.requests === 1 ? "" : "s"} · ${u.estimatedCostUsd.toFixed(4)}</span>
+                  <p className="text-xs text-slate-500">
+                    Stored on this Pi — get a free key at{" "}
+                    <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-purple-300 hover:text-purple-200 underline">
+                      aistudio.google.com/apikey
+                    </a>.
+                  </p>
+                  {geminiKeyError && <p className="text-xs text-red-400">{geminiKeyError}</p>}
+                </div>
+              </div>
+            )}
+
+            {(aiDjProvider === "claude" || aiDjProvider === "gemini") && (
+              <div className="space-y-1.5 pt-3 mt-1 border-t border-white/5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs text-slate-400">Usage (accumulated on this Pi, by model)</label>
+                  <button onClick={loadAiDjUsage} className="text-xs text-slate-500 hover:text-slate-300 underline transition-colors">
+                    Refresh
+                  </button>
+                </div>
+                {aiDjUsageError && <p className="text-xs text-red-400">{aiDjUsageError}</p>}
+                {aiDjUsage && Object.keys(aiDjUsage).length === 0 && (
+                  <p className="text-xs text-slate-600 italic">No calls made yet.</p>
+                )}
+                {aiDjUsage && Object.entries(aiDjUsage).map(([model, u]) => {
+                  const maxTokens = Math.max(u.inputTokens, u.outputTokens, 1);
+                  return (
+                    <div key={model} className="space-y-1 rounded-lg bg-slate-900/50 border border-white/5 px-3 py-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-slate-300 font-medium">{model}</span>
+                        <span className="text-slate-500">{u.requests} request{u.requests === 1 ? "" : "s"} · ${u.estimatedCostUsd.toFixed(4)}</span>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 text-[11px] text-slate-500">
+                          <span className="w-14 shrink-0">Input</span>
+                          <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                            <div className="h-full bg-sky-500 rounded-full" style={{ width: `${Math.round((u.inputTokens / maxTokens) * 100)}%` }} />
+                          </div>
+                          <span className="w-16 text-right tabular-nums">{u.inputTokens.toLocaleString()}</span>
                         </div>
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2 text-[11px] text-slate-500">
-                            <span className="w-14 shrink-0">Input</span>
-                            <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
-                              <div className="h-full bg-sky-500 rounded-full" style={{ width: `${Math.round((u.inputTokens / maxTokens) * 100)}%` }} />
-                            </div>
-                            <span className="w-16 text-right tabular-nums">{u.inputTokens.toLocaleString()}</span>
+                        <div className="flex items-center gap-2 text-[11px] text-slate-500">
+                          <span className="w-14 shrink-0">Output</span>
+                          <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                            <div className="h-full bg-purple-500 rounded-full" style={{ width: `${Math.round((u.outputTokens / maxTokens) * 100)}%` }} />
                           </div>
-                          <div className="flex items-center gap-2 text-[11px] text-slate-500">
-                            <span className="w-14 shrink-0">Output</span>
-                            <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
-                              <div className="h-full bg-purple-500 rounded-full" style={{ width: `${Math.round((u.outputTokens / maxTokens) * 100)}%` }} />
-                            </div>
-                            <span className="w-16 text-right tabular-nums">{u.outputTokens.toLocaleString()}</span>
-                          </div>
+                          <span className="w-16 text-right tabular-nums">{u.outputTokens.toLocaleString()}</span>
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

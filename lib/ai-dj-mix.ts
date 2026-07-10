@@ -146,11 +146,15 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   if (easyBias > 0) console.log(`[ai-dj] recent easy runs ran ~${easyBias}s/mi fast — easing easy segments`);
   const trackFeedback = getAllTrackVotes();
 
-  // Claude runs right here on the Pi via the on-Pi bridge — no dependency on
-  // the separate Ollama service PC being on. Ollama-backed "local" mixes
-  // still need that PC (its GPU runs the model), so those go over HTTP.
+  // Claude/Gemini run right here on the Pi via the on-Pi bridge — no
+  // dependency on the separate Ollama service PC being on. Ollama-backed
+  // "local" mixes still need that PC (its GPU runs the model), so those go
+  // over HTTP.
   if (config.provider === "claude") {
     return buildMixLocally(segments, easyBias, trackFeedback, onProgress, avoidUris, config.claudeModel, config.claudeEffort);
+  }
+  if (config.provider === "gemini") {
+    return buildMixLocally(segments, easyBias, trackFeedback, onProgress, avoidUris, config.geminiModel);
   }
 
   const body = JSON.stringify({
