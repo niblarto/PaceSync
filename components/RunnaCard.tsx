@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { freshSpotifyToken } from "@/lib/spotify-browser";
@@ -771,7 +771,14 @@ function courseMatchesDate(name: string, date: string): boolean {
 }
 
 export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0 }: RunnaScheduleProps = {}) {
-  const { workouts, loading, error } = useRunnaData();
+  const { workouts: allWorkouts, pastRuns, loading, error } = useRunnaData();
+  // Once a workout is completed, Runna surfaces it on the Summary card
+  // (pastRuns) instead — drop it here so the same day's run isn't shown as
+  // both upcoming (Schedule) and completed (Summary) at once.
+  const workouts = useMemo(
+    () => allWorkouts.filter(w => !pastRuns.some(r => r.date === w.date)),
+    [allWorkouts, pastRuns],
+  );
   const [expanded, setExpanded] = useState<string | null>(null);
   const paceSpm = usePaceSpm(garminConfigured);
   const [mixState, setMixState] = useState<Record<string, MixStatus>>({});

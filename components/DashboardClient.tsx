@@ -237,6 +237,38 @@ function parseExportifyCsv(text: string): CsvParseResult {
 export function DashboardClient({ spotifyUser }: Props) {
   const { data: session } = useSession();
   const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
+  // Column 2's results card is capped so its bottom edge lines up with
+  // column 3's bottom edge (not just "no taller than column 3", which
+  // overshoots by however much sits above the results card — the Target
+  // zone card — in column 2). Measured as col3's bottom Y minus the results
+  // card's own top Y, both viewport-relative, recomputed whenever either
+  // column's height changes. CSS grid `items-stretch` can't do this
+  // reliably here since the row's own height is derived from column 3's
+  // auto-height content.
+  const col3Ref = useRef<HTMLDivElement>(null);
+  const resultsCardRef = useRef<HTMLDivElement>(null);
+  const [resultsMaxHeight, setResultsMaxHeight] = useState<number | null>(null);
+  // The results card only exists in the DOM when results are showing, so a
+  // callback ref (fired on mount/unmount) is what tells us when to start/stop
+  // observing it — a plain useRef + effect-on-mount would miss later mounts.
+  const [resultsCardEl, setResultsCardEl] = useState<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const col3El = col3Ref.current;
+    if (!col3El || !resultsCardEl) { setResultsMaxHeight(null); return; }
+    const recompute = () => {
+      const col3Bottom = col3El.getBoundingClientRect().bottom;
+      const resultsTop = resultsCardEl.getBoundingClientRect().top;
+      // 99% of the space down to column 3's bottom edge — 100% overshot
+      // (likely border/subpixel rounding pushing it just past the edge).
+      const next = Math.max(200, Math.round((col3Bottom - resultsTop) * 0.99));
+      setResultsMaxHeight(prev => (prev === next ? prev : next));
+    };
+    const observer = new ResizeObserver(recompute);
+    observer.observe(col3El);
+    observer.observe(resultsCardEl);
+    recompute();
+    return () => observer.disconnect();
+  }, [resultsCardEl]);
   const [zones, setZones]               = useState<RunningZone[]>([]);
   const [selectedZones, setSelectedZones] = useState<RunningZone[]>([]);
   const [allTracks, setAllTracks]       = useState<TrackWithBPM[]>([]);
@@ -1075,11 +1107,16 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               </div>
             )}
 
-            {/* Results — grows to fill the column's height (matched to the
-                taller Runna rail in col 3) so the track list, not empty
-                space, absorbs the extra room. */}
+            {/* Results — capped to half the space down to column 3's bottom
+                edge (see resultsMaxHeight above) so a long track list
+                scrolls inside the card instead of pushing the page past the
+                Runna rail. No cap until the first measurement lands. */}
             {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || similarFilter || noBpmFilter || aiDjMix) && (
-              <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden flex-1 min-h-0 flex flex-col">
+              <div
+                ref={setResultsCardEl}
+                className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden flex flex-col"
+                style={resultsMaxHeight ? { maxHeight: resultsMaxHeight } : undefined}
+              >
                 <div className="p-5 border-b border-white/10 flex items-start justify-between gap-4 flex-wrap">
                   <div>
                     <h3 className="font-semibold">
@@ -1296,7 +1333,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           </main>
 
           {/* Col 3: Right rail — Runna */}
-          <div className="space-y-6 min-w-0">
+          <div ref={col3Ref} className="space-y-6 min-w-0">
             <RunnaSummaryCard />
             <RunnaScheduleCard
               aiDjEnabled={aiDjEnabled}
