@@ -172,7 +172,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [geminiKeyConfigured, setGeminiKeyConfigured] = useState(false);
   // Usage is keyed by model across providers (see ai_dj/llm.py get_usage) —
   // one shared panel, not per-provider state.
-  const [aiDjUsage, setAiDjUsage] = useState<Record<string, { inputTokens: number; outputTokens: number; requests: number; estimatedCostUsd: number }> | null>(null);
+  const [aiDjUsage, setAiDjUsage] = useState<Record<string, { inputTokens: number; outputTokens: number; requests: number; estimatedCostUsd: number; errors: number; lastError: string | null }> | null>(null);
   const [aiDjUsageError, setAiDjUsageError] = useState<string | null>(null);
   // ── Run-type BPM override state (blank = no override) ─────────────────────
   const [bpmOv, setBpmOv] = useState<Record<string, { min: string; max: string }>>({
@@ -2250,7 +2250,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     <div key={model} className="space-y-1 rounded-lg bg-slate-900/50 border border-white/5 px-3 py-2">
                       <div className="flex items-center justify-between text-xs">
                         <span className="text-slate-300 font-medium">{model}</span>
-                        <span className="text-slate-500">{u.requests} request{u.requests === 1 ? "" : "s"} · ${u.estimatedCostUsd.toFixed(4)}</span>
+                        <span className="text-slate-500">
+                          {u.requests} request{u.requests === 1 ? "" : "s"} · ${u.estimatedCostUsd.toFixed(4)}
+                          {u.errors > 0 && <span className="text-red-400"> · {u.errors} failed</span>}
+                        </span>
                       </div>
                       <div className="space-y-1">
                         <div className="flex items-center gap-2 text-[11px] text-slate-500">
@@ -2268,6 +2271,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                           <span className="w-16 text-right tabular-nums">{u.outputTokens.toLocaleString()}</span>
                         </div>
                       </div>
+                      {u.lastError && (
+                        <p className="text-[11px] text-red-400/80 truncate" title={u.lastError}>{u.lastError}</p>
+                      )}
                     </div>
                   );
                 })}

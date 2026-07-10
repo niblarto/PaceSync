@@ -140,6 +140,7 @@ def main():
         "trackUris": [u for u in playlist["Track URI"] if isinstance(u, str)],
         "totalSec": float(playlist["Duration (ms)"].sum() / 1000),
         "timeline": timeline,
+        "llmFailures": playlist.attrs.get("llm_failures") or [],
     }))
 
 

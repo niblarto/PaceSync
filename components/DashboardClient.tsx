@@ -294,6 +294,10 @@ export function DashboardClient({ spotifyUser }: Props) {
   const enrichAttempted = useRef(false);
   const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[] } | null>(null);
   const [remixing, setRemixing] = useState(false);
+  // Set when a remix's mix build had a segment fall back from LLM selection
+  // to plain BPM matching (rate limit, quota, network) — non-fatal, the mix
+  // still built, but with less curated track selection.
+  const [mixWarning, setMixWarning] = useState<string | null>(null);
   const [todaysRunSaving, setTodaysRunSaving] = useState(false);
   const [todaysRunSaved, setTodaysRunSaved] = useState(false);
   const [todaysRunError, setTodaysRunError] = useState<string | null>(null);
@@ -497,6 +501,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     setPinError(null);
     setStep("ready");
     setSaveError(null);
+    setMixWarning(null);
     setSavedUrl(null);
     setTodaysRunSaving(false);
     setTodaysRunSaved(false);
@@ -514,24 +519,53 @@ export function DashboardClient({ spotifyUser }: Props) {
     if (!aiDjMix) return;
     setRemixing(true);
     setSaveError(null);
+    setMixWarning(null);
     const priorUris = aiDjMix.tracks.map(t => t.uri);
     const avoidUris = Array.from(new Set([...(aiDjMix.avoidUris ?? []), ...priorUris]));
     // Clear the old tracks immediately so the stale mix can't linger (or be
     // saved) while the rebuild runs.
     setAiDjMix(prev => prev ? { ...prev, tracks: [] } : prev);
     try {
+      // The route always responds as SSE (progress/warning/done/error
+      // events), never plain JSON — read it as a stream even though this
+      // caller doesn't render a live progress bar.
       const res = await fetch("/api/ai-dj/mix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: aiDjMix.workoutTitle, segments: aiDjMix.segments, avoidUris }),
       });
-      const mix = await res.json() as {
-        error?: string;
-        trackUris?: string[];
-        totalSec?: number;
-        timeline?: AiDjTimeline;
-      };
-      if (!res.ok || mix.error) throw new Error(mix.error ?? `Mix failed (${res.status})`);
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `Mix failed (${res.status})`);
+      }
+
+      let mix: { trackUris?: string[]; totalSec?: number; timeline?: AiDjTimeline } | null = null;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const msg = JSON.parse(dataLine.slice(6)) as
+            & { type: string; error?: string; trackUris?: string[]; totalSec?: number; timeline?: AiDjTimeline; llmFailures?: string[] };
+          if (msg.type === "warning" && msg.llmFailures?.length) {
+            const n = msg.llmFailures.length;
+            setMixWarning(`⚠ ${n} segment${n === 1 ? "" : "s"} fell back to basic BPM matching (model call failed) — check Settings usage`);
+          } else if (msg.type === "error") {
+            throw new Error(msg.error ?? "Mix failed");
+          } else if (msg.type === "done") {
+            mix = { trackUris: msg.trackUris, totalSec: msg.totalSec, timeline: msg.timeline };
+          }
+        }
+      }
+      if (!mix) throw new Error("Mix stream ended without a result");
       const tracks: TrackWithBPM[] = (mix.timeline ?? []).flatMap(seg => seg.tracks).map(t => ({
         id: t.uri.split(":")[2] ?? t.uri,
         name: t.name,
@@ -543,7 +577,7 @@ export function DashboardClient({ spotifyUser }: Props) {
         energy: t.energy,
       })).filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
       if (tracks.length === 0) throw new Error("No tracks matched this workout");
-      setAiDjMix(prev => prev ? { ...prev, tracks, totalSec: mix.totalSec ?? prev.totalSec, timeline: mix.timeline ?? prev.timeline, stale: false, avoidUris } : prev);
+      setAiDjMix(prev => prev ? { ...prev, tracks, totalSec: mix!.totalSec ?? prev.totalSec, timeline: mix!.timeline ?? prev.timeline, stale: false, avoidUris } : prev);
       setStep("ready");
       setSavedUrl(null);
       setTodaysRunSaved(false);
@@ -1248,6 +1282,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 {saveError && (
                   <div className="px-5 py-3 text-sm text-red-400 border-b border-slate-800">
                     {saveError}
+                  </div>
+                )}
+
+                {mixWarning && (
+                  <div className="px-5 py-3 text-sm text-amber-400/90 border-b border-slate-800">
+                    {mixWarning}
                   </div>
                 )}
 

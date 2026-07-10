@@ -25,6 +25,10 @@ export interface AiDjMixResponse {
     targetPaceSec?: number | null;
     tracks: { uri: string; name: string; artist: string; startsAt: string; durationSec?: number; tempo: number; camelot: string | null; energy: number }[];
   }[];
+  // Segments where the LLM call failed (rate limit, quota, network) and fell
+  // back to the deterministic distance-chain — one string per segment, e.g.
+  // "Warm up: Gemini API request failed: 429 RESOURCE_EXHAUSTED...".
+  llmFailures?: string[];
 }
 
 export type AiDjMixResult =
@@ -109,7 +113,7 @@ async function fetchMixStream(url: string, body: string, onProgress: AiDjProgres
       if (msg.type === "progress") {
         onProgress(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "");
       } else if (msg.type === "done") {
-        return { ok: true, mix: { trackUris: msg.trackUris!, totalSec: msg.totalSec!, timeline: msg.timeline! } };
+        return { ok: true, mix: { trackUris: msg.trackUris!, totalSec: msg.totalSec!, timeline: msg.timeline!, llmFailures: msg.llmFailures } };
       } else if (msg.type === "error") {
         return { ok: false, error: msg.error ?? "AI DJ service error" };
       }

@@ -62,6 +62,13 @@ export async function POST(req: NextRequest) {
           send({ type: "error", error: result.error });
         } else {
           console.log(`[ai-dj] "${title}": ${result.mix.trackUris.length} tracks, ${Math.round(result.mix.totalSec / 60)} min`);
+          // Segments where the LLM call failed (rate limit, quota, network)
+          // and fell back to the deterministic distance-chain — surface
+          // this instead of silently shipping a lesser mix.
+          if (result.mix.llmFailures?.length) {
+            console.warn(`[ai-dj] ${result.mix.llmFailures.length} segment(s) fell back from LLM selection:`, result.mix.llmFailures);
+            send({ type: "warning", llmFailures: result.mix.llmFailures });
+          }
           send({ type: "done", ...result.mix });
         }
       } catch (err) {

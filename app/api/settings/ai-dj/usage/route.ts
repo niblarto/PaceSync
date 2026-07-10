@@ -28,8 +28,8 @@ export async function GET() {
 
   try {
     const raw = await readFile(USAGE_PATH, "utf8");
-    const usage = JSON.parse(raw) as Record<string, { input_tokens: number; output_tokens: number; requests: number }>;
-    const models: Record<string, { inputTokens: number; outputTokens: number; requests: number; estimatedCostUsd: number }> = {};
+    const usage = JSON.parse(raw) as Record<string, { input_tokens: number; output_tokens: number; requests: number; errors?: number; last_error?: string }>;
+    const models: Record<string, { inputTokens: number; outputTokens: number; requests: number; estimatedCostUsd: number; errors: number; lastError: string | null }> = {};
     for (const [model, u] of Object.entries(usage)) {
       const [inPrice, outPrice] = PRICING[model] ?? [0, 0];
       models[model] = {
@@ -37,6 +37,8 @@ export async function GET() {
         outputTokens: u.output_tokens,
         requests: u.requests,
         estimatedCostUsd: Math.round(((u.input_tokens / 1_000_000) * inPrice + (u.output_tokens / 1_000_000) * outPrice) * 10_000) / 10_000,
+        errors: u.errors ?? 0,
+        lastError: u.last_error ?? null,
       };
     }
     return NextResponse.json({ models });

@@ -890,8 +890,15 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
           const msg = JSON.parse(dataLine.slice(6)) as
             & Partial<AiDjMixResponse>
             & { type: string; current?: number; total?: number; segment?: string; error?: string;
-                count?: number; tracks?: string[]; fields?: string[] };
-          if (msg.type === "warning") {
+                count?: number; tracks?: string[]; fields?: string[]; llmFailures?: string[] };
+          if (msg.type === "warning" && msg.llmFailures?.length) {
+            // Segment(s) where the model call failed (rate limit, quota,
+            // network) and fell back to the deterministic distance-chain —
+            // the mix still built, but with less curated track selection.
+            const n = msg.llmFailures.length;
+            const warning = `⚠ ${n} segment${n === 1 ? "" : "s"} fell back to basic BPM matching (model call failed) — check Settings usage`;
+            setMixState(s => ({ ...s, [w.uid]: { ...s[w.uid], status: "building", warning } }));
+          } else if (msg.type === "warning") {
             // Library tracks missing data (duration/BPM/…) that couldn't be
             // backfilled — they're excluded from the mix pool.
             const names = (msg.tracks ?? []).join(", ");
