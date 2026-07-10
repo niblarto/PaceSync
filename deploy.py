@@ -218,6 +218,7 @@ FILES = [
     ('../AI_DJ/ai_dj/workout.py',                 'ai_dj/workout.py'),
     ('../AI_DJ/ai_dj/selector.py',                'ai_dj/selector.py'),
     ('../AI_DJ/ai_dj/llm.py',                     'ai_dj/llm.py'),
+    ('../AI_DJ/ai_dj/claude_config.py',           'ai_dj/claude_config.py'),
     ('.env.local',                                '.env.local'),
 ]
 
@@ -339,6 +340,14 @@ else:
 print('  Checking Python matcher dependencies...')
 run(ssh, 'python3 -c "import pandas, numpy, requests" 2>/dev/null && echo "python deps OK" || echo "installing..."')
 sudo_run(ssh, 'python3 -c "import pandas, numpy, requests" 2>/dev/null || apt-get install -y -qq python3-pandas python3-numpy python3-requests')
+
+# anthropic isn't packaged for apt — pip install it directly. Debian 13's
+# PEP 668 externally-managed environment needs --break-system-packages;
+# this is the system Python the on-Pi Claude bridge (ai_dj_bridge.py) runs
+# under, so a venv would need its own activation wiring in ai-dj-mix.ts.
+print('  Checking anthropic (Claude API) dependency...')
+run(ssh, 'python3 -c "import anthropic" 2>/dev/null && echo "anthropic OK" || echo "installing anthropic..."')
+run(ssh, 'python3 -c "import anthropic" 2>/dev/null || pip3 install --break-system-packages -q anthropic')
 
 print('  Building Next.js app...')
 # Abort the deploy if the build fails — restarting the service without a

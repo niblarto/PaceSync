@@ -154,6 +154,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [aiDjHealth, setAiDjHealth] = useState<"idle" | "checking" | "ok" | "down">("idle");
   const [aiDjHealthLlm, setAiDjHealthLlm] = useState(false);
   const [aiDjHealthClaude, setAiDjHealthClaude] = useState(false);
+  const [claudeKeyConfigured, setClaudeKeyConfigured] = useState(false);
   const [aiDjHealthMsg, setAiDjHealthMsg] = useState<string | null>(null);
   const [aiDjWolMac, setAiDjWolMac] = useState("");
   const [aiDjProvider, setAiDjProvider] = useState<"local" | "claude">("local");
@@ -396,11 +397,18 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         if (d.error) { setClaudeUsageError(d.error); return; }
         setClaudeUsage(d.models ?? {});
       })
-      .catch(() => setClaudeUsageError("Could not reach AI DJ service"));
+      .catch(() => setClaudeUsageError("Could not read usage — try again."));
+  }
+
+  function loadClaudeKeyStatus() {
+    fetch("/api/settings/ai-dj/claude-key")
+      .then(r => r.json())
+      .then((d: { configured?: boolean }) => setClaudeKeyConfigured(!!d.configured))
+      .catch(() => {});
   }
 
   useEffect(() => {
-    if (aiDjProvider === "claude" && aiDjUrl.trim()) loadClaudeUsage();
+    if (aiDjProvider === "claude") { loadClaudeUsage(); loadClaudeKeyStatus(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiDjProvider]);
 
@@ -418,7 +426,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       if (!res.ok) throw new Error(d.error ?? "Failed to save");
       setClaudeKeySaved(true);
       setClaudeApiKey("");
-      setAiDjCheckNonce(n => n + 1);
+      setClaudeKeyConfigured(true);
     } catch (e) {
       setClaudeKeyError(e instanceof Error ? e.message : "Failed to save — try again.");
     } finally {
@@ -1995,8 +2003,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           <button
             role="switch"
             aria-checked={aiDjEnabled}
-            onClick={() => { if (!aiDjSaving && aiDjUrl.trim()) saveAiDj(!aiDjEnabled); }}
-            disabled={aiDjSaving || !aiDjUrl.trim()}
+            onClick={() => { if (!aiDjSaving && (aiDjProvider === "claude" || aiDjUrl.trim())) saveAiDj(!aiDjEnabled); }}
+            disabled={aiDjSaving || (aiDjProvider === "local" && !aiDjUrl.trim())}
             className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-40 ${
               aiDjEnabled ? "bg-purple-500" : "bg-slate-700"
             }`}
@@ -2097,14 +2105,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   </div>
                 </div>
 
-                {aiDjUrl.trim() && (
-                  <div className="flex items-center gap-1.5 text-xs">
-                    <span className={`w-1.5 h-1.5 rounded-full ${aiDjHealthClaude ? "bg-green-400" : "bg-red-400"}`} />
-                    <span className={aiDjHealthClaude ? "text-green-400" : "text-red-400"}>
-                      {aiDjHealthClaude ? "Claude API key configured on the service" : "No Claude API key configured on the service"}
-                    </span>
-                  </div>
-                )}
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className={`w-1.5 h-1.5 rounded-full ${claudeKeyConfigured ? "bg-green-400" : "bg-red-400"}`} />
+                  <span className={claudeKeyConfigured ? "text-green-400" : "text-red-400"}>
+                    {claudeKeyConfigured ? "Claude API key configured" : "No Claude API key configured"}
+                  </span>
+                </div>
 
                 <div className="space-y-1.5">
                   <label className="text-xs text-slate-400">Claude API key</label>
@@ -2113,26 +2119,26 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                       type="password"
                       value={claudeApiKey}
                       onChange={e => { setClaudeApiKey(e.target.value); setClaudeKeySaved(false); }}
-                      placeholder={aiDjHealthClaude ? "•••••••••••••••••••• (saved — enter to replace)" : "sk-ant-..."}
+                      placeholder={claudeKeyConfigured ? "•••••••••••••••••••• (saved — enter to replace)" : "sk-ant-..."}
                       className="flex-1 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500 font-mono"
                     />
                     <button
                       onClick={saveClaudeApiKey}
-                      disabled={claudeKeySaving || !claudeApiKey.trim() || !aiDjUrl.trim()}
+                      disabled={claudeKeySaving || !claudeApiKey.trim()}
                       className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-4 py-2 transition-colors shrink-0"
                     >
                       {claudeKeySaving ? "Saving…" : claudeKeySaved ? "Saved!" : "Save"}
                     </button>
                   </div>
                   <p className="text-xs text-slate-500">
-                    Sent to the AI DJ service and stored there — this key never touches the Pi.
+                    Stored on this Pi — Claude mixes run here directly, no separate AI DJ service PC required.
                   </p>
                   {claudeKeyError && <p className="text-xs text-red-400">{claudeKeyError}</p>}
                 </div>
 
                 <div className="space-y-1.5 pt-1 border-t border-white/5">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs text-slate-400">Session usage (since the service last started)</label>
+                    <label className="text-xs text-slate-400">Usage (accumulated on this Pi)</label>
                     <button onClick={loadClaudeUsage} className="text-xs text-slate-500 hover:text-slate-300 underline transition-colors">
                       Refresh
                     </button>

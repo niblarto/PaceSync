@@ -146,14 +146,17 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   if (easyBias > 0) console.log(`[ai-dj] recent easy runs ran ~${easyBias}s/mi fast — easing easy segments`);
   const trackFeedback = getAllTrackVotes();
 
+  // Claude runs right here on the Pi via the on-Pi bridge — no dependency on
+  // the separate Ollama service PC being on. Ollama-backed "local" mixes
+  // still need that PC (its GPU runs the model), so those go over HTTP.
+  if (config.provider === "claude") {
+    return buildMixLocally(segments, easyBias, trackFeedback, onProgress, avoidUris, config.claudeModel, config.claudeEffort);
+  }
+
   const body = JSON.stringify({
     title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback,
     playedTracks: getPlayedTracks(), bpmOverrides: loadBpmOverrides(),
     avoidTracks: avoidUris?.length ? avoidUris : undefined,
-    // Ollama when provider is "local" (server default); Claude model/effort
-    // otherwise — see ai_dj/llm.py CLAUDE_MODELS for accepted model IDs.
-    model: config.provider === "claude" ? config.claudeModel : undefined,
-    effort: config.provider === "claude" ? config.claudeEffort : undefined,
   });
   try {
     if (onProgress) {
@@ -188,7 +191,8 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
 }
 
 function buildMixLocally(
-  segments: string[], easyBias = 0, trackFeedback: object[] = [], onProgress?: AiDjProgress, avoidUris?: string[]
+  segments: string[], easyBias = 0, trackFeedback: object[] = [], onProgress?: AiDjProgress, avoidUris?: string[],
+  model?: string, effort?: string,
 ): Promise<AiDjMixResult> {
   const script = join(process.cwd(), "scripts", "ai_dj_bridge.py");
   const csvPath = activeCsvPath();
@@ -246,6 +250,7 @@ function buildMixLocally(
       segments, easyBias, trackFeedback,
       playedTracks: getPlayedTracks(), bpmOverrides: loadBpmOverrides(),
       avoidTracks: avoidUris?.length ? avoidUris : undefined,
+      model, effort,
     }));
     proc.stdin.end();
   });

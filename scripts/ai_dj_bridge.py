@@ -1,14 +1,17 @@
-"""On-Pi fallback for the AI DJ mix builder.
+"""On-Pi mix builder: the Claude path, and the fallback for when the remote
+Ollama-based AI DJ service is unreachable (PC off, network change).
 
-Used by /api/ai-dj/mix when the remote AI DJ service is unreachable (PC off,
-network change). Runs the same workout mixer locally with use_llm=False —
-deterministic BPM/key/energy distance-chaining — and prints the same JSON
-shape the remote service's POST /mix returns.
+Reads {"title": ..., "segments": [...], "model": ..., "effort": ...} on
+stdin; the library CSV path is argv[1]. Uses the Garmin cadence buckets for
+exact pace->BPM when garmin-config.json points at a GarminDB (a remote PC
+service host can't do that — so on-Pi mixes actually get *better* pace
+matching).
 
-Reads {"title": ..., "segments": [...]} on stdin; the library CSV path is
-argv[1]. Uses the Garmin cadence buckets for exact pace->BPM when
-garmin-config.json points at a GarminDB (the remote PC can't do that — so
-fallback mixes actually get *better* pace matching).
+model absent/blank -> deterministic BPM/key/energy distance-chaining
+(use_llm=False, no network call, no API key needed). model set to a Claude
+ID (see ai_dj/llm.py CLAUDE_MODELS) -> that segment-by-segment LLM selection
+runs right here on the Pi, calling the Claude API directly — no dependency
+on the separate AI DJ service PC being on.
 """
 
 import json
@@ -28,6 +31,7 @@ if not os.path.isdir(os.path.join(_APP_ROOT, "ai_dj")):
 import pandas as pd  # noqa: E402
 
 from bpm_matcher.camelot import to_camelot  # noqa: E402
+from ai_dj.llm import is_claude_model  # noqa: E402
 from ai_dj.workout import (  # noqa: E402
     build_workout_playlist,
     garmin_cadence_buckets,
@@ -86,6 +90,10 @@ def main():
     if not isinstance(avoid, list):
         avoid = None
 
+    model = payload.get("model") or ""
+    effort = payload.get("effort") or None
+    use_llm = is_claude_model(model)
+
     library = _load_library(csv_path)
 
     # One NDJSON progress line per segment; the final line is the mix (or
@@ -95,10 +103,10 @@ def main():
 
     try:
         playlist = build_workout_playlist(
-            segments, library, model="", use_llm=False,
+            segments, library, model=model, use_llm=use_llm,
             cadence_buckets=_cadence_buckets(), easy_bias_sec=easy_bias,
             track_feedback=feedback, played_tracks=played,
-            bpm_overrides=bpm_overrides, avoid_tracks=avoid,
+            bpm_overrides=bpm_overrides, avoid_tracks=avoid, effort=effort,
             min_total_sec=max_projected_duration(segments_text), progress=_progress,
         )
     except ValueError as e:
