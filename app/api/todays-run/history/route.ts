@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { saveTodaysRunEntry, timelineToHistoryTracks, getTodaysRunEntry, setTodaysRunApproval } from "@/lib/todays-run-history";
-import { getPinnedMix } from "@/lib/pinned-mixes";
+import { getPinnedMix, setPinnedMix } from "@/lib/pinned-mixes";
 import { appendTracksToStravaActivity } from "@/lib/strava-workout-sync";
 import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 
@@ -54,6 +54,25 @@ export async function POST(req: NextRequest) {
     savedAt: new Date().toISOString(),
     tracks: timelineToHistoryTracks(body.timeline),
   });
+
+  // A pinned mix outranks the saved snapshot everywhere (history GET, the
+  // nightly pre-build) — so an explicit save over a pinned date replaces the
+  // pin's content with this mix, rather than letting the stale pin win. The
+  // pin is updated (not removed) so the cron re-applies *this* mix instead
+  // of auto-building a different one.
+  const pin = getPinnedMix(body.date);
+  if (pin) {
+    const totalSec = body.timeline.reduce(
+      (sum, seg) => sum + seg.tracks.reduce((s, t) => s + (t.durationSec ?? 0), 0), 0);
+    setPinnedMix({
+      date: body.date,
+      workoutTitle: body.workoutTitle ?? pin.workoutTitle,
+      totalSec,
+      timeline: body.timeline,
+      pinnedAt: new Date().toISOString(),
+    });
+    console.log(`[todays-run] replaced pinned mix for ${body.date} with the newly saved mix`);
+  }
   return NextResponse.json({ ok: true });
 }
 
