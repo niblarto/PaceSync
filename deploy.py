@@ -171,6 +171,7 @@ FILES = [
     ('app/api/settings/ai-dj/claude-key/route.ts', 'app/api/settings/ai-dj/claude-key/route.ts'),
     ('app/api/settings/ai-dj/gemini-key/route.ts', 'app/api/settings/ai-dj/gemini-key/route.ts'),
     ('app/api/settings/ai-dj/usage/route.ts',     'app/api/settings/ai-dj/usage/route.ts'),
+    ('app/api/settings/ai-dj/llm-log/route.ts',   'app/api/settings/ai-dj/llm-log/route.ts'),
     ('app/api/cron/ai-dj/route.ts',               'app/api/cron/ai-dj/route.ts'),
     ('lib/cron-schedule.ts',                      'lib/cron-schedule.ts'),
     ('lib/cron-log.ts',                           'lib/cron-log.ts'),

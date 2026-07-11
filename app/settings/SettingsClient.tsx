@@ -174,6 +174,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // one shared panel, not per-provider state.
   const [aiDjUsage, setAiDjUsage] = useState<Record<string, { inputTokens: number; outputTokens: number; requests: number; estimatedCostUsd: number; errors: number; lastError: string | null }> | null>(null);
   const [aiDjUsageError, setAiDjUsageError] = useState<string | null>(null);
+  const [llmLog, setLlmLog] = useState<{ ts: string; model: string; system: string; prompt: string; ok: boolean; error?: string; durationMs?: number; source?: "pi" | "service" }[] | null>(null);
   // ── Run-type BPM override state (blank = no override) ─────────────────────
   const [bpmOv, setBpmOv] = useState<Record<string, { min: string; max: string }>>({
     warmup: { min: "", max: "" }, work: { min: "", max: "" }, easy: { min: "", max: "" },
@@ -416,6 +417,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .catch(() => {});
   }
 
+  function loadLlmLog() {
+    fetch("/api/settings/ai-dj/llm-log")
+      .then(r => r.json())
+      .then((d: { entries?: typeof llmLog }) => setLlmLog(d.entries ?? []))
+      .catch(() => setLlmLog([]));
+  }
+
   function loadGeminiKeyStatus() {
     fetch("/api/settings/ai-dj/gemini-key")
       .then(r => r.json())
@@ -428,6 +436,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     else if (aiDjProvider === "gemini") { loadAiDjUsage(); loadGeminiKeyStatus(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiDjProvider]);
+
+  useEffect(() => {
+    if (aiDjEnabled) loadLlmLog();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiDjEnabled]);
 
   async function saveClaudeApiKey() {
     setClaudeKeySaving(true);
@@ -2369,6 +2382,51 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         >
           {aiDjSaving ? "Saving…" : aiDjSaved ? "Saved!" : "Save"}
         </button>
+
+        {/* LLM prompt log — every prompt sent during tracklist creation,
+            same style as the GarminDB sync log. Written by ai_dj/llm.py on
+            whichever host ran the call, so Claude/Gemini (on-Pi) mixes show
+            here; Ollama calls log on the remote service PC instead. */}
+        {aiDjEnabled && (
+          <div className="space-y-1 pt-2 border-t border-white/5">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium text-slate-400">LLM prompt log <span className="font-normal text-slate-600">— click an entry for the full prompt</span></p>
+              <button onClick={loadLlmLog} className="text-xs text-slate-500 hover:text-slate-300 underline transition-colors">
+                Refresh
+              </button>
+            </div>
+            {llmLog && llmLog.length === 0 && (
+              <p className="text-xs text-slate-600 italic">No LLM calls logged yet (Claude/Gemini mixes log here; local-LLM calls log on the service PC).</p>
+            )}
+            {llmLog && llmLog.length > 0 && (
+              <div className="rounded bg-slate-950/60 border border-white/5 px-2.5 py-2 space-y-1 max-h-64 overflow-y-auto">
+                {llmLog.map((e, i) => {
+                  const t = e.ts.includes("T") ? e.ts.split("T")[1] : e.ts;
+                  const day = e.ts.includes("T") ? e.ts.split("T")[0].slice(5) : "";
+                  return (
+                    <details key={`${e.ts}-${i}`} className="font-mono text-[10px] leading-relaxed">
+                      <summary className="cursor-pointer truncate list-none flex gap-2 items-baseline">
+                        <span className="text-slate-600 shrink-0">{day} {t}</span>
+                        <span className={`shrink-0 ${e.ok ? "text-green-500/70" : "text-red-400/80"}`}>{e.ok ? "✓" : "✗"}</span>
+                        <span className="text-sky-500/70 shrink-0">{e.model}</span>
+                        {e.source && (
+                          <span className={`shrink-0 px-1 rounded text-[9px] ${e.source === "service" ? "bg-purple-500/10 text-purple-400/80" : "bg-slate-700/40 text-slate-500"}`}>
+                            {e.source === "service" ? "PC" : "Pi"}
+                          </span>
+                        )}
+                        {e.durationMs != null && <span className="text-slate-600 shrink-0">{(e.durationMs / 1000).toFixed(1)}s</span>}
+                        <span className="text-slate-500 truncate">{e.prompt.split("\n")[0]}</span>
+                      </summary>
+                      <pre className="whitespace-pre-wrap text-slate-500 mt-1 mb-2 pl-3 border-l border-white/10 max-h-48 overflow-y-auto">
+                        {`SYSTEM: ${e.system}\n\n${e.prompt}${e.error ? `\n\nERROR: ${e.error}` : ""}`}
+                      </pre>
+                    </details>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Runna */}
