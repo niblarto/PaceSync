@@ -54,8 +54,8 @@ export async function POST(req: NextRequest) {
           console.warn("[ai-dj] pre-mix CSV scan failed:", e); // never block the mix
         }
 
-        const result = await buildAiDjMix(title, segments, (current, total, segment) => {
-          send({ type: "progress", current, total, segment });
+        const result = await buildAiDjMix(title, segments, (current, total, segment, detail) => {
+          send({ type: "progress", current, total, segment, detail });
         }, avoidUris);
         if (!result.ok) {
           console.error(`[ai-dj] ${result.error}`);

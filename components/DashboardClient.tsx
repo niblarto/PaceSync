@@ -9,7 +9,7 @@ import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
 import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArtError } from "./TrackRow";
 import { DedupCard } from "./DedupCard";
-import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline } from "./RunnaCard";
+import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
 import { useRunningPlaylist } from "./useRunningPlaylist";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
 
@@ -294,10 +294,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const enrichAttempted = useRef(false);
   const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[] } | null>(null);
   const [remixing, setRemixing] = useState(false);
-  // Set when a remix's mix build had a segment fall back from LLM selection
-  // to plain BPM matching (rate limit, quota, network) — non-fatal, the mix
-  // still built, but with less curated track selection.
-  const [mixWarning, setMixWarning] = useState<string | null>(null);
+  const runnaScheduleRef = useRef<RunnaScheduleHandle>(null);
   const [todaysRunSaving, setTodaysRunSaving] = useState(false);
   const [todaysRunSaved, setTodaysRunSaved] = useState(false);
   const [todaysRunError, setTodaysRunError] = useState<string | null>(null);
@@ -489,19 +486,18 @@ export function DashboardClient({ spotifyUser }: Props) {
   // Populates the central track list/save UI from an AI DJ mix (built in
   // RunnaScheduleCard) instead of saving straight to Spotify — the user picks
   // which playlist(s) to save to from here.
-  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimeline) {
+  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimeline, avoidUris?: string[]) {
     setSelectedZones([]);
     setPaceFilter(null);
     setSimilarFilter(null);
     setNoBpmFilter(false);
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
-    setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false });
+    setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false, avoidUris });
     setPlaylistName(name);
     setPinSaved(false);
     setPinError(null);
     setStep("ready");
     setSaveError(null);
-    setMixWarning(null);
     setSavedUrl(null);
     setTodaysRunSaving(false);
     setTodaysRunSaved(false);
@@ -511,80 +507,28 @@ export function DashboardClient({ spotifyUser }: Props) {
 
   // Rebuild the AI DJ mix from the same workout segments — either because a
   // track in the mix was deleted (stale=true), or the user just wants a
-  // different mix. avoidUris accumulates across remixes (like RunnaCard's
-  // remix) so the mixer demotes tracks from every prior build in this
-  // session, not just the last one, and repeated remixes keep surfacing
-  // fresh tracks instead of alternating between the same couple of sets.
+  // different mix. avoidUris accumulates across remixes so the mixer demotes
+  // tracks from every prior build in this session, not just the last one,
+  // and repeated remixes keep surfacing fresh tracks instead of alternating
+  // between the same couple of sets.
+  //
+  // Delegated to the Runna Schedule card (via ref) rather than built here:
+  // that card already renders a live progress bar and per-segment LLM detail
+  // line (candidates sent, tracks returned) for its own Mix/Remix button, so
+  // routing through the same buildMix() gives the tracks-card Remix button
+  // the identical progress UI instead of a silent fetch. onAiDjMix (passed
+  // to RunnaScheduleCard) still updates aiDjMix/step/etc. on completion.
   async function remixAiDjMix() {
-    if (!aiDjMix) return;
+    if (!aiDjMix || !runnaScheduleRef.current) return;
     setRemixing(true);
     setSaveError(null);
-    setMixWarning(null);
     const priorUris = aiDjMix.tracks.map(t => t.uri);
     const avoidUris = Array.from(new Set([...(aiDjMix.avoidUris ?? []), ...priorUris]));
     // Clear the old tracks immediately so the stale mix can't linger (or be
     // saved) while the rebuild runs.
     setAiDjMix(prev => prev ? { ...prev, tracks: [] } : prev);
     try {
-      // The route always responds as SSE (progress/warning/done/error
-      // events), never plain JSON — read it as a stream even though this
-      // caller doesn't render a live progress bar.
-      const res = await fetch("/api/ai-dj/mix", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: aiDjMix.workoutTitle, segments: aiDjMix.segments, avoidUris }),
-      });
-      if (!res.ok || !res.body) {
-        const err = await res.json().catch(() => ({})) as { error?: string };
-        throw new Error(err.error ?? `Mix failed (${res.status})`);
-      }
-
-      let mix: { trackUris?: string[]; totalSec?: number; timeline?: AiDjTimeline } | null = null;
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let sep;
-        while ((sep = buf.indexOf("\n\n")) !== -1) {
-          const chunk = buf.slice(0, sep);
-          buf = buf.slice(sep + 2);
-          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
-          if (!dataLine) continue;
-          const msg = JSON.parse(dataLine.slice(6)) as
-            & { type: string; error?: string; trackUris?: string[]; totalSec?: number; timeline?: AiDjTimeline; llmFailures?: string[] };
-          if (msg.type === "warning" && msg.llmFailures?.length) {
-            const n = msg.llmFailures.length;
-            setMixWarning(`⚠ ${n} segment${n === 1 ? "" : "s"} fell back to basic BPM matching (model call failed) — check Settings usage`);
-          } else if (msg.type === "error") {
-            throw new Error(msg.error ?? "Mix failed");
-          } else if (msg.type === "done") {
-            mix = { trackUris: msg.trackUris, totalSec: msg.totalSec, timeline: msg.timeline };
-          }
-        }
-      }
-      if (!mix) throw new Error("Mix stream ended without a result");
-      const tracks: TrackWithBPM[] = (mix.timeline ?? []).flatMap(seg => seg.tracks).map(t => ({
-        id: t.uri.split(":")[2] ?? t.uri,
-        name: t.name,
-        artists: [{ name: t.artist }],
-        album: { name: "", images: [] },
-        duration_ms: Math.round((t.durationSec ?? 0) * 1000),
-        uri: t.uri,
-        bpm: Math.round(t.tempo),
-        energy: t.energy,
-      })).filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
-      if (tracks.length === 0) throw new Error("No tracks matched this workout");
-      setAiDjMix(prev => prev ? { ...prev, tracks, totalSec: mix!.totalSec ?? prev.totalSec, timeline: mix!.timeline ?? prev.timeline, stale: false, avoidUris } : prev);
-      setStep("ready");
-      setSavedUrl(null);
-      setTodaysRunSaved(false);
-      setTodaysRunUrl(null);
-      setTodaysRunError(null);
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : "Remix failed");
+      await runnaScheduleRef.current.remix(aiDjMix.date, avoidUris);
     } finally {
       setRemixing(false);
     }
@@ -1285,13 +1229,6 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   </div>
                 )}
 
-                {mixWarning && (
-                  <div className="px-5 py-3 text-sm text-amber-400/90 border-b border-slate-800">
-                    {mixWarning}
-                  </div>
-                )}
-
-
                 {step === "partial" && savedUrl && (
                   <div className="px-5 py-4 border-b border-slate-800 space-y-3">
                     <div className="flex items-start gap-3">
@@ -1376,6 +1313,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           <div ref={col3Ref} className="space-y-6 min-w-0">
             <RunnaSummaryCard />
             <RunnaScheduleCard
+              ref={runnaScheduleRef}
               aiDjEnabled={aiDjEnabled}
               garminConfigured={garminConfigured}
               mixSavedNonce={mixSavedNonce}

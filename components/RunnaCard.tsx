@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, forwardRef, useImperativeHandle } from "react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { freshSpotifyToken } from "@/lib/spotify-browser";
@@ -633,9 +633,17 @@ interface RunnaScheduleProps {
   activePaces?: string[];
   aiDjEnabled?: boolean;
   /** Called once a mix is built — the parent populates the central track list/save UI rather than saving directly */
-  onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimelineSegment[]) => void;
+  onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimelineSegment[], avoidUris?: string[]) => void;
   /** Bumped by the parent after a mix is saved — invalidates the saved-mix tracklist cache */
   mixSavedNonce?: number;
+}
+
+// Exposed to the parent so the tracks card's Remix button can drive this
+// card's own progress bar/LLM detail line instead of building the mix
+// silently — the workout is looked up by date since that's what the
+// tracks card's aiDjMix state carries.
+export interface RunnaScheduleHandle {
+  remix: (date: string, avoidUris: string[]) => Promise<void>;
 }
 
 // Strength sessions have no pace segments — synthesize one the mixer's
@@ -661,7 +669,7 @@ function mixSegmentsFor(w: RunnaWorkout): string[] {
   return [`Strength • ${mins}m - ${mins}m`, `${mins} min strength session`];
 }
 
-type MixProgress = { current: number; total: number; segment: string };
+type MixProgress = { current: number; total: number; segment: string; detail?: string };
 type MixStatus = { status: "building" | "done" | "error"; error?: string; warning?: string; startedAt?: number; progress?: MixProgress; uris?: string[] };
 
 // Real per-segment progress streamed over SSE from /api/ai-dj/mix. Between
@@ -770,7 +778,10 @@ function courseMatchesDate(name: string, date: string): boolean {
   return re.test(name);
 }
 
-export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0 }: RunnaScheduleProps = {}) {
+export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaScheduleProps>(function RunnaScheduleCard(
+  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0 }: RunnaScheduleProps = {},
+  ref,
+) {
   const { workouts: allWorkouts, pastRuns, loading, error } = useRunnaData();
   // Once a workout is completed, Runna surfaces it on the Summary card
   // (pastRuns) instead — drop it here so the same day's run isn't shown as
@@ -889,7 +900,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
           if (!dataLine) continue;
           const msg = JSON.parse(dataLine.slice(6)) as
             & Partial<AiDjMixResponse>
-            & { type: string; current?: number; total?: number; segment?: string; error?: string;
+            & { type: string; current?: number; total?: number; segment?: string; detail?: string; error?: string;
                 count?: number; tracks?: string[]; fields?: string[]; llmFailures?: string[] };
           if (msg.type === "warning" && msg.llmFailures?.length) {
             // Segment(s) where the model call failed (rate limit, quota,
@@ -907,7 +918,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
               (msg.fields ?? []).join("/") || "data"} left out of the mix: ${names}${extra}`;
             setMixState(s => ({ ...s, [w.uid]: { ...s[w.uid], status: "building", warning } }));
           } else if (msg.type === "progress") {
-            const progress = { current: msg.current ?? 0, total: msg.total ?? 1, segment: msg.segment ?? "" };
+            const progress = { current: msg.current ?? 0, total: msg.total ?? 1, segment: msg.segment ?? "", detail: msg.detail };
             setMixState(s => ({ ...s, [w.uid]: { ...s[w.uid], status: "building", progress } }));
           } else if (msg.type === "error") {
             throw new Error(msg.error ?? "Mix failed");
@@ -930,21 +941,28 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
         energy: t.energy,
       }));
 
-      onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w), w.date, mix.timeline);
       // Accumulate across remixes: avoiding only the latest build lets the
       // mixer alternate between the same two setlists.
+      const accumulatedUris = Array.from(new Set([...(mixState[w.uid]?.uris ?? []), ...mix.trackUris]));
+      onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w), w.date, mix.timeline, accumulatedUris);
       setMixState(s => ({
         ...s,
-        [w.uid]: {
-          status: "done", warning: s[w.uid]?.warning,
-          uris: Array.from(new Set([...(s[w.uid]?.uris ?? []), ...mix.trackUris])),
-        },
+        [w.uid]: { status: "done", warning: s[w.uid]?.warning, uris: accumulatedUris },
       }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to build mix";
       setMixState(s => ({ ...s, [w.uid]: { status: "error", error: msg, warning: s[w.uid]?.warning } }));
     }
   }
+
+  useImperativeHandle(ref, () => ({
+    remix(date, avoidUris) {
+      const w = workouts.find(x => x.date === date);
+      if (!w) return Promise.resolve();
+      setExpanded(w.uid);
+      return buildMix(w, avoidUris);
+    },
+  }), [workouts]);
 
   return (
     <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
@@ -1109,6 +1127,9 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
                               <span className="text-xs text-red-400">{st.error}</span>
                             )}
                           </div>
+                          {st?.status === "building" && st.progress?.detail && (
+                            <p className="text-[11px] text-slate-500 pl-0.5 -mt-1 truncate">{st.progress.detail}</p>
+                          )}
                           {st?.warning && (
                             <p className="text-xs text-amber-400/90 mt-1">{st.warning}</p>
                           )}
@@ -1266,7 +1287,7 @@ export function RunnaScheduleCard({ garminConfigured = false, onPaceFilter, acti
       )}
     </div>
   );
-}
+});
 
 // Legacy export so any existing import still compiles
 export { RunnaScheduleCard as RunnaCard };

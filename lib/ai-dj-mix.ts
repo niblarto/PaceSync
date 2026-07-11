@@ -36,8 +36,10 @@ export type AiDjMixResult =
   | { ok: false; error: string };
 
 // Fired as each workout segment starts building (the per-segment LLM call is
-// the slow part) — lets the API route stream a real progress bar.
-export type AiDjProgress = (current: number, total: number, segment: string) => void;
+// the slow part) — lets the API route stream a real progress bar. `detail`
+// carries the LLM interaction status for that segment (candidates sent,
+// tracks returned, fallback) when the builder reports one.
+export type AiDjProgress = (current: number, total: number, segment: string, detail?: string) => void;
 
 // Real cadence per 5s pace bucket from GarminDB (sec/mi -> SPM), sent to the
 // remote AI DJ service so its pace->BPM uses measured turnover instead of a
@@ -109,9 +111,9 @@ async function fetchMixStream(url: string, body: string, onProgress: AiDjProgres
       if (!dataLine) continue; // padding/comment frame
       const msg = JSON.parse(dataLine.slice(6)) as
         & Partial<AiDjMixResponse>
-        & { type: string; current?: number; total?: number; segment?: string; error?: string };
+        & { type: string; current?: number; total?: number; segment?: string; detail?: string; error?: string };
       if (msg.type === "progress") {
-        onProgress(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "");
+        onProgress(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "", msg.detail);
       } else if (msg.type === "done") {
         return { ok: true, mix: { trackUris: msg.trackUris!, totalSec: msg.totalSec!, timeline: msg.timeline!, llmFailures: msg.llmFailures } };
       } else if (msg.type === "error") {
@@ -217,9 +219,9 @@ function buildMixLocally(
     const takeLine = (line: string) => {
       if (!line.trim()) return;
       try {
-        const msg = JSON.parse(line) as { type?: string; current?: number; total?: number; segment?: string };
+        const msg = JSON.parse(line) as { type?: string; current?: number; total?: number; segment?: string; detail?: string };
         if (msg.type === "progress") {
-          onProgress?.(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "");
+          onProgress?.(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "", msg.detail);
           return;
         }
       } catch { /* partial or non-JSON line — treat as payload candidate */ }

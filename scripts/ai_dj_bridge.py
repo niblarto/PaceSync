@@ -98,8 +98,11 @@ def main():
 
     # One NDJSON progress line per segment; the final line is the mix (or
     # error) JSON. lib/ai-dj-mix.ts parses stdout line-by-line for these.
-    def _progress(done, total, label):
-        print(json.dumps({"type": "progress", "current": done, "total": total, "segment": label}), flush=True)
+    def _progress(done, total, label, detail=None):
+        msg = {"type": "progress", "current": done, "total": total, "segment": label}
+        if detail:
+            msg["detail"] = detail
+        print(json.dumps(msg), flush=True)
 
     try:
         playlist = build_workout_playlist(
