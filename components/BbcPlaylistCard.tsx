@@ -318,9 +318,15 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
       }
       await addTracksBrowser(RUNNING_PLAYLIST_ID, tracksWithUri.map(t => t.uri));
 
-      // Enrich with BPM/audio features via ReccoBeats and add to the local CSV
-      // pool so the new tracks show up in zone/pace filters straight away.
+      // Enrich with BPM/audio features via ReccoBeats, then add every track
+      // to the local CSV pool regardless of whether enrichment found a match
+      // — a track that Spotify accepted but ReccoBeats/Deezer couldn't match
+      // (common for extended mixes, live versions, etc.) still needs a CSV
+      // row so healActiveCsv() can keep retrying it later; skipping the row
+      // entirely here left such tracks in Spotify but permanently invisible
+      // to the local library.
       let enriched = 0;
+      let added = 0;
       try {
         const er = await fetch("/api/bpm/enrich", {
           method: "POST",
@@ -336,25 +342,26 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
         const ed = await er.json() as {
           features?: Record<string, { tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number }>;
         };
-        const rows = tracksWithUri.flatMap(t => {
+        const rows = tracksWithUri.map(t => {
           const id = t.uri.split(":").pop()!;
           const f = ed.features?.[id];
-          return f ? [{ uri: `spotify:track:${id}`, name: t.name, artist: t.artistName, ...f }] : [];
+          if (f) enriched++;
+          return { uri: `spotify:track:${id}`, name: t.name, artist: t.artistName, ...f };
         });
-        if (rows.length > 0) {
-          const ar = await fetch("/api/tracks/add", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tracks: rows }),
-          });
-          const ad = await ar.json() as { added?: number };
-          enriched = ad.added ?? rows.length;
-        }
+        const ar = await fetch("/api/tracks/add", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tracks: rows }),
+        });
+        const ad = await ar.json() as { added?: number };
+        added = ad.added ?? rows.length;
       } catch { /* enrichment is best-effort — playlist add already succeeded */ }
 
+      const noBpm = added - enriched;
       setUpdateMsg(
         `Added ${tracksWithUri.length} track${tracksWithUri.length !== 1 ? "s" : ""}` +
         (enriched > 0 ? ` · ${enriched} with BPM data` : "") +
+        (noBpm > 0 ? ` · ${noBpm} added without BPM data (will retry)` : "") +
         (noUri > 0 ? ` · ${noUri} not found on Spotify` : "")
       );
     } catch (e) {

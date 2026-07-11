@@ -15,12 +15,16 @@ interface AddTrack {
   uri: string;
   name: string;
   artist: string;
-  tempo: number;
-  key: number;
-  mode: number;
-  energy: number;
-  danceability: number;
-  valence: number;
+  // Optional: a track can be written with no audio-feature match yet (e.g.
+  // ReccoBeats/Deezer found nothing) so it still joins the Spotify playlist
+  // and the local library — healActiveCsv() backfills these blanks later
+  // whenever a lookup does succeed, same as any other incomplete row.
+  tempo?: number;
+  key?: number;
+  mode?: number;
+  energy?: number;
+  danceability?: number;
+  valence?: number;
 }
 
 function csvEscape(v: string): string {
@@ -45,16 +49,17 @@ export async function POST(req: NextRequest) {
     const newLines: string[] = [];
     let added = 0;
     for (const t of fresh) {
+      const num = (v: number | undefined) => v == null ? "" : String(v);
       const byName: Record<string, string> = {
         "Track URI": t.uri,
         "Track Name": t.name,
         "Artist Name(s)": t.artist,
-        "Tempo": String(t.tempo),
-        "Key": String(t.key),
-        "Mode": String(t.mode),
-        "Energy": String(t.energy),
-        "Danceability": String(t.danceability),
-        "Valence": String(t.valence),
+        "Tempo": num(t.tempo),
+        "Key": num(t.key),
+        "Mode": num(t.mode),
+        "Energy": num(t.energy),
+        "Danceability": num(t.danceability),
+        "Valence": num(t.valence),
       };
       newLines.push(headers.map(h => csvEscape(byName[h] ?? "")).join(","));
       added++;

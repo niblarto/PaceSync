@@ -25,7 +25,7 @@ interface ProgInfo {
   pid?: string;
   first_broadcast_date?: string;
   peers?: { previous?: EpPeer; next?: EpPeer };
-  parent?: { programme?: { type?: string; pid?: string } };
+  parent?: { programme?: { type?: string; pid?: string; title?: string } };
 }
 
 async function fetchProgInfo(pid: string): Promise<ProgInfo | null> {
@@ -77,6 +77,16 @@ export async function GET(req: NextRequest) {
   const info = await fetchProgInfo(pid);
 
   if (info?.type === "episode") {
+    // An episode PID only identifies one broadcast forever — findLatestEpisode
+    // (bbc/tracks) treats whatever pid a card is saved with as if it were the
+    // *brand*, and scrapes that PID's /episodes/player page for the latest
+    // episode. For a real episode PID that page can list unrelated/future
+    // episodes, which breaks segment lookup once the saved episode airs and
+    // scrolls out of the schedule. Surface the true brand pid/title so
+    // callers (BbcBrowserCard) can persist that instead of the episode pid.
+    const brandPid = info.parent?.programme?.type === "brand" ? info.parent.programme.pid : undefined;
+    const brandTitle = info.parent?.programme?.type === "brand" ? info.parent.programme.title : undefined;
+
     const now = new Date();
     const broadcastDate = info.first_broadcast_date;
     const epDate = broadcastDate ? new Date(broadcastDate) : null;
@@ -86,6 +96,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({
         episodePid: pid,
         airDate: formatAirDate(broadcastDate!),
+        brandPid, brandTitle,
       });
     }
 
@@ -95,6 +106,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({
         episodePid: prev.pid,
         airDate: prev.first_broadcast_date ? formatAirDate(prev.first_broadcast_date) : null,
+        brandPid, brandTitle,
       });
     }
 
@@ -102,6 +114,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       episodePid: pid,
       airDate: broadcastDate ? formatAirDate(broadcastDate) : null,
+      brandPid, brandTitle,
     });
   }
 

@@ -107,11 +107,24 @@ export function BbcBrowserCard({ onAdd, defaultOpen = false, saveLabel = "Add to
     }
   }
 
-  function handleAdd() {
+  const [adding, setAdding] = useState(false);
+
+  async function handleAdd() {
     if (!selectedProg) return;
-    onAdd({ pid: selectedProg.pid, name: selectedProg.brand, synopsis: selectedProg.synopsis });
+    setAdding(true);
+    // The schedule only exposes episode pids — resolve the stable brand pid
+    // before saving, so the card doesn't break once this episode airs and
+    // scrolls out of the schedule (see bbc/episode-info's brandPid comment).
+    let pid = selectedProg.pid;
+    try {
+      const res = await fetch(`/api/bbc/episode-info?pid=${selectedProg.pid}`);
+      const d = await res.json() as { brandPid?: string };
+      if (d.brandPid) pid = d.brandPid;
+    } catch { /* keep the episode pid — still usually works */ }
+    onAdd({ pid, name: selectedProg.brand, synopsis: selectedProg.synopsis });
     setAddedBrands(prev => { const s = new Set(Array.from(prev)); s.add(selectedProg.brand); return s; });
     setSelectedProg(null);
+    setAdding(false);
   }
 
   const programmes = dedupeByBrand(schedule);
@@ -218,9 +231,10 @@ export function BbcBrowserCard({ onAdd, defaultOpen = false, saveLabel = "Add to
               </div>
               <button
                 onClick={handleAdd}
-                className="shrink-0 rounded-lg bg-green-500 hover:bg-green-400 text-black font-semibold text-xs px-4 py-2 transition-colors whitespace-nowrap"
+                disabled={adding}
+                className="shrink-0 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-60 text-black font-semibold text-xs px-4 py-2 transition-colors whitespace-nowrap"
               >
-                {saveLabel}
+                {adding ? <><Spinner /> Adding…</> : saveLabel}
               </button>
             </div>
           )}
