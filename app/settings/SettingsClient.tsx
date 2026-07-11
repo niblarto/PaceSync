@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useSession } from "next-auth/react";
 import type { RunningZone } from "@/types";
 import { BbcBrowserCard } from "@/components/BbcBrowserCard";
+import { DedupCard } from "@/components/DedupCard";
 import { invalidateRunningPlaylistCache } from "@/components/useRunningPlaylist";
 
 const ZONE_DETAILS = [
@@ -1849,6 +1850,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
         </div>
       </div>
+
+      <DedupCard />
 
     </div>
     <div className="space-y-6">

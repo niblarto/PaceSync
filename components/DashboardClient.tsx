@@ -8,7 +8,6 @@ import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
 import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArtError } from "./TrackRow";
-import { DedupCard } from "./DedupCard";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
 import { useRunningPlaylist } from "./useRunningPlaylist";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
@@ -292,6 +291,11 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [enriching, setEnriching] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
   const enrichAttempted = useRef(false);
+  const [savingNoBpm, setSavingNoBpm] = useState(false);
+  const [noBpmSaveMsg, setNoBpmSaveMsg] = useState<string | null>(null);
+  const [importingBpmCsv, setImportingBpmCsv] = useState(false);
+  const [importBpmMsg, setImportBpmMsg] = useState<string | null>(null);
+  const noBpmCsvInputRef = useRef<HTMLInputElement>(null);
   const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[] } | null>(null);
   const [remixing, setRemixing] = useState(false);
   const runnaScheduleRef = useRef<RunnaScheduleHandle>(null);
@@ -325,36 +329,40 @@ export function DashboardClient({ spotifyUser }: Props) {
       .catch(() => {});
   }, []);
 
-  // Auto-load default playlist on mount — the active playlist's CSV is served
-  // via an API route (not a static /public fetch): files written at runtime,
-  // like a freshly imported playlist's CSV, don't exist at Next.js build time
-  // and would 404 if fetched directly from /public.
+  // Re-reads the active playlist's CSV from disk — the API route (not a
+  // static /public fetch) since files written at runtime, like a freshly
+  // imported playlist's CSV, don't exist at Next.js build time and would
+  // 404 if fetched directly from /public. Used on mount and after anything
+  // that mutates the CSV out from under the in-memory track list (e.g. the
+  // No BPM CSV import).
+  const loadLibrary = useCallback(async () => {
+    const d = await fetch("/api/settings/playlist").then(r => r.json()) as { name?: string };
+    const name = d.name || "Running";
+    const res = await fetch("/api/playlist-csv");
+    if (!res.ok) throw new Error("no csv");
+    const text = await res.text();
+    const result = parseExportifyCsv(text);
+    if (!result.ok) return;
+    setCsvName(name);
+    setAllTracks(result.tracks);
+    setStep("ready");
+    setPlaylistName(name);
+    prewarmArt(result.tracks);
+  }, []);
+
+  // Auto-load default playlist on mount — start on the full playlist so the
+  // track list is populated immediately.
   useEffect(() => {
-    fetch("/api/settings/playlist")
-      .then(r => r.json())
-      .then((d: { name?: string }) => {
-        const name = d.name || "Running";
-        return fetch("/api/playlist-csv")
-          .then(r => { if (!r.ok) throw new Error("no csv"); return r.text(); })
-          .then((text) => {
-            const result = parseExportifyCsv(text);
-            if (!result.ok) return;
-            setCsvName(name);
-            setAllTracks(result.tracks);
-            setStep("ready");
-            // Start on the full playlist so the track list is populated immediately
-            setSelectedZones([ALL_ZONE]);
-            setPlaylistName(name);
-            prewarmArt(result.tracks);
-          });
-      })
+    loadLibrary()
+      .then(() => setSelectedZones([ALL_ZONE]))
       .catch(() => {/* silently ignore if file missing */});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Enrich BPM-less tracks via ReccoBeats; updates the CSV and local state.
-  // Returns how many tracks got features.
-  const runEnrichment = useCallback(async (missing: TrackWithBPM[]): Promise<number> => {
-    if (missing.length === 0) return 0;
+  // Returns how many tracks got features and which ones are still missing.
+  const runEnrichment = useCallback(async (missing: TrackWithBPM[]): Promise<{ found: number; stillMissing: TrackWithBPM[] }> => {
+    if (missing.length === 0) return { found: 0, stillMissing: [] };
     const er = await fetch("/api/bpm/enrich", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -370,7 +378,8 @@ export function DashboardClient({ spotifyUser }: Props) {
       const f = features[t.id];
       return f ? [{ uri: t.uri, ...f }] : [];
     });
-    if (rows.length === 0) return 0;
+    const stillMissing = missing.filter(t => !features[t.id]);
+    if (rows.length === 0) return { found: 0, stillMissing };
 
     await fetch("/api/tracks/update-features", {
       method: "POST",
@@ -382,8 +391,113 @@ export function DashboardClient({ spotifyUser }: Props) {
       const f = features[t.id];
       return f && t.bpm === 0 ? { ...t, bpm: Math.round(f.tempo), energy: f.energy } : t;
     }));
-    return rows.length;
+    return { found: rows.length, stillMissing };
   }, []);
+
+  // After a BPM retry still can't match a track, check whether it even still
+  // exists on Spotify — a track pulled/region-locked/removed since it was
+  // added would never resolve on ReccoBeats or Deezer either, so this is
+  // both the explanation for a persistent no-BPM track and the cleanup for
+  // it. Only deletes tracks Spotify actually reports gone (404 items come
+  // back null in the batch response); a transient API error leaves the
+  // track alone rather than risking a wrong deletion. Throttled: a gap
+  // between lookup batches, and between individual deletes, so a long
+  // no-BPM list can't burst Spotify's rate limit. Returns how many were
+  // removed.
+  async function pruneDeadSpotifyTracks(tracks: TrackWithBPM[]): Promise<number> {
+    const token = await freshSpotifyToken();
+    if (!token || tracks.length === 0) return 0;
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+    let removed = 0;
+    for (let i = 0; i < tracks.length; i += 50) {
+      if (i > 0) await sleep(200);
+      const batch = tracks.slice(i, i + 50);
+      const ids = batch.map(t => t.id).join(",");
+      let res: Response;
+      try {
+        res = await fetch(`https://api.spotify.com/v1/tracks?ids=${ids}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      } catch {
+        continue; // network hiccup — leave these tracks alone
+      }
+      if (res.status === 429) {
+        const wait = parseInt(res.headers.get("Retry-After") ?? "5", 10);
+        await sleep((isNaN(wait) ? 5 : wait) * 1000);
+        try {
+          res = await fetch(`https://api.spotify.com/v1/tracks?ids=${ids}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+        } catch {
+          continue;
+        }
+      }
+      if (!res.ok) continue; // still failing after one retry — don't risk deleting on a bad response
+      const data = await res.json() as { tracks?: (unknown | null)[] };
+      const dead = batch.filter((_, j) => data.tracks?.[j] == null);
+      for (const t of dead) {
+        await handleDeleteTrack(t);
+        removed++;
+        await sleep(120);
+      }
+    }
+    return removed;
+  }
+
+  // Saves the current no-BPM tracks to a Spotify playlist named "No BPM" —
+  // lets an outside BPM-analysis tool pick them up. Re-running this replaces
+  // the playlist's contents with whatever's still missing BPM data.
+  async function saveNoBpmPlaylist() {
+    const missing = allTracks.filter(t => t.bpm === 0);
+    if (missing.length === 0) return;
+    setSavingNoBpm(true);
+    setNoBpmSaveMsg(null);
+    try {
+      const res = await fetch("/api/spotify/create-playlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "No BPM",
+          description: "Tracks missing BPM/audio-feature data in the Running library — run through a BPM tool, export via Exportify, then import back on the dashboard.",
+          trackUris: missing.map(t => t.uri),
+        }),
+      });
+      const data = await res.json() as { error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `Save failed (${res.status})`);
+      setNoBpmSaveMsg(`Saved ${missing.length} track${missing.length !== 1 ? "s" : ""} to "No BPM" on Spotify`);
+    } catch (e) {
+      setNoBpmSaveMsg(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setSavingNoBpm(false);
+    }
+  }
+
+  // Imports an Exportify CSV of the (externally BPM-analyzed) "No BPM"
+  // playlist and backfills matching rows in the library CSV — the other half
+  // of the save/import round-trip for tracks ReccoBeats/Deezer couldn't match.
+  async function importBpmCsv(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setImportingBpmCsv(true);
+    setImportBpmMsg(null);
+    try {
+      const text = await file.text();
+      const res = await fetch("/api/tracks/import-bpm-csv", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: text,
+      });
+      const data = await res.json() as { matched?: number; filled?: number; error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `Import failed (${res.status})`);
+      setImportBpmMsg(`Matched ${data.matched ?? 0} track${data.matched === 1 ? "" : "s"}, filled ${data.filled ?? 0}`);
+      await loadLibrary();
+    } catch (err) {
+      setImportBpmMsg(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setImportingBpmCsv(false);
+    }
+  }
 
   // Auto-enrich on load: any track missing BPM gets a ReccoBeats lookup once per session
   useEffect(() => {
@@ -1017,7 +1131,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <BPMDistribution tracks={allTracks} zones={displayZones} selectedZones={selectedZones} />
             )}
 
-            <DedupCard />
+            {allTracks.length > 0 && <SprintBpmCounts tracks={allTracks} />}
           </aside>
 
           {/* Col 2: Main content */}
@@ -1121,27 +1235,50 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
                   {noBpmFilter && filteredTracks.length > 0 && (
                     <div className="flex flex-col items-end gap-1.5 shrink-0">
-                      <button
-                        onClick={async () => {
-                          setEnriching(true);
-                          setEnrichMsg(null);
-                          try {
-                            const found = await runEnrichment(filteredTracks);
-                            setEnrichMsg(found > 0
-                              ? `Found BPM data for ${found} track${found !== 1 ? "s" : ""}`
-                              : "No BPM data found — these tracks aren't in ReccoBeats");
-                          } catch (e) {
-                            setEnrichMsg(e instanceof Error ? e.message : "Lookup failed");
-                          } finally {
-                            setEnriching(false);
-                          }
-                        }}
-                        disabled={enriching}
-                        className="inline-flex items-center gap-2 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors"
-                      >
-                        {enriching ? <><Spinner />Looking up…</> : "Retry BPM lookup"}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={async () => {
+                            setEnriching(true);
+                            setEnrichMsg(null);
+                            try {
+                              const { found, stillMissing } = await runEnrichment(filteredTracks);
+                              const removed = await pruneDeadSpotifyTracks(stillMissing);
+                              const parts: string[] = [];
+                              if (found > 0) parts.push(`Found BPM data for ${found} track${found !== 1 ? "s" : ""}`);
+                              if (removed > 0) parts.push(`removed ${removed} no longer on Spotify`);
+                              setEnrichMsg(parts.length > 0 ? parts.join(", ") : "No BPM data found — these tracks aren't in ReccoBeats");
+                            } catch (e) {
+                              setEnrichMsg(e instanceof Error ? e.message : "Lookup failed");
+                            } finally {
+                              setEnriching(false);
+                            }
+                          }}
+                          disabled={enriching}
+                          className="inline-flex items-center gap-2 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors"
+                        >
+                          {enriching ? <><Spinner />Looking up…</> : "Retry BPM lookup"}
+                        </button>
+                        <button
+                          onClick={saveNoBpmPlaylist}
+                          disabled={savingNoBpm}
+                          title='Save these tracks to a Spotify playlist named "No BPM" — run it through an external BPM tool, export via Exportify, then import the CSV back with the button below'
+                          className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 font-medium text-xs px-4 py-1.5 transition-colors whitespace-nowrap"
+                        >
+                          {savingNoBpm ? <><Spinner />Saving…</> : 'Save to "No BPM"'}
+                        </button>
+                        <input ref={noBpmCsvInputRef} type="file" accept=".csv" onChange={importBpmCsv} className="hidden" />
+                        <button
+                          onClick={() => noBpmCsvInputRef.current?.click()}
+                          disabled={importingBpmCsv}
+                          title='Import an Exportify CSV of the "No BPM" playlist to fill in matching tracks'
+                          className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 font-medium text-xs px-4 py-1.5 transition-colors whitespace-nowrap"
+                        >
+                          {importingBpmCsv ? <><Spinner />Importing…</> : "Import filled CSV"}
+                        </button>
+                      </div>
                       {enrichMsg && <p className="text-xs text-slate-400">{enrichMsg}</p>}
+                      {noBpmSaveMsg && <p className="text-xs text-slate-400">{noBpmSaveMsg}</p>}
+                      {importBpmMsg && <p className="text-xs text-slate-400">{importBpmMsg}</p>}
                     </div>
                   )}
 
@@ -1568,6 +1705,44 @@ function BPMDistribution({
           </div>
           <span className="text-xs text-slate-600">Out</span>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Sprint/high-cadence range (164-180 BPM), one bar per exact BPM — the
+// window the AI DJ mixer targets for hard-effort segments. A track tagged
+// at half tempo (e.g. 82 BPM) counts toward its doubled bucket too, same
+// half/double-time equivalence the mixer itself uses for BPM matching
+// (see _effective_run_tempo / _bpm_distance in ai_dj/workout.py).
+const SPRINT_BPM_MIN = 164;
+const SPRINT_BPM_MAX = 180;
+
+function SprintBpmCounts({ tracks }: { tracks: TrackWithBPM[] }) {
+  const bpms = Array.from({ length: SPRINT_BPM_MAX - SPRINT_BPM_MIN + 1 }, (_, i) => SPRINT_BPM_MIN + i);
+  const counts = bpms.map(bpm =>
+    tracks.filter(t => {
+      const rounded = Math.round(t.bpm);
+      return rounded === bpm || rounded * 2 === bpm;
+    }).length
+  );
+  const max = Math.max(...counts, 1);
+  return (
+    <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5">
+      <h3 className="text-sm font-semibold mb-4 text-slate-400">
+        Sprint BPM counts ({SPRINT_BPM_MIN}–{SPRINT_BPM_MAX})
+        <span className="font-normal text-slate-600"> — half-tempo tracks counted at double</span>
+      </h3>
+      <div className="flex items-end gap-1 h-20">
+        {bpms.map((bpm, i) => (
+          <div key={bpm} className="flex-1 flex flex-col items-center gap-1" title={`${counts[i]} tracks at ${bpm} BPM`}>
+            <span className="text-[10px] font-mono text-slate-500">{counts[i]}</span>
+            <div className="w-full rounded-t" style={{ height: `${Math.max((counts[i] / max) * 56, 4)}px` }}>
+              <div className="w-full h-full rounded-t bg-sky-500" />
+            </div>
+            <span className="text-[9px] text-slate-600 rotate-0">{bpm}</span>
+          </div>
+        ))}
       </div>
     </div>
   );

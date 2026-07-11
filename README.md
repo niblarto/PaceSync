@@ -14,10 +14,11 @@ A Next.js web app for managing a Spotify running playlist based on heart rate zo
 - Runna training calendar integration with zone suggestions and per-pace BPM filter buttons (driven by your real Garmin cadence data)
 - **Song matching**: filter the playlist to songs similar to any track (BPM, musical key, energy)
 - **Song suggestions**: discover new tracks *not* in your playlist that match a seed track by style or tempo (via Last.fm / Deezer / ReccoBeats), and add them to the playlist with one click
-- **Automatic BPM enrichment**: tracks without BPM data are looked up on ReccoBeats automatically
-- **🎧 AI DJ Mix** (optional): build a pace-matched playlist for any Runna workout — including strength sessions (up-tempo, high-energy, any BPM) — with a live progress bar, per-run-type BPM limits, and a pin option so a mix survives future rule changes. Powered by the [AI_DJ companion app](https://github.com/niblarto/AI_DJ). See [AI DJ Mix](#ai-dj-mix-optional) below
+- **Automatic BPM enrichment**: tracks without BPM data are looked up on ReccoBeats automatically, with a Deezer-ISRC fallback for tracks ReccoBeats doesn't know by Spotify ID — and a manual **save-to-playlist / re-import** round-trip in the dashboard for anything neither source can match (see [Tracks without BPM data](#tracks-without-bpm-data))
+- **🎧 AI DJ Mix** (optional): build a pace-matched playlist for any Runna workout — including strength sessions (up-tempo, high-energy, any BPM) — with a live progress bar, per-segment LLM detail, per-run-type BPM limits, and a pin option so a mix survives future rule changes. Choose a **Local LLM** (Ollama, via the [AI_DJ companion app](https://github.com/niblarto/AI_DJ)), **Claude**, or **Gemini** as the backend, with a prompt log and usage/cost tracking in Settings. See [AI DJ Mix](#ai-dj-mix-optional) below
 - Dedup playlist, to remove duplicate tracks
 - Garmin activity stats: pace/cadence/HR charts and activity summaries, read directly from a local [GarminDB](https://github.com/tcgoetz/GarminDB) database
+- **Strava integration** (optional): a `/strava` stats page (recent activities, HR zones), and automatic syncing of Runna workout titles/planned steps onto new Strava activities via webhook. See [Strava Integration](#strava-integration) below
 - Weekly cron job to keep the playlist fresh:-
     - Pull down the tracks of the last show, for the BBC programmes that are currently subcribed to
     - Upload to the active Spotify playlist, then dedupe it.
@@ -68,6 +69,8 @@ Edit `.env.local` and fill in all required values:
 | `GARMINDB_SYNC_WRAPPER` | optional | Path to the GarminDB sync wrapper script (see [GarminDB Integration](#garmindb-integration)) — only needed for the Settings sync-status card |
 | `GARMINDB_PYTHON_BIN` | optional | Path to the Python binary inside your GarminDB venv |
 | `GARMINDB_LOG_PATH` | optional | Path to the GarminDB sync log file |
+| `STRAVA_CLIENT_ID` | optional | From your [Strava API app](https://www.strava.com/settings/api) — can also be set in **Settings → Strava** after deploy |
+| `STRAVA_CLIENT_SECRET` | optional | From your Strava API app — can also be set in **Settings → Strava** after deploy |
 
 To find your **playlist ID**: open the playlist on [open.spotify.com](https://open.spotify.com), copy the URL — the ID is the string after `/playlist/`.
 
@@ -186,8 +189,8 @@ PaceSync can pull tracks from BBC Radio programmes and add them directly to your
 1. Go to the **BBC Radio** page and click **Add BBC Programme**.
 2. Click on a Station (e.g. Radio 2, Radio 6 Music)
 3. Search for a BBC programme by name (e.g. "6 Music's 90s Forever", "Sarah Cox Breakfast Show").
-4. Select the programme from the results — a card will appear showing the most recent episode's tracklist.
-5. Click **Add to Spotify** on the card to add all tracks from that episode to your active playlist immediately.
+4. Select the programme from the results — a card will appear showing the most recent episode's tracklist. The programme is saved by its stable **brand** ID rather than that week's episode ID, so the card keeps resolving to whichever episode is actually current as weeks pass.
+5. Click **Update "\<playlist name>"** on the card to add all tracks from that episode to your active Spotify playlist immediately (or **Save to Spotify** to save the episode as its own standalone playlist instead).
 
 **Automatic weekly updates:**
 
@@ -195,9 +198,9 @@ Once a programme card is added, the weekly cron job (Fridays at 14:00) will auto
 
 **BPM data is fetched automatically.**
 
-When you click **Add to Spotify** on a BBC card, PaceSync looks up each track's audio features (tempo, key, energy, danceability, valence) on [ReccoBeats](https://reccobeats.com) — a free, keyless API that accepts Spotify track IDs — and appends them to the active playlist's CSV. The status message shows how many tracks got BPM data (e.g. *"Added 12 tracks · 11 with BPM data"*), and they appear in zone/pace filters straight away.
+When you click **Update "\<playlist name>"** on a BBC card, PaceSync looks up each track's audio features (tempo, key, energy, danceability, valence) on [ReccoBeats](https://reccobeats.com) — a free, keyless API that accepts Spotify track IDs — and appends them to the active playlist's CSV. The status message shows how many tracks got BPM data (e.g. *"Added 12 tracks · 11 with BPM data"*), and they appear in zone/pace filters straight away.
 
-The rare track ReccoBeats doesn't know stays BPM-less; see [Tracks without BPM data](#tracks-without-bpm-data) below for how to handle those.
+Any track ReccoBeats/Deezer can't match still gets added to Spotify **and** written to the CSV (with blank feature columns, called out in the status message as *"N added without BPM data (will retry)"*) — nothing added through the app is ever silently invisible locally. See [Tracks without BPM data](#tracks-without-bpm-data) below for how to fill those in.
 
 ---
 
@@ -234,11 +237,14 @@ Same discovery pipeline, but ranked with BPM at 70% of the weighting — results
 
 The **All Songs** tile shows a count of tracks with no BPM info (red when non-zero).
 
-- **On dashboard load**, PaceSync automatically tries to fill these in from ReccoBeats — found features are written back into `Running.csv` and the count drops on its own.
+- **On dashboard load**, PaceSync automatically tries to fill these in from ReccoBeats — found features are written back into the active playlist's CSV and the count drops on its own.
+- A track added through the app (BBC card, song suggestions) that ReccoBeats/Deezer can't match is still written to the CSV with blank feature columns rather than being dropped — so it stays visible here and keeps getting retried by the heal sweep, instead of silently existing on Spotify but nowhere locally.
 - **Click the count** to filter the main list to just those tracks. From there you can:
-  - Click **Retry BPM lookup** to re-attempt the ReccoBeats lookup manually
+  - Click **Retry BPM lookup** to re-attempt the ReccoBeats/Deezer lookup manually
+  - Click **Save to "No BPM"** to push just these tracks to a Spotify playlist named `No BPM` — run it through an external BPM-analysis tool, then re-export it via [exportify.net](https://exportify.net)
+  - Click **Import filled CSV** and upload that re-exported CSV — it's matched back to the library by Track URI and fills in only the columns that are still blank (never overwrites data that's already there)
   - Delete tracks that shouldn't be in the playlist (trash icon)
-  - Or re-export the playlist from [exportify.net](https://exportify.net) and re-upload via **Settings → Import Playlist** for anything ReccoBeats doesn't know
+  - Or re-export the *whole* playlist from [exportify.net](https://exportify.net) and re-upload via **Settings → Import Playlist** if you'd rather refresh everything at once
 
 ---
 
@@ -277,6 +283,7 @@ The mixing engine is **[AI_DJ](https://github.com/niblarto/AI_DJ)**, a companion
 - **Run BPM limits** (Settings → AI DJ card): set a min/max BPM per run type (warm up, work, easy, cool down, rest) that overrides the automatic cadence matching — leave blank for automatic. A half-time track (e.g. 87 BPM under a 174 cadence) counts at its doubled tempo for these limits.
 - Every mix has **one track per artist** (no repeats, even across collaborations) and demotes tracks you've already run to at that pace band in favour of unplayed ones — unless you've thumbs-upped them, which always keeps them at the front.
 - The playlist is sized to the workout's slowest projected duration (from Runna's own estimate) rather than padded with arbitrary extra tracks; section changes land on track boundaries so a song never cuts off mid-way when the pace changes.
+- **Candidate pool per section**: every track that survives a section's BPM/energy filter is sent to the LLM in that section's prompt — there's no fixed sample size or truncation. If BPM/energy is too tight to find enough tracks, the filter widens in steps until at least a floor amount is available (see [AI_DJ's README](https://github.com/niblarto/AI_DJ#workout-mode-runna) for the exact mechanics).
 
 **Using it:**
 1. Expand any runnable workout — or a strength session — in the **Runna Schedule** card and click **🎧 AI DJ Mix**. A live progress bar tracks each section as it builds.
@@ -291,29 +298,40 @@ The mixing engine is **[AI_DJ](https://github.com/niblarto/AI_DJ)**, a companion
 
 **Wake-on-LAN:** if the AI DJ service runs on a PC that sleeps, Settings has a **⏻ Wake PC** button next to a saved MAC address — it sends a magic packet from the Pi and polls until the service answers. The Connected/Unreachable indicator on the service URL doubles as an up/down status for the PC.
 
-### Optional local LLM
+**Remix from the tracks card:** the central track list's **🎧 Remix** button (shown once a mix is loaded) delegates to the same build path as the Runna Schedule card's own Mix/Remix button — clicking it auto-expands the matching workout in the schedule card and drives its live progress bar and per-segment detail line, rather than rebuilding silently.
 
-Track selection within each section can happen two ways:
+### Choosing an LLM backend: Local, Claude, or Gemini
 
-- **With an LLM** (default when available): the service calls a local [Ollama](https://ollama.com) model (`qwen2.5:7b` by default) with a mood-aware prompt per section (e.g. *"Hard effort — driving, motivating, relentless"* for work, *"Recovery — calm"* for rest) to pick and order tracks from the BPM/energy-filtered candidate pool.
-- **Without an LLM**: tracks are chosen purely by [bpm_matcher](bpm_matcher/)'s weighted distance — a deterministic greedy nearest-neighbour chain over BPM, Camelot key, energy, danceability and valence. No GPU or model download needed; runs fine on a Raspberry Pi.
+Track selection within each section can happen three ways, chosen per the **Settings → 🎧 AI DJ** card's provider toggle:
+
+- **Local LLM** (via the [AI_DJ](https://github.com/niblarto/AI_DJ) service): calls a local [Ollama](https://ollama.com) model (`qwen3.5:9b` by default) running on a separate always-on-required PC, with a mood-aware prompt per section (e.g. *"Hard effort — driving, motivating, relentless"* for work, *"Recovery — calm"* for rest) to pick and order tracks from the BPM/energy-filtered candidate pool.
+- **Claude**: calls the Claude API directly — model and effort level (low/medium/high/xhigh/max) are selectable in Settings. Requires a Claude API key with prepaid credit at [console.anthropic.com](https://console.anthropic.com).
+- **Gemini**: calls the Gemini API directly — model selectable in Settings. Has a free tier (with a low daily request cap per model/project) before requiring billing.
+- **No LLM at all**: tracks are chosen purely by [bpm_matcher](bpm_matcher/)'s weighted distance — a deterministic greedy nearest-neighbour chain over BPM, Camelot key, energy, danceability and valence. This is the automatic fallback (see below), not a separate toggle.
+
+**Claude and Gemini mixes run on the Pi itself** via a small bridge script (`scripts/ai_dj_bridge.py`), calling the vendored `ai_dj` package directly — they don't depend on the separate AI DJ service PC being on at all. Only the **Local LLM** provider needs that service reachable, since it's the one running Ollama.
 
 **The LLM is entirely optional and fails gracefully**, at two levels:
 
-- If the service is reachable but **Ollama isn't** (not running, model not pulled, or started with `--no-llm`), the service falls back to the deterministic distance-chain per section — the mix still completes, just without the LLM's picks.
-- If the **whole service is unreachable** (PC off or asleep), PaceSync builds the mix **on the Pi itself** using the same vendored workout mixer in no-LLM mode. As a bonus, the on-Pi fallback reads your real Garmin cadence data for exact pace→BPM matching (the remote service uses a linear approximation). Either way, the manual button and the 15:30 cron keep working.
+- If the Local LLM service is reachable but **Ollama isn't** (not running, model not pulled, or started with `--no-llm`), it falls back to the deterministic distance-chain per section — the mix still completes, just without the LLM's picks.
+- If the **whole Local LLM service is unreachable** (PC off or asleep), PaceSync builds the mix **on the Pi itself** using the same vendored workout mixer in no-LLM mode. As a bonus, the on-Pi fallback reads your real Garmin cadence data for exact pace→BPM matching (the remote service uses a linear approximation). Either way, the manual button and the 15:30 cron keep working.
+- A per-segment Claude/Gemini API failure (rate limit, quota exhausted, network) falls back to the distance-chain for that segment only — the mix still completes and a warning banner lists which segments were affected, rather than failing the whole build or silently shipping a lesser mix.
 
-**Setting it up:**
+**LLM prompt log:** the bottom of the Settings AI DJ card shows a rolling log of the last 50 LLM calls — timestamp, model, success/failure, duration, and the full prompt on expand. Claude/Gemini calls (on the Pi) and Ollama calls (on the service PC) are merged into one list, tagged with a **Pi**/**PC** badge so you can tell which host handled each call.
 
-1. **Run the [AI_DJ](https://github.com/niblarto/AI_DJ) service** somewhere on your network (a PC with Ollama for LLM-assisted mixes, or the Pi itself with `--no-llm` for the deterministic-only mode — it's pure Python, no GPU required). Clone the repo and follow its README; PaceSync calls two of its endpoints:
-   - `POST /mix` `{title, segments, csv, easyPace?, useLlm?}` → `{trackUris, totalSec, timeline}`
-   - `GET /health` → `{ok, llm}`
-2. If running with LLM support, install [Ollama](https://ollama.com/download) and pull a model: `ollama pull qwen2.5:7b` (or set a different model — see the [AI_DJ README](https://github.com/niblarto/AI_DJ#setup)).
+**Usage & cost tracking** (Claude/Gemini only): the Settings AI DJ card shows a running total of input/output tokens, request count, estimated cost, and error count per model — so a rate-limited or misconfigured key shows up clearly instead of mixes silently degrading.
+
+**Setting it up (Local LLM):**
+
+1. **Run the [AI_DJ](https://github.com/niblarto/AI_DJ) service** somewhere on your network (a PC with Ollama for LLM-assisted mixes, or the Pi itself with `--no-llm` for the deterministic-only mode — it's pure Python, no GPU required). Clone the repo and follow its README.
+2. Install [Ollama](https://ollama.com/download) and pull a model: `ollama pull qwen3.5:9b` (or set a different model — see the [AI_DJ README](https://github.com/niblarto/AI_DJ#setup)).
 3. If the service runs on a separate machine from the Pi, **allow inbound traffic on its port through the firewall** — and if using Windows, scope the rule to cover whatever network profile that connection uses (Private *and* Public), since Windows can silently reclassify a network and drop a Private-only rule.
 4. In PaceSync, go to **Settings**, scroll to the bottom of the **middle column**, and find the **🎧 AI DJ** card:
-   - Enter the service's URL (e.g. `http://192.168.1.50:8765`) and click **Save**.
+   - Select **Local LLM**, enter the service's URL (e.g. `http://192.168.1.50:8765`) and click **Save**.
    - A live connection indicator appears next to the URL field — green "Connected · LLM ready" (or "no LLM (distance-chain only)" if running with `--no-llm`), red with the failure reason if unreachable. It's checked automatically as you type and every 60 seconds while the page is open, and there's a refresh icon to re-check on demand.
    - Once a URL is saved, flip the **enable** toggle to start showing the AI DJ Mix button on Runna workouts.
+
+**Setting it up (Claude or Gemini):** select **Claude** or **Gemini** in the same card, paste an API key, pick a model (and effort level for Claude), and enable. No separate service PC needed — mixes build on the Pi directly.
 
 > The `ai-dj-config.json` this creates on the Pi is gitignored, same as other personal settings files.
 
@@ -386,6 +404,29 @@ same topic as the other push notifications below.
 - GarminDB occasionally fails to download a FIT file for an activity that Garmin Connect only stores as GPX (no FIT archived) — those activities won't have per-second speed/cadence data, which is a Garmin Connect limitation, not a PaceSync or GarminDB bug.
 - If an activity fails to import with an `UnknownEnumValue` error on `hr_zones_method`, that's a known GarminDB parsing edge case for certain FIT files — the rest of the sync still completes normally.
 - The intial data pull from Garmin to the local database can take hours, the transfer is throttled so that excessive data grab thresholds are not breached, leading to 429 errors
+
+---
+
+## Strava Integration
+
+PaceSync can connect to Strava for two things: a stats page, and automatic syncing of Runna workout info onto your Strava activities.
+
+**Setting it up:**
+
+1. Create a [Strava API app](https://www.strava.com/settings/api) and note its **Client ID** and **Client Secret**.
+2. In PaceSync, go to **Settings → Strava**, enter both, and save.
+3. Click **Connect** — you'll be sent to Strava to authorize, then redirected back. The requested scopes let PaceSync read your activities and HR zones, and write activity titles/descriptions (needed for the auto-sync below).
+4. Once connected, toggle **Enable auto-update** to subscribe to a Strava webhook — new activities are picked up automatically (see below). Disable to unsubscribe.
+
+Alternatively, set `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` in `.env.local` before deploying — the Settings page value takes precedence if set.
+
+**The `/strava` page:** recent activities (distance, duration, pace/speed, HR) and your heart-rate zone breakdown, read from the Strava API. Linked from the dashboard header.
+
+**Automatic Runna title sync:** when auto-update is enabled, a Strava webhook notifies PaceSync as soon as a new activity is created. If it matches a Runna workout for that date, PaceSync appends the workout's title and planned steps (pace steps for a run, the exercise list for a strength session) onto the Strava activity's name/description — waiting briefly first in case a third-party auto-renamer (e.g. from your watch) finishes renaming it first, so the sync doesn't get overwritten. Each run in the **Runna Summary** card also shows a **Strava ↗** link and a **Sync Strava title** button to retry this manually if it didn't run automatically (e.g. auto-update was off, or the webhook hadn't been set up yet).
+
+Once you've reviewed and saved an AI DJ mix's pacing for a run (see [AI DJ Mix](#ai-dj-mix-optional)), the tracklist is also appended to that run's Strava description.
+
+**HR zones from Strava:** Settings → Heart Rate Settings can pull your five-zone HR set directly from your Strava account (in addition to Garmin or manual entry) — an alternative zone source, not a separate feature from the sync above.
 
 ---
 

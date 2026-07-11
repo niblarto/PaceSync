@@ -76,6 +76,7 @@ FILES = [
     ('app/api/tracks/delete/route.ts',            'app/api/tracks/delete/route.ts'),
     ('app/api/tracks/add/route.ts',               'app/api/tracks/add/route.ts'),
     ('app/api/tracks/update-features/route.ts',   'app/api/tracks/update-features/route.ts'),
+    ('app/api/tracks/import-bpm-csv/route.ts',    'app/api/tracks/import-bpm-csv/route.ts'),
     ('app/api/bbc/tracks/route.ts',               'app/api/bbc/tracks/route.ts'),
     ('app/api/bbc/episode-info/route.ts',         'app/api/bbc/episode-info/route.ts'),
     ('app/api/bbc/schedule/route.ts',             'app/api/bbc/schedule/route.ts'),

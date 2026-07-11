@@ -9,6 +9,15 @@ export default async function HomePage() {
 
   return (
     <main className="h-screen flex flex-col overflow-hidden">
+      {/* Top bar — sign-in stays reachable even if the hero/feature grid
+          below runs taller than the viewport (e.g. small mobile screens),
+          instead of being buried inside the hero where it could scroll
+          out of view. */}
+      <div className="shrink-0 flex items-center justify-between px-4 py-3 bg-slate-950 border-b border-slate-900">
+        <span className="font-semibold text-sm">PaceSync</span>
+        <SignInButton compact />
+      </div>
+
       {/* Hero */}
       <div className="relative flex-1 min-h-0 flex flex-col items-center justify-center px-4 text-center py-6 overflow-hidden">
         {/* Background image */}
@@ -36,8 +45,6 @@ export default async function HomePage() {
             Filter your Spotify playlists by BPM across your heart rate zones —
             so your music always matches your effort.
           </p>
-
-          <SignInButton />
         </div>
       </div>
 
@@ -61,6 +68,16 @@ export default async function HomePage() {
               body: "Your training schedule with zone suggestions and one-tap BPM filters for each session pace.",
             },
             {
+              icon: "🎧",
+              title: "AI DJ Mix",
+              body: "Auto-build a pace-matched playlist for any Runna workout, powered by Claude, Gemini, or a local LLM.",
+            },
+            {
+              icon: "📻",
+              title: "BBC Radio",
+              body: "Pull tracklists from BBC radio shows straight into your playlist, refreshed automatically every week.",
+            },
+            {
               icon: "✨",
               title: "Song discovery",
               body: "Find new songs matching any track by style or tempo, and add them straight to your playlist.",
@@ -74,6 +91,11 @@ export default async function HomePage() {
               icon: "⌚",
               title: "Garmin insights",
               body: "Pace, cadence and heart rate charts from your own runs — powering pace-to-BPM lookups.",
+            },
+            {
+              icon: "🟠",
+              title: "Strava sync",
+              body: "Auto-tag Strava activities with your Runna workout details, and browse recent runs and zones.",
             },
           ].map((f) => (
             <div
@@ -91,7 +113,14 @@ export default async function HomePage() {
       </div>
 
       <footer className="bg-slate-950 text-center text-slate-600 text-xs py-2.5 border-t border-slate-900 shrink-0">
-        PaceSync — not affiliated with Spotify
+        PaceSync — not affiliated with Spotify · BPM data via{" "}
+        <a href="https://reccobeats.com" target="_blank" rel="noopener noreferrer" className="hover:text-slate-400 underline underline-offset-2 transition-colors">
+          ReccoBeats
+        </a>
+        {" "}and{" "}
+        <a href="https://www.deezer.com" target="_blank" rel="noopener noreferrer" className="hover:text-slate-400 underline underline-offset-2 transition-colors">
+          Deezer
+        </a>
       </footer>
     </main>
   );
