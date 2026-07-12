@@ -9,6 +9,7 @@ import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
 import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArtError } from "./TrackRow";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
+import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
 import { useRunningPlaylist } from "./useRunningPlaylist";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
 
@@ -309,6 +310,10 @@ export function DashboardClient({ spotifyUser }: Props) {
   const noBpmCsvInputRef = useRef<HTMLInputElement>(null);
   const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[] } | null>(null);
   const [remixing, setRemixing] = useState(false);
+  // Manual close for the pace/BPM chart — also closes automatically whenever
+  // the mix becomes stale (a track was deleted) or a remix starts, since the
+  // chart's data would no longer match the actual track list either way.
+  const [chartDismissed, setChartDismissed] = useState(false);
   const runnaScheduleRef = useRef<RunnaScheduleHandle>(null);
   const [todaysRunSaving, setTodaysRunSaving] = useState(false);
   const [todaysRunSaved, setTodaysRunSaved] = useState(false);
@@ -631,6 +636,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     setNoBpmFilter(false);
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
     setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false, avoidUris });
+    setChartDismissed(false);
     setPlaylistName(name);
     setPinSaved(false);
     setPinError(null);
@@ -1472,6 +1478,30 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     />
                   )}
                 </div>
+              </div>
+            )}
+
+            {/* Pace/BPM chart for the current AI DJ mix — sits directly
+                below the Results/track-list card, at column 2's own
+                vertical position (so it lands wherever the track list ends),
+                but is widened and shifted left to visually lay over column 1
+                too. Column 1 keeps its own layout/height — this only
+                overlaps it visually (relative + negative margin, not
+                absolute positioning, so it still pushes the page content
+                below it down normally instead of floating detached). */}
+            {aiDjMix && !aiDjMix.stale && !remixing && !chartDismissed && aiDjMix.timeline?.length > 0 && (
+              <div className="lg:-ml-[304px] lg:w-[calc(100%+304px)] rounded-xl bg-slate-900/85 backdrop-blur-sm border-4 border-purple-500/40 p-5">
+                <div className="flex items-start justify-between gap-4">
+                  <h2 className="font-semibold text-sm text-slate-300 mb-1">Pace &amp; BPM — &quot;{aiDjMix.workoutTitle}&quot;</h2>
+                  <button
+                    onClick={() => setChartDismissed(true)}
+                    title="Close chart"
+                    className="text-slate-500 hover:text-slate-300 transition-colors text-lg leading-none shrink-0"
+                  >
+                    ×
+                  </button>
+                </div>
+                <MixPaceChart tracks={timelineToChartTracks(aiDjMix.timeline)} />
               </div>
             )}
 

@@ -1135,22 +1135,41 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                           )}
                           {snap && snap.tracks?.length > 0 && (
                             <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-1">
-                              <p className="text-xs text-purple-300/80 font-medium">
-                                {snap.pinned ? "📌 Pinned mix" : "🎧 Saved mix"} — {snap.tracks.length} tracks
+                              <p className="text-xs text-purple-300/80 font-medium flex items-center justify-between gap-2">
+                                <span>{snap.pinned ? "📌 Pinned mix" : "🎧 Saved mix"} — {snap.tracks.length} tracks</span>
+                                <Link
+                                  href={`/mix/${w.date}`}
+                                  onClick={e => e.stopPropagation()}
+                                  className="text-[11px] text-purple-300 hover:text-purple-200 underline shrink-0"
+                                >
+                                  View chart →
+                                </Link>
                               </p>
                               <div className="max-h-44 overflow-y-auto no-scrollbar space-y-0.5">
                                 {snap.tracks.map((t, i) => {
                                   const mm = String(Math.floor(t.startsAtSec / 60)).padStart(2, "0");
                                   const ss = String(Math.floor(t.startsAtSec % 60)).padStart(2, "0");
                                   const spm = t.tempo != null ? String(Math.round(t.tempo)).padStart(3, "0") : "—";
-                                  return (
-                                    <p key={i} className="text-[11px] text-slate-400 truncate">
+                                  const label = (
+                                    <>
                                       <span className="text-slate-600 font-mono">
                                         {mm}:{ss} - {spm}
                                       </span>
                                       {"   "}
                                       {t.name} — <span className="text-slate-500">{t.artist}</span>
+                                    </>
+                                  );
+                                  return t.uri ? (
+                                    <p key={i} className="text-[11px] text-slate-400 truncate">
+                                      <button
+                                        onClick={e => { e.stopPropagation(); openInSpotify(t.uri!); }}
+                                        className="hover:text-slate-200 truncate text-left"
+                                      >
+                                        {label}
+                                      </button>
                                     </p>
+                                  ) : (
+                                    <p key={i} className="text-[11px] text-slate-400 truncate">{label}</p>
                                   );
                                 })}
                               </div>
