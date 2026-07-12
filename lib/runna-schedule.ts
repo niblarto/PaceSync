@@ -233,10 +233,59 @@ function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPast
     }
   }
 
+  fillRestDays(workouts, pastRuns, lookback, cutoff);
+
   workouts.sort((a, b) => a.date.localeCompare(b.date));
   pastRuns.sort((a, b) => b.date.localeCompare(a.date)); // most recent first
 
   return { workouts, pastRuns };
+}
+
+// Runna's calendar only emits an event for a day when something is actually
+// scheduled — a day with nothing planned has no VEVENT at all, not an
+// explicit rest entry. Without this, such days are just missing from both
+// the Schedule and Summary cards instead of reading as a rest day. Synthesize
+// a "rest" placeholder for every date in the display window (lookback through
+// today for the Summary card, today through cutoff for Schedule) that has
+// neither an upcoming workout nor a past run.
+function fillRestDays(workouts: RunnaWorkout[], pastRuns: RunnaPastRun[], lookback: string, cutoff: string) {
+  const today = new Date().toISOString().slice(0, 10);
+  const covered = new Set([...workouts.map(w => w.date), ...pastRuns.map(r => r.date)]);
+
+  const d = new Date(lookback + "T00:00:00");
+  const end = new Date(cutoff + "T00:00:00");
+  for (; d <= end; d.setDate(d.getDate() + 1)) {
+    const date = d.toISOString().slice(0, 10);
+    if (covered.has(date)) continue;
+
+    if (date < today) {
+      pastRuns.push({
+        uid: `SYNTHETIC_REST_${date}`,
+        date,
+        title: "Rest",
+        type: "rest",
+        distanceMi: null,
+        durationStr: null,
+        avgPace: null,
+        laps: [],
+        planSteps: [],
+        appUrl: null,
+      });
+    } else {
+      workouts.push({
+        uid: `SYNTHETIC_REST_${date}`,
+        date,
+        summary: "Rest",
+        title: "Rest",
+        type: "rest",
+        distanceMi: null,
+        durationSec: 0,
+        segments: [],
+        appUrl: null,
+        suggestedZone: null,
+      });
+    }
+  }
 }
 
 // ── Fetch + parse ────────────────────────────────────────────────────────────

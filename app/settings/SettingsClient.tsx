@@ -213,6 +213,70 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     lastRun: string | null;
   } | null>(null);
 
+  // ── Sprint BPM table + copy-to-playlist ────────────────────────────────────
+  const [activeTracks, setActiveTracks] = useState<{ uri: string; name: string; artist: string; bpm: number }[]>([]);
+  const [activeTracksLoaded, setActiveTracksLoaded] = useState(false);
+  const [sprintCopyTarget, setSprintCopyTarget] = useState("");
+  const [sprintCopying, setSprintCopying] = useState(false);
+  const [sprintCopyMsg, setSprintCopyMsg] = useState<string | null>(null);
+  const [sprintCopyError, setSprintCopyError] = useState<string | null>(null);
+  const SPRINT_BPM_MIN = 164;
+  const SPRINT_BPM_MAX = 180;
+
+  useEffect(() => {
+    fetch("/api/settings/active-tracks")
+      .then(r => r.json())
+      .then((d: { tracks?: typeof activeTracks }) => { setActiveTracks(d.tracks ?? []); setActiveTracksLoaded(true); })
+      .catch(() => setActiveTracksLoaded(true));
+  }, []);
+
+  async function copySprintTracksToPlaylist() {
+    if (!sprintCopyTarget) { setSprintCopyError("Choose a target playlist first."); return; }
+    const sprintTracks = activeTracks.filter(t => {
+      const rounded = Math.round(t.bpm);
+      return rounded >= SPRINT_BPM_MIN && rounded <= SPRINT_BPM_MAX;
+    });
+    if (sprintTracks.length === 0) { setSprintCopyError("No tracks in the sprint range to copy."); return; }
+
+    const token = session?.accessToken;
+    if (!token) { setSprintCopyError("Not signed in"); return; }
+
+    setSprintCopying(true);
+    setSprintCopyError(null);
+    setSprintCopyMsg(null);
+    try {
+      await addTracksBrowser(sprintCopyTarget, sprintTracks.map(t => t.uri), token);
+
+      const res = await fetch("/api/tracks/copy-to-playlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetPlaylistId: sprintCopyTarget, uris: sprintTracks.map(t => t.uri) }),
+      });
+      const d = await res.json() as { error?: string; appended?: number; merged?: number };
+      if (!res.ok) throw new Error(d.error ?? "Failed to copy");
+
+      const targetName = knownPlaylists.find(p => p.id === sprintCopyTarget)?.name ?? "target playlist";
+      setSprintCopyMsg(
+        `Copied ${sprintTracks.length} track${sprintTracks.length === 1 ? "" : "s"} to "${targetName}"` +
+        ((d.merged ?? 0) > 0 ? ` · ${d.merged} already there had data filled in` : "")
+      );
+      loadPlaylistList();
+    } catch (e) {
+      setSprintCopyError(e instanceof Error ? e.message : "Failed to copy tracks");
+    } finally {
+      setSprintCopying(false);
+    }
+  }
+
+  // Live progress for a running CSV heal sweep (BPM/audio-feature backfill
+  // after a big import) — polled while running so a large library doesn't
+  // look silently stuck. See lib/csv-heal.ts.
+  const [healProgress, setHealProgress] = useState<{
+    running: boolean; phase: "features" | "duration" | null;
+    current: number; total: number; healedSoFar: number;
+    startedAt: string | null; finishedAt: string | null;
+  } | null>(null);
+
   // ── CSV import state ───────────────────────────────────────────────────────
   const [csvPlaylistName, setCsvPlaylistName] = useState("");
   const [csvStagedText, setCsvStagedText] = useState<string | null>(null);
@@ -223,6 +287,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [csvSaved, setCsvSaved] = useState(false);
   const [csvImportMode, setCsvImportMode] = useState<"overwrite" | "append">("overwrite");
   const csvFileRef = useRef<HTMLInputElement>(null);
+
+  // ── Append-to-active-playlist CSV import state ─────────────────────────────
+  const [appendCsvStagedText, setAppendCsvStagedText] = useState<string | null>(null);
+  const [appendCsvFileName, setAppendCsvFileName] = useState<string | null>(null);
+  const [appendCsvTrackCount, setAppendCsvTrackCount] = useState<number | null>(null);
+  const [appendCsvError, setAppendCsvError] = useState<string | null>(null);
+  const [appendCsvSaving, setAppendCsvSaving] = useState(false);
+  const [appendCsvSaved, setAppendCsvSaved] = useState<{ appended: number; merged: number } | null>(null);
+  const appendCsvFileRef = useRef<HTMLInputElement>(null);
 
   // ── AI DJ library import state ─────────────────────────────────────────────
   const [libPlaylistName, setLibPlaylistName] = useState("");
@@ -236,11 +309,48 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [libSaving, setLibSaving] = useState(false);
   const [libSavedMsg, setLibSavedMsg] = useState<string | null>(null);
   const [libFileName, setLibFileName] = useState<string | null>(null);
+  // Rate-limit cooldown from the last lookup batch, so a page reload while
+  // waiting doesn't lose track of "N tracks left, retry after HH:MM" — a
+  // large library (thousands of tracks) can take multiple daily retries to
+  // fully import since Spotify's dev-mode rate limit has no way to raise it.
+  const [libRateLimitClearsAt, setLibRateLimitClearsAt] = useState<string | null>(null);
+  const LIB_STORAGE_KEY = "ai-dj-library-import-progress";
 
   const [cronRunning, setCronRunning] = useState(false);
   const [cronResults, setCronResults] = useState<{ name: string; matched: number; found: number; error?: string }[] | null>(null);
   const [cronSummary, setCronSummary] = useState<{ totalMatched: number; dedupRemoved: number; dedupRemaining: number } | null>(null);
   const [cronError, setCronError] = useState<string | null>(null);
+
+  // Restore an in-progress library import (partial matches + rate-limit
+  // cooldown) so it survives a reload while waiting for Spotify's limit to clear.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LIB_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as {
+        fileName?: string;
+        tracks?: typeof libTracks;
+        clearsAt?: string;
+      };
+      if (saved.tracks?.length) setLibTracks(saved.tracks);
+      if (saved.fileName) setLibFileName(saved.fileName);
+      if (saved.clearsAt) setLibRateLimitClearsAt(saved.clearsAt);
+    } catch { /* corrupt/old entry — ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist whenever the import state changes so it's there after a reload.
+  useEffect(() => {
+    if (libTracks.length === 0 && !libRateLimitClearsAt) {
+      localStorage.removeItem(LIB_STORAGE_KEY);
+      return;
+    }
+    try {
+      localStorage.setItem(LIB_STORAGE_KEY, JSON.stringify({
+        fileName: libFileName, tracks: libTracks, clearsAt: libRateLimitClearsAt,
+      }));
+    } catch { /* storage full/unavailable — best-effort only */ }
+  }, [libTracks, libFileName, libRateLimitClearsAt]);
 
   useEffect(() => {
     fetch("/api/settings/hr-zones")
@@ -576,7 +686,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [cronLog, setCronLog] = useState<{ ts: string; job: string; message: string }[]>([]);
 
   // ── Known playlists (switch / delete) ──────────────────────────────────────
-  const [knownPlaylists, setKnownPlaylists] = useState<{ name: string; id: string; csvFile: string }[]>([]);
+  const [knownPlaylists, setKnownPlaylists] = useState<{ name: string; id: string; csvFile: string; trackCount?: number | null }[]>([]);
   const [playlistsLoaded, setPlaylistsLoaded] = useState(false);
   const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
@@ -588,7 +698,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   function loadPlaylistList() {
     fetch("/api/settings/playlists")
       .then(r => r.json())
-      .then((d: { playlists?: { name: string; id: string; csvFile: string }[]; activeId?: string }) => {
+      .then((d: { playlists?: { name: string; id: string; csvFile: string; trackCount?: number | null }[]; activeId?: string }) => {
         setKnownPlaylists(d.playlists ?? []);
         setActivePlaylistId(d.activeId ?? null);
         setPlaylistsLoaded(true);
@@ -712,6 +822,36 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
     };
   }, [garminConfigured, fetchSyncStatus]);
+
+  // CSV heal-sweep progress polling — 3s while running, checked once on
+  // mount in case a sweep from a prior save is still in flight, stops once
+  // it reports done.
+  const healTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const healCancelledRef = useRef(false);
+
+  const fetchHealStatus = useCallback(async () => {
+    if (healCancelledRef.current) return;
+    if (healTimerRef.current) clearTimeout(healTimerRef.current);
+    try {
+      const res = await fetch("/api/settings/heal-status");
+      if (res.ok && !healCancelledRef.current) {
+        const data = await res.json() as { progress?: typeof healProgress };
+        setHealProgress(data.progress ?? null);
+        if (data.progress?.running) {
+          healTimerRef.current = setTimeout(fetchHealStatus, 3_000);
+        }
+      }
+    } catch { /* stop polling on error — next save will restart it */ }
+  }, []);
+
+  useEffect(() => {
+    healCancelledRef.current = false;
+    fetchHealStatus();
+    return () => {
+      healCancelledRef.current = true;
+      if (healTimerRef.current) clearTimeout(healTimerRef.current);
+    };
+  }, [fetchHealStatus]);
 
   useEffect(() => {
     fetch("/api/bbc/programmes")
@@ -1119,6 +1259,57 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }
 
+  // Appends an Exportify CSV straight to whichever playlist is currently
+  // active (per "Select playlist" above) — no name/target picking, unlike
+  // the named-playlist import above. Local CSV only, same as that flow
+  // (save-default-playlist never touches Spotify itself).
+  function handleAppendCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setAppendCsvError(null);
+    setAppendCsvSaved(null);
+    setAppendCsvStagedText(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string;
+      const lines = text.replace(/\r/g, "").split("\n").filter(Boolean);
+      if (lines.length < 2) { setAppendCsvError("File appears to be empty."); return; }
+      const header = lines[0].toLowerCase();
+      if (!header.includes("track") && !header.includes("name") && !header.includes("uri")) {
+        setAppendCsvError("Doesn't look like an Exportify CSV — check the file and try again."); return;
+      }
+      setAppendCsvFileName(file.name);
+      setAppendCsvTrackCount(lines.length - 1);
+      setAppendCsvStagedText(text);
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  async function appendCsvToActivePlaylist() {
+    if (!appendCsvStagedText) return;
+    setAppendCsvSaving(true);
+    setAppendCsvError(null);
+    try {
+      const res = await fetch("/api/save-default-playlist?mode=append", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: appendCsvStagedText,
+      });
+      const d = await res.json() as { error?: string; appended?: number; merged?: number };
+      if (!res.ok) throw new Error(d.error ?? "Failed to append");
+      setAppendCsvSaved({ appended: d.appended ?? 0, merged: d.merged ?? 0 });
+      setAppendCsvStagedText(null);
+      invalidateRunningPlaylistCache();
+      loadPlaylistList();
+      fetchHealStatus();
+    } catch (e) {
+      setAppendCsvError(e instanceof Error ? e.message : "Failed to append — try again.");
+    } finally {
+      setAppendCsvSaving(false);
+    }
+  }
+
   function parseCsvRowLocal(line: string): string[] {
     const result: string[] = [];
     let current = "";
@@ -1130,6 +1321,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
     result.push(current.trim());
     return result;
+  }
+
+  // Some CSV exporters double-encode: a non-breaking space (U+00A0) gets
+  // UTF-8-encoded once, then those bytes get misread as Latin-1 and
+  // UTF-8-encoded again — the NBSP surfaces as a stray "Â" (U+00C2) glued
+  // onto the adjacent word, breaking Spotify search matches. Strip it and
+  // fold any literal NBSPs to regular spaces before searching.
+  function cleanMojibake(s: string): string {
+    return s.replace(/Â/g, "").replace(/ /g, " ").trim();
   }
 
   async function addTracksBrowser(playlistId: string, uris: string[], token: string): Promise<void> {
@@ -1170,7 +1370,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   async function runLibraryLookup(
     tracks: { title: string; artist: string }[],
     bypassCache: boolean
-  ): Promise<{ tracks: LibTrack[]; warning: string | null }> {
+  ): Promise<{ tracks: LibTrack[]; warning: string | null; clearsAt: string | null }> {
     const token = session?.accessToken;
     if (!token) throw new Error("Not signed in");
 
@@ -1222,14 +1422,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         // Stop here rather than silently continuing to burn through misses;
         // whatever matched so far is still returned to the caller.
         if (chunkRetryAfter !== null) {
-          const clearsAt = new Date(Date.now() + chunkRetryAfter * 1000);
+          const clearsAtDate = new Date(Date.now() + chunkRetryAfter * 1000);
           const today = new Date();
-          const isTomorrow = clearsAt.toDateString() !== today.toDateString();
-          const timeStr = clearsAt.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).toLowerCase().replace(" ", "");
+          const isTomorrow = clearsAtDate.toDateString() !== today.toDateString();
+          const timeStr = clearsAtDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).toLowerCase().replace(" ", "");
           const clearsAtStr = isTomorrow ? `${timeStr} tomorrow` : timeStr;
           return {
             tracks: combined,
             warning: `Spotify rate-limited the search — stopped after ${chunkStart + chunk.length}/${tracks.length} tracks checked. Clears around ${clearsAtStr}.`,
+            clearsAt: clearsAtDate.toISOString(),
           };
         }
 
@@ -1237,7 +1438,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         // doesn't itself trip Spotify's rate limit.
         if (chunkStart + LIBRARY_LOOKUP_CHUNK_SIZE < tracks.length) await new Promise(r => setTimeout(r, 300));
       }
-      return { tracks: combined, warning: null };
+      return { tracks: combined, warning: null, clearsAt: null };
     } finally {
       setLibLoading(false);
       setLibProgress(0);
@@ -1251,6 +1452,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setLibError(null);
     setLibSavedMsg(null);
     setLibTracks([]);
+    setLibRateLimitClearsAt(null);
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const text = ev.target?.result as string;
@@ -1271,11 +1473,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
       setLibFileName(file.name);
       try {
-        const { tracks, warning } = await runLibraryLookup(
-          parsed.map(row => ({ title: row[idxName], artist: row[idxArtist] })),
+        const { tracks, warning, clearsAt } = await runLibraryLookup(
+          parsed.map(row => ({ title: cleanMojibake(row[idxName]), artist: cleanMojibake(row[idxArtist]) })),
           false
         );
         setLibTracks(tracks);
+        setLibRateLimitClearsAt(clearsAt);
         if (warning) setLibError(warning);
       } catch (err) {
         setLibError(err instanceof Error ? err.message : "Failed to look up tracks");
@@ -1291,8 +1494,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     const misses = libTracks.filter(t => !t.uri);
     if (!misses.length) return;
     setLibError(null);
+    setLibRateLimitClearsAt(null);
     try {
-      const { tracks: result, warning } = await runLibraryLookup(
+      const { tracks: result, warning, clearsAt } = await runLibraryLookup(
         misses.map(t => ({ title: t.originalTitle, artist: t.originalArtist })),
         true
       );
@@ -1302,6 +1506,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         const updated = byKey.get(`${t.originalTitle}|||${t.originalArtist}`);
         return updated ?? t;
       }));
+      setLibRateLimitClearsAt(clearsAt);
       if (warning) setLibError(warning);
     } catch (err) {
       setLibError(err instanceof Error ? err.message : "Failed to retry misses");
@@ -1334,15 +1539,34 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       }
 
       // Keep the local library CSV (used for BPM/pace matching) in step with
-      // whatever just landed in the Spotify playlist — same append/overwrite mode.
-      const header = "Track URI,Track Name,Artist Name(s)";
-      const rows = matched.map(t => [t.uri, t.name, t.artistName].map(csvEscapeLocal).join(","));
+      // whatever just landed in the Spotify playlist — same append/overwrite
+      // mode. Full Exportify-shaped header (not just URI/Name/Artist): this
+      // lookup never fetches audio features, so Tempo/Energy/etc. are blank
+      // here — but the column must still *exist* for healActiveCsv() to spot
+      // the gap and backfill it via ReccoBeats/Deezer afterward. A CSV with
+      // those columns missing entirely (not just blank) looks "healthy" to
+      // the heal sweep and gets skipped, leaving every track with 0 BPM.
+      const header = "Track URI,Track Name,Album Name,Artist Name(s),Release Date,Duration (ms),Popularity,Explicit,Added By,Added At,Genres,Record Label,Danceability,Energy,Key,Loudness,Mode,Speechiness,Acousticness,Instrumentalness,Liveness,Valence,Tempo,Time Signature";
+      const rows = matched.map(t => {
+        const cells = [t.uri, t.name, "", t.artistName, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""];
+        return cells.map(csvEscapeLocal).join(",");
+      });
       const csvBody = `${header}\n${rows.join("\n")}\n`;
-      await fetch(`/api/save-default-playlist?mode=${libImportMode}`, {
+      const csvRes = await fetch(`/api/save-default-playlist?mode=${libImportMode}`, {
         method: "POST",
         headers: { "Content-Type": "text/plain" },
         body: csvBody,
       });
+      if (!csvRes.ok) {
+        const errBody = await csvRes.json().catch(() => ({})) as { error?: string };
+        throw new Error(
+          `Saved ${uris.length} tracks to Spotify, but the local library CSV write failed ` +
+          `(${errBody.error ?? `HTTP ${csvRes.status}`}) — tracks won't show up in the dashboard until this succeeds. Try again.`
+        );
+      }
+      invalidateRunningPlaylistCache();
+      loadPlaylistList();
+      fetchHealStatus();
 
       const noMatch = libTracks.length - uris.length;
       setLibSavedMsg(
@@ -1606,12 +1830,92 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         {saving ? "Saving…" : saved ? "Saved!" : "Save zones"}
       </button>
 
+      {/* Run-type BPM limits — lives here (not Playlist & BBC) since it's a
+          per-run-type tempo setting like HR zones, and is referenced by the
+          AI DJ mixer's per-segment LLM prompts (ai_dj/workout.py's
+          _kind_bpm_bounds) the same way HR zones drive pace suggestions. */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h3 className="font-semibold text-slate-200">Run BPM limits</h3>
+          <p className="text-sm text-slate-400 mt-1">
+            Min/max music BPM per run type for AI DJ mixes. Leave blank for automatic
+            cadence matching — anything set here becomes a hard limit.
+            Half-time tracks count at double tempo (an 87 BPM track counts as 174).
+          </p>
+        </div>
+        <div className="space-y-2">
+          {([
+            ["warmup", "Warm up"],
+            ["work", "Work / intervals"],
+            ["easy", "Easy / conversational"],
+            ["cooldown", "Cool down"],
+            ["rest", "Rest / recovery"],
+          ] as [string, string][]).map(([kind, label]) => (
+            <div key={kind} className="flex items-center gap-3">
+              <span className="text-sm text-slate-300 w-44 shrink-0">{label}</span>
+              <input
+                type="number"
+                min={0}
+                value={bpmOv[kind].min}
+                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], min: e.target.value } })); setBpmOvSaved(false); }}
+                placeholder="164"
+                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+              />
+              <span className="text-slate-600 text-xs">–</span>
+              <input
+                type="number"
+                min={0}
+                value={bpmOv[kind].max}
+                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], max: e.target.value } })); setBpmOvSaved(false); }}
+                placeholder="180"
+                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+              />
+              <span className="text-xs text-slate-600">BPM</span>
+            </div>
+          ))}
+        </div>
+        {bpmOvError && <p className="text-sm text-red-400">{bpmOvError}</p>}
+        <button
+          onClick={saveBpmOverrides}
+          disabled={bpmOvSaving}
+          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+        >
+          {bpmOvSaving ? "Saving…" : bpmOvSaved ? "Saved!" : "Save BPM limits"}
+        </button>
+      </div>
+
     </div>
     </div>
 
     {/* ── Tab 2: Playlist & BBC ── */}
     <div className={activeTab === "playlist" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
+
+      {/* CSV heal-sweep progress — backfills BPM/audio-feature data after a
+          save/import; can run for a long time on a large library, so this
+          keeps it visible instead of the page looking like nothing happened. */}
+      {healProgress?.running && (
+        <div className="rounded-xl bg-purple-500/10 border border-purple-500/30 p-4 space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-medium text-purple-300">
+              Backfilling {healProgress.phase === "features" ? "BPM/audio features" : "track durations"}…
+            </p>
+            <span className="text-xs text-purple-300/70 tabular-nums">
+              {healProgress.current}/{healProgress.total}
+            </span>
+          </div>
+          <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-purple-400 rounded-full transition-all duration-300"
+              style={{ width: `${healProgress.total > 0 ? Math.round((healProgress.current / healProgress.total) * 100) : 0}%` }}
+            />
+          </div>
+          <p className="text-xs text-slate-500">
+            {healProgress.healedSoFar} row{healProgress.healedSoFar === 1 ? "" : "s"} healed so far
+            {healProgress.phase === "duration" && " — BPM data is already in, this pass only fills track durations"}
+          </p>
+        </div>
+      )}
 
       {/* Playlist Management */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
@@ -1715,6 +2019,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   <div className="min-w-0">
                     <p className="text-sm text-slate-200 truncate">
                       {p.name}
+                      {typeof p.trackCount === "number" && (
+                        <span className="ml-2 text-xs text-slate-500">{p.trackCount} track{p.trackCount === 1 ? "" : "s"}</span>
+                      )}
                       {p.id === activePlaylistId && <span className="ml-2 text-xs text-green-400">active</span>}
                     </p>
                     <p className="text-xs text-slate-500 font-mono truncate">{p.csvFile}</p>
@@ -1744,6 +2051,116 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             </div>
           )}
           {playlistListError && <p className="text-xs text-red-400">{playlistListError}</p>}
+        </div>
+
+        {/* Append CSV to the currently active playlist — no name/target
+            picking, unlike the named-playlist import above. Local library
+            CSV only, same as that flow (never writes to Spotify itself). */}
+        <div className="pt-3 border-t border-white/10 space-y-2">
+          <label className="block text-sm font-medium text-slate-300">Append CSV to active playlist</label>
+          <p className="text-xs text-slate-500">
+            Upload an Exportify CSV and add its tracks to{" "}
+            <span className="text-slate-300">
+              {knownPlaylists.find(p => p.id === activePlaylistId)?.name ?? "the active playlist"}
+            </span>
+            {" "}— new tracks are added; tracks already there get any blank fields (e.g. BPM) filled in from this file, never overwritten.
+          </p>
+          <div className="flex items-center gap-3 flex-wrap">
+            <input ref={appendCsvFileRef} type="file" accept=".csv" onChange={handleAppendCsvUpload} className="hidden" />
+            <button
+              onClick={() => appendCsvFileRef.current?.click()}
+              disabled={appendCsvSaving}
+              className="inline-flex items-center gap-2 rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 text-sm font-medium px-4 py-2 transition-colors"
+            >
+              Browse CSV
+            </button>
+            {appendCsvSaved !== null && (
+              <span className="text-sm text-green-400">
+                {appendCsvFileName} — {appendCsvSaved.appended} track{appendCsvSaved.appended === 1 ? "" : "s"} added
+                {appendCsvSaved.merged > 0 && ` · ${appendCsvSaved.merged} existing track${appendCsvSaved.merged === 1 ? "" : "s"} filled in`}
+              </span>
+            )}
+          </div>
+
+          {appendCsvStagedText && (
+            <div className="rounded-lg bg-slate-800/40 border border-white/10 p-3 flex items-center justify-between gap-3 flex-wrap">
+              <p className="text-xs text-slate-400">
+                {appendCsvFileName} — {appendCsvTrackCount} tracks
+              </p>
+              <button
+                onClick={appendCsvToActivePlaylist}
+                disabled={appendCsvSaving}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
+              >
+                {appendCsvSaving ? "Adding…" : "Add to active playlist"}
+              </button>
+            </div>
+          )}
+          {appendCsvError && <p className="text-xs text-red-400">{appendCsvError}</p>}
+        </div>
+
+        {/* Sprint BPM summary (text version of the dashboard's Sprint BPM
+            counts chart — same half/double-time bucketing) + copy the whole
+            range to another playlist. Spotify add happens client-side
+            (browser token), the local CSV merge happens server-side via
+            /api/tracks/copy-to-playlist so BPM data carries over instead of
+            the target needing to re-look it up. */}
+        <div className="pt-3 border-t border-white/10 space-y-2">
+          <label className="block text-sm font-medium text-slate-300">Sprint BPM summary ({SPRINT_BPM_MIN}–{SPRINT_BPM_MAX})</label>
+          <p className="text-xs text-slate-500">
+            Track count per BPM in the active library&apos;s sprint range (half-tempo tracks counted at double) — copy the whole range into another playlist below.
+          </p>
+          {!activeTracksLoaded ? (
+            <p className="text-xs text-slate-500 italic">Loading…</p>
+          ) : (() => {
+            const sprintTracks = activeTracks.filter(t => {
+              const rounded = Math.round(t.bpm);
+              return rounded >= SPRINT_BPM_MIN && rounded <= SPRINT_BPM_MAX;
+            });
+            const bpms = Array.from({ length: SPRINT_BPM_MAX - SPRINT_BPM_MIN + 1 }, (_, i) => SPRINT_BPM_MIN + i);
+            const counts = bpms.map(bpm =>
+              activeTracks.filter(t => {
+                const rounded = Math.round(t.bpm);
+                return rounded === bpm || rounded * 2 === bpm;
+              }).length
+            );
+            if (sprintTracks.length === 0 && counts.every(c => c === 0)) {
+              return <p className="text-xs text-slate-500 italic">No tracks in this range in the active playlist.</p>;
+            }
+            return (
+              <>
+                <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs">
+                  {bpms.map((bpm, i) => (
+                    <div key={bpm} className="px-2.5 py-1 flex items-center justify-between gap-3">
+                      <span className="text-slate-400">{bpm} BPM</span>
+                      <span className={counts[i] > 0 ? "text-slate-200" : "text-slate-600"}>{counts[i]}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2 flex-wrap pt-1">
+                  <select
+                    value={sprintCopyTarget}
+                    onChange={e => { setSprintCopyTarget(e.target.value); setSprintCopyError(null); }}
+                    className="rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+                  >
+                    <option value="">Choose target playlist…</option>
+                    {knownPlaylists.filter(p => p.id !== activePlaylistId).map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={copySprintTracksToPlaylist}
+                    disabled={sprintCopying || !sprintCopyTarget || sprintTracks.length === 0}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-2 transition-colors whitespace-nowrap"
+                  >
+                    {sprintCopying ? "Copying…" : `Copy ${sprintTracks.length} track${sprintTracks.length === 1 ? "" : "s"}`}
+                  </button>
+                </div>
+                {sprintCopyMsg && <p className="text-xs text-green-400">{sprintCopyMsg}</p>}
+                {sprintCopyError && <p className="text-xs text-red-400">{sprintCopyError}</p>}
+              </>
+            );
+          })()}
         </div>
 
         <div className="pt-3 border-t border-white/10 space-y-2">
@@ -1821,13 +2238,28 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
               {libTracks.some(t => !t.uri) && (
                 <div className="pt-2 border-t border-white/10 space-y-2">
+                  {libRateLimitClearsAt && (() => {
+                    const clearsAtDate = new Date(libRateLimitClearsAt);
+                    const stillWaiting = clearsAtDate.getTime() > Date.now();
+                    const today = new Date();
+                    const isTomorrow = clearsAtDate.toDateString() !== today.toDateString();
+                    const timeStr = clearsAtDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).toLowerCase().replace(" ", "");
+                    return (
+                      <p className={`text-xs rounded-lg px-2.5 py-1.5 ${stillWaiting ? "bg-amber-500/10 text-amber-400 border border-amber-500/20" : "bg-green-500/10 text-green-400 border border-green-500/20"}`}>
+                        {stillWaiting
+                          ? `Spotify rate limit hit — ${libTracks.filter(t => !t.uri).length} tracks outstanding. Retry after ${timeStr}${isTomorrow ? " tomorrow" : ""}.`
+                          : `Rate limit should be clear now — ${libTracks.filter(t => !t.uri).length} tracks outstanding, ready to retry.`}
+                      </p>
+                    );
+                  })()}
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-xs text-amber-400">
                       {libTracks.filter(t => !t.uri).length} not found on Spotify
                     </p>
                     <button
                       onClick={retryLibraryMisses}
-                      disabled={libLoading}
+                      disabled={libLoading || (libRateLimitClearsAt !== null && new Date(libRateLimitClearsAt).getTime() > Date.now())}
+                      title={libRateLimitClearsAt && new Date(libRateLimitClearsAt).getTime() > Date.now() ? "Waiting for Spotify's rate limit to clear" : undefined}
                       className="text-xs rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 px-2.5 py-1 transition-colors whitespace-nowrap"
                     >
                       {libLoading ? "Retrying…" : "Retry all misses"}
@@ -1988,57 +2420,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </div>
         )}
         </div>
-      </div>
-
-      {/* Run-type BPM limits */}
-      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
-        <div>
-          <h3 className="font-semibold text-slate-200">Run BPM limits</h3>
-          <p className="text-sm text-slate-400 mt-1">
-            Min/max music BPM per run type for AI DJ mixes. Leave blank for automatic
-            cadence matching — anything set here becomes a hard limit.
-            Half-time tracks count at double tempo (an 87 BPM track counts as 174).
-          </p>
-        </div>
-        <div className="space-y-2">
-          {([
-            ["warmup", "Warm up"],
-            ["work", "Work / intervals"],
-            ["easy", "Easy / conversational"],
-            ["cooldown", "Cool down"],
-            ["rest", "Rest / recovery"],
-          ] as [string, string][]).map(([kind, label]) => (
-            <div key={kind} className="flex items-center gap-3">
-              <span className="text-sm text-slate-300 w-44 shrink-0">{label}</span>
-              <input
-                type="number"
-                min={0}
-                value={bpmOv[kind].min}
-                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], min: e.target.value } })); setBpmOvSaved(false); }}
-                placeholder="164"
-                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
-              />
-              <span className="text-slate-600 text-xs">–</span>
-              <input
-                type="number"
-                min={0}
-                value={bpmOv[kind].max}
-                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], max: e.target.value } })); setBpmOvSaved(false); }}
-                placeholder="180"
-                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
-              />
-              <span className="text-xs text-slate-600">BPM</span>
-            </div>
-          ))}
-        </div>
-        {bpmOvError && <p className="text-sm text-red-400">{bpmOvError}</p>}
-        <button
-          onClick={saveBpmOverrides}
-          disabled={bpmOvSaving}
-          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
-        >
-          {bpmOvSaving ? "Saving…" : bpmOvSaved ? "Saved!" : "Save BPM limits"}
-        </button>
       </div>
 
     </div>

@@ -1,15 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { listRunningPlaylists, loadRunningPlaylistConfig, setActiveRunningPlaylist, removeRunningPlaylist } from "@/lib/running-playlist-config";
+import { readFile } from "fs/promises";
+import { listRunningPlaylists, loadRunningPlaylistConfig, setActiveRunningPlaylist, removeRunningPlaylist, csvPathFor } from "@/lib/running-playlist-config";
 
-// GET — every playlist this app has been pointed at, plus which is active.
+// Counts data rows in a playlist's CSV — same "is this a real row" rule as
+// the write side (save-default-playlist): non-blank lines after the header.
+async function trackCount(entry: { csvFile: string }): Promise<number | null> {
+  try {
+    const csv = await readFile(csvPathFor({ name: "", id: "", csvFile: entry.csvFile }), "utf8");
+    const lines = csv.replace(/\r/g, "").split("\n").filter(l => l.trim());
+    return Math.max(0, lines.length - 1); // minus header
+  } catch {
+    return null; // file missing — e.g. a freshly-registered playlist with no CSV yet
+  }
+}
+
+// GET — every playlist this app has been pointed at, plus which is active
+// and (for the Select Playlist list) each one's current track count.
 export async function GET() {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const playlists = listRunningPlaylists();
   const active = loadRunningPlaylistConfig();
-  return NextResponse.json({ playlists, activeId: active.id });
+  const withCounts = await Promise.all(
+    playlists.map(async p => ({ ...p, trackCount: await trackCount(p) }))
+  );
+  return NextResponse.json({ playlists: withCounts, activeId: active.id });
 }
 
 // PATCH { id } — switch the active playlist to an already-known id.

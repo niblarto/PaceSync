@@ -48,7 +48,9 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 // Deliberately capped at 2 (not 4): a large batch of misses can mean
 // thousands of tracks, and each extra variant multiplies Spotify API calls
 // across the whole batch — a prior 4-variant version tripped a ~22-hour
-// app-level rate limit on a ~2500-track library.
+// app-level rate limit on a ~2500-track library. Even at 2 variants with
+// 120ms/track + 80ms/variant spacing, a ~2800-track batch retripped it —
+// bumped to 300ms/track + 200ms/variant.
 function searchVariants(title: string, artist: string): { title: string; artist: string }[] {
   // Strip "(Remix)", "(Extended Mix)", "[Radio Edit]", "- Radio Edit" etc.
   const cleanTitle = title
@@ -84,7 +86,7 @@ async function searchSpotify(token: string, title: string, artist: string): Prom
     if (item) {
       return { result: { uri: item.uri, name: item.name, artistName: item.artists[0]?.name ?? artist }, rateLimited: null };
     }
-    await sleep(80); // stay polite between variant attempts on the same track
+    await sleep(200); // stay polite between variant attempts on the same track
   }
   return { result: null, rateLimited: null };
 }
@@ -155,7 +157,7 @@ export async function POST(req: NextRequest) {
           spotifyResults.push(result);
 
           send({ type: "progress", current: i + 1, total: inputTracks.length });
-          await sleep(120);
+          await sleep(300);
         }
 
         if (spotifyCache.size > initialCacheSize) saveCacheToDisk();

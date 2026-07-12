@@ -1,6 +1,35 @@
 import { readFile, writeFile } from "fs/promises";
+import path from "path";
 import { activeCsvPath } from "@/lib/running-playlist-config";
 import { deezerDurationMs, fetchFeatures, lastfmDurationMs, sleep, TrackFeatures } from "@/lib/track-enrich";
+
+// Live progress for the Settings page to poll — a heal sweep on a large
+// library (thousands of rows) can run for a long time, and previously gave
+// no visibility beyond server logs. Best-effort file write; never blocks
+// or fails the heal itself.
+export interface HealProgress {
+  running: boolean;
+  phase: "features" | "duration" | null;
+  current: number;
+  total: number;
+  healedSoFar: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+const PROGRESS_PATH = path.join(process.cwd(), "csv-heal-progress.json");
+
+async function writeProgress(p: HealProgress): Promise<void> {
+  try { await writeFile(PROGRESS_PATH, JSON.stringify(p), "utf8"); } catch { /* best-effort */ }
+}
+
+export async function getHealProgress(): Promise<HealProgress | null> {
+  try {
+    return JSON.parse(await readFile(PROGRESS_PATH, "utf8")) as HealProgress;
+  } catch {
+    return null;
+  }
+}
 
 // Sweeps the active library CSV for rows with missing data and backfills it
 // from the available sources. Run after every CSV write (track add, feature
@@ -192,13 +221,71 @@ async function doHeal(): Promise<HealResult> {
       needsDuration, needsFeatures,
     });
   }
-  if (gaps.length === 0) return { checked, healed: 0, incomplete: 0 };
+  if (gaps.length === 0) {
+    await writeProgress({ running: false, phase: null, current: 0, total: 0, healedSoFar: 0, startedAt: null, finishedAt: new Date().toISOString() });
+    return { checked, healed: 0, incomplete: 0 };
+  }
 
   console.log(`[csv-heal] ${gaps.length}/${checked} rows missing data — backfilling`);
+  const startedAt = new Date().toISOString();
+  await writeProgress({ running: true, phase: "features", current: 0, total: gaps.length, healedSoFar: 0, startedAt, finishedAt: null });
 
-  // Durations: Spotify singles first, Deezer for whatever's left
+  // Write whatever's changed in `gaps` back into `lines` and flush to disk —
+  // called after each phase so a restart mid-sweep (e.g. a redeploy) only
+  // loses whatever hadn't been fetched yet, not the whole sweep's progress.
+  const flush = async (): Promise<number> => {
+    let healedNow = 0;
+    for (const g of gaps) {
+      const rebuilt = g.row.map(csvEscape).join(",");
+      if (rebuilt !== lines[g.line]) {
+        lines[g.line] = rebuilt;
+        healedNow++;
+      }
+    }
+    if (healedNow > 0) await writeFile(csvPath, lines.join("\n"), "utf8");
+    return healedNow;
+  };
+
+  // Audio features via ReccoBeats (+ Deezer-ISRC fallback) first: one
+  // batched call covers the whole gap list (fast), and Tempo/Energy is what
+  // the dashboard actually requires to load a library at all — Duration
+  // below is comparatively slow (sequential, one request per row) and
+  // doesn't block anything the app needs immediately.
+  const featureGaps = gaps.filter(g => g.needsFeatures);
+  if (featureGaps.length > 0) {
+    try {
+      const features = await fetchFeatures(
+        featureGaps.map(g => ({ id: g.id, name: g.name || undefined, artist: g.artist || undefined })),
+      );
+      for (const g of featureGaps) {
+        const f = features[g.id];
+        if (!f) continue;
+        for (const [header, key] of FEATURE_COLS) {
+          const idx = col(header);
+          if (idx !== -1 && isBlank(g.row[idx])) g.row[idx] = String(f[key]);
+        }
+        g.needsFeatures = false;
+      }
+    } catch (e) {
+      console.warn(`[csv-heal] feature lookup failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  let healed = await flush();
+  const featuresHealed = healed;
+  console.log(`[csv-heal] features pass: healed ${featuresHealed} rows so far`);
+  await writeProgress({ running: true, phase: "duration", current: 0, total: gaps.filter(g => g.needsDuration).length, healedSoFar: featuresHealed, startedAt, finishedAt: null });
+
+  // Durations: Spotify singles first, Deezer for whatever's left. Slow
+  // (sequential, ~1 request/row) — flushed incrementally every 25 rows so
+  // a restart doesn't lose an hour of progress on a large library, with a
+  // progress line every 50 rows so a long sweep can be watched via
+  // `journalctl -u running-playlist -f` (or the Settings page) instead of
+  // looking like it's hung.
   let token: string | null | undefined = undefined; // lazy — only fetch if needed
-  for (const g of gaps.filter(g => g.needsDuration)) {
+  const durationGaps = gaps.filter(g => g.needsDuration);
+  let durationHealed = 0;
+  for (let i = 0; i < durationGaps.length; i++) {
+    const g = durationGaps[i];
     let ms: number | null | undefined = null;
     if (token !== null) {
       if (token === undefined) token = await spotifyAppToken();
@@ -219,41 +306,19 @@ async function doHeal(): Promise<HealResult> {
     if (ms != null) {
       g.row[idxDuration] = String(Math.round(ms));
       g.needsDuration = false;
+      durationHealed++;
+    }
+    if ((i + 1) % 25 === 0) await flush();
+    if ((i + 1) % 50 === 0 || i === durationGaps.length - 1) {
+      console.log(`[csv-heal] duration pass: ${i + 1}/${durationGaps.length} rows checked, ${durationHealed} filled`);
+      await writeProgress({ running: true, phase: "duration", current: i + 1, total: durationGaps.length, healedSoFar: featuresHealed + durationHealed, startedAt, finishedAt: null });
     }
   }
 
-  // Audio features via ReccoBeats (+ Deezer-ISRC fallback)
-  const featureGaps = gaps.filter(g => g.needsFeatures);
-  if (featureGaps.length > 0) {
-    try {
-      const features = await fetchFeatures(
-        featureGaps.map(g => ({ id: g.id, name: g.name || undefined, artist: g.artist || undefined })),
-      );
-      for (const g of featureGaps) {
-        const f = features[g.id];
-        if (!f) continue;
-        for (const [header, key] of FEATURE_COLS) {
-          const idx = col(header);
-          if (idx !== -1 && isBlank(g.row[idx])) g.row[idx] = String(f[key]);
-        }
-        g.needsFeatures = false;
-      }
-    } catch (e) {
-      console.warn(`[csv-heal] feature lookup failed: ${e instanceof Error ? e.message : e}`);
-    }
-  }
-
-  let healed = 0;
-  for (const g of gaps) {
-    const rebuilt = g.row.map(csvEscape).join(",");
-    if (rebuilt !== lines[g.line]) {
-      lines[g.line] = rebuilt;
-      healed++;
-    }
-  }
-  if (healed > 0) await writeFile(csvPath, lines.join("\n"), "utf8");
-
+  const durationFlushHealed = await flush();
+  healed = featuresHealed + durationFlushHealed;
   const incomplete = gaps.filter(g => g.needsDuration || g.needsFeatures).length;
   console.log(`[csv-heal] healed ${healed} rows${incomplete ? `, ${incomplete} still incomplete` : ""}`);
+  await writeProgress({ running: false, phase: null, current: durationGaps.length, total: durationGaps.length, healedSoFar: healed, startedAt, finishedAt: new Date().toISOString() });
   return { checked, healed, incomplete };
 }

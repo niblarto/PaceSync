@@ -12,6 +12,16 @@ import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaSched
 import { useRunningPlaylist } from "./useRunningPlaylist";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
 
+function fmtTotalDuration(tracks: TrackWithBPM[]): string {
+  const totalSec = Math.round(tracks.reduce((sum, t) => sum + (t.duration_ms || 0), 0) / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 function prewarmArt(tracks: TrackWithBPM[]) {
   const payload = tracks.map(t => ({ artist: t.artists[0]?.name ?? "", title: t.name }));
   fetch("/api/itunes-art", {
@@ -282,6 +292,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [garminConfigured, setGarminConfigured] = useState(false);
   const [aiDjEnabled, setAiDjEnabled] = useState(false);
   const [paceFilter, setPaceFilter] = useState<{ paces: Array<{ paceStr: string; bpm: number }> } | null>(null);
+  const [sprintBpmFilter, setSprintBpmFilter] = useState<number | null>(null);
   const [similarFilter, setSimilarFilter] = useState<{ seed: TrackWithBPM; uris: string[] } | null>(null);
   const [similarLoading, setSimilarLoading] = useState(false);
   const [suggest, setSuggest] = useState<SuggestState | null>(null);
@@ -533,6 +544,17 @@ export function DashboardClient({ spotifyUser }: Props) {
       setFilteredTracks(allTracks.filter(t => t.bpm >= lo && t.bpm <= hi));
       return;
     }
+    if (sprintBpmFilter !== null) {
+      // Same half/double-time match as the Sprint BPM chart's own counting
+      // (SprintBpmCounts) — a track only counts toward a bar if its rounded
+      // BPM, or double it, equals that bar's value, so the filtered list
+      // matches exactly what the bar's count promised.
+      setFilteredTracks(allTracks.filter(t => {
+        const rounded = Math.round(t.bpm);
+        return rounded === sprintBpmFilter || rounded * 2 === sprintBpmFilter;
+      }));
+      return;
+    }
     if (selectedZones.length === 0) return;
     if (selectedZones.some(z => z.number === 0)) {
       setFilteredTracks(allTracks);
@@ -547,7 +569,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       }
       setFilteredTracks(result);
     }
-  }, [selectedZones, allTracks, paceFilter, similarFilter, noBpmFilter, aiDjMix]);
+  }, [selectedZones, allTracks, paceFilter, sprintBpmFilter, similarFilter, noBpmFilter, aiDjMix]);
 
   // For seeds not in the playlist pool (BBC tracks, 0-BPM tracks) the CSV
   // lookup in the python bridge can't work — fetch features from ReccoBeats
@@ -585,6 +607,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       setSimilarFilter({ seed: seedTrack, uris: (data.matches ?? []).map(m => m.uri) });
       setSelectedZones([]);
       setPaceFilter(null);
+      setSprintBpmFilter(null);
       setNoBpmFilter(false);
       setAiDjMix(null);
       if (csvName) setPlaylistName(`${csvName} – like ${track.name}`);
@@ -603,6 +626,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimeline, avoidUris?: string[]) {
     setSelectedZones([]);
     setPaceFilter(null);
+    setSprintBpmFilter(null);
     setSimilarFilter(null);
     setNoBpmFilter(false);
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
@@ -1045,6 +1069,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <button
                 onClick={() => {
                   setPaceFilter(null);
+                  setSprintBpmFilter(null);
                   setSimilarFilter(null);
                   setNoBpmFilter(false);
                   setAiDjMix(null);
@@ -1073,6 +1098,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                         e.stopPropagation();
                         setSelectedZones([]);
                         setPaceFilter(null);
+                        setSprintBpmFilter(null);
                         setSimilarFilter(null);
                         setNoBpmFilter(true);
                         setAiDjMix(null);
@@ -1098,6 +1124,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   selected={selectedZones.some(z => z.number === zone.number)}
                   onClick={(e) => {
                     setPaceFilter(null);
+                    setSprintBpmFilter(null);
                     setSimilarFilter(null);
                     setNoBpmFilter(false);
                     setAiDjMix(null);
@@ -1131,7 +1158,21 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <BPMDistribution tracks={allTracks} zones={displayZones} selectedZones={selectedZones} />
             )}
 
-            {allTracks.length > 0 && <SprintBpmCounts tracks={allTracks} />}
+            {allTracks.length > 0 && (
+              <SprintBpmCounts
+                tracks={allTracks}
+                activeBpm={sprintBpmFilter}
+                onSelect={(bpm) => {
+                  setSelectedZones([]);
+                  setPaceFilter(null);
+                  setSimilarFilter(null);
+                  setNoBpmFilter(false);
+                  setAiDjMix(null);
+                  setSprintBpmFilter(prev => prev === bpm ? null : bpm);
+                  if (csvName) setPlaylistName(`${csvName} – ${bpm} BPM`);
+                }}
+              />
+            )}
           </aside>
 
           {/* Col 2: Main content */}
@@ -1182,7 +1223,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     const lo = Math.min(...bpms) - 2, hi = Math.max(...bpms) + 2;
                     const labels = [...paceFilter.paces].sort((a, b) => a.bpm - b.bpm).map(p => p.paceStr).join(", ");
                     return <span className="text-orange-400 font-medium">{labels}/mi pace · ♪ {lo}–{hi} BPM</span>;
-                  })() : selectedZones.length === 0 ? (
+                  })() : sprintBpmFilter !== null ? (
+                    <span className="text-sky-400 font-medium">
+                      Sprint BPM {sprintBpmFilter} — including half-tempo matches
+                    </span>
+                  ) : selectedZones.length === 0 ? (
                     <span className="text-slate-500">← Select a zone on the left</span>
                   ) : selectedZones.some(z => z.number === 0) ? (
                     <span className="text-green-400 font-medium">All Songs — all BPM ranges</span>
@@ -1203,7 +1248,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 edge (see resultsMaxHeight above) so a long track list
                 scrolls inside the card instead of pushing the page past the
                 Runna rail. No cap until the first measurement lands. */}
-            {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || similarFilter || noBpmFilter || aiDjMix) && (
+            {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || sprintBpmFilter !== null || similarFilter || noBpmFilter || aiDjMix) && (
               <div
                 ref={setResultsCardEl}
                 className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden flex flex-col"
@@ -1222,6 +1267,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                           const labels = [...paceFilter.paces].sort((a, b) => a.bpm - b.bpm).map(p => p.paceStr).join(", ");
                           return `${filteredTracks.length} tracks matching ${labels}/mi (${lo}–${hi} BPM)`;
                         }
+                        if (sprintBpmFilter !== null) return `${filteredTracks.length} tracks at ${sprintBpmFilter} BPM (incl. half-tempo)`;
                         if (selectedZones.some(z => z.number === 0)) return `${filteredTracks.length} tracks in zone 0 (0–9999 BPM)`;
                         const s = [...selectedZones].sort((a,b) => a.number - b.number);
                         const zLabel = s.length === 1 ? `zone ${s[0].number} (${s[0].bpmMin}–${s[0].bpmMax} BPM)` : `zones ${s.map(z=>z.number).join("+")} (${s.map(z=>`${z.bpmMin}–${z.bpmMax}`).join(", ")} BPM)`;
@@ -1229,7 +1275,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       })()}
                     </h3>
                     <p className="text-sm text-slate-500 mt-0.5">
-                      From {allTracks.length} total tracks in "{csvName}"
+                      From {allTracks.length} total tracks in "{csvName}" · {fmtTotalDuration(filteredTracks)} playing time
                     </p>
                   </div>
 
@@ -1412,7 +1458,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     </div>
                   ) : (
                     <VirtualTrackList
-                      key={aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : selectedZones.map(z=>z.number).sort().join("-")}
+                      key={aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : sprintBpmFilter !== null ? `sprint-${sprintBpmFilter}` : selectedZones.map(z=>z.number).sort().join("-")}
                       tracks={filteredTracks}
                       onDelete={handleDeleteTrack}
                       onSimilar={handleSimilar}
@@ -1459,6 +1505,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               onPaceFilter={(paceStr, bpm, multiSelect) => {
                 setNoBpmFilter(false);
                 setAiDjMix(null);
+                setSprintBpmFilter(null);
                 if (multiSelect) {
                   setPaceFilter(prev => {
                     const current = prev?.paces ?? [];
@@ -1718,7 +1765,13 @@ function BPMDistribution({
 const SPRINT_BPM_MIN = 164;
 const SPRINT_BPM_MAX = 180;
 
-function SprintBpmCounts({ tracks }: { tracks: TrackWithBPM[] }) {
+function SprintBpmCounts({
+  tracks, activeBpm, onSelect,
+}: {
+  tracks: TrackWithBPM[];
+  activeBpm: number | null;
+  onSelect: (bpm: number) => void;
+}) {
   const bpms = Array.from({ length: SPRINT_BPM_MAX - SPRINT_BPM_MIN + 1 }, (_, i) => SPRINT_BPM_MIN + i);
   const counts = bpms.map(bpm =>
     tracks.filter(t => {
@@ -1731,18 +1784,30 @@ function SprintBpmCounts({ tracks }: { tracks: TrackWithBPM[] }) {
     <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5">
       <h3 className="text-sm font-semibold mb-4 text-slate-400">
         Sprint BPM counts ({SPRINT_BPM_MIN}–{SPRINT_BPM_MAX})
-        <span className="font-normal text-slate-600"> — half-tempo tracks counted at double</span>
+        <span className="font-normal text-slate-600"> — click a bar to filter the track list; half-tempo tracks counted at double</span>
       </h3>
-      <div className="flex items-end gap-1 h-20">
-        {bpms.map((bpm, i) => (
-          <div key={bpm} className="flex-1 flex flex-col items-center gap-1" title={`${counts[i]} tracks at ${bpm} BPM`}>
-            <span className="text-[10px] font-mono text-slate-500">{counts[i]}</span>
-            <div className="w-full rounded-t" style={{ height: `${Math.max((counts[i] / max) * 56, 4)}px` }}>
-              <div className="w-full h-full rounded-t bg-sky-500" />
-            </div>
-            <span className="text-[9px] text-slate-600 rotate-0">{bpm}</span>
-          </div>
-        ))}
+      <div className="space-y-1">
+        {bpms.map((bpm, i) => {
+          const active = activeBpm === bpm;
+          return (
+            <button
+              key={bpm}
+              onClick={() => onSelect(bpm)}
+              disabled={counts[i] === 0}
+              title={counts[i] > 0 ? `Show ${counts[i]} track${counts[i] === 1 ? "" : "s"} at ${bpm} BPM` : undefined}
+              className="w-full flex items-center gap-2 disabled:cursor-default group"
+            >
+              <span className={`w-8 text-right text-xs font-mono ${active ? "text-sky-300 font-bold" : "text-slate-500"}`}>{bpm}</span>
+              <div className="flex-1 h-3 rounded bg-white/5 overflow-hidden">
+                <div
+                  className={`h-full rounded transition-colors ${active ? "bg-sky-300" : "bg-sky-500 group-hover:bg-sky-400"}`}
+                  style={{ width: `${Math.max((counts[i] / max) * 100, counts[i] > 0 ? 2 : 0)}%` }}
+                />
+              </div>
+              <span className={`w-6 text-xs font-mono ${active ? "text-sky-300 font-bold" : "text-slate-400"}`}>{counts[i]}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
