@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { useSession } from "next-auth/react";
 import { freshSpotifyToken } from "@/lib/spotify-browser";
 import Link from "next/link";
@@ -284,6 +284,61 @@ export function GarminActivityClient({ id }: { id: string }) {
     return () => el.removeEventListener("wheel", onWheel);
   }, [data]);
 
+  // Drag-to-pan: click-hold and move horizontally to shift the visible time
+  // window, same span, clamped to the data's actual range. At full zoom the
+  // span equals the whole range so panning is a no-op (nowhere to go), which
+  // falls out of the clamp naturally.
+  //
+  // Uses window-level mousemove/mouseup (not pointer capture on the chart
+  // element) because Recharts' own Surface/Tooltip mouse handling on the SVG
+  // inside chartWrapRef made native PointerEvent capture on the wrapper
+  // unreliable — drags would start but stop tracking almost immediately.
+  // Listening on window instead sidesteps Recharts entirely and also means
+  // the drag keeps tracking even if the pointer leaves the chart area.
+  const dragStateRef = useRef<{ startX: number; startDomain: [number, number] } | null>(null);
+  const onChartMouseDown = (e: ReactMouseEvent) => {
+    const records = recordsRef.current;
+    if (records.length < 2) return;
+    e.preventDefault();
+    dragStateRef.current = {
+      startX: e.clientX,
+      startDomain: xDomainRef.current ?? [records[0].t, records[records.length - 1].t],
+    };
+    if (chartWrapRef.current) chartWrapRef.current.style.cursor = "grabbing";
+  };
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      const drag = dragStateRef.current;
+      const el = chartWrapRef.current;
+      if (!drag || !el) return;
+      const records = recordsRef.current;
+      if (records.length < 2) return;
+      const dataMin = records[0].t;
+      const dataMax = records[records.length - 1].t;
+      const rect = el.getBoundingClientRect();
+      const [startLo, startHi] = drag.startDomain;
+      const span = startHi - startLo;
+      const dxFrac = (e.clientX - drag.startX) / rect.width;
+      // Dragging right (positive dx) reveals earlier time, like panning a map.
+      let lo = startLo - dxFrac * span;
+      let hi = lo + span;
+      if (lo < dataMin) { lo = dataMin; hi = lo + span; }
+      if (hi > dataMax) { hi = dataMax; lo = hi - span; }
+      setXDomain([Math.round(lo), Math.round(hi)]);
+    };
+    const onMouseUp = () => {
+      if (!dragStateRef.current) return;
+      dragStateRef.current = null;
+      if (chartWrapRef.current) chartWrapRef.current.style.cursor = "";
+    };
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, []);
+
   useEffect(() => {
     fetch(`/api/garmin/activity/${id}`)
       .then(r => r.json())
@@ -430,6 +485,58 @@ export function GarminActivityClient({ id }: { id: string }) {
         .filter(t => t.clipEnd > t.clipStart)
     : [];
 
+  // Workout segment strip above the song strip: each mix track already
+  // carries which segment it was built for (e.g. "3.11mi time trial at
+  // 7:30/mi") — merge consecutive tracks sharing a segment into one block
+  // spanning from the first track's start to the last track's end, so the
+  // row reads as "conversational · interval 1 · rest · interval 2 · …"
+  // instead of repeating the same label per song. Computed from the full
+  // (unclipped) mix.tracks, not timelineTracks, so a block's true start/end
+  // survives being clicked to zoom in — otherwise a block visible only
+  // partially at the current zoom would zoom to its clipped (wrong) extent.
+  const segmentSpans = mix
+    ? (() => {
+        const spans: { segment: string; startsAtSec: number; endsAtSec: number }[] = [];
+        for (const t of mix.tracks) {
+          const end = t.startsAtSec + t.durationSec;
+          const last = spans[spans.length - 1];
+          if (last && last.segment === t.segment) {
+            last.endsAtSec = end;
+          } else {
+            spans.push({ segment: t.segment, startsAtSec: t.startsAtSec, endsAtSec: end });
+          }
+        }
+        return spans;
+      })()
+    : [];
+  // Short rests (<2min) don't get a track-fill pass of their own — music
+  // keeps playing through them — but the backend still records the fold as
+  // "<segment label> + <rest label>" (see ai_dj/workout.py parse_workout).
+  // Split that back into two adjacent chips here, sized by the rest's own
+  // stated duration, so the strip still reads "interval · rest" even though
+  // both halves share the same underlying tracks.
+  const REST_SUFFIX_RE = / \+ ((\d+)\s*(s|sec|secs|min|mins?)\b[^,]*)$/i;
+  const splitSegmentSpans = segmentSpans.flatMap(span => {
+    const m = span.segment.match(REST_SUFFIX_RE);
+    if (!m) return [span];
+    const value = parseInt(m[2], 10);
+    const restSec = m[3].startsWith("min") ? value * 60 : value;
+    const totalSec = span.endsAtSec - span.startsAtSec;
+    if (restSec <= 0 || restSec >= totalSec) return [span];
+    const splitAt = span.endsAtSec - restSec;
+    return [
+      { segment: span.segment.slice(0, m.index), startsAtSec: span.startsAtSec, endsAtSec: splitAt },
+      { segment: m[1], startsAtSec: splitAt, endsAtSec: span.endsAtSec },
+    ];
+  });
+  const segmentBlocks = splitSegmentSpans
+    .map(b => ({
+      ...b,
+      clipStart: Math.max(b.startsAtSec, timelineDomain[0]),
+      clipEnd: Math.min(b.endsAtSec, timelineDomain[1]),
+    }))
+    .filter(b => b.clipEnd > b.clipStart);
+
   return (
     <div
       className="min-h-screen flex flex-col bg-cover bg-fixed bg-center bg-no-repeat"
@@ -496,12 +603,18 @@ export function GarminActivityClient({ id }: { id: string }) {
                 <h2 className="font-semibold text-sm text-slate-300 mb-1">Pace & Cadence</h2>
                 <p className="text-xs text-slate-500 mb-4">
                   10-second averages — faster pace at top, cadence on right axis ·
-                  scroll to zoom{xDomain ? " · " : ", "}
+                  scroll to zoom, drag to pan{xDomain ? " · " : ", "}
                   {xDomain
                     ? <button onClick={() => setXDomain(null)} className="text-sky-400 hover:text-sky-300 underline">reset zoom</button>
                     : "double-click to reset"}
                 </p>
-                <div ref={chartWrapRef} onDoubleClick={() => setXDomain(null)}>
+                <div
+                  ref={chartWrapRef}
+                  onDoubleClick={() => setXDomain(null)}
+                  onMouseDown={onChartMouseDown}
+                  className="cursor-grab"
+                  style={{ touchAction: "none", userSelect: "none" }}
+                >
                 <ResponsiveContainer width="100%" height={260}>
                   <ComposedChart
                     data={chartRecords}
@@ -592,6 +705,44 @@ export function GarminActivityClient({ id }: { id: string }) {
                   </ComposedChart>
                 </ResponsiveContainer>
                 </div>
+
+                {segmentBlocks.length > 0 && (
+                  // Same padding/positioning math as the song strip below,
+                  // so the two rows line up under the chart's X axis.
+                  <div className="mt-2" style={{ paddingLeft: 40, paddingRight: 88 }}>
+                    <div className="relative h-6 rounded overflow-hidden border border-white/5 bg-slate-800/60">
+                      {segmentBlocks.map((b, i) => {
+                        const span = timelineDomain[1] - timelineDomain[0];
+                        const leftPct = span > 0 ? ((b.clipStart - timelineDomain[0]) / span) * 100 : 0;
+                        const widthPct = span > 0 ? ((b.clipEnd - b.clipStart) / span) * 100 : 0;
+                        const isZoomedToThis = xDomain
+                          && Math.abs(xDomain[0] - b.startsAtSec) < 1
+                          && Math.abs(xDomain[1] - b.endsAtSec) < 1;
+                        return (
+                          <button
+                            key={i}
+                            onClick={() => setXDomain([b.startsAtSec, b.endsAtSec])}
+                            title={b.segment}
+                            className={`absolute top-0 h-full flex items-center justify-center overflow-hidden border-r border-slate-950/60 transition-colors ${
+                              isZoomedToThis
+                                ? "bg-indigo-500/60 hover:bg-indigo-500/70"
+                                : i % 2 === 0
+                                  ? "bg-indigo-500/20 hover:bg-indigo-500/35"
+                                  : "bg-indigo-500/10 hover:bg-indigo-500/25"
+                            }`}
+                            style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                          >
+                            {widthPct > 4 && (
+                              <span className="text-[10px] text-indigo-200 px-1 truncate whitespace-nowrap font-medium">
+                                {b.segment}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {timelineTracks.length > 0 && (
                   // Padding must match the chart's actual plot-area insets, not
