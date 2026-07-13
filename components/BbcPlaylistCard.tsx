@@ -310,10 +310,30 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
     setUpdateMsg(null);
     setError(null);
     try {
-      const tracksWithUri = tracks.filter(t => t.uri);
-      const noUri = tracks.length - tracksWithUri.length;
+      const withUri = tracks.filter(t => t.uri);
+      const noUri = tracks.length - withUri.length;
+
+      // Dedupe against the library before adding anywhere — the CSV write
+      // below already dedupes on its own, but addTracksBrowser (Spotify)
+      // does not, so without this a track already in the playlist gets a
+      // second copy added to Spotify every time this episode is re-added.
+      let existingUris = new Set<string>();
+      try {
+        const ur = await fetch("/api/tracks/uris");
+        const ud = await ur.json() as { uris?: string[] };
+        existingUris = new Set(ud.uris ?? []);
+      } catch { /* dedupe is best-effort — fall through and add everything */ }
+      const tracksWithUri = withUri.filter(t => !existingUris.has(t.uri));
+      const alreadyInLibrary = withUri.length - tracksWithUri.length;
+
       if (tracksWithUri.length === 0) {
-        setUpdateMsg(`No tracks could be matched — ${noUri} track${noUri !== 1 ? "s" : ""} not found`);
+        setUpdateMsg(
+          noUri > 0 || alreadyInLibrary > 0
+            ? `Nothing new to add` +
+              (alreadyInLibrary > 0 ? ` · ${alreadyInLibrary} already in the library` : "") +
+              (noUri > 0 ? ` · ${noUri} not found on Spotify` : "")
+            : "No tracks could be matched"
+        );
         return;
       }
       await addTracksBrowser(RUNNING_PLAYLIST_ID, tracksWithUri.map(t => t.uri));
@@ -325,8 +345,13 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
       // row so healActiveCsv() can keep retrying it later; skipping the row
       // entirely here left such tracks in Spotify but permanently invisible
       // to the local library.
+      //
+      // Enrichment and the CSV write are in separate try/catches on purpose:
+      // an enrichment failure (network error, ReccoBeats down, etc.) must
+      // not prevent the CSV write, or the track ends up in Spotify but
+      // silently missing from the local library with no error shown.
+      let features: Record<string, { tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number }> = {};
       let enriched = 0;
-      let added = 0;
       try {
         const er = await fetch("/api/bpm/enrich", {
           method: "POST",
@@ -339,30 +364,41 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
             })),
           }),
         });
-        const ed = await er.json() as {
-          features?: Record<string, { tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number }>;
-        };
+        const ed = await er.json() as { features?: typeof features };
+        features = ed.features ?? {};
+        enriched = Object.keys(features).length;
+      } catch { /* enrichment is best-effort — the CSV write below still runs */ }
+
+      let added = 0;
+      let csvError: string | null = null;
+      try {
         const rows = tracksWithUri.map(t => {
           const id = t.uri.split(":").pop()!;
-          const f = ed.features?.[id];
-          if (f) enriched++;
-          return { uri: `spotify:track:${id}`, name: t.name, artist: t.artistName, ...f };
+          return { uri: `spotify:track:${id}`, name: t.name, artist: t.artistName, ...features[id] };
         });
         const ar = await fetch("/api/tracks/add", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ tracks: rows }),
         });
-        const ad = await ar.json() as { added?: number };
+        const ad = await ar.json() as { added?: number; error?: string };
+        if (!ar.ok || ad.error) throw new Error(ad.error ?? `HTTP ${ar.status}`);
         added = ad.added ?? rows.length;
-      } catch { /* enrichment is best-effort — playlist add already succeeded */ }
+      } catch (e) {
+        // Spotify add already succeeded — surface this distinctly from "0
+        // new, already in library" so tracks aren't silently lost from the
+        // local CSV the way they were before this fix.
+        csvError = e instanceof Error ? e.message : "CSV write failed";
+      }
 
       const noBpm = added - enriched;
       setUpdateMsg(
-        `Added ${tracksWithUri.length} track${tracksWithUri.length !== 1 ? "s" : ""}` +
+        `Added ${tracksWithUri.length} new track${tracksWithUri.length !== 1 ? "s" : ""} to Spotify` +
         (enriched > 0 ? ` · ${enriched} with BPM data` : "") +
         (noBpm > 0 ? ` · ${noBpm} added without BPM data (will retry)` : "") +
-        (noUri > 0 ? ` · ${noUri} not found on Spotify` : "")
+        (alreadyInLibrary > 0 ? ` · ${alreadyInLibrary} already in the library (skipped)` : "") +
+        (noUri > 0 ? ` · ${noUri} not found on Spotify` : "") +
+        (csvError ? ` · ⚠️ local library not updated: ${csvError}` : "")
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update");

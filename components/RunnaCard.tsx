@@ -203,6 +203,7 @@ function fmtPaceSec(s: number | null): string {
 export function RunnaSummaryCard() {
   const { pastRuns, loading, error } = useRunnaData();
   const [expanded, setExpanded] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [pacing, setPacing] = useState<Record<string, PacingState>>({});
   const [activityLinks, setActivityLinks] = useState<Record<string, { garminId: string | number | null; stravaId: number | null } | null>>({});
   const [votes, setVotes] = useState<{ uri: string; paceSec: number; vote: "up" | "down" }[]>([]);
@@ -375,7 +376,7 @@ export function RunnaSummaryCard() {
       )}
 
       {!loading && !error && pastRuns.length > 0 && (
-        <div className="divide-y divide-white/10">
+        <div ref={scrollRef} className="overflow-y-auto max-h-[700px] no-scrollbar divide-y divide-white/10">
           {pastRuns.map(run => {
             const meta = TYPE_META[run.type];
             const isOpen = expanded === run.uid;
@@ -383,9 +384,16 @@ export function RunnaSummaryCard() {
             return (
               <div key={run.uid}>
                 <button
-                  onClick={() => {
+                  onClick={e => {
                     setExpanded(isOpen ? null : run.uid);
-                    if (!isOpen) { fetchPacing(run.date); loadVotes(); fetchActivityLinks(run.date); }
+                    if (!isOpen) {
+                      fetchPacing(run.date); loadVotes(); fetchActivityLinks(run.date);
+                      const el = e.currentTarget;
+                      // Scroll after the expanding content has laid out, so
+                      // the clicked row lands at the container's top rather
+                      // than wherever it happened to sit before expansion.
+                      requestAnimationFrame(() => el.scrollIntoView({ block: "start", behavior: "smooth" }));
+                    }
                   }}
                   className="w-full px-5 py-3 flex items-center gap-3 text-left hover:bg-slate-800/40 transition-colors"
                 >
@@ -791,6 +799,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     [allWorkouts, pastRuns],
   );
   const [expanded, setExpanded] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const paceSpm = usePaceSpm(garminConfigured);
   const [mixState, setMixState] = useState<Record<string, MixStatus>>({});
   interface RoutePage { items: RouteActivity[]; offset: number; total: number; loading?: boolean }
@@ -1042,7 +1051,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       )}
 
       {!loading && !error && workouts.length > 0 && (
-        <div className="overflow-y-auto max-h-[700px] no-scrollbar divide-y divide-white/10">
+        <div ref={scrollRef} className="overflow-y-auto max-h-[700px] no-scrollbar divide-y divide-white/10">
           {workouts.map(w => {
             const meta = TYPE_META[w.type];
             const isOpen = expanded === w.uid;
@@ -1051,7 +1060,16 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
             return (
               <div key={w.uid}>
                 <button
-                  onClick={() => setExpanded(isOpen ? null : w.uid)}
+                  onClick={e => {
+                    setExpanded(isOpen ? null : w.uid);
+                    if (!isOpen) {
+                      const el = e.currentTarget;
+                      // Scroll after the expanding content has laid out, so
+                      // the clicked row lands at the container's top rather
+                      // than wherever it happened to sit before expansion.
+                      requestAnimationFrame(() => el.scrollIntoView({ block: "start", behavior: "smooth" }));
+                    }
+                  }}
                   className="w-full px-5 py-3 flex items-center gap-3 text-left hover:bg-slate-800/40 transition-colors"
                 >
                   {/* Fixed-width weather slot (empty past the forecast range)
