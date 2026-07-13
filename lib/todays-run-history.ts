@@ -84,6 +84,17 @@ export function getTodaysRunEntry(date: string): TodaysRunEntry | null {
   return loadAll()[date] ?? null;
 }
 
+export function removeTodaysRunEntry(date: string): void {
+  try {
+    const all = loadAll();
+    if (!(date in all)) return;
+    delete all[date];
+    fs.writeFileSync(FILE, JSON.stringify(all), "utf-8");
+  } catch (e) {
+    console.warn("[todays-run-history] remove failed:", e);
+  }
+}
+
 // Record whether the saved mix was actually what played that day. Doesn't
 // remove the entry — just marks it so pacing review and getPlayedTracks()
 // can exclude it without losing the record.

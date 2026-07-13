@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { saveTodaysRunEntry, timelineToHistoryTracks, getTodaysRunEntry, setTodaysRunApproval } from "@/lib/todays-run-history";
-import { getPinnedMix, setPinnedMix } from "@/lib/pinned-mixes";
+import { saveTodaysRunEntry, timelineToHistoryTracks, getTodaysRunEntry, setTodaysRunApproval, removeTodaysRunEntry } from "@/lib/todays-run-history";
+import { getPinnedMix, setPinnedMix, removePinnedMix } from "@/lib/pinned-mixes";
 import { appendTracksToStravaActivity } from "@/lib/strava-workout-sync";
 import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 
@@ -73,6 +73,18 @@ export async function POST(req: NextRequest) {
     });
     console.log(`[todays-run] replaced pinned mix for ${body.date} with the newly saved mix`);
   }
+  return NextResponse.json({ ok: true });
+}
+
+// Deletes a saved (unpinned) mix outright — also removes any pin for that
+// date, so this works as a full delete regardless of pin state.
+export async function DELETE(req: NextRequest) {
+  const session = await getServerSession(authOptions);
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { date } = await req.json() as { date?: string };
+  if (!date || !DATE_RE.test(date)) return NextResponse.json({ error: "date required" }, { status: 400 });
+  removeTodaysRunEntry(date);
+  removePinnedMix(date);
   return NextResponse.json({ ok: true });
 }
 

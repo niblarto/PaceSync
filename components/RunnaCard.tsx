@@ -822,6 +822,56 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   // the nightly cron or saved from the dashboard) — keyed by workout date.
   interface MixSnapshot { workoutTitle: string; tracks: { uri: string | null; name: string; artist: string; startsAtSec: number; tempo: number | null }[]; pinned?: boolean }
   const [mixSnapshots, setMixSnapshots] = useState<Record<string, MixSnapshot | null>>({});
+  const [unpinningDate, setUnpinningDate] = useState<string | null>(null);
+  const [pinningDate, setPinningDate] = useState<string | null>(null);
+  const [deletingDate, setDeletingDate] = useState<string | null>(null);
+
+  async function unpinMix(date: string) {
+    setUnpinningDate(date);
+    try {
+      // Server-side, unpinning deletes the mix outright (both the pin and
+      // the underlying "Today's Run" history snapshot) rather than leaving
+      // it around as an unpinned "saved" mix.
+      await fetch("/api/ai-dj/pin", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date }),
+      });
+      setMixSnapshots(s => ({ ...s, [date]: null }));
+    } finally {
+      setUnpinningDate(null);
+    }
+  }
+
+  async function repinMix(date: string) {
+    setPinningDate(date);
+    try {
+      // No timeline in the body — the pin route re-pins from the existing
+      // "Today's Run" history entry for this date as-is.
+      await fetch("/api/ai-dj/pin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date }),
+      });
+      setMixSnapshots(s => (s[date] ? { ...s, [date]: { ...s[date]!, pinned: true } } : s));
+    } finally {
+      setPinningDate(null);
+    }
+  }
+
+  async function deleteSavedMix(date: string) {
+    setDeletingDate(date);
+    try {
+      await fetch("/api/todays-run/history", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date }),
+      });
+      setMixSnapshots(s => ({ ...s, [date]: null }));
+    } finally {
+      setDeletingDate(null);
+    }
+  }
 
   // A save on the dashboard bumps mixSavedNonce — drop the cache so the
   // fetch effect below (which depends on mixSnapshots) re-reads fresh data.
@@ -1137,13 +1187,41 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                             <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-1">
                               <p className="text-xs text-purple-300/80 font-medium flex items-center justify-between gap-2">
                                 <span>{snap.pinned ? "📌 Pinned mix" : "🎧 Saved mix"} — {snap.tracks.length} tracks</span>
-                                <Link
-                                  href={`/mix/${w.date}`}
-                                  onClick={e => e.stopPropagation()}
-                                  className="text-[11px] text-purple-300 hover:text-purple-200 underline shrink-0"
-                                >
-                                  View chart →
-                                </Link>
+                                <span className="flex items-center gap-2 shrink-0">
+                                  {snap.pinned ? (
+                                    <button
+                                      onClick={e => { e.stopPropagation(); unpinMix(w.date); }}
+                                      disabled={unpinningDate === w.date}
+                                      className="text-[11px] text-purple-300 hover:text-purple-200 underline disabled:opacity-50"
+                                    >
+                                      {unpinningDate === w.date ? "Unpinning…" : "Unpin"}
+                                    </button>
+                                  ) : (
+                                    <>
+                                      <button
+                                        onClick={e => { e.stopPropagation(); repinMix(w.date); }}
+                                        disabled={pinningDate === w.date}
+                                        className="text-[11px] text-purple-300 hover:text-purple-200 underline disabled:opacity-50"
+                                      >
+                                        {pinningDate === w.date ? "Pinning…" : "Pin"}
+                                      </button>
+                                      <button
+                                        onClick={e => { e.stopPropagation(); deleteSavedMix(w.date); }}
+                                        disabled={deletingDate === w.date}
+                                        className="text-[11px] text-red-400/80 hover:text-red-300 underline disabled:opacity-50"
+                                      >
+                                        {deletingDate === w.date ? "Deleting…" : "Delete"}
+                                      </button>
+                                    </>
+                                  )}
+                                  <Link
+                                    href={`/mix/${w.date}`}
+                                    onClick={e => e.stopPropagation()}
+                                    className="text-[11px] text-purple-300 hover:text-purple-200 underline"
+                                  >
+                                    View chart →
+                                  </Link>
+                                </span>
                               </p>
                               <div className="max-h-44 overflow-y-auto no-scrollbar space-y-0.5">
                                 {snap.tracks.map((t, i) => {
