@@ -8,6 +8,7 @@ import type { RunningZone } from "@/types";
 import { BbcBrowserCard } from "@/components/BbcBrowserCard";
 import { DedupCard } from "@/components/DedupCard";
 import { invalidateRunningPlaylistCache } from "@/components/useRunningPlaylist";
+import { freshSpotifyToken } from "@/lib/spotify-browser";
 
 const ZONE_DETAILS = [
   {
@@ -222,6 +223,16 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [sprintCopyError, setSprintCopyError] = useState<string | null>(null);
   const SPRINT_BPM_MIN = 164;
   const SPRINT_BPM_MAX = 180;
+  // A track counts if its raw BPM is in range, OR its doubled BPM is (a
+  // half-tempo track a runner feels as double-time) — same rule the per-BPM
+  // breakdown table and the AI DJ mixer's own BPM matching both use, so
+  // "Copy N tracks" doesn't silently under-count relative to what's shown
+  // or what mixes actually pull from.
+  function inSprintRange(t: { bpm: number }): boolean {
+    const rounded = Math.round(t.bpm);
+    return (rounded >= SPRINT_BPM_MIN && rounded <= SPRINT_BPM_MAX)
+      || (rounded * 2 >= SPRINT_BPM_MIN && rounded * 2 <= SPRINT_BPM_MAX);
+  }
 
   useEffect(() => {
     fetch("/api/settings/active-tracks")
@@ -230,12 +241,29 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .catch(() => setActiveTracksLoaded(true));
   }, []);
 
+  // ── Library coverage report: how much of the library falls within a BPM
+  // range the AI DJ mixer could ever pick a track from (per-kind Settings
+  // overrides), vs. sitting outside every kind's range — and how many
+  // confirmed "Today's Run" mixes each track has actually featured in, so
+  // unused-but-in-range tracks are visible too. ──
+  interface CoverageTrack { uri: string; name: string; artist: string; played: number }
+  interface CoverageBucket { bpm: number; count: number; inRange: boolean; played: number; tracks: CoverageTrack[] }
+  const [coverage, setCoverage] = useState<{
+    buckets: CoverageBucket[]; totalTracks: number; inRangeTracks: number; outOfRangeTracks: number;
+    kindRanges: { kind: string; min: number; max: number }[];
+  } | null>(null);
+  const [coverageLoaded, setCoverageLoaded] = useState(false);
+  const [expandedBucket, setExpandedBucket] = useState<number | null>(null);
+  useEffect(() => {
+    fetch("/api/settings/library-coverage")
+      .then(r => r.json())
+      .then((d: typeof coverage) => { setCoverage(d); setCoverageLoaded(true); })
+      .catch(() => setCoverageLoaded(true));
+  }, []);
+
   async function copySprintTracksToPlaylist() {
     if (!sprintCopyTarget) { setSprintCopyError("Choose a target playlist first."); return; }
-    const sprintTracks = activeTracks.filter(t => {
-      const rounded = Math.round(t.bpm);
-      return rounded >= SPRINT_BPM_MIN && rounded <= SPRINT_BPM_MAX;
-    });
+    const sprintTracks = activeTracks.filter(inSprintRange);
     if (sprintTracks.length === 0) { setSprintCopyError("No tracks in the sprint range to copy."); return; }
 
     const token = session?.accessToken;
@@ -694,6 +722,117 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [deleteUnfollow, setDeleteUnfollow] = useState(true);
   const [deleting, setDeleting] = useState(false);
   const [playlistListError, setPlaylistListError] = useState<string | null>(null);
+
+  // ── Sync from Spotify: catch up on tracks added to the active playlist
+  // directly in Spotify (outside the app), which never went through the
+  // app's own add flows and so never joined the local CSV/BPM library. ──
+  const [syncingFromSpotify, setSyncingFromSpotify] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  async function syncFromSpotify() {
+    if (!activePlaylistId) return;
+    setSyncingFromSpotify(true);
+    setSyncMsg(null);
+    setSyncError(null);
+    try {
+      const token = await freshSpotifyToken();
+      if (!token) throw new Error("Not signed in to Spotify");
+
+      // Page through the full playlist. No fields= projection — its syntax
+      // is unreliable across Spotify API versions, so fetch full track
+      // objects instead (slightly heavier, but avoids silently getting back
+      // an empty items array from a malformed projection).
+      const playlistTracks: { uri: string; name: string; artist: string }[] = [];
+      let url: string | null =
+        `https://api.spotify.com/v1/playlists/${activePlaylistId}/items?limit=100`;
+      let pages = 0;
+      while (url) {
+        const res: Response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+        const bodyText = await res.text();
+        if (!res.ok) throw new Error(`Spotify ${res.status} on page ${pages}: ${bodyText.slice(0, 300)}`);
+        pages++;
+        let data: {
+          next: string | null;
+          // The track data itself lives directly under item.item (the
+          // "track" key inside it is a boolean flag meaning "this is a
+          // track, not an episode" — not a further nesting level).
+          // Confirmed against a live /items response.
+          items: { is_local: boolean; item: { uri: string; name: string; artists: { name: string }[]; is_local: boolean } | null }[];
+        };
+        try {
+          data = JSON.parse(bodyText);
+        } catch {
+          throw new Error(`Non-JSON response on page ${pages}: ${bodyText.slice(0, 300)}`);
+        }
+        for (const entry of data.items ?? []) {
+          const t = entry.item;
+          if (!t || t.is_local || !t.uri?.startsWith("spotify:track:")) continue;
+          playlistTracks.push({ uri: t.uri, name: t.name, artist: t.artists.map(a => a.name).join(", ") });
+        }
+        url = data.next;
+      }
+      if (playlistTracks.length === 0) {
+        throw new Error(`Spotify returned 0 tracks across ${pages} page(s) for playlist ${activePlaylistId}`);
+      }
+
+      // Dedupe against the library — same endpoint the BBC add flow uses,
+      // so a track added here twice (or already synced) is never re-added.
+      const ur = await fetch("/api/tracks/uris");
+      const ud = await ur.json() as { uris?: string[] };
+      const existingUris = new Set(ud.uris ?? []);
+      const missing = playlistTracks.filter(t => !existingUris.has(t.uri));
+
+      if (missing.length === 0) {
+        setSyncMsg(`Up to date — all ${playlistTracks.length} tracks already in the library`);
+        return;
+      }
+
+      // Same enrichment + CSV-write split as the BBC add flow: an
+      // enrichment failure must not prevent the CSV write, or a track ends
+      // up looking synced (it's in Spotify) but silently missing locally.
+      let features: Record<string, { tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number }> = {};
+      let enriched = 0;
+      try {
+        const er = await fetch("/api/bpm/enrich", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tracks: missing.map(t => ({ id: t.uri.split(":").pop()!, name: t.name, artist: t.artist })),
+          }),
+        });
+        const ed = await er.json() as { features?: typeof features };
+        features = ed.features ?? {};
+        enriched = Object.keys(features).length;
+      } catch { /* enrichment is best-effort — the CSV write below still runs */ }
+
+      const rows = missing.map(t => {
+        const id = t.uri.split(":").pop()!;
+        return { uri: t.uri, name: t.name, artist: t.artist, ...features[id] };
+      });
+      const ar = await fetch("/api/tracks/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tracks: rows }),
+      });
+      const ad = await ar.json() as { added?: number; error?: string };
+      if (!ar.ok || ad.error) throw new Error(ad.error ?? `HTTP ${ar.status}`);
+
+      const added = ad.added ?? rows.length;
+      const noBpm = added - enriched;
+      setSyncMsg(
+        `Added ${added} new track${added !== 1 ? "s" : ""} from Spotify` +
+        (enriched > 0 ? ` · ${enriched} with BPM data` : "") +
+        (noBpm > 0 ? ` · ${noBpm} without BPM data (will retry)` : "")
+      );
+      invalidateRunningPlaylistCache();
+      fetchHealStatus();
+    } catch (e) {
+      setSyncError(e instanceof Error ? e.message : "Sync failed");
+    } finally {
+      setSyncingFromSpotify(false);
+    }
+  }
 
   function loadPlaylistList() {
     fetch("/api/settings/playlists")
@@ -1923,6 +2062,26 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           <h2 className="font-semibold text-lg">Playlist Management</h2>
         </div>
         <div className="p-5 space-y-4">
+
+        {/* Sync from Spotify: pull in tracks added to the active playlist
+            directly in Spotify (outside the app) and BPM-enrich them. */}
+        <div className="rounded-lg bg-slate-800/40 border border-white/10 p-3 space-y-2">
+          <p className="text-sm text-slate-400">
+            Added tracks to the playlist directly in Spotify? Sync them into the local BPM library.
+          </p>
+          <div className="flex items-center gap-3 flex-wrap">
+            <button
+              onClick={syncFromSpotify}
+              disabled={syncingFromSpotify || !activePlaylistId}
+              className="inline-flex items-center gap-2 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
+            >
+              {syncingFromSpotify ? "Syncing…" : "Sync from Spotify"}
+            </button>
+            {syncMsg && <span className="text-sm text-green-400">{syncMsg}</span>}
+          </div>
+          {syncError && <p className="text-sm text-red-400">{syncError}</p>}
+        </div>
+
         <p className="text-sm text-slate-400">
           Export your Spotify playlist via{" "}
           <a href="https://exportify.net" target="_blank" rel="noopener noreferrer"
@@ -2113,10 +2272,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           {!activeTracksLoaded ? (
             <p className="text-xs text-slate-500 italic">Loading…</p>
           ) : (() => {
-            const sprintTracks = activeTracks.filter(t => {
-              const rounded = Math.round(t.bpm);
-              return rounded >= SPRINT_BPM_MIN && rounded <= SPRINT_BPM_MAX;
-            });
+            const sprintTracks = activeTracks.filter(inSprintRange);
             const bpms = Array.from({ length: SPRINT_BPM_MAX - SPRINT_BPM_MIN + 1 }, (_, i) => SPRINT_BPM_MIN + i);
             const counts = bpms.map(bpm =>
               activeTracks.filter(t => {
@@ -2283,10 +2439,89 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
       </div>
 
-      <DedupCard />
-
     </div>
     <div className="space-y-6">
+
+      <DedupCard />
+
+      {/* Library coverage: tracks the AI DJ mixer could actually be
+          presented with (per-kind BPM ceilings from Settings), vs. tracks
+          sitting outside every kind's range as dead weight — plus how many
+          confirmed mixes each track has played in, so an in-range track
+          that's never been picked is visible too. */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+        <div className="px-5 py-4 border-b border-white/10">
+          <h2 className="font-semibold text-lg">Library Coverage — tracks presentable to the AI DJ</h2>
+        </div>
+        <div className="p-5 space-y-3">
+          {!coverageLoaded ? (
+            <p className="text-xs text-slate-500 italic">Loading…</p>
+          ) : !coverage || coverage.totalTracks === 0 ? (
+            <p className="text-xs text-slate-500 italic">No BPM data in the active library yet.</p>
+          ) : (
+            <>
+              <p className="text-xs text-slate-500">
+                Effective BPM (half-tempo tracks counted at double) against each run type&apos;s BPM ceiling
+                (Settings → Run BPM limits) — a track outside every type&apos;s range can never be picked for any mix.
+                Click a BPM row to see its tracks and play counts.
+              </p>
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div className="rounded-lg bg-slate-800/60 border border-white/10 px-2 py-2">
+                  <p className="text-lg font-semibold text-slate-200">{coverage.totalTracks}</p>
+                  <p className="text-[10px] text-slate-500 uppercase tracking-wide">Total</p>
+                </div>
+                <div className="rounded-lg bg-green-500/10 border border-green-500/20 px-2 py-2">
+                  <p className="text-lg font-semibold text-green-400">{coverage.inRangeTracks}</p>
+                  <p className="text-[10px] text-slate-500 uppercase tracking-wide">Presentable</p>
+                </div>
+                <div className="rounded-lg bg-red-500/10 border border-red-500/20 px-2 py-2">
+                  <p className="text-lg font-semibold text-red-400">{coverage.outOfRangeTracks}</p>
+                  <p className="text-[10px] text-slate-500 uppercase tracking-wide">Never usable</p>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs max-h-80 overflow-y-auto no-scrollbar">
+                {coverage.buckets.filter(b => b.inRange).map(b => {
+                  const isOpen = expandedBucket === b.bpm;
+                  return (
+                    <div key={b.bpm}>
+                      <button
+                        onClick={() => setExpandedBucket(isOpen ? null : b.bpm)}
+                        className="w-full px-2.5 py-1 flex items-center justify-between gap-3 text-left hover:bg-slate-800/40 transition-colors"
+                      >
+                        <span className="text-slate-400">{b.bpm} BPM</span>
+                        <span className="flex items-center gap-3">
+                          <span className={b.count > 0 ? "text-slate-200" : "text-slate-600"}>{b.count} track{b.count === 1 ? "" : "s"}</span>
+                          <span className={b.played > 0 ? "text-purple-300" : "text-slate-600"}>
+                            {b.played} play{b.played === 1 ? "" : "s"}
+                          </span>
+                        </span>
+                      </button>
+                      {isOpen && (
+                        <div className="bg-slate-950/40 divide-y divide-white/5">
+                          {b.tracks.map(t => (
+                            <div key={t.uri} className="px-4 py-1 flex items-center justify-between gap-3 text-[11px]">
+                              <span className="text-slate-300 truncate">{t.name} — <span className="text-slate-500">{t.artist}</span></span>
+                              <span className={t.played > 0 ? "text-purple-300 shrink-0" : "text-slate-600 shrink-0"}>
+                                {t.played} play{t.played === 1 ? "" : "s"}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-slate-600">
+                Plays = confirmed &quot;Today&apos;s Run&quot; mixes each track has featured in, historically — a track&apos;s
+                measured BPM can change after it was played (re-sync, corrected match), so a play count doesn&apos;t
+                guarantee the track is still in range today.
+              </p>
+            </>
+          )}
+        </div>
+      </div>
 
       {/* BBC Programme list */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">

@@ -111,6 +111,23 @@ export function getAllTodaysRunEntries(): TodaysRunEntry[] {
   return Object.values(loadAll()).sort((a, b) => b.date.localeCompare(a.date));
 }
 
+// How many confirmed (not disputed) "Today's Run" mixes each track has
+// featured in — one count per date, not per song-in-that-mix, so a track
+// repeated within the same day's mix still only counts once for that day.
+export function getPlayedCounts(): Record<string, number> {
+  const counts: Record<string, number> = {};
+  Object.values(loadAll()).forEach(entry => {
+    if (entry.approved === false) return; // disputed — didn't actually play
+    const seenToday = new Set<string>();
+    entry.tracks.forEach(t => {
+      if (!t.uri || seenToday.has(t.uri)) return;
+      seenToday.add(t.uri);
+      counts[t.uri] = (counts[t.uri] ?? 0) + 1;
+    });
+  });
+  return counts;
+}
+
 // Tracks that have already featured in a run (entries up to today — a mix
 // pre-built for tomorrow hasn't been played yet). Sent to the mix builder so
 // played-but-unvoted tracks rank below unplayed ones at the pace band they

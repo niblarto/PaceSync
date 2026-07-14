@@ -80,6 +80,7 @@ FILES = [
     ('app/api/tracks/import-bpm-csv/route.ts',    'app/api/tracks/import-bpm-csv/route.ts'),
     ('app/api/settings/heal-status/route.ts',     'app/api/settings/heal-status/route.ts'),
     ('app/api/settings/active-tracks/route.ts',   'app/api/settings/active-tracks/route.ts'),
+    ('app/api/settings/library-coverage/route.ts', 'app/api/settings/library-coverage/route.ts'),
     ('app/api/tracks/copy-to-playlist/route.ts',  'app/api/tracks/copy-to-playlist/route.ts'),
     ('lib/csv-merge.ts',                          'lib/csv-merge.ts'),
     ('app/api/bbc/tracks/route.ts',               'app/api/bbc/tracks/route.ts'),

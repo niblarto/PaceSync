@@ -930,12 +930,15 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   }, [expanded, garminConfigured, workouts, courses]);
 
   async function buildMix(w: RunnaWorkout, seedAvoidUris?: string[]) {
-    // A remix should sound different: send the previous build's tracks so the
-    // mixer demotes them (they only reappear if the BPM pool runs dry). On
-    // the very first remix of a session (no in-session mix yet), seed from
-    // the saved/pinned mix's tracks instead, so remixing a persisted mix
-    // still avoids repeating it rather than rebuilding the same setlist.
-    const avoidUris = mixState[w.uid]?.uris ?? seedAvoidUris;
+    // A remix should sound different: send every track from every prior
+    // build this session so the mixer demotes them (they only reappear if
+    // the BPM pool runs dry). seedAvoidUris (from DashboardClient's
+    // remixAiDjMix) is the up-to-date accumulated list — it must win over
+    // the stale mixState snapshot from the previous build, or accumulation
+    // stops after the first remix and the same tracks keep resurfacing.
+    // Falling back to mixState only covers the plain (non-remix) "AI DJ
+    // Mix" button, which has no seedAvoidUris of its own.
+    const avoidUris = seedAvoidUris ?? mixState[w.uid]?.uris;
     setMixState(s => ({ ...s, [w.uid]: { status: "building", startedAt: Date.now(), uris: avoidUris } }));
     try {
       const mixRes = await fetch("/api/ai-dj/mix", {
