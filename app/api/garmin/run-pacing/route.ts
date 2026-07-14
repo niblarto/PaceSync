@@ -41,6 +41,22 @@ function withLibraryFlag<T extends { tracks?: { uri: string | null }[] }>(result
 // How far off target still counts as "on pace" (sec/mi either side).
 const TOLERANCE_SEC_PER_MI = 10;
 
+// Mirrors ai_dj/workout.py's _segment_kind: classifies a segment label as
+// "easy" (warmup/conversational/cooldown/walking rest — allowed to run
+// slower than target without penalty) or "work" (an actual interval, judged
+// with the normal tolerance). Used only for the aggregate summary verdict
+// below, not the per-track color, which already shows every track's real
+// pace regardless of kind.
+function isEasySegment(label: string): boolean {
+  const t = label.toLowerCase();
+  return (
+    t.includes("warm up") || t.includes("warmup") ||
+    t.includes("cool down") || t.includes("cooldown") ||
+    t.includes("conversational") || t.includes("easy") || t.includes("recovery") ||
+    t.includes("rest") || t.includes("walk")
+  );
+}
+
 export interface TrackPacing {
   uri: string | null;
   name: string;
@@ -153,8 +169,23 @@ export async function GET(req: NextRequest) {
       return { ...t, actualPaceSec, verdict };
     });
 
-    // Overall read: of the judged songs, which way does the run lean?
-    const judged = tracks.filter(t => t.verdict === "on" || t.verdict === "fast" || t.verdict === "slow");
+    // Overall read: of the judged songs, which way does the run lean? Only
+    // actual interval (non-easy) tracks are held to the tolerance — a
+    // warmup/conversational/cooldown/walking-rest track running slower than
+    // its already-slow target isn't a problem, and neither is a track that
+    // straddles the transition into/out of an interval (its measured pace
+    // mixes two different targets' worth of samples). Both kinds still count
+    // as a positive signal if they ran faster than target, same as before.
+    const judged = tracks.filter((t, i) => {
+      if (t.verdict !== "on" && t.verdict !== "fast" && t.verdict !== "slow") return false;
+      if (t.verdict === "fast") return true;
+      const prevSeg = i > 0 ? entry.tracks[i - 1].segment : null;
+      const nextSeg = i < entry.tracks.length - 1 ? entry.tracks[i + 1].segment : null;
+      const isTransition = (prevSeg !== null && prevSeg !== t.segment) || (nextSeg !== null && nextSeg !== t.segment);
+      if (isTransition) return false;
+      if (isEasySegment(t.segment)) return false;
+      return true;
+    });
     const fast = judged.filter(t => t.verdict === "fast").length;
     const slow = judged.filter(t => t.verdict === "slow").length;
     const summary = judged.length === 0

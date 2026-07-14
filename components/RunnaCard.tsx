@@ -388,11 +388,17 @@ export function RunnaSummaryCard() {
                     setExpanded(isOpen ? null : run.uid);
                     if (!isOpen) {
                       fetchPacing(run.date); loadVotes(); fetchActivityLinks(run.date);
-                      const el = e.currentTarget;
-                      // Scroll after the expanding content has laid out, so
-                      // the clicked row lands at the container's top rather
-                      // than wherever it happened to sit before expansion.
-                      requestAnimationFrame(() => el.scrollIntoView({ block: "start", behavior: "smooth" }));
+                      const row = e.currentTarget.parentElement as HTMLElement | null;
+                      const container = scrollRef.current;
+                      // Scroll only the card's own list container — never
+                      // scrollIntoView, which can also move the outer page
+                      // scroll. Computed after the expanding content lays
+                      // out, so the row lands at the container's top rather
+                      // than wherever it sat before expansion.
+                      requestAnimationFrame(() => {
+                        if (!row || !container) return;
+                        container.scrollTo({ top: row.offsetTop - container.offsetTop, behavior: "smooth" });
+                      });
                     }
                   }}
                   className="w-full px-5 py-3 flex items-center gap-3 text-left hover:bg-slate-800/40 transition-colors"
@@ -1063,11 +1069,17 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                   onClick={e => {
                     setExpanded(isOpen ? null : w.uid);
                     if (!isOpen) {
-                      const el = e.currentTarget;
-                      // Scroll after the expanding content has laid out, so
-                      // the clicked row lands at the container's top rather
-                      // than wherever it happened to sit before expansion.
-                      requestAnimationFrame(() => el.scrollIntoView({ block: "start", behavior: "smooth" }));
+                      const row = e.currentTarget.parentElement as HTMLElement | null;
+                      const container = scrollRef.current;
+                      // Scroll only the card's own list container — never
+                      // scrollIntoView, which can also move the outer page
+                      // scroll. Computed after the expanding content lays
+                      // out, so the row lands at the container's top rather
+                      // than wherever it sat before expansion.
+                      requestAnimationFrame(() => {
+                        if (!row || !container) return;
+                        container.scrollTo({ top: row.offsetTop - container.offsetTop, behavior: "smooth" });
+                      });
                     }
                   }}
                   className="w-full px-5 py-3 flex items-center gap-3 text-left hover:bg-slate-800/40 transition-colors"

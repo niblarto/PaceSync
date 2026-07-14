@@ -62,6 +62,13 @@ function effectiveTempo(tempo: number): number {
   return tempo < DOUBLETIME_THRESHOLD ? tempo * 2 : tempo;
 }
 
+// Rounded to whole BPM everywhere the track list itself shows rounded BPM
+// (e.g. "167 BPM") — plotting raw decimals made tracks that display as the
+// same BPM still draw a visible micro-step between them on the chart.
+function chartBpm(tempo: number): number {
+  return Math.round(effectiveTempo(tempo));
+}
+
 function fmtPaceSecs(secs: number): string {
   const m = Math.floor(secs / 60);
   const s = Math.round(secs % 60);
@@ -134,11 +141,11 @@ export function MixPaceChart({ tracks }: { tracks: MixChartTrack[] }) {
   // as a line through each track's own tempo.
   const records: ChartPoint[] = tracks.length
     ? [
-        ...tracks.map(t => ({ t: t.startsAtSec, target: t.targetPaceSec, bpm: t.tempo != null ? effectiveTempo(t.tempo) : null })),
+        ...tracks.map(t => ({ t: t.startsAtSec, target: t.targetPaceSec, bpm: t.tempo != null ? chartBpm(t.tempo) : null })),
         {
           t: totalSec,
           target: tracks[tracks.length - 1].targetPaceSec,
-          bpm: tracks[tracks.length - 1].tempo != null ? effectiveTempo(tracks[tracks.length - 1].tempo!) : null,
+          bpm: tracks[tracks.length - 1].tempo != null ? chartBpm(tracks[tracks.length - 1].tempo!) : null,
         },
       ]
     : [];
