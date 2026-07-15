@@ -82,6 +82,7 @@ FILES = [
     ('app/api/settings/active-tracks/route.ts',   'app/api/settings/active-tracks/route.ts'),
     ('app/api/settings/library-coverage/route.ts', 'app/api/settings/library-coverage/route.ts'),
     ('app/api/tracks/copy-to-playlist/route.ts',  'app/api/tracks/copy-to-playlist/route.ts'),
+    ('app/api/settings/register-playlist/route.ts', 'app/api/settings/register-playlist/route.ts'),
     ('lib/csv-merge.ts',                          'lib/csv-merge.ts'),
     ('app/api/bbc/tracks/route.ts',               'app/api/bbc/tracks/route.ts'),
     ('app/api/bbc/episode-info/route.ts',         'app/api/bbc/episode-info/route.ts'),

@@ -3,7 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { readFile } from "fs/promises";
 import { activeCsvPath, csvPathFor, listRunningPlaylists, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
-import { mergeCsvIntoFile, parseCsvRow } from "@/lib/csv-merge";
+import { mergeCsvIntoFile, parseCsvRow, csvEscape } from "@/lib/csv-merge";
 import { healActiveCsv } from "@/lib/csv-heal";
 
 // Copies the given track URIs (already in the active playlist's library)
@@ -40,7 +40,10 @@ export async function POST(req: NextRequest) {
 
   if (matchedRows.length === 0) return NextResponse.json({ error: "None of the requested tracks were found in the active library" }, { status: 404 });
 
-  const csvBody = [header.join(","), ...matchedRows.map(r => r.join(","))].join("\n") + "\n";
+  const csvBody = [
+    header.map(csvEscape).join(","),
+    ...matchedRows.map(r => r.map(csvEscape).join(",")),
+  ].join("\n") + "\n";
   const dest = csvPathFor(target);
   const result = await mergeCsvIntoFile(dest, csvBody);
   console.log(`[copy-to-playlist] copied into "${target.name}": appended ${result.appended}, merged ${result.merged}`);

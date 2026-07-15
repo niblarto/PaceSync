@@ -234,19 +234,20 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       || (rounded * 2 >= SPRINT_BPM_MIN && rounded * 2 <= SPRINT_BPM_MAX);
   }
 
-  useEffect(() => {
+  const loadActiveTracks = useCallback(() => {
     fetch("/api/settings/active-tracks")
       .then(r => r.json())
       .then((d: { tracks?: typeof activeTracks }) => { setActiveTracks(d.tracks ?? []); setActiveTracksLoaded(true); })
       .catch(() => setActiveTracksLoaded(true));
   }, []);
+  useEffect(() => { loadActiveTracks(); }, [loadActiveTracks]);
 
   // ── Library coverage report: how much of the library falls within a BPM
   // range the AI DJ mixer could ever pick a track from (per-kind Settings
   // overrides), vs. sitting outside every kind's range — and how many
   // confirmed "Today's Run" mixes each track has actually featured in, so
   // unused-but-in-range tracks are visible too. ──
-  interface CoverageTrack { uri: string; name: string; artist: string; played: number }
+  interface CoverageTrack { uri: string; name: string; artist: string; played: number; inRange: boolean }
   interface CoverageBucket { bpm: number; count: number; inRange: boolean; played: number; tracks: CoverageTrack[] }
   const [coverage, setCoverage] = useState<{
     buckets: CoverageBucket[]; totalTracks: number; inRangeTracks: number; outOfRangeTracks: number;
@@ -254,12 +255,91 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   } | null>(null);
   const [coverageLoaded, setCoverageLoaded] = useState(false);
   const [expandedBucket, setExpandedBucket] = useState<number | null>(null);
-  useEffect(() => {
+  const loadCoverage = useCallback(() => {
     fetch("/api/settings/library-coverage")
       .then(r => r.json())
       .then((d: typeof coverage) => { setCoverage(d); setCoverageLoaded(true); })
       .catch(() => setCoverageLoaded(true));
   }, []);
+  useEffect(() => { loadCoverage(); }, [loadCoverage]);
+
+  // ── Copy every "presentable" (in-range) coverage track to another
+  // playlist — an existing known one (append + dedupe, same as Sprint BPM's
+  // copy) or a brand-new one (created on Spotify, registered locally). ──
+  const [coverageCopyTarget, setCoverageCopyTarget] = useState(""); // known playlist id, or "__new__"
+  const [coverageNewPlaylistName, setCoverageNewPlaylistName] = useState("");
+  const [coverageCopying, setCoverageCopying] = useState(false);
+  const [coverageCopyMsg, setCoverageCopyMsg] = useState<string | null>(null);
+  const [coverageCopyError, setCoverageCopyError] = useState<string | null>(null);
+
+  async function copyCoverageTracksToPlaylist() {
+    if (!coverageCopyTarget) { setCoverageCopyError("Choose a target playlist first."); return; }
+    const isNew = coverageCopyTarget === "__new__";
+    if (isNew && !coverageNewPlaylistName.trim()) { setCoverageCopyError("Name the new playlist first."); return; }
+
+    const presentableUris = Array.from(new Set(
+      (coverage?.buckets ?? []).flatMap(b => b.tracks.filter(t => t.inRange).map(t => t.uri))
+    ));
+    if (presentableUris.length === 0) { setCoverageCopyError("No presentable tracks to copy."); return; }
+
+    const token = await freshSpotifyToken();
+    if (!token) { setCoverageCopyError("Not signed in"); return; }
+
+    setCoverageCopying(true);
+    setCoverageCopyError(null);
+    setCoverageCopyMsg(null);
+    try {
+      if (isNew) {
+        // /me/playlists (not /users/{id}/playlists) — this app's other
+        // create-playlist path (lib/spotify-playlist.ts) already found the
+        // user-id-scoped endpoint 403s unreliably; /me/playlists targets
+        // "the current user" directly and works.
+        const createRes = await fetch("https://api.spotify.com/v1/me/playlists", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ name: coverageNewPlaylistName.trim(), public: false, description: "Presentable tracks copied from Library Coverage" }),
+        });
+        if (!createRes.ok) throw new Error(`[POST /me/playlists] Spotify ${createRes.status}: ${await createRes.text()}`);
+        const created = await createRes.json() as { id: string };
+
+        try {
+          await addTracksBrowser(created.id, presentableUris, token);
+        } catch (e) {
+          throw new Error(`[POST /playlists/${created.id}/items] ${e instanceof Error ? e.message : String(e)}`);
+        }
+
+        const res = await fetch("/api/settings/register-playlist", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: coverageNewPlaylistName.trim(), id: created.id, uris: presentableUris }),
+        });
+        const d = await res.json() as { error?: string };
+        if (!res.ok) throw new Error(d.error ?? "Failed to register new playlist locally");
+
+        setCoverageCopyMsg(`Created "${coverageNewPlaylistName.trim()}" and copied ${presentableUris.length} tracks`);
+        setCoverageNewPlaylistName("");
+        loadPlaylistList();
+      } else {
+        await addTracksBrowser(coverageCopyTarget, presentableUris, token);
+        const res = await fetch("/api/tracks/copy-to-playlist", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targetPlaylistId: coverageCopyTarget, uris: presentableUris }),
+        });
+        const d = await res.json() as { error?: string; merged?: number };
+        if (!res.ok) throw new Error(d.error ?? "Failed to copy");
+        const targetName = knownPlaylists.find(p => p.id === coverageCopyTarget)?.name ?? "target playlist";
+        setCoverageCopyMsg(
+          `Copied ${presentableUris.length} tracks to "${targetName}"` +
+          ((d.merged ?? 0) > 0 ? ` · ${d.merged} already there had data filled in` : "")
+        );
+      }
+    } catch (e) {
+      setCoverageCopyError(e instanceof Error ? e.message : "Failed to copy tracks");
+    } finally {
+      setCoverageCopying(false);
+    }
+  }
 
   async function copySprintTracksToPlaylist() {
     if (!sprintCopyTarget) { setSprintCopyError("Choose a target playlist first."); return; }
@@ -655,6 +735,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       const d = await res.json() as { error?: string };
       if (!res.ok) throw new Error(d.error ?? "Failed to save");
       setBpmOvSaved(true);
+      loadCoverage();
     } catch (e) {
       setBpmOvError(e instanceof Error ? e.message : "Failed to save — try again.");
     } finally {
@@ -827,6 +908,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       );
       invalidateRunningPlaylistCache();
       fetchHealStatus();
+      loadActiveTracks();
+      loadCoverage();
     } catch (e) {
       setSyncError(e instanceof Error ? e.message : "Sync failed");
     } finally {
@@ -862,6 +945,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       if (!res.ok) throw new Error(d.error ?? "Failed to switch");
       invalidateRunningPlaylistCache();
       setActivePlaylistId(id);
+      // The active playlist's CSV backs both of these — refetch so they
+      // reflect the newly-active library instead of the previous one.
+      loadActiveTracks();
+      loadCoverage();
     } catch (e) {
       setPlaylistListError(e instanceof Error ? e.message : "Failed to switch playlist");
     } finally {
@@ -885,6 +972,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       invalidateRunningPlaylistCache();
       setDeleteTarget(null);
       loadPlaylistList();
+      // Deleting the active playlist switches active to another one
+      // server-side — refetch either way so these reflect whichever
+      // playlist's CSV is active now.
+      loadActiveTracks();
+      loadCoverage();
     } catch (e) {
       setPlaylistListError(e instanceof Error ? e.message : "Failed to delete playlist");
     } finally {
@@ -1391,6 +1483,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       if (csvImportMode === "append" && d.appended !== undefined) setCsvTrackCount(d.appended);
       setCsvSaved(true);
       setCsvStagedText(null);
+      loadPlaylistList();
+      loadActiveTracks();
+      loadCoverage();
     } catch {
       setCsvError("Failed to save — try again.");
     } finally {
@@ -1442,6 +1537,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       invalidateRunningPlaylistCache();
       loadPlaylistList();
       fetchHealStatus();
+      loadActiveTracks();
+      loadCoverage();
     } catch (e) {
       setAppendCsvError(e instanceof Error ? e.message : "Failed to append — try again.");
     } finally {
@@ -1756,8 +1853,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
   const TABS = [
     { key: "heart-rate", label: "Heart Rate & Zones" },
-    { key: "playlist", label: "Playlist & BBC" },
-    { key: "integrations", label: "Integrations" },
+    { key: "playlist", label: "Playlist & BPM" },
+    { key: "integrations", label: "Integrations & BBC" },
     { key: "notifications", label: "Notifications & 2FA" },
   ] as const;
   type TabKey = typeof TABS[number]["key"];
@@ -1956,77 +2053,23 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             </div>
           </div>
         ))}
-        </div>
-      </div>
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+        {error && <p className="text-sm text-red-400 px-1">{error}</p>}
 
-      <button
-        onClick={save}
-        disabled={saving || !hrrValid}
-        className="rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-sm px-5 py-2 transition-colors"
-      >
-        {saving ? "Saving…" : saved ? "Saved!" : "Save zones"}
-      </button>
-
-      {/* Run-type BPM limits — lives here (not Playlist & BBC) since it's a
-          per-run-type tempo setting like HR zones, and is referenced by the
-          AI DJ mixer's per-segment LLM prompts (ai_dj/workout.py's
-          _kind_bpm_bounds) the same way HR zones drive pace suggestions. */}
-      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
-        <div>
-          <h3 className="font-semibold text-slate-200">Run BPM limits</h3>
-          <p className="text-sm text-slate-400 mt-1">
-            Min/max music BPM per run type for AI DJ mixes. Leave blank for automatic
-            cadence matching — anything set here becomes a hard limit.
-            Half-time tracks count at double tempo (an 87 BPM track counts as 174).
-          </p>
-        </div>
-        <div className="space-y-2">
-          {([
-            ["warmup", "Warm up"],
-            ["work", "Work / intervals"],
-            ["easy", "Easy / conversational"],
-            ["cooldown", "Cool down"],
-            ["rest", "Rest / recovery"],
-          ] as [string, string][]).map(([kind, label]) => (
-            <div key={kind} className="flex items-center gap-3">
-              <span className="text-sm text-slate-300 w-44 shrink-0">{label}</span>
-              <input
-                type="number"
-                min={0}
-                value={bpmOv[kind].min}
-                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], min: e.target.value } })); setBpmOvSaved(false); }}
-                placeholder="164"
-                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
-              />
-              <span className="text-slate-600 text-xs">–</span>
-              <input
-                type="number"
-                min={0}
-                value={bpmOv[kind].max}
-                onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], max: e.target.value } })); setBpmOvSaved(false); }}
-                placeholder="180"
-                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
-              />
-              <span className="text-xs text-slate-600">BPM</span>
-            </div>
-          ))}
-        </div>
-        {bpmOvError && <p className="text-sm text-red-400">{bpmOvError}</p>}
         <button
-          onClick={saveBpmOverrides}
-          disabled={bpmOvSaving}
-          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+          onClick={save}
+          disabled={saving || !hrrValid}
+          className="rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-sm px-5 py-2 transition-colors"
         >
-          {bpmOvSaving ? "Saving…" : bpmOvSaved ? "Saved!" : "Save BPM limits"}
+          {saving ? "Saving…" : saved ? "Saved!" : "Save zones"}
         </button>
+        </div>
       </div>
 
     </div>
     </div>
 
-    {/* ── Tab 2: Playlist & BBC ── */}
+    {/* ── Tab 2: Playlist & BPM ── */}
     <div className={activeTab === "playlist" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
@@ -2258,67 +2301,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           {appendCsvError && <p className="text-xs text-red-400">{appendCsvError}</p>}
         </div>
 
-        {/* Sprint BPM summary (text version of the dashboard's Sprint BPM
-            counts chart — same half/double-time bucketing) + copy the whole
-            range to another playlist. Spotify add happens client-side
-            (browser token), the local CSV merge happens server-side via
-            /api/tracks/copy-to-playlist so BPM data carries over instead of
-            the target needing to re-look it up. */}
-        <div className="pt-3 border-t border-white/10 space-y-2">
-          <label className="block text-sm font-medium text-slate-300">Sprint BPM summary ({SPRINT_BPM_MIN}–{SPRINT_BPM_MAX})</label>
-          <p className="text-xs text-slate-500">
-            Track count per BPM in the active library&apos;s sprint range (half-tempo tracks counted at double) — copy the whole range into another playlist below.
-          </p>
-          {!activeTracksLoaded ? (
-            <p className="text-xs text-slate-500 italic">Loading…</p>
-          ) : (() => {
-            const sprintTracks = activeTracks.filter(inSprintRange);
-            const bpms = Array.from({ length: SPRINT_BPM_MAX - SPRINT_BPM_MIN + 1 }, (_, i) => SPRINT_BPM_MIN + i);
-            const counts = bpms.map(bpm =>
-              activeTracks.filter(t => {
-                const rounded = Math.round(t.bpm);
-                return rounded === bpm || rounded * 2 === bpm;
-              }).length
-            );
-            if (sprintTracks.length === 0 && counts.every(c => c === 0)) {
-              return <p className="text-xs text-slate-500 italic">No tracks in this range in the active playlist.</p>;
-            }
-            return (
-              <>
-                <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs">
-                  {bpms.map((bpm, i) => (
-                    <div key={bpm} className="px-2.5 py-1 flex items-center justify-between gap-3">
-                      <span className="text-slate-400">{bpm} BPM</span>
-                      <span className={counts[i] > 0 ? "text-slate-200" : "text-slate-600"}>{counts[i]}</span>
-                    </div>
-                  ))}
-                </div>
-                <div className="flex items-center gap-2 flex-wrap pt-1">
-                  <select
-                    value={sprintCopyTarget}
-                    onChange={e => { setSprintCopyTarget(e.target.value); setSprintCopyError(null); }}
-                    className="rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
-                  >
-                    <option value="">Choose target playlist…</option>
-                    {knownPlaylists.filter(p => p.id !== activePlaylistId).map(p => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </select>
-                  <button
-                    onClick={copySprintTracksToPlaylist}
-                    disabled={sprintCopying || !sprintCopyTarget || sprintTracks.length === 0}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-2 transition-colors whitespace-nowrap"
-                  >
-                    {sprintCopying ? "Copying…" : `Copy ${sprintTracks.length} track${sprintTracks.length === 1 ? "" : "s"}`}
-                  </button>
-                </div>
-                {sprintCopyMsg && <p className="text-xs text-green-400">{sprintCopyMsg}</p>}
-                {sprintCopyError && <p className="text-xs text-red-400">{sprintCopyError}</p>}
-              </>
-            );
-          })()}
-        </div>
-
         <div className="pt-3 border-t border-white/10 space-y-2">
           <label className="block text-sm font-medium text-slate-300">Import AI DJ playlist library</label>
           <p className="text-xs text-slate-500">
@@ -2442,7 +2424,101 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     </div>
     <div className="space-y-6">
 
-      <DedupCard />
+      {/* Run-type BPM limits — feeds the AI DJ mixer's per-segment LLM
+          prompts (ai_dj/workout.py's _kind_bpm_bounds) and the Library
+          Coverage report below, so it lives alongside both on this tab. */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h3 className="font-semibold text-slate-200">Run BPM limits</h3>
+          <p className="text-sm text-slate-400 mt-1">
+            Min/max music BPM per run type for AI DJ mixes. Leave blank for automatic
+            cadence matching — anything set here becomes a hard limit.
+            Half-time tracks count at double tempo (an 87 BPM track counts as 174).
+          </p>
+        </div>
+        <div className="space-y-2">
+          {([
+            ["warmup", "Warm up"],
+            ["work", "Work / intervals"],
+            ["easy", "Easy / conversational"],
+            ["cooldown", "Cool down"],
+            ["rest", "Rest / recovery"],
+          ] as [string, string][]).map(([kind, label]) => {
+            const minVal = bpmOv[kind].min.trim();
+            const maxVal = bpmOv[kind].max.trim();
+            const min = minVal ? Number(minVal) : null;
+            const max = maxVal ? Number(maxVal) : null;
+            // A range this narrow (or inverted) will silently exclude
+            // almost every track — the segment just gets skipped with no
+            // error, which is exactly how a min===max typo went unnoticed
+            // before (a cooldown segment vanished from a mix entirely).
+            const isExact = min !== null && max !== null && min === max;
+            const isInverted = min !== null && max !== null && min > max;
+            // How many library tracks actually fall in this range right
+            // now — same doubletime convention as everywhere else (a
+            // sub-95 BPM track counts at double), computed live as the
+            // fields are edited so a bad range's impact is visible before
+            // saving, not just after a mix silently comes up short.
+            const matchCount = !isInverted && activeTracksLoaded
+              ? activeTracks.filter(t => {
+                  const eff = t.bpm < 95 ? t.bpm * 2 : t.bpm;
+                  return (min === null || eff >= min) && (max === null || eff <= max);
+                }).length
+              : null;
+            return (
+              <div key={kind}>
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-slate-300 w-44 shrink-0">{label}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={bpmOv[kind].min}
+                    onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], min: e.target.value } })); setBpmOvSaved(false); }}
+                    placeholder="164"
+                    className={`w-24 rounded-lg bg-slate-800/60 border text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 ${
+                      isExact || isInverted ? "border-amber-500/50" : "border-white/10"
+                    }`}
+                  />
+                  <span className="text-slate-600 text-xs">–</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={bpmOv[kind].max}
+                    onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], max: e.target.value } })); setBpmOvSaved(false); }}
+                    placeholder="180"
+                    className={`w-24 rounded-lg bg-slate-800/60 border text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 ${
+                      isExact || isInverted ? "border-amber-500/50" : "border-white/10"
+                    }`}
+                  />
+                  <span className="text-xs text-slate-600">BPM</span>
+                  <span className={`text-xs ml-1 ${matchCount === 0 ? "text-amber-400/90" : "text-slate-500"}`}>
+                    {matchCount === null ? "" : `${matchCount} track${matchCount === 1 ? "" : "s"}`}
+                  </span>
+                </div>
+                {isInverted && (
+                  <p className="text-xs text-amber-400/90 pl-1 mt-0.5">
+                    ⚠ Min is higher than max — no track can ever match; this segment will be skipped.
+                  </p>
+                )}
+                {isExact && (
+                  <p className="text-xs text-amber-400/90 pl-1 mt-0.5">
+                    ⚠ Min equals max — only a track at exactly {min} BPM qualifies. If none exist in the
+                    library, this segment gets silently skipped. Use a real range instead.
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {bpmOvError && <p className="text-sm text-red-400">{bpmOvError}</p>}
+        <button
+          onClick={saveBpmOverrides}
+          disabled={bpmOvSaving}
+          className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+        >
+          {bpmOvSaving ? "Saving…" : bpmOvSaved ? "Saved!" : "Save BPM limits"}
+        </button>
+      </div>
 
       {/* Library coverage: tracks the AI DJ mixer could actually be
           presented with (per-kind BPM ceilings from Settings), vs. tracks
@@ -2481,8 +2557,16 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               </div>
 
               <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs max-h-80 overflow-y-auto no-scrollbar">
-                {coverage.buckets.filter(b => b.inRange).map(b => {
+                {coverage.buckets.map(b => {
+                  // Filtered per-track, not by the bucket's own inRange flag
+                  // — a bucket straddling a kind's exact BPM ceiling can mix
+                  // in-range and out-of-range tracks, so counts/plays shown
+                  // here (and what Copy sends) must only ever reflect the
+                  // tracks that are individually actually in range.
+                  const presentable = b.tracks.filter(t => t.inRange);
+                  if (presentable.length === 0) return null;
                   const isOpen = expandedBucket === b.bpm;
+                  const playedSum = presentable.reduce((sum, t) => sum + t.played, 0);
                   return (
                     <div key={b.bpm}>
                       <button
@@ -2491,15 +2575,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                       >
                         <span className="text-slate-400">{b.bpm} BPM</span>
                         <span className="flex items-center gap-3">
-                          <span className={b.count > 0 ? "text-slate-200" : "text-slate-600"}>{b.count} track{b.count === 1 ? "" : "s"}</span>
-                          <span className={b.played > 0 ? "text-purple-300" : "text-slate-600"}>
-                            {b.played} play{b.played === 1 ? "" : "s"}
+                          <span className="text-slate-200">{presentable.length} track{presentable.length === 1 ? "" : "s"}</span>
+                          <span className={playedSum > 0 ? "text-purple-300" : "text-slate-600"}>
+                            {playedSum} play{playedSum === 1 ? "" : "s"}
                           </span>
                         </span>
                       </button>
                       {isOpen && (
                         <div className="bg-slate-950/40 divide-y divide-white/5">
-                          {b.tracks.map(t => (
+                          {presentable.map(t => (
                             <div key={t.uri} className="px-4 py-1 flex items-center justify-between gap-3 text-[11px]">
                               <span className="text-slate-300 truncate">{t.name} — <span className="text-slate-500">{t.artist}</span></span>
                               <span className={t.played > 0 ? "text-purple-300 shrink-0" : "text-slate-600 shrink-0"}>
@@ -2518,10 +2602,123 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                 measured BPM can change after it was played (re-sync, corrected match), so a play count doesn&apos;t
                 guarantee the track is still in range today.
               </p>
+
+              {/* Copy every presentable (in-range) track to another playlist
+                  — an existing known playlist (append + dedupe) or a new
+                  one (created on Spotify, registered locally with its own
+                  CSV seeded from the active library's data). */}
+              <div className="pt-2 border-t border-white/10 space-y-2">
+                <label className="block text-xs font-medium text-slate-400">
+                  Copy all {coverage.inRangeTracks} presentable tracks to…
+                </label>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <select
+                    value={coverageCopyTarget}
+                    onChange={e => { setCoverageCopyTarget(e.target.value); setCoverageCopyError(null); }}
+                    className="rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+                  >
+                    <option value="">Choose target playlist…</option>
+                    <option value="__new__">+ New playlist…</option>
+                    {knownPlaylists.filter(p => p.id !== activePlaylistId).map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                  {coverageCopyTarget === "__new__" && (
+                    <input
+                      type="text"
+                      value={coverageNewPlaylistName}
+                      onChange={e => { setCoverageNewPlaylistName(e.target.value); setCoverageCopyError(null); }}
+                      placeholder="New playlist name"
+                      className="rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+                    />
+                  )}
+                  <button
+                    onClick={copyCoverageTracksToPlaylist}
+                    disabled={coverageCopying || !coverageCopyTarget || (coverageCopyTarget === "__new__" && !coverageNewPlaylistName.trim())}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-2 transition-colors whitespace-nowrap"
+                  >
+                    {coverageCopying ? "Copying…" : `Copy ${coverage.inRangeTracks} tracks`}
+                  </button>
+                </div>
+                {coverageCopyMsg && <p className="text-xs text-green-400">{coverageCopyMsg}</p>}
+                {coverageCopyError && <p className="text-xs text-red-400">{coverageCopyError}</p>}
+              </div>
+
+              {/* Sprint BPM summary (text version of the dashboard's Sprint
+                  BPM counts chart — same half/double-time bucketing) + copy
+                  the whole range to another playlist. Spotify add happens
+                  client-side (browser token), the local CSV merge happens
+                  server-side via /api/tracks/copy-to-playlist so BPM data
+                  carries over instead of the target needing to re-look it
+                  up. Lives here alongside Library Coverage since both are
+                  BPM-range-based "copy a slice of the library" tools. */}
+              <div className="pt-3 border-t border-white/10 space-y-2">
+                <label className="block text-sm font-medium text-slate-300">Sprint BPM summary ({SPRINT_BPM_MIN}–{SPRINT_BPM_MAX})</label>
+                <p className="text-xs text-slate-500">
+                  Track count per BPM in the active library&apos;s sprint range (half-tempo tracks counted at double) — copy the whole range into another playlist below.
+                </p>
+                {!activeTracksLoaded ? (
+                  <p className="text-xs text-slate-500 italic">Loading…</p>
+                ) : (() => {
+                  const sprintTracks = activeTracks.filter(inSprintRange);
+                  const bpms = Array.from({ length: SPRINT_BPM_MAX - SPRINT_BPM_MIN + 1 }, (_, i) => SPRINT_BPM_MIN + i);
+                  const counts = bpms.map(bpm =>
+                    activeTracks.filter(t => {
+                      const rounded = Math.round(t.bpm);
+                      return rounded === bpm || rounded * 2 === bpm;
+                    }).length
+                  );
+                  if (sprintTracks.length === 0 && counts.every(c => c === 0)) {
+                    return <p className="text-xs text-slate-500 italic">No tracks in this range in the active playlist.</p>;
+                  }
+                  return (
+                    <>
+                      <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs max-h-80 overflow-y-auto no-scrollbar">
+                        {bpms.map((bpm, i) => (
+                          <div key={bpm} className="px-2.5 py-1 flex items-center justify-between gap-3">
+                            <span className="text-slate-400">{bpm} BPM</span>
+                            <span className={counts[i] > 0 ? "text-slate-200" : "text-slate-600"}>{counts[i]}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap pt-1">
+                        <select
+                          value={sprintCopyTarget}
+                          onChange={e => { setSprintCopyTarget(e.target.value); setSprintCopyError(null); }}
+                          className="rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+                        >
+                          <option value="">Choose target playlist…</option>
+                          {knownPlaylists.filter(p => p.id !== activePlaylistId).map(p => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={copySprintTracksToPlaylist}
+                          disabled={sprintCopying || !sprintCopyTarget || sprintTracks.length === 0}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-2 transition-colors whitespace-nowrap"
+                        >
+                          {sprintCopying ? "Copying…" : `Copy ${sprintTracks.length} track${sprintTracks.length === 1 ? "" : "s"}`}
+                        </button>
+                      </div>
+                      {sprintCopyMsg && <p className="text-xs text-green-400">{sprintCopyMsg}</p>}
+                      {sprintCopyError && <p className="text-xs text-red-400">{sprintCopyError}</p>}
+                    </>
+                  );
+                })()}
+              </div>
             </>
           )}
         </div>
       </div>
+
+      <DedupCard />
+
+    </div>
+    </div>
+
+    {/* ── Tab 3: Integrations & BBC ── */}
+    <div className={activeTab === "integrations" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
+    <div className="space-y-6">
 
       {/* BBC Programme list */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
@@ -2656,13 +2853,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         )}
         </div>
       </div>
-
-    </div>
-    </div>
-
-    {/* ── Tab 3: Integrations ── */}
-    <div className={activeTab === "integrations" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
-    <div className="space-y-6">
 
       {/* AI DJ */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">

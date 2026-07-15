@@ -40,7 +40,7 @@ function parseCsvRow(line: string): string[] {
   return result;
 }
 
-interface BucketTrack { uri: string; name: string; artist: string; played: number }
+interface BucketTrack { uri: string; name: string; artist: string; played: number; inRange: boolean }
 export interface CoverageBucket {
   bpm: number;       // effective (post-doubling) BPM, in 2-BPM-wide buckets
   count: number;      // tracks whose effective BPM falls in this bucket
@@ -96,16 +96,24 @@ export async function GET() {
       totalTracks++;
       const effectiveBpm = rawBpm < DOUBLETIME_THRESHOLD ? rawBpm * 2 : rawBpm;
       const bucket = Math.round(effectiveBpm / bucketWidth) * bucketWidth;
+      // inRange is decided per-track from its own exact effective BPM, not
+      // from the rounded bucket value — a bucket sits at the boundary of a
+      // kind's range can otherwise disagree with some of its own tracks
+      // (e.g. bucket 180 in-range but a track rounding into it at 180.9 is
+      // actually past a 180 ceiling), which both mis-reports "presentable"
+      // counts and silently copies out-of-range tracks into a new playlist.
+      const trackInRange = isInAnyKindRange(effectiveBpm);
       const list = bucketTracks.get(bucket) ?? [];
       list.push({
         uri,
         name: idxName !== -1 ? (row[idxName]?.trim() || "Unknown") : "Unknown",
         artist: idxArtist !== -1 ? (row[idxArtist]?.trim() || "Unknown") : "Unknown",
         played: playedCounts[uri] ?? 0,
+        inRange: trackInRange,
       });
       bucketTracks.set(bucket, list);
 
-      if (isInAnyKindRange(effectiveBpm)) inRangeTracks++;
+      if (trackInRange) inRangeTracks++;
     }
 
     const buckets: CoverageBucket[] = Array.from(bucketTracks.entries())
@@ -113,7 +121,11 @@ export async function GET() {
       .map(([bpm, tracks]) => ({
         bpm,
         count: tracks.length,
-        inRange: isInAnyKindRange(bpm),
+        // A bucket is only flagged in-range if EVERY track in it actually
+        // is — otherwise "click to expand" would show a mix of in/out-of-
+        // range tracks under a single in-range-looking header. Individual
+        // tracks still carry their own accurate inRange flag regardless.
+        inRange: tracks.every(t => t.inRange),
         played: tracks.reduce((sum, t) => sum + t.played, 0),
         tracks: tracks.sort((a, b) => b.played - a.played),
       }));

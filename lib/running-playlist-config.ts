@@ -102,10 +102,16 @@ export function csvPathFor(entry: RunningPlaylistConfig): string {
   return path.join(CSV_DIR, entry.csvFile);
 }
 
-// Add/update a playlist entry (by id) and make it the active one. Reuses an
-// existing csvFile if this id is already known, otherwise derives one from
-// the playlist's own name — e.g. "Uber-Running" -> Uber-Running.csv.
-export function saveRunningPlaylistConfig(config: { name: string; id: string }): RunningPlaylistConfig {
+// Add/update a playlist entry (by id) and, by default, make it the active
+// one. Reuses an existing csvFile if this id is already known, otherwise
+// derives one from the playlist's own name — e.g. "Uber-Running" ->
+// Uber-Running.csv. Pass keepCurrentActive when registering a playlist that
+// isn't meant to take over as active (e.g. a brand-new copy-to target
+// created from another tab/feature).
+export function saveRunningPlaylistConfig(
+  config: { name: string; id: string },
+  opts: { keepCurrentActive?: boolean } = {},
+): RunningPlaylistConfig {
   const store = loadStore();
   const existing = store.playlists.find(p => p.id === config.id);
   const csvFile = existing?.csvFile ?? slugifyCsvName(config.name);
@@ -113,7 +119,8 @@ export function saveRunningPlaylistConfig(config: { name: string; id: string }):
 
   const others = store.playlists.filter(p => p.id !== config.id);
   const playlists = [...others, entry];
-  saveStore({ activeId: config.id, playlists });
+  const activeId = opts.keepCurrentActive ? store.activeId : config.id;
+  saveStore({ activeId, playlists });
   return entry;
 }
 
