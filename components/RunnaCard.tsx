@@ -200,7 +200,7 @@ function fmtPaceSec(s: number | null): string {
   return `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
 }
 
-export function RunnaSummaryCard() {
+export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string) => void } = {}) {
   const { pastRuns, loading, error } = useRunnaData();
   const [expanded, setExpanded] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -576,7 +576,7 @@ export function RunnaSummaryCard() {
                                 >
                                   {t.uri ? (
                                     <button
-                                      onClick={() => openInSpotify(t.uri!)}
+                                      onClick={() => { openInSpotify(t.uri!); onTrackClick?.(t.uri!); }}
                                       className="flex-1 min-w-0 truncate text-left hover:underline"
                                       title={`${t.name} — open in Spotify`}
                                     >
@@ -650,6 +650,9 @@ interface RunnaScheduleProps {
   onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimelineSegment[], avoidUris?: string[]) => void;
   /** Bumped by the parent after a mix is saved — invalidates the saved-mix tracklist cache */
   mixSavedNonce?: number;
+  /** Called when a track in this card is clicked, alongside opening it in Spotify — the
+      parent surfaces the same track in the main track list (clears filters, scrolls, highlights). */
+  onTrackClick?: (uri: string) => void;
 }
 
 // Exposed to the parent so the tracks card's Remix button can drive this
@@ -793,7 +796,7 @@ function courseMatchesDate(name: string, date: string): boolean {
 }
 
 export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaScheduleProps>(function RunnaScheduleCard(
-  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0 }: RunnaScheduleProps = {},
+  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0, onTrackClick }: RunnaScheduleProps = {},
   ref,
 ) {
   const { workouts: allWorkouts, pastRuns, loading, error } = useRunnaData();
@@ -1273,7 +1276,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                                   return t.uri ? (
                                     <p key={i} className="text-[11px] text-slate-400 truncate">
                                       <button
-                                        onClick={e => { e.stopPropagation(); openInSpotify(t.uri!); }}
+                                        onClick={e => { e.stopPropagation(); openInSpotify(t.uri!); onTrackClick?.(t.uri!); }}
                                         className="hover:text-slate-200 truncate text-left"
                                       >
                                         {label}

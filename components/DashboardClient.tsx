@@ -45,7 +45,7 @@ const ALL_ZONE: RunningZone = {
   textColor: "text-white",
 };
 
-function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy, inlineCard }: {
+function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy, inlineCard, highlightUri, playedCounts }: {
   tracks: TrackWithBPM[];
   onDelete?: (track: TrackWithBPM) => void;
   onSimilar?: (track: TrackWithBPM) => void;
@@ -53,11 +53,16 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy,
   suggestBusy?: { trackId: string; mode: "style" | "tempo" } | null;
   /** Card rendered inline directly below the row whose track id matches (suggestions popover) */
   inlineCard?: { trackId: string; node: React.ReactNode } | null;
+  /** Track to scroll to and briefly highlight, e.g. jumped to from a Runna card click */
+  highlightUri?: string | null;
+  /** Confirmed "Today's Run" mix play counts, keyed by track URI */
+  playedCounts?: Record<string, number>;
 }) {
   const [visibleCount, setVisibleCount] = useState(50);
   const containerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
+  const highlightRowRef = useRef<HTMLDivElement | null>(null);
 
   const loadMore = useCallback(() => {
     setVisibleCount(c => Math.min(c + 50, tracks.length));
@@ -75,14 +80,26 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy,
     return () => obs.disconnect();
   }, [visibleCount, tracks.length, loadMore]);
 
+  // Jump to a track from outside the list (e.g. clicked in a Runna card):
+  // make sure it's within the sliced/visible range, then scroll it into view.
+  useEffect(() => {
+    if (!highlightUri) return;
+    const idx = tracks.findIndex(t => t.uri === highlightUri);
+    if (idx === -1) return;
+    if (idx >= visibleCount) { setVisibleCount(Math.min(idx + 50, tracks.length)); return; }
+    highlightRowRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [highlightUri, tracks, visibleCount]);
+
   return (
     <div ref={containerRef} className="divide-y divide-slate-800/50 h-full min-h-[400px] overflow-y-auto no-scrollbar">
       {tracks.slice(0, visibleCount).map((track, i) => (
         <div
           key={`${track.id}-${i}`}
-          ref={inlineCard?.trackId === track.id
-            ? (el) => { if (el) setAnchorEl(prev => (prev === el ? prev : el)); }
-            : undefined}
+          ref={(el) => {
+            if (inlineCard?.trackId === track.id && el) setAnchorEl(prev => (prev === el ? prev : el));
+            if (highlightUri === track.uri) highlightRowRef.current = el;
+          }}
+          className={highlightUri === track.uri ? "animate-pulse-highlight" : undefined}
         >
           <TrackRow
             track={track}
@@ -92,6 +109,7 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, suggestBusy,
             onSuggestStyle={onSuggest ? () => onSuggest(track, "style") : undefined}
             onSuggestTempo={onSuggest ? () => onSuggest(track, "tempo") : undefined}
             suggestBusy={suggestBusy?.trackId === track.id ? suggestBusy.mode : null}
+            playedCount={playedCounts?.[track.uri]}
           />
         </div>
       ))}
@@ -283,6 +301,11 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [selectedZones, setSelectedZones] = useState<RunningZone[]>([]);
   const [allTracks, setAllTracks]       = useState<TrackWithBPM[]>([]);
   const [filteredTracks, setFilteredTracks] = useState<TrackWithBPM[]>([]);
+  const [playedCounts, setPlayedCounts] = useState<Record<string, number>>({});
+  // Set when a track is clicked from a Runna Summary/Schedule card — filters
+  // the main list down to just that track, same as any other filter, with
+  // its own "Clear filter" affordance.
+  const [singleTrackFilter, setSingleTrackFilter] = useState<string | null>(null);
   const [csvName, setCsvName]           = useState<string | null>(null);
   const [step, setStep]                 = useState<Step>("idle");
   const [savedUrl, setSavedUrl]         = useState<string | null>(null);
@@ -335,6 +358,13 @@ export function DashboardClient({ spotifyUser }: Props) {
     fetch("/api/settings/ai-dj")
       .then(r => r.json())
       .then((d: { enabled?: boolean }) => { setAiDjEnabled(d.enabled ?? false); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/tracks/played-counts")
+      .then(r => r.json())
+      .then((d: { counts?: Record<string, number> }) => { setPlayedCounts(d.counts ?? {}); })
       .catch(() => {});
   }, []);
 
@@ -526,6 +556,10 @@ export function DashboardClient({ spotifyUser }: Props) {
 
   // Re-filter whenever zone selection, pace filter, similar filter, or tracks change
   useEffect(() => {
+    if (singleTrackFilter) {
+      setFilteredTracks(allTracks.filter(t => t.uri === singleTrackFilter));
+      return;
+    }
     if (aiDjMix) {
       setFilteredTracks(aiDjMix.tracks);
       return;
@@ -574,7 +608,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       }
       setFilteredTracks(result);
     }
-  }, [selectedZones, allTracks, paceFilter, sprintBpmFilter, similarFilter, noBpmFilter, aiDjMix]);
+  }, [selectedZones, allTracks, paceFilter, sprintBpmFilter, similarFilter, noBpmFilter, aiDjMix, singleTrackFilter]);
 
   // For seeds not in the playlist pool (BBC tracks, 0-BPM tracks) the CSV
   // lookup in the python bridge can't work — fetch features from ReccoBeats
@@ -597,6 +631,14 @@ export function DashboardClient({ spotifyUser }: Props) {
     return { name: track.name, artist: track.artists[0]?.name ?? "", ...f };
   }
 
+  // Surface a track (clicked from a Runna Summary/Schedule card) in the main
+  // track list: filter the list down to just that one track (the track may
+  // not be in whatever filtered view is currently active) — takes priority
+  // over every other filter until cleared.
+  function jumpToTrack(uri: string) {
+    setSingleTrackFilter(uri);
+  }
+
   async function handleSimilar(track: TrackWithBPM) {
     setSimilarLoading(true);
     try {
@@ -615,6 +657,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       setSprintBpmFilter(null);
       setNoBpmFilter(false);
       setAiDjMix(null);
+      setSingleTrackFilter(null);
       if (csvName) setPlaylistName(`${csvName} – like ${track.name}`);
     } catch (e) {
       console.error("[similar]", e);
@@ -634,6 +677,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     setSprintBpmFilter(null);
     setSimilarFilter(null);
     setNoBpmFilter(false);
+    setSingleTrackFilter(null);
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
     setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false, avoidUris });
     setChartDismissed(false);
@@ -1079,6 +1123,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   setSimilarFilter(null);
                   setNoBpmFilter(false);
                   setAiDjMix(null);
+                  setSingleTrackFilter(null);
                   setSelectedZones([ALL_ZONE]);
                   if (csvName) setPlaylistName(csvName);
                 }}
@@ -1108,6 +1153,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                         setSimilarFilter(null);
                         setNoBpmFilter(true);
                         setAiDjMix(null);
+                        setSingleTrackFilter(null);
                         setEnrichMsg(null);
                       } : undefined}
                       className={`block text-xs mt-0.5 ${
@@ -1134,6 +1180,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     setSimilarFilter(null);
                     setNoBpmFilter(false);
                     setAiDjMix(null);
+                    setSingleTrackFilter(null);
                     if (e.ctrlKey || e.metaKey) {
                       setSelectedZones(prev => {
                         const withoutAll = prev.filter(z => z.number !== 0);
@@ -1174,6 +1221,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   setSimilarFilter(null);
                   setNoBpmFilter(false);
                   setAiDjMix(null);
+                  setSingleTrackFilter(null);
                   setSprintBpmFilter(prev => prev === bpm ? null : bpm);
                   if (csvName) setPlaylistName(`${csvName} – ${bpm} BPM`);
                 }}
@@ -1254,7 +1302,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 edge (see resultsMaxHeight above) so a long track list
                 scrolls inside the card instead of pushing the page past the
                 Runna rail. No cap until the first measurement lands. */}
-            {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || sprintBpmFilter !== null || similarFilter || noBpmFilter || aiDjMix) && (
+            {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || sprintBpmFilter !== null || similarFilter || noBpmFilter || aiDjMix || singleTrackFilter) && (
               <div
                 ref={setResultsCardEl}
                 className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden flex flex-col"
@@ -1264,6 +1312,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   <div>
                     <h3 className="font-semibold">
                       {(() => {
+                        if (singleTrackFilter) return filteredTracks[0] ? `"${filteredTracks[0].name}"` : "Track not in library";
                         if (aiDjMix) return `${filteredTracks.length} tracks in AI DJ mix for "${aiDjMix.workoutTitle}"`;
                         if (noBpmFilter) return `${filteredTracks.length} tracks without BPM info`;
                         if (similarFilter) return `${filteredTracks.length} songs like "${similarFilter.seed.name}"`;
@@ -1284,6 +1333,15 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       From {allTracks.length} total tracks in "{csvName}" · {fmtTotalDuration(filteredTracks)} playing time
                     </p>
                   </div>
+
+                  {singleTrackFilter && (
+                    <button
+                      onClick={() => setSingleTrackFilter(null)}
+                      className="shrink-0 text-xs text-slate-400 hover:text-slate-200 border border-white/10 hover:border-white/20 rounded-lg px-3 py-1.5 transition-colors"
+                    >
+                      Clear filter
+                    </button>
+                  )}
 
                   {noBpmFilter && filteredTracks.length > 0 && (
                     <div className="flex flex-col items-end gap-1.5 shrink-0">
@@ -1460,11 +1518,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 <div className="flex-1 min-h-0 flex flex-col">
                   {filteredTracks.length === 0 ? (
                     <div className="p-8 text-center text-slate-500 text-sm">
-                      {noBpmFilter ? "All tracks have BPM info 🎉" : aiDjMix ? (remixing ? "Rebuilding mix…" : "No tracks in this mix.") : "No tracks in this BPM range. Try a different zone."}
+                      {singleTrackFilter ? "This track isn't in the library." : noBpmFilter ? "All tracks have BPM info 🎉" : aiDjMix ? (remixing ? "Rebuilding mix…" : "No tracks in this mix.") : "No tracks in this BPM range. Try a different zone."}
                     </div>
                   ) : (
                     <VirtualTrackList
-                      key={aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : sprintBpmFilter !== null ? `sprint-${sprintBpmFilter}` : selectedZones.map(z=>z.number).sort().join("-")}
+                      key={singleTrackFilter ? `single-${singleTrackFilter}` : aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : sprintBpmFilter !== null ? `sprint-${sprintBpmFilter}` : selectedZones.map(z=>z.number).sort().join("-")}
                       tracks={filteredTracks}
                       onDelete={handleDeleteTrack}
                       onSimilar={handleSimilar}
@@ -1475,6 +1533,8 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       inlineCard={suggest && suggestSeedVisible
                         ? { trackId: suggest.seed.id, node: suggestCardNode }
                         : null}
+                      highlightUri={singleTrackFilter}
+                      playedCounts={playedCounts}
                     />
                   )}
                 </div>
@@ -1524,7 +1584,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
           {/* Col 3: Right rail — Runna */}
           <div ref={col3Ref} className="space-y-6 min-w-0">
-            <RunnaSummaryCard />
+            <RunnaSummaryCard onTrackClick={jumpToTrack} />
             <RunnaScheduleCard
               ref={runnaScheduleRef}
               aiDjEnabled={aiDjEnabled}
@@ -1532,10 +1592,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               mixSavedNonce={mixSavedNonce}
               activePaces={paceFilter?.paces.map(p => p.paceStr) ?? []}
               onAiDjMix={handleAiDjMix}
+              onTrackClick={jumpToTrack}
               onPaceFilter={(paceStr, bpm, multiSelect) => {
                 setNoBpmFilter(false);
                 setAiDjMix(null);
                 setSprintBpmFilter(null);
+                setSingleTrackFilter(null);
                 if (multiSelect) {
                   setPaceFilter(prev => {
                     const current = prev?.paces ?? [];

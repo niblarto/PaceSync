@@ -73,6 +73,22 @@ function calcZones(maxHR: number, restingHR: number): ZoneRow[] {
   ];
 }
 
+// %LTHR-based zones — same bands Garmin itself uses for a running "Based On
+// LTHR" zone set (Z1 66-75%, Z2 75-82%, Z3 82-91%, Z4 91-99%, Z5 99-107%).
+// Different basis from %HRR: no resting-HR term, and Z5's top is allowed to
+// exceed LTHR itself (up to 107%) rather than being capped at Max HR.
+function calcZonesFromLthr(lthr: number): ZoneRow[] {
+  const bounds = [0.66, 0.75, 0.82, 0.91, 0.99, 1.07];
+  const edges = bounds.map(p => Math.round(p * lthr));
+  return [
+    { min: edges[0],   max: edges[1] },
+    { min: edges[1]+1, max: edges[2] },
+    { min: edges[2]+1, max: edges[3] },
+    { min: edges[3]+1, max: edges[4] },
+    { min: edges[4]+1, max: edges[5] },
+  ];
+}
+
 function zoneLabel(z: ZoneRow, i: number) {
   if (i === 0) return `< ${z.max} bpm`;
   return `${z.min} – ${z.max} bpm`;
@@ -93,8 +109,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // ── HR zone state ──────────────────────────────────────────────────────────
   const [maxHR, setMaxHR] = useState(166);
   const [restingHR, setRestingHR] = useState(39);
+  const [lthr, setLthr] = useState(154);
   const [zones, setZones] = useState<ZoneRow[]>(calcZones(166, 39));
-  const [zoneSource, setZoneSource] = useState<"manual" | "garmin" | "strava">("manual");
+  const [zoneSource, setZoneSource] = useState<"manual" | "lthr" | "garmin" | "strava">("manual");
   const [zoneSourceLoading, setZoneSourceLoading] = useState(false);
   const [zoneSourceError, setZoneSourceError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -214,25 +231,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     lastRun: string | null;
   } | null>(null);
 
-  // ── Sprint BPM table + copy-to-playlist ────────────────────────────────────
+  // ── Active library tracks (feeds Run BPM limits' live per-range counts) ────
   const [activeTracks, setActiveTracks] = useState<{ uri: string; name: string; artist: string; bpm: number }[]>([]);
   const [activeTracksLoaded, setActiveTracksLoaded] = useState(false);
-  const [sprintCopyTarget, setSprintCopyTarget] = useState("");
-  const [sprintCopying, setSprintCopying] = useState(false);
-  const [sprintCopyMsg, setSprintCopyMsg] = useState<string | null>(null);
-  const [sprintCopyError, setSprintCopyError] = useState<string | null>(null);
-  const SPRINT_BPM_MIN = 164;
-  const SPRINT_BPM_MAX = 180;
-  // A track counts if its raw BPM is in range, OR its doubled BPM is (a
-  // half-tempo track a runner feels as double-time) — same rule the per-BPM
-  // breakdown table and the AI DJ mixer's own BPM matching both use, so
-  // "Copy N tracks" doesn't silently under-count relative to what's shown
-  // or what mixes actually pull from.
-  function inSprintRange(t: { bpm: number }): boolean {
-    const rounded = Math.round(t.bpm);
-    return (rounded >= SPRINT_BPM_MIN && rounded <= SPRINT_BPM_MAX)
-      || (rounded * 2 >= SPRINT_BPM_MIN && rounded * 2 <= SPRINT_BPM_MAX);
-  }
 
   const loadActiveTracks = useCallback(() => {
     fetch("/api/settings/active-tracks")
@@ -341,38 +342,59 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }
 
-  async function copySprintTracksToPlaylist() {
-    if (!sprintCopyTarget) { setSprintCopyError("Choose a target playlist first."); return; }
-    const sprintTracks = activeTracks.filter(inSprintRange);
-    if (sprintTracks.length === 0) { setSprintCopyError("No tracks in the sprint range to copy."); return; }
+  // ── Delete every "never usable" (out-of-range for every run type) coverage
+  // track from the active playlist — both Spotify (browser token, batched in
+  // groups of 100) and the local CSV (one batch server call). Irreversible,
+  // so the button requires an explicit confirm click before it fires. ──
+  const [coverageDeleting, setCoverageDeleting] = useState(false);
+  const [coverageDeleteMsg, setCoverageDeleteMsg] = useState<string | null>(null);
+  const [coverageDeleteError, setCoverageDeleteError] = useState<string | null>(null);
+  const [coverageDeleteConfirm, setCoverageDeleteConfirm] = useState(false);
 
-    const token = session?.accessToken;
-    if (!token) { setSprintCopyError("Not signed in"); return; }
+  async function deleteNeverUsableTracks() {
+    const outOfRangeUris = Array.from(new Set(
+      (coverage?.buckets ?? []).flatMap(b => b.tracks.filter(t => !t.inRange).map(t => t.uri))
+    ));
+    if (outOfRangeUris.length === 0) return;
 
-    setSprintCopying(true);
-    setSprintCopyError(null);
-    setSprintCopyMsg(null);
+    if (!coverageDeleteConfirm) { setCoverageDeleteConfirm(true); return; }
+    setCoverageDeleteConfirm(false);
+
+    const token = await freshSpotifyToken();
+    if (!token) { setCoverageDeleteError("Not signed in"); return; }
+    if (!activePlaylistId) { setCoverageDeleteError("No active playlist"); return; }
+
+    setCoverageDeleting(true);
+    setCoverageDeleteError(null);
+    setCoverageDeleteMsg(null);
     try {
-      await addTracksBrowser(sprintCopyTarget, sprintTracks.map(t => t.uri), token);
+      for (let i = 0; i < outOfRangeUris.length; i += 100) {
+        const chunk = outOfRangeUris.slice(i, i + 100);
+        const res = await fetch(`https://api.spotify.com/v1/playlists/${activePlaylistId}/items`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ items: chunk.map(uri => ({ uri })) }),
+        });
+        if (!res.ok) throw new Error(`[DELETE /playlists/${activePlaylistId}/items] Spotify ${res.status}: ${await res.text()}`);
+      }
 
-      const res = await fetch("/api/tracks/copy-to-playlist", {
-        method: "POST",
+      const csvRes = await fetch("/api/tracks/delete", {
+        method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ targetPlaylistId: sprintCopyTarget, uris: sprintTracks.map(t => t.uri) }),
+        body: JSON.stringify({ spotifyUris: outOfRangeUris }),
       });
-      const d = await res.json() as { error?: string; appended?: number; merged?: number };
-      if (!res.ok) throw new Error(d.error ?? "Failed to copy");
+      const csvData = await csvRes.json() as { error?: string; removed?: number };
+      if (!csvRes.ok) throw new Error(csvData.error ?? "Failed to remove from local library");
 
-      const targetName = knownPlaylists.find(p => p.id === sprintCopyTarget)?.name ?? "target playlist";
-      setSprintCopyMsg(
-        `Copied ${sprintTracks.length} track${sprintTracks.length === 1 ? "" : "s"} to "${targetName}"` +
-        ((d.merged ?? 0) > 0 ? ` · ${d.merged} already there had data filled in` : "")
-      );
+      setCoverageDeleteMsg(`Deleted ${outOfRangeUris.length} never-usable tracks from Spotify and the local library`);
+      invalidateRunningPlaylistCache();
+      loadActiveTracks();
+      loadCoverage();
       loadPlaylistList();
     } catch (e) {
-      setSprintCopyError(e instanceof Error ? e.message : "Failed to copy tracks");
+      setCoverageDeleteError(e instanceof Error ? e.message : "Failed to delete tracks");
     } finally {
-      setSprintCopying(false);
+      setCoverageDeleting(false);
     }
   }
 
@@ -463,10 +485,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   useEffect(() => {
     fetch("/api/settings/hr-zones")
       .then(r => r.json())
-      .then((data: { zones: RunningZone[]; maxHR?: number; restingHR?: number; source?: "manual" | "garmin" | "strava" }) => {
+      .then((data: { zones: RunningZone[]; maxHR?: number; restingHR?: number; lthr?: number; source?: "manual" | "lthr" | "garmin" | "strava" }) => {
         if (data.zones) setZones(data.zones.map(z => ({ min: z.hrMin, max: z.hrMax })));
         if (data.maxHR)     setMaxHR(data.maxHR);
         if (data.restingHR) setRestingHR(data.restingHR);
+        if (data.lthr)      setLthr(data.lthr);
         if (data.source)    setZoneSource(data.source);
       })
       .catch(() => {})
@@ -1117,20 +1140,29 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     if (maxHR > n) { setZones(calcZones(maxHR, n)); setZoneSource("manual"); setSaved(false); }
   };
 
+  const handleLthr = (val: string) => {
+    const n = parseInt(val) || 0;
+    setLthr(n);
+    if (n > 0) { setZones(calcZonesFromLthr(n)); setZoneSource("lthr"); setSaved(false); }
+  };
+
   const updateZone = (i: number, field: "min" | "max", val: string) => {
     const n = parseInt(val) || 0;
     setZones(prev => prev.map((z, idx) => idx === i ? { ...z, [field]: n } : z));
-    setZoneSource("manual");
+    setZoneSource(zoneSource === "lthr" ? "lthr" : "manual");
     setSaved(false);
   };
 
-  const resetToCalc = () => { setZones(calcZones(maxHR, restingHR)); setZoneSource("manual"); setSaved(false); };
+  const resetToCalc = () => {
+    setZones(zoneSource === "lthr" ? calcZonesFromLthr(lthr) : calcZones(maxHR, restingHR));
+    setSaved(false);
+  };
 
-  async function persistZones(zonesToSave: ZoneRow[], source: "manual" | "garmin" | "strava") {
+  async function persistZones(zonesToSave: ZoneRow[], source: "manual" | "lthr" | "garmin" | "strava") {
     const res = await fetch("/api/settings/hr-zones", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ maxHR, restingHR, zones: zonesToSave, source }),
+      body: JSON.stringify({ maxHR, restingHR, lthr, zones: zonesToSave, source }),
     });
     const data = await res.json() as { ok?: boolean; error?: string };
     if (!res.ok) throw new Error(data.error ?? "Failed to save");
@@ -1158,15 +1190,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }
 
-  async function handleZoneSourceChange(source: "manual" | "garmin" | "strava") {
-    if (source === "manual") {
-      const manualZones = calcZones(maxHR, restingHR);
-      setZones(manualZones);
-      setZoneSource("manual");
+  async function handleZoneSourceChange(source: "manual" | "lthr" | "garmin" | "strava") {
+    if (source === "manual" || source === "lthr") {
+      const calcZonesForSource = source === "lthr" ? calcZonesFromLthr(lthr) : calcZones(maxHR, restingHR);
+      setZones(calcZonesForSource);
+      setZoneSource(source);
       setZoneSourceError(null);
       setZoneSourceLoading(true);
       try {
-        await persistZones(manualZones, "manual");
+        await persistZones(calcZonesForSource, source);
         setSaved(true);
       } catch (e) {
         setZoneSourceError(e instanceof Error ? e.message : "Failed to save");
@@ -1906,7 +1938,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             Manual uses Max/Resting HR below. Garmin/Strava pull that service&apos;s zones directly — still editable after.
           </p>
           <div className="flex gap-1.5">
-            {(["manual", "garmin", "strava"] as const).map(s => (
+            {(["manual", "lthr", "garmin", "strava"] as const).map(s => (
               <button
                 key={s}
                 onClick={() => handleZoneSourceChange(s)}
@@ -1917,44 +1949,64 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     : "bg-slate-800/60 border-white/10 text-slate-400 hover:text-slate-200"
                 }`}
               >
-                {zoneSourceLoading && zoneSource !== s ? "…" : s}
+                {zoneSourceLoading && zoneSource !== s ? "…" : s === "lthr" ? "LTHR" : s}
               </button>
             ))}
           </div>
           {zoneSourceError && <p className="text-xs text-red-400">{zoneSourceError}</p>}
         </div>
 
-        <div className={`space-y-1.5 ${zoneSource !== "manual" ? "opacity-50" : ""}`}>
-          <label className="block text-sm font-medium text-slate-300">Max Heart Rate</label>
-          <p className="text-xs text-slate-500">Normally measured from a Max HR Stress Test.</p>
-          <input
-            type="number"
-            min={100}
-            max={220}
-            value={maxHR || ""}
-            onChange={e => handleMaxHR(e.target.value)}
-            disabled={zoneSource !== "manual"}
-            className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500 disabled:opacity-50"
-          />
-        </div>
+        {zoneSource === "lthr" ? (
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-slate-300">Lactate Threshold Heart Rate</label>
+            <p className="text-xs text-slate-500">
+              From a threshold test or your watch&apos;s LTHR estimate. Zones use Garmin&apos;s %LTHR bands
+              (Z1 66–75%, Z2 75–82%, Z3 82–91%, Z4 91–99%, Z5 99–107%).
+            </p>
+            <input
+              type="number"
+              min={100}
+              max={220}
+              value={lthr || ""}
+              onChange={e => handleLthr(e.target.value)}
+              className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500"
+            />
+          </div>
+        ) : (
+          <>
+            <div className={`space-y-1.5 ${zoneSource !== "manual" ? "opacity-50" : ""}`}>
+              <label className="block text-sm font-medium text-slate-300">Max Heart Rate</label>
+              <p className="text-xs text-slate-500">Normally measured from a Max HR Stress Test.</p>
+              <input
+                type="number"
+                min={100}
+                max={220}
+                value={maxHR || ""}
+                onChange={e => handleMaxHR(e.target.value)}
+                disabled={zoneSource !== "manual"}
+                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500 disabled:opacity-50"
+              />
+            </div>
 
-        <div className={`space-y-1.5 ${zoneSource !== "manual" ? "opacity-50" : ""}`}>
-          <label className="block text-sm font-medium text-slate-300">Resting Heart Rate</label>
-          <p className="text-xs text-slate-500">Measure first thing in the morning, standing still.</p>
-          <input
-            type="number"
-            min={30}
-            max={100}
-            value={restingHR || ""}
-            onChange={e => handleRestingHR(e.target.value)}
-            disabled={zoneSource !== "manual"}
-            className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500 disabled:opacity-50"
-          />
-        </div>
+            <div className={`space-y-1.5 ${zoneSource !== "manual" ? "opacity-50" : ""}`}>
+              <label className="block text-sm font-medium text-slate-300">Resting Heart Rate</label>
+              <p className="text-xs text-slate-500">Measure first thing in the morning, standing still.</p>
+              <input
+                type="number"
+                min={30}
+                max={100}
+                value={restingHR || ""}
+                onChange={e => handleRestingHR(e.target.value)}
+                disabled={zoneSource !== "manual"}
+                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-lg px-3 py-2 text-slate-100 text-center focus:outline-none focus:ring-1 focus:ring-green-500 disabled:opacity-50"
+              />
+            </div>
+          </>
+        )}
 
-        {zoneSource !== "manual" && (
+        {(zoneSource === "garmin" || zoneSource === "strava") && (
           <p className="text-xs text-slate-500 italic">
-            Zones loaded from {zoneSource === "garmin" ? "Garmin" : "Strava"}. Editing a zone below or changing Max/Resting HR switches back to manual.
+            Zones loaded from {zoneSource === "garmin" ? "Garmin" : "Strava"}. Editing a zone below switches back to manual.
           </p>
         )}
 
@@ -2550,11 +2602,26 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   <p className="text-lg font-semibold text-green-400">{coverage.inRangeTracks}</p>
                   <p className="text-[10px] text-slate-500 uppercase tracking-wide">Presentable</p>
                 </div>
-                <div className="rounded-lg bg-red-500/10 border border-red-500/20 px-2 py-2">
+                <div className="rounded-lg bg-red-500/10 border border-red-500/20 px-2 py-2 space-y-1">
                   <p className="text-lg font-semibold text-red-400">{coverage.outOfRangeTracks}</p>
                   <p className="text-[10px] text-slate-500 uppercase tracking-wide">Never usable</p>
+                  {coverage.outOfRangeTracks > 0 && (
+                    <button
+                      onClick={deleteNeverUsableTracks}
+                      disabled={coverageDeleting}
+                      className={`w-full rounded text-[10px] font-medium px-1.5 py-1 transition-colors disabled:opacity-40 ${
+                        coverageDeleteConfirm
+                          ? "bg-red-500 text-white hover:bg-red-400"
+                          : "bg-red-500/20 text-red-300 hover:bg-red-500/30"
+                      }`}
+                    >
+                      {coverageDeleting ? "Deleting…" : coverageDeleteConfirm ? "Confirm delete?" : "Delete all"}
+                    </button>
+                  )}
                 </div>
               </div>
+              {coverageDeleteMsg && <p className="text-xs text-green-400">{coverageDeleteMsg}</p>}
+              {coverageDeleteError && <p className="text-xs text-red-400">{coverageDeleteError}</p>}
 
               <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs max-h-80 overflow-y-auto no-scrollbar">
                 {coverage.buckets.map(b => {
@@ -2642,69 +2709,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                 </div>
                 {coverageCopyMsg && <p className="text-xs text-green-400">{coverageCopyMsg}</p>}
                 {coverageCopyError && <p className="text-xs text-red-400">{coverageCopyError}</p>}
-              </div>
-
-              {/* Sprint BPM summary (text version of the dashboard's Sprint
-                  BPM counts chart — same half/double-time bucketing) + copy
-                  the whole range to another playlist. Spotify add happens
-                  client-side (browser token), the local CSV merge happens
-                  server-side via /api/tracks/copy-to-playlist so BPM data
-                  carries over instead of the target needing to re-look it
-                  up. Lives here alongside Library Coverage since both are
-                  BPM-range-based "copy a slice of the library" tools. */}
-              <div className="pt-3 border-t border-white/10 space-y-2">
-                <label className="block text-sm font-medium text-slate-300">Sprint BPM summary ({SPRINT_BPM_MIN}–{SPRINT_BPM_MAX})</label>
-                <p className="text-xs text-slate-500">
-                  Track count per BPM in the active library&apos;s sprint range (half-tempo tracks counted at double) — copy the whole range into another playlist below.
-                </p>
-                {!activeTracksLoaded ? (
-                  <p className="text-xs text-slate-500 italic">Loading…</p>
-                ) : (() => {
-                  const sprintTracks = activeTracks.filter(inSprintRange);
-                  const bpms = Array.from({ length: SPRINT_BPM_MAX - SPRINT_BPM_MIN + 1 }, (_, i) => SPRINT_BPM_MIN + i);
-                  const counts = bpms.map(bpm =>
-                    activeTracks.filter(t => {
-                      const rounded = Math.round(t.bpm);
-                      return rounded === bpm || rounded * 2 === bpm;
-                    }).length
-                  );
-                  if (sprintTracks.length === 0 && counts.every(c => c === 0)) {
-                    return <p className="text-xs text-slate-500 italic">No tracks in this range in the active playlist.</p>;
-                  }
-                  return (
-                    <>
-                      <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs max-h-80 overflow-y-auto no-scrollbar">
-                        {bpms.map((bpm, i) => (
-                          <div key={bpm} className="px-2.5 py-1 flex items-center justify-between gap-3">
-                            <span className="text-slate-400">{bpm} BPM</span>
-                            <span className={counts[i] > 0 ? "text-slate-200" : "text-slate-600"}>{counts[i]}</span>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="flex items-center gap-2 flex-wrap pt-1">
-                        <select
-                          value={sprintCopyTarget}
-                          onChange={e => { setSprintCopyTarget(e.target.value); setSprintCopyError(null); }}
-                          className="rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
-                        >
-                          <option value="">Choose target playlist…</option>
-                          {knownPlaylists.filter(p => p.id !== activePlaylistId).map(p => (
-                            <option key={p.id} value={p.id}>{p.name}</option>
-                          ))}
-                        </select>
-                        <button
-                          onClick={copySprintTracksToPlaylist}
-                          disabled={sprintCopying || !sprintCopyTarget || sprintTracks.length === 0}
-                          className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-2 transition-colors whitespace-nowrap"
-                        >
-                          {sprintCopying ? "Copying…" : `Copy ${sprintTracks.length} track${sprintTracks.length === 1 ? "" : "s"}`}
-                        </button>
-                      </div>
-                      {sprintCopyMsg && <p className="text-xs text-green-400">{sprintCopyMsg}</p>}
-                      {sprintCopyError && <p className="text-xs text-red-400">{sprintCopyError}</p>}
-                    </>
-                  );
-                })()}
               </div>
             </>
           )}

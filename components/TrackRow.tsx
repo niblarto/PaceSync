@@ -13,6 +13,8 @@ interface Props {
   onSuggestTempo?: () => void;
   /** Which suggest search is currently running for THIS track (shows a spinner on that icon) */
   suggestBusy?: "style" | "tempo" | null;
+  /** Confirmed "Today's Run" mixes this track has featured in, if any */
+  playedCount?: number;
 }
 
 export function MiniSpinner() {
@@ -130,7 +132,7 @@ export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string)
   }
 }
 
-export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, onSuggestTempo, suggestBusy }: Props) {
+export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, onSuggestTempo, suggestBusy, playedCount }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(track.name)}`;
@@ -156,6 +158,11 @@ export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, on
           <p className="text-sm font-medium truncate group-hover:text-green-400 transition-colors">{track.name}</p>
           <p className="text-xs text-slate-500 truncate">
             {track.artists.map((a) => a.name).join(", ")}
+            {!!playedCount && (
+              <span className="text-purple-400/80" title={`Featured in ${playedCount} confirmed "Today's Run" mix${playedCount === 1 ? "" : "es"}`}>
+                {" · "}{playedCount} play{playedCount === 1 ? "" : "s"}
+              </span>
+            )}
           </p>
         </div>
 

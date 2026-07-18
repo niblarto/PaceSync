@@ -12,3 +12,14 @@
   .no-scrollbar::-webkit-scrollbar { display: none; }
   .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 }
+
+/* Brief highlight flash for a track jumped to from another card (e.g. a
+   Runna Summary/Schedule song click) — fades out on its own so it doesn't
+   need to be manually cleared. */
+@keyframes pulse-highlight {
+  0%   { background-color: rgba(34, 197, 94, 0.25); }
+  100% { background-color: transparent; }
+}
+.animate-pulse-highlight {
+  animation: pulse-highlight 2.5s ease-out;
+}

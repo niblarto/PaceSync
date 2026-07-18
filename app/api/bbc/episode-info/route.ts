@@ -77,13 +77,13 @@ export async function GET(req: NextRequest) {
   const info = await fetchProgInfo(pid);
 
   if (info?.type === "episode") {
-    // An episode PID only identifies one broadcast forever — findLatestEpisode
-    // (bbc/tracks) treats whatever pid a card is saved with as if it were the
-    // *brand*, and scrapes that PID's /episodes/player page for the latest
-    // episode. For a real episode PID that page can list unrelated/future
-    // episodes, which breaks segment lookup once the saved episode airs and
-    // scrolls out of the schedule. Surface the true brand pid/title so
-    // callers (BbcBrowserCard) can persist that instead of the episode pid.
+    // An episode PID only identifies one broadcast forever — a saved card's
+    // pid can be an episode that's since been superseded by newer ones
+    // (e.g. a weekly show airs again next week). Walk forward via
+    // peers.next until hitting a future/unaired episode or running out of
+    // next links, landing on the true latest AIRED episode rather than just
+    // whichever one happened to be saved. Surface the true brand pid/title
+    // so callers (BbcBrowserCard) can persist that instead of the episode pid.
     const brandPid = info.parent?.programme?.type === "brand" ? info.parent.programme.pid : undefined;
     const brandTitle = info.parent?.programme?.type === "brand" ? info.parent.programme.title : undefined;
 
@@ -92,10 +92,26 @@ export async function GET(req: NextRequest) {
     const epDate = broadcastDate ? new Date(broadcastDate) : null;
 
     if (epDate && epDate <= now) {
-      // Already aired — use this episode directly
+      // Already aired — but a newer episode may have aired since. Walk
+      // forward through peers.next while each next episode has also
+      // already aired, capped to avoid any pathological/circular chain.
+      let curPid = pid;
+      let curDate = broadcastDate!;
+      let curInfo = info;
+      for (let hops = 0; hops < 20; hops++) {
+        const next = curInfo.peers?.next;
+        if (!next?.pid) break;
+        const nextDate = next.first_broadcast_date ? new Date(next.first_broadcast_date) : null;
+        if (!nextDate || nextDate > now) break; // next hasn't aired yet — stop here
+        const nextInfo = await fetchProgInfo(next.pid);
+        if (!nextInfo) break;
+        curPid = next.pid;
+        curDate = next.first_broadcast_date!;
+        curInfo = nextInfo;
+      }
       return NextResponse.json({
-        episodePid: pid,
-        airDate: formatAirDate(broadcastDate!),
+        episodePid: curPid,
+        airDate: formatAirDate(curDate),
         brandPid, brandTitle,
       });
     }

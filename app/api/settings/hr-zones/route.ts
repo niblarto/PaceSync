@@ -12,7 +12,8 @@ interface SavedData {
   zones: HRZone[];
   maxHR?: number;
   restingHR?: number;
-  source?: "manual" | "garmin" | "strava";
+  lthr?: number;
+  source?: "manual" | "lthr" | "garmin" | "strava";
 }
 
 function loadSaved(): SavedData | null {
@@ -34,6 +35,7 @@ export async function GET() {
     custom: saved !== null,
     maxHR: saved?.maxHR,
     restingHR: saved?.restingHR,
+    lthr: saved?.lthr,
     source: saved?.source ?? "manual",
   });
 }
@@ -42,8 +44,8 @@ export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json() as { zones: HRZone[]; maxHR?: number; restingHR?: number; source?: "manual" | "garmin" | "strava" };
-  const { zones, maxHR, restingHR, source } = body;
+  const body = await req.json() as { zones: HRZone[]; maxHR?: number; restingHR?: number; lthr?: number; source?: "manual" | "lthr" | "garmin" | "strava" };
+  const { zones, maxHR, restingHR, lthr, source } = body;
 
   if (!Array.isArray(zones) || zones.length !== 5) {
     return NextResponse.json({ error: "Expected 5 zones" }, { status: 400 });
@@ -57,7 +59,8 @@ export async function POST(req: NextRequest) {
   const data: SavedData = { zones };
   if (typeof maxHR === "number")     data.maxHR = maxHR;
   if (typeof restingHR === "number") data.restingHR = restingHR;
-  if (source === "manual" || source === "garmin" || source === "strava") data.source = source;
+  if (typeof lthr === "number")      data.lthr = lthr;
+  if (source === "manual" || source === "lthr" || source === "garmin" || source === "strava") data.source = source;
 
   fs.writeFileSync(ZONES_FILE, JSON.stringify(data), "utf-8");
   return NextResponse.json({ ok: true });
