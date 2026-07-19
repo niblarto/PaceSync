@@ -1062,11 +1062,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 Garmin
               </Link>
             )}
-            <Link href="/bbc" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
-              BBC Radio
-            </Link>
             <Link href="/strava" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
               Strava
+            </Link>
+            <Link href="/bbc" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
+              BBC Radio
             </Link>
             <Link
               href="/settings"

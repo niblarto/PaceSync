@@ -21,7 +21,7 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   callbacks: {
-    async jwt({ token, account, profile }) {
+    async jwt({ token, account, profile, user }) {
       if (account && profile) {
         saveTokens({
           accessToken: account.access_token!,
@@ -35,6 +35,13 @@ export const authOptions: NextAuthOptions = {
           expiresAt: account.expires_at,
           userId: (profile as { id?: string }).id,
           scope: account.scope,
+          // A custom jwt callback fully replaces `token` — NextAuth doesn't
+          // auto-merge the OAuth profile's picture/name in for us, so pull
+          // them from `user` explicitly (the adapter-mapped profile,
+          // already has Spotify's images[0].url as `image` via the
+          // provider's own profile() mapping) or the raw profile as fallback.
+          picture: user?.image ?? (profile as { images?: { url?: string }[] }).images?.[0]?.url,
+          name: user?.name ?? token.name,
         };
       }
 
@@ -58,6 +65,10 @@ export const authOptions: NextAuthOptions = {
       session.error = token.error;
       session.scope = token.scope;
       if (token.userId) session.user.id = token.userId;
+      // Explicit, not relied on as an automatic default — a custom jwt
+      // callback means NextAuth won't reliably merge these in on its own.
+      if (token.picture) session.user.image = token.picture as string;
+      if (token.name) session.user.name = token.name;
       return session;
     },
   },
