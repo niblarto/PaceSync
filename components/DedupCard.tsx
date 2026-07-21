@@ -21,6 +21,27 @@ export function DedupCard() {
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // "Failed to fetch" is a bare network-level failure (no HTTP response at
+  // all — dropped connection, brief offline blip), distinct from a Spotify
+  // error status. A large library now means many sequential requests to
+  // read the whole playlist, so one retry after a short pause absorbs a
+  // transient blip instead of failing the whole run; `step` names what was
+  // being done so a failure that survives the retry says exactly where.
+  async function fetchWithRetry(url: string, init: RequestInit, step: string): Promise<Response> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await fetch(url, init);
+      } catch (e) {
+        if (attempt === 1) {
+          const detail = e instanceof Error ? e.message : String(e);
+          throw new Error(`Network error while ${step}: ${detail}`);
+        }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+    throw new Error(`Network error while ${step}`); // unreachable, satisfies TS
+  }
+
   const run = async () => {
     const token = await freshSpotifyToken();
     if (!token) return;
@@ -36,7 +57,7 @@ export function DedupCard() {
         `https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items?limit=100`;
 
       while (url) {
-        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+        const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${token}` } }, `reading playlist page ${Math.floor(pageOffset / 100) + 1}`);
         if (!res.ok) throw new Error(`Spotify ${res.status}: ${await res.text()}`);
         const data = await res.json() as any;
         const items: unknown[] = data?.items ?? [];
@@ -87,26 +108,28 @@ export function DedupCard() {
       }
 
       // PUT replaces entire playlist with first chunk
-      const putRes = await fetch(
+      const putRes = await fetchWithRetry(
         `https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`,
         {
           method: "PUT",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           body: JSON.stringify({ uris: chunks[0] ?? [] }),
-        }
+        },
+        "replacing playlist with the deduplicated list"
       );
       if (!putRes.ok) throw new Error(`Spotify PUT ${putRes.status}: ${await putRes.text()}`);
 
       // POST each remaining chunk to append
       for (let i = 1; i < chunks.length; i++) {
         setStatus(`Writing… ${Math.min(i * 100, deduped.length)}/${deduped.length} tracks`);
-        const postRes = await fetch(
+        const postRes = await fetchWithRetry(
           `https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`,
           {
             method: "POST",
             headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
             body: JSON.stringify({ uris: chunks[i] }),
-          }
+          },
+          `writing batch ${i + 1}/${chunks.length}`
         );
         if (!postRes.ok) throw new Error(`Spotify POST ${postRes.status}: ${await postRes.text()}`);
       }
