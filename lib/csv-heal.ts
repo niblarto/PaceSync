@@ -33,6 +33,27 @@ async function writeProgress(p: HealProgress): Promise<void> {
   try { await writeFile(PROGRESS_PATH, JSON.stringify(p), "utf8"); } catch { /* best-effort */ }
 }
 
+// Spotify's client-credentials rate limit is scoped to the whole app, not
+// one sweep — a fresh doHeal() run used to forget the 429 from a previous
+// sweep entirely, re-request immediately, eat another 429, and reset the
+// clock to a brand-new Retry-After each time (the "22:44:36" clear time
+// kept drifting later on every retriggered sweep instead of counting down).
+// Persisted to disk (not just an in-memory module var) so it survives a
+// redeploy/restart mid-cooldown too.
+const RATE_LIMIT_PATH = path.join(process.cwd(), "spotify-rate-limit.json");
+
+async function getSpotifyBlockedUntil(): Promise<string | null> {
+  try {
+    const raw = JSON.parse(await readFile(RATE_LIMIT_PATH, "utf8")) as { until?: string };
+    if (raw.until && new Date(raw.until).getTime() > Date.now()) return raw.until;
+  } catch { /* no file yet, or expired */ }
+  return null;
+}
+
+async function setSpotifyBlockedUntil(until: string): Promise<void> {
+  try { await writeFile(RATE_LIMIT_PATH, JSON.stringify({ until }), "utf8"); } catch { /* best-effort */ }
+}
+
 export async function getHealProgress(): Promise<HealProgress | null> {
   try {
     return JSON.parse(await readFile(PROGRESS_PATH, "utf8")) as HealProgress;
@@ -400,6 +421,16 @@ async function doHealInner(): Promise<HealResult> {
   addLog(`${gaps.length + uriGaps.length}/${checked} tracks missing data — starting`);
   const startedAt = new Date().toISOString();
 
+  // A prior sweep's 429 outlives that sweep — skip Spotify entirely (both
+  // the URI search below and the duration pass) until the persisted
+  // cooldown clears, instead of re-requesting immediately and eating (and
+  // resetting the clock on) another 429 every time the button is clicked.
+  const blockedUntil = await getSpotifyBlockedUntil();
+  if (blockedUntil) {
+    spotifyRetryAt = blockedUntil;
+    addLog(`Spotify still rate-limited from an earlier sweep — skipping Spotify until ${new Date(blockedUntil).toLocaleTimeString()}, using Deezer/Last.fm only`);
+  }
+
   // Write whatever's changed back into `lines` and flush to disk — called
   // after each phase so a restart mid-sweep (e.g. a redeploy) only loses
   // whatever hadn't been fetched yet, not the whole sweep's progress. Also
@@ -426,7 +457,7 @@ async function doHealInner(): Promise<HealResult> {
   // before every call — search is a heavier-weight endpoint than the
   // per-track lookup, so this is throttled more conservatively than the
   // duration pass below.
-  let uriToken: string | null | undefined = undefined;
+  let uriToken: string | null | undefined = blockedUntil ? null : undefined;
   let urisHealed = 0;
   if (uriGaps.length > 0) {
     addLog(`checking ${uriGaps.length} tracks with no Spotify URI (search)…`);
@@ -434,13 +465,14 @@ async function doHealInner(): Promise<HealResult> {
     for (let i = 0; i < uriGaps.length; i++) {
       checkCancelled();
       const g = uriGaps[i];
-      if (uriToken === null) break; // long rate limit hit earlier — stop searching for the rest of this sweep
+      if (uriToken === null) break; // rate-limited (this sweep or an earlier one) — stop searching
       if (uriToken === undefined) uriToken = await spotifyAppToken();
       if (!uriToken) break; // no client-credentials configured
       const result = await spotifySearchUri(g.name, g.artist, uriToken);
       if (isRateLimited(result)) {
         uriToken = null;
         spotifyRetryAt = result.retryAt;
+        await setSpotifyBlockedUntil(result.retryAt);
         addLog(`Spotify rate-limited during URI search — pausing until ${new Date(result.retryAt).toLocaleTimeString()}, ${uriGaps.length - i} tracks left unsearched this sweep`);
         break;
       }
@@ -502,7 +534,7 @@ async function doHealInner(): Promise<HealResult> {
   // request/row) — flushed incrementally every 25 rows so a restart
   // doesn't lose an hour of progress on a large library, with a progress
   // line every 50 rows.
-  let token: string | null | undefined = undefined; // lazy — only fetch if needed
+  let token: string | null | undefined = blockedUntil ? null : undefined; // lazy — only fetch if needed
   const durationGaps = gaps.filter(g => g.needsDuration);
   let durationHealed = 0;
   if (durationGaps.length > 0) addLog(`checking ${durationGaps.length} tracks for missing durations (Spotify → Deezer → Last.fm)…`);
@@ -517,6 +549,7 @@ async function doHealInner(): Promise<HealResult> {
         if (isRateLimited(result)) {
           token = null; // stop using Spotify for the rest of this sweep
           spotifyRetryAt = result.retryAt;
+          await setSpotifyBlockedUntil(result.retryAt);
           addLog(`Spotify rate-limited — pausing Spotify lookups until ${new Date(result.retryAt).toLocaleTimeString()}, continuing with Deezer/Last.fm only`);
         } else {
           ms = result;
