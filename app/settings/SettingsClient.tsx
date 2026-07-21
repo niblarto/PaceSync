@@ -1132,11 +1132,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       // The sweep starts in the background (fire-and-forget on the server),
       // so an immediate poll can race its first writeProgress() call and
       // read a stale/finished progress file from a previous run — a short
-      // library can finish in well under a second. Re-poll a couple more
-      // times shortly after so the running state/log actually gets picked up.
-      fetchHealStatus();
-      setTimeout(fetchHealStatus, 800);
-      setTimeout(fetchHealStatus, 2000);
+      // sweep (e.g. Spotify already known rate-limited, so it skips straight
+      // to Deezer) can finish in well under a second. Re-poll repeatedly for
+      // a few seconds so the running state/log actually gets picked up
+      // instead of the log window freezing on whatever the very first,
+      // possibly-stale poll saw.
+      for (const delay of [0, 400, 800, 1500, 2500, 4000, 6000]) {
+        setTimeout(fetchHealStatus, delay);
+      }
     } catch {
       setHealNowError("Failed to start — try again.");
     }
