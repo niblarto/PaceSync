@@ -420,6 +420,10 @@ async function doHealInner(): Promise<HealResult> {
 
   addLog(`${gaps.length + uriGaps.length}/${checked} tracks missing data — starting`);
   const startedAt = new Date().toISOString();
+  // Persisted immediately so a poll landing in the gap before the first
+  // pass actually begins still sees forward motion instead of the log
+  // appearing to dead-end on "...starting" with nothing after it.
+  await save({ phase: null, current: 0, total: 0, healedSoFar: 0, startedAt });
 
   // A prior sweep's 429 outlives that sweep — skip Spotify entirely (both
   // the URI search below and the duration pass) until the persisted
@@ -429,6 +433,7 @@ async function doHealInner(): Promise<HealResult> {
   if (blockedUntil) {
     spotifyRetryAt = blockedUntil;
     addLog(`Spotify still rate-limited from an earlier sweep — skipping Spotify until ${new Date(blockedUntil).toLocaleTimeString()}, using Deezer/Last.fm only`);
+    await save({ phase: null, current: 0, total: 0, healedSoFar: 0, startedAt });
   }
 
   // Write whatever's changed back into `lines` and flush to disk — called

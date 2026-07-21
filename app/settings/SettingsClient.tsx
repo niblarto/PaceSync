@@ -2203,6 +2203,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             </div>
           )}
 
+          {healProgress && !healProgress.running && healProgress.finishedAt && (
+            <div className="rounded-lg bg-green-500/10 border border-green-500/30 p-3">
+              <p className="text-sm font-medium text-green-400">
+                ✓ Finished at {new Date(healProgress.finishedAt).toLocaleTimeString()} — {healProgress.healedSoFar} row{healProgress.healedSoFar === 1 ? "" : "s"} healed
+              </p>
+            </div>
+          )}
+
           {healProgress?.running && (
             <div className="rounded-lg bg-purple-500/10 border border-purple-500/30 p-3 space-y-2">
               <div className="flex items-center justify-between gap-3">
