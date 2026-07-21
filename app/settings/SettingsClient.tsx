@@ -9,6 +9,8 @@ import { BbcBrowserCard } from "@/components/BbcBrowserCard";
 import { DedupCard } from "@/components/DedupCard";
 import { invalidateRunningPlaylistCache } from "@/components/useRunningPlaylist";
 import { freshSpotifyToken } from "@/lib/spotify-browser";
+import { DeletedTracksReview, type RejectedTrack } from "@/components/DeletedTracksReview";
+import { openInSpotify } from "@/components/TrackRow";
 
 const ZONE_DETAILS = [
   {
@@ -402,9 +404,19 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // after a big import) — polled while running so a large library doesn't
   // look silently stuck. See lib/csv-heal.ts.
   const [healProgress, setHealProgress] = useState<{
-    running: boolean; phase: "features" | "duration" | null;
+    running: boolean; phase: "uris" | "features" | "duration" | "genres" | null;
     current: number; total: number; healedSoFar: number;
     startedAt: string | null; finishedAt: string | null;
+    spotifyRetryAt: string | null;
+    log: { at: string; text: string }[];
+  } | null>(null);
+
+  // Instant column-blank breakdown from the moment "Check for missing data"
+  // was clicked (before the slower heal sweep even starts) — e.g. "912
+  // tracks, 40 missing duration, 15 missing genres".
+  const [healStatus, setHealStatus] = useState<{
+    total: number; missingUri: number; missingDuration: number; missingGenres: number;
+    missingFeatures: Record<string, number>;
   } | null>(null);
 
   // ── CSV import state ───────────────────────────────────────────────────────
@@ -427,60 +439,21 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [appendCsvSaved, setAppendCsvSaved] = useState<{ appended: number; merged: number } | null>(null);
   const appendCsvFileRef = useRef<HTMLInputElement>(null);
 
-  // ── AI DJ library import state ─────────────────────────────────────────────
-  const [libPlaylistName, setLibPlaylistName] = useState("");
-  const aiDjLibraryFileRef = useRef<HTMLInputElement>(null);
-  const [libImportMode, setLibImportMode] = useState<"overwrite" | "append">("append");
-  const [libLoading, setLibLoading] = useState(false);
-  const [libProgress, setLibProgress] = useState(0);
-  const [libProgressTotal, setLibProgressTotal] = useState(0);
-  const [libTracks, setLibTracks] = useState<{ uri: string; name: string; artistName: string; originalTitle: string; originalArtist: string }[]>([]);
-  const [libError, setLibError] = useState<string | null>(null);
-  const [libSaving, setLibSaving] = useState(false);
-  const [libSavedMsg, setLibSavedMsg] = useState<string | null>(null);
-  const [libFileName, setLibFileName] = useState<string | null>(null);
-  // Rate-limit cooldown from the last lookup batch, so a page reload while
-  // waiting doesn't lose track of "N tracks left, retry after HH:MM" — a
-  // large library (thousands of tracks) can take multiple daily retries to
-  // fully import since Spotify's dev-mode rate limit has no way to raise it.
-  const [libRateLimitClearsAt, setLibRateLimitClearsAt] = useState<string | null>(null);
-  const LIB_STORAGE_KEY = "ai-dj-library-import-progress";
+  // ── Previously-deleted tracks review (shared by all import flows) ──────────
+  // The triggering flow stashes a resume continuation; the review panel calls
+  // it with the URIs the user ticked to override (empty = reject all).
+  const [deletedReview, setDeletedReview] = useState<{ rejected: RejectedTrack[]; resume: (allowUris: string[]) => void } | null>(null);
+
+  // ── Deleted Tracks tab ──────────────────────────────────────────────────────
+  const [deletedTracksList, setDeletedTracksList] = useState<RejectedTrack[] | null>(null);
+  const [deletedTracksLoading, setDeletedTracksLoading] = useState(false);
+  const [deletedTracksError, setDeletedTracksError] = useState<string | null>(null);
+  const [forgettingUris, setForgettingUris] = useState<Set<string>>(new Set());
 
   const [cronRunning, setCronRunning] = useState(false);
   const [cronResults, setCronResults] = useState<{ name: string; matched: number; found: number; error?: string }[] | null>(null);
   const [cronSummary, setCronSummary] = useState<{ totalMatched: number; dedupRemoved: number; dedupRemaining: number } | null>(null);
   const [cronError, setCronError] = useState<string | null>(null);
-
-  // Restore an in-progress library import (partial matches + rate-limit
-  // cooldown) so it survives a reload while waiting for Spotify's limit to clear.
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LIB_STORAGE_KEY);
-      if (!raw) return;
-      const saved = JSON.parse(raw) as {
-        fileName?: string;
-        tracks?: typeof libTracks;
-        clearsAt?: string;
-      };
-      if (saved.tracks?.length) setLibTracks(saved.tracks);
-      if (saved.fileName) setLibFileName(saved.fileName);
-      if (saved.clearsAt) setLibRateLimitClearsAt(saved.clearsAt);
-    } catch { /* corrupt/old entry — ignore */ }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Persist whenever the import state changes so it's there after a reload.
-  useEffect(() => {
-    if (libTracks.length === 0 && !libRateLimitClearsAt) {
-      localStorage.removeItem(LIB_STORAGE_KEY);
-      return;
-    }
-    try {
-      localStorage.setItem(LIB_STORAGE_KEY, JSON.stringify({
-        fileName: libFileName, tracks: libTracks, clearsAt: libRateLimitClearsAt,
-      }));
-    } catch { /* storage full/unavailable — best-effort only */ }
-  }, [libTracks, libFileName, libRateLimitClearsAt]);
 
   useEffect(() => {
     fetch("/api/settings/hr-zones")
@@ -959,6 +932,16 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setSwitchingId(id);
     setPlaylistListError(null);
     try {
+      // A running heal sweep already has the old playlist's CSV path
+      // captured in memory — stop it and clear its log/status so nothing
+      // stale from the previous playlist lingers on screen.
+      if (healProgress?.running) {
+        fetch("/api/settings/heal-cancel", { method: "POST" }).catch(() => {});
+      }
+      setHealProgress(null);
+      setHealStatus(null);
+      setHealNowError(null);
+
       const res = await fetch("/api/settings/playlists", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -972,6 +955,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       // reflect the newly-active library instead of the previous one.
       loadActiveTracks();
       loadCoverage();
+      fetchHealStatusSnapshot();
     } catch (e) {
       setPlaylistListError(e instanceof Error ? e.message : "Failed to switch playlist");
     } finally {
@@ -1083,6 +1067,24 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const healTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const healCancelledRef = useRef(false);
 
+  // Column-blank breakdown (the "N tracks, N missing genres…" card) —
+  // fetched on mount so a page reload doesn't lose it, and re-fetched once
+  // a running sweep finishes so the numbers reflect what actually got
+  // healed instead of the stale pre-sweep snapshot from when the button
+  // was clicked.
+  const fetchHealStatusSnapshot = useCallback(async () => {
+    try {
+      const res = await fetch("/api/settings/heal-now-status");
+      if (!res.ok) return;
+      const data = await res.json() as { status?: typeof healStatus };
+      if (data.status) setHealStatus(data.status);
+    } catch { /* best-effort */ }
+  }, []);
+
+  useEffect(() => { fetchHealStatusSnapshot(); }, [fetchHealStatusSnapshot]);
+
+  const wasRunningRef = useRef(false);
+
   const fetchHealStatus = useCallback(async () => {
     if (healCancelledRef.current) return;
     if (healTimerRef.current) clearTimeout(healTimerRef.current);
@@ -1092,11 +1094,17 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         const data = await res.json() as { progress?: typeof healProgress };
         setHealProgress(data.progress ?? null);
         if (data.progress?.running) {
+          wasRunningRef.current = true;
           healTimerRef.current = setTimeout(fetchHealStatus, 3_000);
+        } else if (wasRunningRef.current) {
+          // Sweep just finished — refresh the column-blank snapshot so it
+          // shows post-heal numbers instead of the pre-heal click-time ones.
+          wasRunningRef.current = false;
+          fetchHealStatusSnapshot();
         }
       }
     } catch { /* stop polling on error — next save will restart it */ }
-  }, []);
+  }, [fetchHealStatusSnapshot]);
 
   useEffect(() => {
     healCancelledRef.current = false;
@@ -1106,6 +1114,33 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       if (healTimerRef.current) clearTimeout(healTimerRef.current);
     };
   }, [fetchHealStatus]);
+
+  const [healNowError, setHealNowError] = useState<string | null>(null);
+
+  // "Check for missing data" button — triggers the same heal sweep that
+  // already runs automatically after every CSV write, on demand for the
+  // active playlist. The progress bar above (healProgress) picks it up via
+  // the existing polling once it starts running.
+  async function healNow() {
+    setHealNowError(null);
+    setHealStatus(null);
+    try {
+      const res = await fetch("/api/settings/heal-now", { method: "POST" });
+      if (!res.ok) throw new Error();
+      const data = await res.json() as { status?: typeof healStatus };
+      setHealStatus(data.status ?? null);
+      // The sweep starts in the background (fire-and-forget on the server),
+      // so an immediate poll can race its first writeProgress() call and
+      // read a stale/finished progress file from a previous run — a short
+      // library can finish in well under a second. Re-poll a couple more
+      // times shortly after so the running state/log actually gets picked up.
+      fetchHealStatus();
+      setTimeout(fetchHealStatus, 800);
+      setTimeout(fetchHealStatus, 2000);
+    } catch {
+      setHealNowError("Failed to start — try again.");
+    }
+  }
 
   useEffect(() => {
     fetch("/api/bbc/programmes")
@@ -1408,6 +1443,38 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }, [aiDjHealth, waking]);
 
+  async function loadDeletedTracksList() {
+    setDeletedTracksLoading(true);
+    setDeletedTracksError(null);
+    try {
+      const res = await fetch("/api/settings/deleted-tracks");
+      const d = await res.json() as { tracks?: RejectedTrack[]; error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to load");
+      setDeletedTracksList(d.tracks ?? []);
+    } catch (e) {
+      setDeletedTracksError(e instanceof Error ? e.message : "Failed to load deleted tracks");
+    } finally {
+      setDeletedTracksLoading(false);
+    }
+  }
+
+  async function forgetDeletedTrack(uri: string) {
+    setForgettingUris(prev => new Set(prev).add(uri));
+    try {
+      const res = await fetch("/api/settings/deleted-tracks", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uris: [uri] }),
+      });
+      if (!res.ok) throw new Error();
+      setDeletedTracksList(prev => prev?.filter(t => t.uri !== uri) ?? prev);
+    } catch {
+      setDeletedTracksError("Failed to remove — try again.");
+    } finally {
+      setForgettingUris(prev => { const next = new Set(prev); next.delete(uri); return next; });
+    }
+  }
+
   async function saveAiDj(
     enabled: boolean, autoPlaylist: boolean = aiDjAutoPlaylist,
     provider: "local" | "claude" | "gemini" = aiDjProvider,
@@ -1498,7 +1565,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     e.target.value = "";
   }
 
-  async function saveCsvToPlaylist() {
+  async function saveCsvToPlaylist(allowDeletedUris?: string[]) {
     const name = csvPlaylistName.trim();
     if (!name) { setCsvError("Enter a playlist name first — this is both its name on Spotify and its filename on the Pi."); return; }
     if (!csvStagedText) return;
@@ -1506,12 +1573,22 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setCsvError(null);
     try {
       await resolvePlaylistByName(name);
-      const res = await fetch(`/api/save-default-playlist?mode=${csvImportMode}`, {
+      const confirmed = allowDeletedUris !== undefined;
+      const res = await fetch(`/api/save-default-playlist?mode=${csvImportMode}${confirmed ? "&confirm=1" : ""}`, {
         method: "POST",
-        headers: { "Content-Type": "text/plain" },
+        headers: {
+          "Content-Type": "text/plain",
+          ...(confirmed ? { "x-allow-deleted-uris": JSON.stringify(allowDeletedUris) } : {}),
+        },
         body: csvStagedText,
       });
-      const d = await res.json() as { appended?: number; skipped?: number };
+      const d = await res.json() as { appended?: number; skipped?: number; needsReview?: boolean; rejected?: RejectedTrack[] };
+      if (d.needsReview && d.rejected?.length) {
+        // Previously-deleted tracks in the upload — nothing written yet;
+        // resume re-posts with the user's override choices.
+        setDeletedReview({ rejected: d.rejected, resume: (allow) => { setDeletedReview(null); void saveCsvToPlaylist(allow); } });
+        return;
+      }
       if (csvImportMode === "append" && d.appended !== undefined) setCsvTrackCount(d.appended);
       setCsvSaved(true);
       setCsvStagedText(null);
@@ -1552,18 +1629,26 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     e.target.value = "";
   }
 
-  async function appendCsvToActivePlaylist() {
+  async function appendCsvToActivePlaylist(allowDeletedUris?: string[]) {
     if (!appendCsvStagedText) return;
     setAppendCsvSaving(true);
     setAppendCsvError(null);
     try {
-      const res = await fetch("/api/save-default-playlist?mode=append", {
+      const confirmed = allowDeletedUris !== undefined;
+      const res = await fetch(`/api/save-default-playlist?mode=append${confirmed ? "&confirm=1" : ""}`, {
         method: "POST",
-        headers: { "Content-Type": "text/plain" },
+        headers: {
+          "Content-Type": "text/plain",
+          ...(confirmed ? { "x-allow-deleted-uris": JSON.stringify(allowDeletedUris) } : {}),
+        },
         body: appendCsvStagedText,
       });
-      const d = await res.json() as { error?: string; appended?: number; merged?: number };
+      const d = await res.json() as { error?: string; appended?: number; merged?: number; needsReview?: boolean; rejected?: RejectedTrack[] };
       if (!res.ok) throw new Error(d.error ?? "Failed to append");
+      if (d.needsReview && d.rejected?.length) {
+        setDeletedReview({ rejected: d.rejected, resume: (allow) => { setDeletedReview(null); void appendCsvToActivePlaylist(allow); } });
+        return;
+      }
       setAppendCsvSaved({ appended: d.appended ?? 0, merged: d.merged ?? 0 });
       setAppendCsvStagedText(null);
       invalidateRunningPlaylistCache();
@@ -1578,273 +1663,35 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }
 
-  function parseCsvRowLocal(line: string): string[] {
-    const result: string[] = [];
-    let current = "";
-    let inQuotes = false;
-    for (const ch of line) {
-      if (ch === '"') { inQuotes = !inQuotes; }
-      else if (ch === "," && !inQuotes) { result.push(current.trim()); current = ""; }
-      else { current += ch; }
-    }
-    result.push(current.trim());
-    return result;
-  }
-
-  // Some CSV exporters double-encode: a non-breaking space (U+00A0) gets
-  // UTF-8-encoded once, then those bytes get misread as Latin-1 and
-  // UTF-8-encoded again — the NBSP surfaces as a stray "Â" (U+00C2) glued
-  // onto the adjacent word, breaking Spotify search matches. Strip it and
-  // fold any literal NBSPs to regular spaces before searching.
-  function cleanMojibake(s: string): string {
-    return s.replace(/Â/g, "").replace(/ /g, " ").trim();
-  }
-
   async function addTracksBrowser(playlistId: string, uris: string[], token: string): Promise<void> {
+    const totalChunks = Math.ceil(uris.length / 100);
     for (let i = 0; i < uris.length; i += 100) {
-      const res = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ uris: uris.slice(i, i + 100) }),
-      });
-      if (!res.ok) throw new Error(`Spotify ${res.status}: ${await res.text()}`);
-    }
-  }
-
-  async function replacePlaylistTracksBrowser(playlistId: string, uris: string[], token: string): Promise<void> {
-    const putRes = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
-      method: "PUT",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ uris: uris.slice(0, 100) }),
-    });
-    if (!putRes.ok) throw new Error(`Spotify ${putRes.status}: ${await putRes.text()}`);
-    if (uris.length > 100) await addTracksBrowser(playlistId, uris.slice(100), token);
-  }
-
-  // A single request over ~1500+ tracks can run for several minutes (each
-  // miss now tries up to 4 search variants) — long enough to risk a timeout
-  // somewhere between the browser and the server regardless of what's
-  // fronting it. Chunking keeps every individual request short.
-  const LIBRARY_LOOKUP_CHUNK_SIZE = 150;
-
-  type LibTrack = { uri: string; name: string; artistName: string; originalTitle: string; originalArtist: string };
-
-  // Streams the SSE lookup for a batch of {title, artist} pairs, chunking
-  // large batches into several requests. Shared by the initial upload and
-  // "Retry all misses" — bypassCache skips the disk cache so a retry with
-  // the looser search variants isn't short-circuited by a previously-cached
-  // miss. Returns whatever matched even if Spotify rate-limits partway
-  // through (via `warning`) rather than throwing and losing that progress.
-  async function runLibraryLookup(
-    tracks: { title: string; artist: string }[],
-    bypassCache: boolean
-  ): Promise<{ tracks: LibTrack[]; warning: string | null; clearsAt: string | null }> {
-    const token = session?.accessToken;
-    if (!token) throw new Error("Not signed in");
-
-    setLibLoading(true);
-    setLibProgress(0);
-    setLibProgressTotal(tracks.length);
-
-    try {
-      const combined: LibTrack[] = [];
-
-      for (let chunkStart = 0; chunkStart < tracks.length; chunkStart += LIBRARY_LOOKUP_CHUNK_SIZE) {
-        const chunk = tracks.slice(chunkStart, chunkStart + LIBRARY_LOOKUP_CHUNK_SIZE);
-
-        const res = await fetch("/api/ai-dj-library/lookup", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ tracks: chunk, bypassCache }),
-        });
-        if (!res.body) throw new Error("No response body");
-
-        const reader2 = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let chunkRetryAfter: number | null = null;
-
-        while (true) {
-          const { done, value } = await reader2.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split("\n\n");
-          buffer = parts.pop() ?? "";
-
-          for (const part of parts) {
-            if (!part.startsWith("data: ")) continue;
-            const msg = JSON.parse(part.slice(6)) as Record<string, unknown>;
-            if (msg.type === "progress") {
-              setLibProgress(chunkStart + (msg.current as number));
-            } else if (msg.type === "done") {
-              combined.push(...((msg.tracks as LibTrack[]) ?? []));
-              chunkRetryAfter = (msg.retryAfter as number | null) ?? null;
-            } else if (msg.type === "error") {
-              throw new Error(msg.error as string);
-            }
-          }
+      const chunkNum = i / 100 + 1;
+      const body = JSON.stringify({ uris: uris.slice(i, i + 100) });
+      // "Failed to fetch" (a network-level failure with no HTTP response at
+      // all — dropped connection, brief offline blip) gets one retry before
+      // giving up, since a large copy (1000+ tracks -> 10+ sequential
+      // requests) has more surface for a transient blip than a single call.
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const res = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body,
+          });
+          if (!res.ok) throw new Error(`Spotify ${res.status}: ${await res.text()}`);
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e;
+          if (attempt === 0) await new Promise(r => setTimeout(r, 1000));
         }
-
-        // Spotify rate-limited us partway through this chunk — the remaining
-        // tracks in it came back as misses with no real search attempted.
-        // Stop here rather than silently continuing to burn through misses;
-        // whatever matched so far is still returned to the caller.
-        if (chunkRetryAfter !== null) {
-          const clearsAtDate = new Date(Date.now() + chunkRetryAfter * 1000);
-          const today = new Date();
-          const isTomorrow = clearsAtDate.toDateString() !== today.toDateString();
-          const timeStr = clearsAtDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).toLowerCase().replace(" ", "");
-          const clearsAtStr = isTomorrow ? `${timeStr} tomorrow` : timeStr;
-          return {
-            tracks: combined,
-            warning: `Spotify rate-limited the search — stopped after ${chunkStart + chunk.length}/${tracks.length} tracks checked. Clears around ${clearsAtStr}.`,
-            clearsAt: clearsAtDate.toISOString(),
-          };
-        }
-
-        // Brief pause between chunks so a burst of many small requests
-        // doesn't itself trip Spotify's rate limit.
-        if (chunkStart + LIBRARY_LOOKUP_CHUNK_SIZE < tracks.length) await new Promise(r => setTimeout(r, 300));
       }
-      return { tracks: combined, warning: null, clearsAt: null };
-    } finally {
-      setLibLoading(false);
-      setLibProgress(0);
-      setLibProgressTotal(0);
-    }
-  }
-
-  function handleAiDjLibraryUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setLibError(null);
-    setLibSavedMsg(null);
-    setLibTracks([]);
-    setLibRateLimitClearsAt(null);
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
-      const text = ev.target?.result as string;
-      const stripped = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
-      const lines = stripped.replace(/\r/g, "").split("\n").filter(Boolean);
-      if (lines.length < 2) { setLibError("File appears to be empty."); return; }
-
-      const headers = parseCsvRowLocal(lines[0]).map(h => h.toLowerCase());
-      const idxName = headers.findIndex(h => h === "track name");
-      const idxArtist = headers.findIndex(h => h === "artist name(s)" || h === "artist");
-      if (idxName === -1 || idxArtist === -1) {
-        setLibError(`Could not find Track Name / Artist Name(s) columns. Found: ${headers.join(", ")}`);
-        return;
+      if (lastErr) {
+        const detail = lastErr instanceof Error ? lastErr.message : String(lastErr);
+        throw new Error(`Failed adding tracks ${i + 1}-${Math.min(i + 100, uris.length)} of ${uris.length} (batch ${chunkNum}/${totalChunks}): ${detail}`);
       }
-
-      const parsed = lines.slice(1).map(l => parseCsvRowLocal(l)).filter(row => row[idxName] && row[idxArtist]);
-      if (parsed.length === 0) { setLibError("No usable rows found in this CSV."); return; }
-
-      setLibFileName(file.name);
-      try {
-        const { tracks, warning, clearsAt } = await runLibraryLookup(
-          parsed.map(row => ({ title: cleanMojibake(row[idxName]), artist: cleanMojibake(row[idxArtist]) })),
-          false
-        );
-        setLibTracks(tracks);
-        setLibRateLimitClearsAt(clearsAt);
-        if (warning) setLibError(warning);
-      } catch (err) {
-        setLibError(err instanceof Error ? err.message : "Failed to look up tracks");
-      }
-    };
-    reader.readAsText(file);
-  }
-
-  // Re-searches every currently-unmatched track with the disk cache bypassed,
-  // so the server's looser fallback query variants get a real shot instead of
-  // being short-circuited by a previously-cached miss for the exact query.
-  async function retryLibraryMisses() {
-    const misses = libTracks.filter(t => !t.uri);
-    if (!misses.length) return;
-    setLibError(null);
-    setLibRateLimitClearsAt(null);
-    try {
-      const { tracks: result, warning, clearsAt } = await runLibraryLookup(
-        misses.map(t => ({ title: t.originalTitle, artist: t.originalArtist })),
-        true
-      );
-      const byKey = new Map(result.map(r => [`${r.originalTitle}|||${r.originalArtist}`, r]));
-      setLibTracks(prev => prev.map(t => {
-        if (t.uri) return t;
-        const updated = byKey.get(`${t.originalTitle}|||${t.originalArtist}`);
-        return updated ?? t;
-      }));
-      setLibRateLimitClearsAt(clearsAt);
-      if (warning) setLibError(warning);
-    } catch (err) {
-      setLibError(err instanceof Error ? err.message : "Failed to retry misses");
-    }
-  }
-
-  function csvEscapeLocal(v: string): string {
-    return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
-  }
-
-  async function saveAiDjLibraryToPlaylist() {
-    const token = session?.accessToken;
-    if (!token) { setLibError("Not signed in"); return; }
-    const name = libPlaylistName.trim();
-    if (!name) { setLibError("Enter a playlist name first."); return; }
-    const matched = libTracks.filter(t => t.uri);
-    if (!matched.length) { setLibError("No matched tracks to save."); return; }
-    const uris = matched.map(t => t.uri);
-
-    setLibSaving(true);
-    setLibError(null);
-    setLibSavedMsg(null);
-    try {
-      const playlist = await resolvePlaylistByName(name);
-
-      if (libImportMode === "overwrite") {
-        await replacePlaylistTracksBrowser(playlist.id, uris, token);
-      } else {
-        await addTracksBrowser(playlist.id, uris, token);
-      }
-
-      // Keep the local library CSV (used for BPM/pace matching) in step with
-      // whatever just landed in the Spotify playlist — same append/overwrite
-      // mode. Full Exportify-shaped header (not just URI/Name/Artist): this
-      // lookup never fetches audio features, so Tempo/Energy/etc. are blank
-      // here — but the column must still *exist* for healActiveCsv() to spot
-      // the gap and backfill it via ReccoBeats/Deezer afterward. A CSV with
-      // those columns missing entirely (not just blank) looks "healthy" to
-      // the heal sweep and gets skipped, leaving every track with 0 BPM.
-      const header = "Track URI,Track Name,Album Name,Artist Name(s),Release Date,Duration (ms),Popularity,Explicit,Added By,Added At,Genres,Record Label,Danceability,Energy,Key,Loudness,Mode,Speechiness,Acousticness,Instrumentalness,Liveness,Valence,Tempo,Time Signature";
-      const rows = matched.map(t => {
-        const cells = [t.uri, t.name, "", t.artistName, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""];
-        return cells.map(csvEscapeLocal).join(",");
-      });
-      const csvBody = `${header}\n${rows.join("\n")}\n`;
-      const csvRes = await fetch(`/api/save-default-playlist?mode=${libImportMode}`, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain" },
-        body: csvBody,
-      });
-      if (!csvRes.ok) {
-        const errBody = await csvRes.json().catch(() => ({})) as { error?: string };
-        throw new Error(
-          `Saved ${uris.length} tracks to Spotify, but the local library CSV write failed ` +
-          `(${errBody.error ?? `HTTP ${csvRes.status}`}) — tracks won't show up in the dashboard until this succeeds. Try again.`
-        );
-      }
-      invalidateRunningPlaylistCache();
-      loadPlaylistList();
-      fetchHealStatus();
-
-      const noMatch = libTracks.length - uris.length;
-      setLibSavedMsg(
-        `${libImportMode === "overwrite" ? "Replaced" : "Added"} ${uris.length} track${uris.length !== 1 ? "s" : ""} in "${playlist.name}" (Spotify + local library)` +
-        (noMatch > 0 ? ` · ${noMatch} not found on Spotify` : "")
-      );
-    } catch (e) {
-      setLibError(e instanceof Error ? e.message : "Failed to save to Spotify");
-    } finally {
-      setLibSaving(false);
     }
   }
 
@@ -1888,9 +1735,17 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     { key: "playlist", label: "Playlist & BPM" },
     { key: "integrations", label: "Integrations & BBC" },
     { key: "notifications", label: "Notifications & 2FA" },
+    { key: "deleted-tracks", label: "Deleted Tracks" },
   ] as const;
   type TabKey = typeof TABS[number]["key"];
   const [activeTab, setActiveTab] = useState<TabKey>("heart-rate");
+
+  useEffect(() => {
+    if (activeTab === "deleted-tracks" && deletedTracksList === null && !deletedTracksLoading) {
+      void loadDeletedTracksList();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   if (loading) {
     return (
@@ -1904,6 +1759,19 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
   return (
     <div className="space-y-6">
+
+    {/* Previously-deleted tracks review — import paused until the user decides */}
+    {deletedReview && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4">
+        <div className="w-full max-w-lg rounded-xl bg-slate-900 border border-white/10 p-4 space-y-3">
+          <h3 className="font-semibold text-sm">Previously deleted tracks in this import</h3>
+          <DeletedTracksReview
+            tracks={deletedReview.rejected}
+            onConfirm={(allow) => deletedReview.resume(allow)}
+          />
+        </div>
+      </div>
+    )}
 
     {/* ── Tab bar ── */}
     <div className="flex flex-wrap gap-1.5 border-b border-white/10 pb-px">
@@ -2125,32 +1993,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     <div className={activeTab === "playlist" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
-      {/* CSV heal-sweep progress — backfills BPM/audio-feature data after a
-          save/import; can run for a long time on a large library, so this
-          keeps it visible instead of the page looking like nothing happened. */}
-      {healProgress?.running && (
-        <div className="rounded-xl bg-purple-500/10 border border-purple-500/30 p-4 space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-medium text-purple-300">
-              Backfilling {healProgress.phase === "features" ? "BPM/audio features" : "track durations"}…
-            </p>
-            <span className="text-xs text-purple-300/70 tabular-nums">
-              {healProgress.current}/{healProgress.total}
-            </span>
-          </div>
-          <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-purple-400 rounded-full transition-all duration-300"
-              style={{ width: `${healProgress.total > 0 ? Math.round((healProgress.current / healProgress.total) * 100) : 0}%` }}
-            />
-          </div>
-          <p className="text-xs text-slate-500">
-            {healProgress.healedSoFar} row{healProgress.healedSoFar === 1 ? "" : "s"} healed so far
-            {healProgress.phase === "duration" && " — BPM data is already in, this pass only fills track durations"}
-          </p>
-        </div>
-      )}
-
       {/* Playlist Management */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
         <div className="px-5 py-4 border-b border-white/10">
@@ -2237,7 +2079,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   </button>
                 </div>
                 <button
-                  onClick={saveCsvToPlaylist}
+                  onClick={() => saveCsvToPlaylist()}
                   disabled={csvSaving || !csvPlaylistName.trim()}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
                 >
@@ -2290,6 +2132,26 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                         {switchingId === p.id ? "Switching…" : "Use"}
                       </button>
                     )}
+                    <a
+                      href={`/api/settings/playlists/download?id=${encodeURIComponent(p.id)}`}
+                      className="p-1.5 text-slate-500 hover:text-green-400 transition-colors rounded"
+                      title={`Download ${p.csvFile}`}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                        <path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z" />
+                        <path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z" />
+                      </svg>
+                    </a>
+                    {p.id === activePlaylistId && (
+                      <button
+                        onClick={healNow}
+                        disabled={!!healProgress?.running}
+                        title="Check for missing BPM/duration/audio-feature data and try to fill the gaps"
+                        className="text-xs rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 px-2.5 py-1 transition-colors whitespace-nowrap"
+                      >
+                        {healProgress?.running ? "Checking…" : "Check for missing data"}
+                      </button>
+                    )}
                     <button
                       onClick={() => { setDeleteTarget(p); setDeleteUnfollow(true); }}
                       className="p-1.5 text-slate-500 hover:text-red-400 transition-colors rounded"
@@ -2305,6 +2167,84 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             </div>
           )}
           {playlistListError && <p className="text-xs text-red-400">{playlistListError}</p>}
+
+          {/* CSV heal-sweep status — backfills BPM/audio-feature/genre data
+              after a save/import or "Check for missing data" above; can run
+              for a long time on a large library, so this keeps it visible
+              instead of the page looking like nothing happened. */}
+          {healStatus && (
+            <div className="rounded-lg bg-slate-800/40 border border-white/10 p-3 space-y-1.5">
+              <p className="text-sm font-medium text-slate-200">{healStatus.total} tracks</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
+                {healStatus.missingUri > 0 && <span className="text-red-400">{healStatus.missingUri} missing Spotify URI</span>}
+                {healStatus.missingDuration > 0 && <span>{healStatus.missingDuration} missing duration</span>}
+                {healStatus.missingGenres > 0 && <span>{healStatus.missingGenres} missing genres</span>}
+                {Object.entries(healStatus.missingFeatures).filter(([, n]) => n > 0).map(([field, n]) => (
+                  <span key={field}>{n} missing {field.toLowerCase()}</span>
+                ))}
+                {healStatus.missingDuration === 0 && healStatus.missingGenres === 0
+                  && healStatus.missingUri === 0
+                  && Object.values(healStatus.missingFeatures).every(n => n === 0) && (
+                  <span className="text-green-400">Nothing missing 🎉</span>
+                )}
+              </div>
+              <p className="text-xs">
+                {healProgress?.spotifyRetryAt && new Date(healProgress.spotifyRetryAt).getTime() > Date.now() ? (
+                  <span className="text-amber-400">
+                    ⚠ Spotify rate limit active — clears {new Date(healProgress.spotifyRetryAt).toLocaleTimeString()}
+                  </span>
+                ) : (
+                  <span className="text-slate-600">Spotify rate limit: not active</span>
+                )}
+              </p>
+            </div>
+          )}
+
+          {healProgress?.running && (
+            <div className="rounded-lg bg-purple-500/10 border border-purple-500/30 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-medium text-purple-300">
+                  Backfilling {healProgress.phase === "uris" ? "missing Spotify URIs" : healProgress.phase === "features" ? "BPM/audio features" : healProgress.phase === "genres" ? "genres" : "track durations"}…
+                </p>
+                <span className="text-xs text-purple-300/70 tabular-nums">
+                  {healProgress.current}/{healProgress.total}
+                </span>
+              </div>
+              <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-purple-400 rounded-full transition-all duration-300"
+                  style={{ width: `${healProgress.total > 0 ? Math.round((healProgress.current / healProgress.total) * 100) : 0}%` }}
+                />
+              </div>
+              <p className="text-xs text-slate-500">
+                {healProgress.healedSoFar} row{healProgress.healedSoFar === 1 ? "" : "s"} healed so far
+                {healProgress.phase === "duration" && " — BPM data is already in, this pass only fills track durations"}
+                {healProgress.phase === "genres" && " — duration/BPM data is already in, this pass only fills genres"}
+              </p>
+              {healProgress.spotifyRetryAt && new Date(healProgress.spotifyRetryAt).getTime() > Date.now() && (
+                <p className="text-xs text-amber-400">
+                  ⚠ Spotify rate-limited — expires {new Date(healProgress.spotifyRetryAt).toLocaleTimeString()}, continuing with Deezer/Last.fm only
+                </p>
+              )}
+            </div>
+          )}
+
+          {healProgress?.log && healProgress.log.length > 0 && (
+            <div className="rounded-lg bg-slate-950/60 border border-white/10 overflow-hidden">
+              <div className="px-3 py-1.5 border-b border-white/10">
+                <p className="text-xs font-medium text-slate-400">Heal log</p>
+              </div>
+              <div className="max-h-40 overflow-y-auto p-3 space-y-1 font-mono text-xs">
+                {[...healProgress.log].reverse().map((entry, i) => (
+                  <p key={i} className="text-slate-500">
+                    <span className="text-slate-600">{new Date(entry.at).toLocaleTimeString()}</span>{" "}
+                    <span className={/rate-limited/i.test(entry.text) ? "text-amber-400" : "text-slate-400"}>{entry.text}</span>
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+          {healNowError && <p className="text-xs text-red-400">{healNowError}</p>}
         </div>
 
         {/* Append CSV to the currently active playlist — no name/target
@@ -2342,7 +2282,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                 {appendCsvFileName} — {appendCsvTrackCount} tracks
               </p>
               <button
-                onClick={appendCsvToActivePlaylist}
+                onClick={() => appendCsvToActivePlaylist()}
                 disabled={appendCsvSaving}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
               >
@@ -2353,123 +2293,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           {appendCsvError && <p className="text-xs text-red-400">{appendCsvError}</p>}
         </div>
 
-        <div className="pt-3 border-t border-white/10 space-y-2">
-          <label className="block text-sm font-medium text-slate-300">Import AI DJ playlist library</label>
-          <p className="text-xs text-slate-500">
-            Browse to a local library CSV (Track Name / Artist Name(s) columns) — each track is
-            looked up on Spotify, then saved as the playlist you name below (created on Spotify if
-            it doesn&apos;t exist yet, with a matching CSV file on the Pi).
-          </p>
-          <input
-            type="text"
-            value={libPlaylistName}
-            onChange={e => { setLibPlaylistName(e.target.value); setLibError(null); }}
-            placeholder="Playlist name (Spotify name + Pi filename)"
-            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
-          />
-          <div className="flex items-center gap-3 flex-wrap">
-            <input ref={aiDjLibraryFileRef} type="file" accept=".csv" onChange={handleAiDjLibraryUpload} className="hidden" />
-            <button
-              onClick={() => aiDjLibraryFileRef.current?.click()}
-              disabled={libLoading}
-              className="inline-flex items-center gap-2 rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 text-sm font-medium px-4 py-2 transition-colors"
-            >
-              {libLoading ? "Looking up…" : "Browse CSV"}
-            </button>
-          </div>
-
-          {libLoading && libProgressTotal > 0 && (
-            <div className="space-y-1">
-              <div className="flex justify-between text-xs text-slate-500">
-                <span>Matching tracks on Spotify…</span>
-                <span>{libProgress}/{libProgressTotal} · {Math.round((libProgress / libProgressTotal) * 100)}%</span>
-              </div>
-              <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-green-500 rounded-full transition-all duration-200"
-                  style={{ width: `${Math.round((libProgress / libProgressTotal) * 100)}%` }}
-                />
-              </div>
-            </div>
-          )}
-
-          {libError && <p className="text-xs text-red-400">{libError}</p>}
-
-          {/* Nothing is written to disk or Spotify until Save is pressed here —
-              this gives a chance to pick append/overwrite after seeing the match count */}
-          {!libLoading && libTracks.length > 0 && (
-            <div className="rounded-lg bg-slate-800/40 border border-white/10 p-3 space-y-2">
-              <p className="text-xs text-slate-400">
-                {libFileName} — {libTracks.filter(t => t.uri).length}/{libTracks.length} matched on Spotify
-              </p>
-              <div className="flex items-center gap-3 flex-wrap">
-                <div className="inline-flex rounded-lg border border-white/10 overflow-hidden text-xs">
-                  <button
-                    onClick={() => setLibImportMode("append")}
-                    className={`px-3 py-1.5 transition-colors ${libImportMode === "append" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
-                  >
-                    Append
-                  </button>
-                  <button
-                    onClick={() => setLibImportMode("overwrite")}
-                    className={`px-3 py-1.5 transition-colors ${libImportMode === "overwrite" ? "bg-slate-600 text-white" : "bg-slate-800/60 text-slate-400 hover:text-slate-200"}`}
-                  >
-                    Overwrite
-                  </button>
-                </div>
-                <button
-                  onClick={saveAiDjLibraryToPlaylist}
-                  disabled={libSaving || !libPlaylistName.trim()}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
-                >
-                  {libSaving ? "Saving…" : libImportMode === "overwrite" ? `Overwrite "${libPlaylistName || "…"}"` : `Add to "${libPlaylistName || "…"}"`}
-                </button>
-              </div>
-
-              {libTracks.some(t => !t.uri) && (
-                <div className="pt-2 border-t border-white/10 space-y-2">
-                  {libRateLimitClearsAt && (() => {
-                    const clearsAtDate = new Date(libRateLimitClearsAt);
-                    const stillWaiting = clearsAtDate.getTime() > Date.now();
-                    const today = new Date();
-                    const isTomorrow = clearsAtDate.toDateString() !== today.toDateString();
-                    const timeStr = clearsAtDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).toLowerCase().replace(" ", "");
-                    return (
-                      <p className={`text-xs rounded-lg px-2.5 py-1.5 ${stillWaiting ? "bg-amber-500/10 text-amber-400 border border-amber-500/20" : "bg-green-500/10 text-green-400 border border-green-500/20"}`}>
-                        {stillWaiting
-                          ? `Spotify rate limit hit — ${libTracks.filter(t => !t.uri).length} tracks outstanding. Retry after ${timeStr}${isTomorrow ? " tomorrow" : ""}.`
-                          : `Rate limit should be clear now — ${libTracks.filter(t => !t.uri).length} tracks outstanding, ready to retry.`}
-                      </p>
-                    );
-                  })()}
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs text-amber-400">
-                      {libTracks.filter(t => !t.uri).length} not found on Spotify
-                    </p>
-                    <button
-                      onClick={retryLibraryMisses}
-                      disabled={libLoading || (libRateLimitClearsAt !== null && new Date(libRateLimitClearsAt).getTime() > Date.now())}
-                      title={libRateLimitClearsAt && new Date(libRateLimitClearsAt).getTime() > Date.now() ? "Waiting for Spotify's rate limit to clear" : undefined}
-                      className="text-xs rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 px-2.5 py-1 transition-colors whitespace-nowrap"
-                    >
-                      {libLoading ? "Retrying…" : "Retry all misses"}
-                    </button>
-                  </div>
-                  <div className="max-h-40 overflow-y-auto no-scrollbar rounded-lg border border-white/10 divide-y divide-white/5">
-                    {libTracks.filter(t => !t.uri).map((t, i) => (
-                      <div key={`${t.originalTitle}-${t.originalArtist}-${i}`} className="px-2.5 py-1.5 text-xs">
-                        <span className="text-slate-300">{t.originalTitle}</span>
-                        <span className="text-slate-500"> — {t.originalArtist}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {libSavedMsg && <p className="text-xs text-green-400">{libSavedMsg}</p>}
-        </div>
         </div>
       </div>
 
@@ -3861,6 +3684,57 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
         {totpError && <p className="text-sm text-red-400">{totpError}</p>}
         {totpMsg && <p className="text-sm text-green-400">{totpMsg}</p>}
+      </div>
+
+    </div>
+    </div>
+
+    {/* ── Tab 5: Deleted Tracks ── */}
+    <div className={activeTab === "deleted-tracks" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
+    <div className="space-y-6">
+
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h3 className="font-semibold text-slate-200">Deleted Tracks</h3>
+          <p className="text-sm text-slate-400 mt-1">
+            Tracks removed from the library are logged here so they don&apos;t silently reappear via BBC episodes, CSV imports, or the weekly cron.
+            Removing a track from this list lets it be imported again without a review prompt. Click a track to play it in Spotify.
+          </p>
+        </div>
+
+        {deletedTracksError && <p className="text-sm text-red-400">{deletedTracksError}</p>}
+
+        {deletedTracksLoading ? (
+          <div className="space-y-2">
+            {[1, 2, 3].map(n => <div key={n} className="h-10 rounded-lg bg-slate-800/50 animate-pulse" />)}
+          </div>
+        ) : !deletedTracksList || deletedTracksList.length === 0 ? (
+          <p className="text-sm text-slate-500">No deleted tracks logged.</p>
+        ) : (
+          <div className="divide-y divide-white/5 rounded-lg border border-white/10 bg-slate-950/40 max-h-[28rem] overflow-y-auto">
+            {deletedTracksList.map(t => (
+              <div key={t.uri} className="flex items-center gap-3 px-3 py-2 group">
+                <button
+                  onClick={() => openInSpotify(t.uri)}
+                  className="min-w-0 flex-1 text-left"
+                  title="Play in Spotify"
+                >
+                  <p className="text-sm text-slate-200 truncate group-hover:text-green-400 transition-colors">
+                    {t.name}{t.artist ? <span className="text-slate-500"> — {t.artist}</span> : null}
+                  </p>
+                  <p className="text-xs text-slate-600">Deleted {t.deletedAt.slice(0, 10)}</p>
+                </button>
+                <button
+                  onClick={() => forgetDeletedTrack(t.uri)}
+                  disabled={forgettingUris.has(t.uri)}
+                  className="shrink-0 text-xs px-3 py-1.5 rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 font-medium transition-colors"
+                >
+                  {forgettingUris.has(t.uri) ? "Removing…" : "Remove"}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
     </div>

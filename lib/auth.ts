@@ -46,6 +46,11 @@ export const authOptions: NextAuthOptions = {
       }
 
       if (token.expiresAt && Date.now() < token.expiresAt * 1000 - 60_000) {
+        // Self-heal sessions issued before picture/name were added to the
+        // token — otherwise they'd stay missing until the user re-logs in.
+        if (!token.picture && token.accessToken) {
+          await backfillProfile(token);
+        }
         return token;
       }
 
@@ -74,6 +79,20 @@ export const authOptions: NextAuthOptions = {
   },
   pages: { signIn: "/" },
 };
+
+async function backfillProfile(token: { accessToken?: string; [key: string]: unknown }) {
+  try {
+    const response = await fetch("https://api.spotify.com/v1/me", {
+      headers: { Authorization: `Bearer ${token.accessToken}` },
+    });
+    if (!response.ok) return;
+    const data = await response.json();
+    token.picture = data.images?.[0]?.url;
+    token.name = data.display_name ?? token.name;
+  } catch {
+    // Cosmetic-only; leave token unchanged and let the UI fall back to the placeholder avatar.
+  }
+}
 
 async function refreshSpotifyToken(token: {
   refreshToken?: string;

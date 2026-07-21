@@ -6,7 +6,7 @@ import { readFile, writeFile } from "fs/promises";
 // Used by save-default-playlist (upload a CSV into the active playlist) and
 // tracks/copy-to-playlist (copy tracks from one known playlist into another).
 
-const URI_HEADER_NAMES = ["track uri", "spotify uri", "spotify id", "uri", "id"];
+export const URI_HEADER_NAMES = ["track uri", "spotify uri", "spotify id", "uri", "id"];
 
 function isBlank(v: string | undefined): boolean {
   const t = v?.trim().toLowerCase();
@@ -41,7 +41,9 @@ export interface MergeResult {
 // merging by Track URI: new URIs are appended as new rows; URIs already
 // present get blank cells backfilled from the incoming row. If `dest`
 // doesn't exist yet or is empty, the incoming CSV is written as-is.
-export async function mergeCsvIntoFile(dest: string, newCsvText: string): Promise<MergeResult> {
+// excludeUris: URIs to skip entirely (e.g. previously-deleted tracks the
+// user chose not to re-import) — they're neither appended nor merged.
+export async function mergeCsvIntoFile(dest: string, newCsvText: string, excludeUris?: Set<string>): Promise<MergeResult> {
   let existing = "";
   try { existing = await readFile(dest, "utf8"); } catch { /* no existing file — treat as a fresh write */ }
 
@@ -87,6 +89,7 @@ export async function mergeCsvIntoFile(dest: string, newCsvText: string): Promis
   for (const newRow of newRows) {
     const uri = newRow[newUriIdx]?.trim();
     if (!uri) { rowsToAppend.push(newRow); appended++; continue; }
+    if (excludeUris?.has(uri)) continue; // previously-deleted, not overridden
     if (newUrisSeen.has(uri)) continue; // dupe within the incoming data itself
     newUrisSeen.add(uri);
 

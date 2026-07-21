@@ -108,6 +108,45 @@ export async function deezerDurationMs(name: string, artist: string): Promise<nu
   return typeof secs === "number" && secs > 0 ? secs * 1000 : null;
 }
 
+// Deezer genre names for a track, via its album (Deezer attaches genre to
+// the album, not the track or artist) — keyless fallback for the Genres
+// column now that Spotify's artist endpoint no longer returns genres for
+// newer apps. Comma-joined to match how the CSV's Genres column is written
+// elsewhere (Exportify's convention).
+//
+// Same two-tier query as deezerIsrc: the quoted artist:"X" track:"Y" form
+// is precise but brittle — decorated titles ("Song - Remix Name") or
+// certain artist names return zero results even when Deezer clearly has
+// the track (confirmed empirically: Chairlift/Goldroom tracks 0-result on
+// the quoted query, found immediately on the plain one). The loose
+// fallback trades a little precision for actually finding the track.
+export async function deezerGenres(name: string, artist: string): Promise<string | null> {
+  const tryQuery = async (q: string): Promise<number | null> => {
+    const res = await fetch(`https://api.deezer.com/search?q=${q}&limit=1`, {
+      headers: { "User-Agent": UA }, signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const d = await res.json() as { data?: { album?: { id?: number } }[] };
+    return d.data?.[0]?.album?.id ?? null;
+  };
+
+  let albumId = await tryQuery(encodeURIComponent(`artist:"${artist}" track:"${name}"`));
+  if (!albumId) {
+    await sleep(150);
+    albumId = await tryQuery(encodeURIComponent(`${artist} ${name}`));
+  }
+  if (!albumId) return null;
+
+  await sleep(150);
+  const albumRes = await fetch(`https://api.deezer.com/album/${albumId}`, {
+    headers: { "User-Agent": UA }, signal: AbortSignal.timeout(10000),
+  });
+  if (!albumRes.ok) return null;
+  const album = await albumRes.json() as { genres?: { data?: { name?: string }[] } };
+  const names = (album.genres?.data ?? []).map(g => g.name).filter((n): n is string => !!n);
+  return names.length > 0 ? names.join(", ") : null;
+}
+
 // Last.fm track.getInfo duration (ms) — needs LASTFM_API_KEY; last-resort
 // duration source after Spotify and Deezer. Last.fm has no BPM/key data,
 // so it only helps with durations.

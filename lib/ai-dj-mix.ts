@@ -79,8 +79,8 @@ function loadCadenceBuckets(): Record<string, number> | null {
 // Parses the SSE stream from the AI DJ service's /mix/stream endpoint.
 // Returns null when the endpoint doesn't exist (service not yet restarted on
 // the new code) so the caller can fall back to the plain /mix endpoint.
-async function fetchMixStream(url: string, body: string, onProgress: AiDjProgress): Promise<AiDjMixResult | null> {
-  const res = await fetch(`${url}/mix/stream`, {
+async function fetchMixStream(url: string, body: string, onProgress: AiDjProgress, endpoint = "/mix/stream"): Promise<AiDjMixResult | null> {
+  const res = await fetch(`${url}${endpoint}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body,
@@ -200,10 +200,11 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   }
 }
 
-function buildMixLocally(
-  segments: string[], easyBias = 0, trackFeedback: object[] = [], onProgress?: AiDjProgress, avoidUris?: string[],
-  model?: string, effort?: string,
-): Promise<AiDjMixResult> {
+// Spawns scripts/ai_dj_bridge.py with `stdinPayload` and parses its NDJSON
+// progress lines + final mix/error JSON line — shared by the segment-based
+// mix and the flow-mix (fixed track pool) modes, which differ only in what
+// they write to stdin.
+function runBridge(stdinPayload: object, onProgress?: AiDjProgress): Promise<AiDjMixResult> {
   const script = join(process.cwd(), "scripts", "ai_dj_bridge.py");
   const csvPath = activeCsvPath();
 
@@ -211,8 +212,6 @@ function buildMixLocally(
     const proc = spawn(PYTHON, [script, csvPath]);
     const timer = setTimeout(() => { proc.kill(); }, LOCAL_MIX_TIMEOUT_MS);
 
-    // The bridge prints NDJSON: {"type":"progress",...} lines as segments
-    // build, then a final mix (or {"error":...}) JSON line.
     let lineBuf = "";
     let lastPayload = "";
     let stderrTail = "";
@@ -256,12 +255,92 @@ function buildMixLocally(
       resolve({ ok: false, error: e.message });
     });
 
-    proc.stdin.write(JSON.stringify({
-      segments, easyBias, trackFeedback,
-      playedTracks: getPlayedTracks(), playCounts: getPlayedCounts(), bpmOverrides: loadBpmOverrides(),
-      avoidTracks: avoidUris?.length ? avoidUris : undefined,
-      model, effort,
-    }));
+    proc.stdin.write(JSON.stringify(stdinPayload));
     proc.stdin.end();
   });
+}
+
+function buildMixLocally(
+  segments: string[], easyBias = 0, trackFeedback: object[] = [], onProgress?: AiDjProgress, avoidUris?: string[],
+  model?: string, effort?: string,
+): Promise<AiDjMixResult> {
+  return runBridge({
+    segments, easyBias, trackFeedback,
+    playedTracks: getPlayedTracks(), playCounts: getPlayedCounts(), bpmOverrides: loadBpmOverrides(),
+    avoidTracks: avoidUris?.length ? avoidUris : undefined,
+    model, effort,
+  }, onProgress);
+}
+
+function buildFlowMixLocally(
+  title: string, trackUris: string[], trackFeedback: object[] = [], onProgress?: AiDjProgress,
+  model?: string, effort?: string, durationSec?: number,
+): Promise<AiDjMixResult> {
+  return runBridge({
+    title, trackUris, trackFeedback, playCounts: getPlayedCounts(), model, effort, durationSec,
+  }, onProgress);
+}
+
+// Sequences a fixed track pool (e.g. every track in a selected HR zone) for
+// smooth transitions, instead of picking tracks to fit workout segments —
+// BPM/energy act only as a local smoothness guide between neighbouring
+// tracks, never a target. See ai_dj/workout.py's build_flow_mix.
+// durationSec: trims the flow-ordered list to this length (e.g. the next
+// scheduled run's estimated duration) instead of including every track.
+export async function buildAiDjFlowMix(title: string, trackUris: string[], onProgress?: AiDjProgress, durationSec?: number): Promise<AiDjMixResult> {
+  const config = loadAiDjConfig();
+  if (!config?.enabled) {
+    return { ok: false, error: "AI DJ is not enabled in Settings" };
+  }
+  if (!trackUris?.length) {
+    return { ok: false, error: "No tracks to mix" };
+  }
+
+  try { await healActiveCsv(); } catch { /* never block the mix */ }
+
+  let csv: string;
+  try {
+    csv = await readFile(activeCsvPath(), "utf8");
+  } catch {
+    return { ok: false, error: "No library CSV - upload a playlist library in Settings first" };
+  }
+
+  const trackFeedback = getAllTrackVotes();
+
+  if (config.provider === "claude") {
+    return buildFlowMixLocally(title, trackUris, trackFeedback, onProgress, config.claudeModel, config.claudeEffort, durationSec);
+  }
+  if (config.provider === "gemini") {
+    return buildFlowMixLocally(title, trackUris, trackFeedback, onProgress, config.geminiModel, undefined, durationSec);
+  }
+
+  const body = JSON.stringify({
+    title, trackUris, csv, trackFeedback, playCounts: getPlayedCounts(), durationSec,
+  });
+  try {
+    if (onProgress) {
+      const streamed = await fetchMixStream(config.url, body, onProgress, "/flow-mix/stream");
+      if (streamed) return streamed;
+    }
+    const res = await fetch(`${config.url}/flow-mix`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal: AbortSignal.timeout(MIX_TIMEOUT_MS),
+    });
+    const data = await res.json() as AiDjMixResponse & { error?: string };
+    if (!res.ok) {
+      return { ok: false, error: data.error ?? `AI DJ service ${res.status}` };
+    }
+    return { ok: true, mix: data };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[ai-dj] remote service failed (${msg}) — trying on-Pi fallback`);
+    const local = await buildFlowMixLocally(title, trackUris, trackFeedback, onProgress, undefined, undefined, durationSec);
+    if (local.ok) return local;
+    const hint = /timeout|abort/i.test(msg)
+      ? "AI DJ service timed out"
+      : `AI DJ service unreachable at ${config.url}`;
+    return { ok: false, error: `${hint} — on-Pi fallback also failed: ${local.error}` };
+  }
 }

@@ -8,6 +8,9 @@ import fs from "fs";
 import path from "path";
 
 import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { findPreviouslyDeleted } from "@/lib/deleted-tracks";
+import { addTracksToLibrary } from "@/lib/library-add";
+import { healActiveCsv } from "@/lib/csv-heal";
 
 // Resolved per call so a playlist change in Settings applies immediately.
 const runningPlaylistId = () => loadRunningPlaylistConfig().id;
@@ -207,8 +210,19 @@ async function processPlaylist(
 
   if (newCacheEntries > 0) saveCache(cache);
 
+  // Automatic run — previously-deleted tracks are rejected outright (no
+  // review UI here; the user deleted them once, the cron won't sneak them
+  // back into either Spotify or the library CSV).
+  const previouslyDeleted = findPreviouslyDeleted(added.map(a => a.uri));
+  const rejectedCount = Object.keys(previouslyDeleted).length;
+  const surviving = added.filter(a => !previouslyDeleted[a.uri]);
+  if (rejectedCount > 0) {
+    console.log(`[cron/weekly] ${name}: auto-rejected ${rejectedCount} previously-deleted track(s): ${
+      Object.values(previouslyDeleted).map(d => `${d.name} — ${d.artist}`).join(", ")}`);
+  }
+
   // Add matched URIs to Running playlist in chunks of 100
-  const uris = added.map(a => a.uri);
+  const uris = surviving.map(a => a.uri);
   for (let i = 0; i < uris.length; i += 100) {
     const res = await fetch(`https://api.spotify.com/v1/playlists/${runningPlaylistId()}/items`, {
       method: "POST",
@@ -218,7 +232,20 @@ async function processPlaylist(
     if (!res.ok) throw new Error(`Add tracks ${res.status}: ${await res.text()}`);
   }
 
-  return { found: tracks.length, matched: uris.length, skipped: tracks.length - uris.length, retryAfter, added };
+  // Also write the surviving tracks into the local library CSV (they used to
+  // exist only in Spotify, invisible to the BPM pool until a manual re-sync).
+  // Heal in the background to backfill Duration/BPM/features for the new rows.
+  try {
+    const libRes = await addTracksToLibrary(surviving.map(a => ({ uri: a.uri, name: a.name, artist: a.artist })));
+    if (libRes.added > 0) {
+      console.log(`[cron/weekly] ${name}: added ${libRes.added} track(s) to the library CSV`);
+      void healActiveCsv().catch(e => console.warn(`[cron/weekly] heal failed:`, e));
+    }
+  } catch (e) {
+    console.warn(`[cron/weekly] ${name}: library CSV write failed:`, e);
+  }
+
+  return { found: tracks.length, matched: uris.length, skipped: tracks.length - uris.length, retryAfter, added: surviving };
 }
 
 // ── Dedup ──────────────────────────────────────────────────────────────────

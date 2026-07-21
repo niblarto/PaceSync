@@ -653,6 +653,10 @@ interface RunnaScheduleProps {
   /** Called when a track in this card is clicked, alongside opening it in Spotify — the
       parent surfaces the same track in the main track list (clears filters, scrolls, highlights). */
   onTrackClick?: (uri: string) => void;
+  /** Called when a mix build warns that tracks were excluded for missing
+      audio-feature data — the parent surfaces those tracks in the main
+      track list so they can be investigated. */
+  onMissingTracks?: (uris: string[]) => void;
 }
 
 // Exposed to the parent so the tracks card's Remix button can drive this
@@ -687,7 +691,7 @@ function mixSegmentsFor(w: RunnaWorkout): string[] {
 }
 
 type MixProgress = { current: number; total: number; segment: string; detail?: string };
-type MixStatus = { status: "building" | "done" | "error"; error?: string; warning?: string; startedAt?: number; progress?: MixProgress; uris?: string[] };
+type MixStatus = { status: "building" | "done" | "error"; error?: string; warning?: string; warningUris?: string[]; startedAt?: number; progress?: MixProgress; uris?: string[] };
 
 // Real per-segment progress streamed over SSE from /api/ai-dj/mix. Between
 // segment events the bar eases partway toward the next step (a segment's LLM
@@ -796,7 +800,7 @@ function courseMatchesDate(name: string, date: string): boolean {
 }
 
 export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaScheduleProps>(function RunnaScheduleCard(
-  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0, onTrackClick }: RunnaScheduleProps = {},
+  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0, onTrackClick, onMissingTracks }: RunnaScheduleProps = {},
   ref,
 ) {
   const { workouts: allWorkouts, pastRuns, loading, error } = useRunnaData();
@@ -813,7 +817,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   const [mixState, setMixState] = useState<Record<string, MixStatus>>({});
   interface RoutePage { items: RouteActivity[]; offset: number; total: number; loading?: boolean }
   const [routes, setRoutes] = useState<Record<string, RoutePage>>({});
-  const [routeMap, setRouteMap] = useState<{ id: string | number; label: string } | null>(null);
+  const [routeMap, setRouteMap] = useState<{ id: string | number; label: string; segments?: string[] } | null>(null);
   const [courses, setCourses] = useState<GarminCourse[] | null>(null);
   const [courseOffsets, setCourseOffsets] = useState<Record<string, number>>({});
   const [weather, setWeather] = useState<Record<string, DayWeather>>({});
@@ -838,7 +842,13 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
 
   // On expand, show the saved AI DJ mix for this workout's date (pre-built by
   // the nightly cron or saved from the dashboard) — keyed by workout date.
-  interface MixSnapshot { workoutTitle: string; tracks: { uri: string | null; name: string; artist: string; startsAtSec: number; tempo: number | null }[]; pinned?: boolean }
+  interface MixSnapshot {
+    workoutTitle: string;
+    // Full todays-run-history HistoryTrack shape — durationSec/energy/segment
+    // are optional for entries saved before those fields existed.
+    tracks: { uri: string | null; name: string; artist: string; startsAtSec: number; tempo: number | null; durationSec?: number; energy?: number | null; segment?: string; targetPaceSec?: number | null }[];
+    pinned?: boolean;
+  }
   const [mixSnapshots, setMixSnapshots] = useState<Record<string, MixSnapshot | null>>({});
   const [unpinningDate, setUnpinningDate] = useState<string | null>(null);
   const [pinningDate, setPinningDate] = useState<string | null>(null);
@@ -932,6 +942,48 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       .catch(() => setCourses([]));
   }, [expanded, garminConfigured, workouts, courses]);
 
+  // Loads a saved/pinned mix snapshot into the dashboard's main track list
+  // (via onAiDjMix, same as a freshly built mix) so the full row actions —
+  // delete, similar, suggest — are available on its tracks.
+  function loadSnapshotIntoTracklist(w: RunnaWorkout, snap: MixSnapshot) {
+    if (!onAiDjMix) return;
+    const mmss = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
+    // Rebuild the timeline: consecutive tracks sharing a segment label group
+    // into one segment, preserving play order.
+    const segs: AiDjTimelineSegment[] = [];
+    for (const t of snap.tracks) {
+      const label = t.segment ?? "Saved mix";
+      let seg = segs[segs.length - 1];
+      if (!seg || seg.segment !== label) {
+        seg = { segment: label, targetBpm: null, targetPaceSec: t.targetPaceSec ?? null, tracks: [] };
+        segs.push(seg);
+      }
+      seg.tracks.push({
+        uri: t.uri ?? "",
+        name: t.name,
+        artist: t.artist,
+        startsAt: mmss(t.startsAtSec),
+        durationSec: t.durationSec,
+        tempo: t.tempo ?? 0,
+        camelot: null,
+        energy: t.energy ?? 0,
+      });
+    }
+    const tracks: TrackWithBPM[] = snap.tracks.filter(t => t.uri).map(t => ({
+      id: t.uri!.split(":")[2] ?? t.uri!,
+      name: t.name,
+      artists: [{ name: t.artist }],
+      album: { name: "", images: [] },
+      duration_ms: Math.round((t.durationSec ?? 0) * 1000),
+      uri: t.uri!,
+      bpm: Math.round(t.tempo ?? 0),
+      energy: t.energy ?? 0,
+    }));
+    const last = snap.tracks[snap.tracks.length - 1];
+    const totalSec = last ? last.startsAtSec + (last.durationSec ?? 0) : 0;
+    onAiDjMix(snap.workoutTitle || w.title, mixName(w), tracks, totalSec, mixSegmentsFor(w), w.date, segs);
+  }
+
   async function buildMix(w: RunnaWorkout, seedAvoidUris?: string[]) {
     // A remix should sound different: send every track from every prior
     // build this session so the mixer demotes them (they only reappear if
@@ -972,7 +1024,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
           const msg = JSON.parse(dataLine.slice(6)) as
             & Partial<AiDjMixResponse>
             & { type: string; current?: number; total?: number; segment?: string; detail?: string; error?: string;
-                count?: number; tracks?: string[]; fields?: string[]; llmFailures?: string[] };
+                count?: number; tracks?: string[]; uris?: string[]; fields?: string[]; llmFailures?: string[] };
           if (msg.type === "warning" && msg.llmFailures?.length) {
             // Segment(s) where the model call failed (rate limit, quota,
             // network) and fell back to the deterministic distance-chain —
@@ -987,7 +1039,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
             const extra = (msg.count ?? 0) > (msg.tracks?.length ?? 0) ? ` +${msg.count! - msg.tracks!.length} more` : "";
             const warning = `⚠ ${msg.count} track${msg.count === 1 ? "" : "s"} missing ${
               (msg.fields ?? []).join("/") || "data"} left out of the mix: ${names}${extra}`;
-            setMixState(s => ({ ...s, [w.uid]: { ...s[w.uid], status: "building", warning } }));
+            setMixState(s => ({ ...s, [w.uid]: { ...s[w.uid], status: "building", warning, warningUris: msg.uris } }));
           } else if (msg.type === "progress") {
             const progress = { current: msg.current ?? 0, total: msg.total ?? 1, segment: msg.segment ?? "", detail: msg.detail };
             setMixState(s => ({ ...s, [w.uid]: { ...s[w.uid], status: "building", progress } }));
@@ -1018,7 +1070,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w), w.date, mix.timeline, accumulatedUris);
       setMixState(s => ({
         ...s,
-        [w.uid]: { status: "done", warning: s[w.uid]?.warning, uris: accumulatedUris },
+        [w.uid]: { status: "done", warning: s[w.uid]?.warning, warningUris: s[w.uid]?.warningUris, uris: accumulatedUris },
       }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to build mix";
@@ -1217,7 +1269,17 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                             <p className="text-[11px] text-slate-500 pl-0.5 -mt-1 truncate">{st.progress.detail}</p>
                           )}
                           {st?.warning && (
-                            <p className="text-xs text-amber-400/90 mt-1">{st.warning}</p>
+                            st.warningUris?.length ? (
+                              <button
+                                onClick={e => { e.stopPropagation(); onMissingTracks?.(st.warningUris!); }}
+                                className="text-xs text-amber-400/90 mt-1 text-left hover:underline"
+                                title="Show these tracks in the main track list"
+                              >
+                                {st.warning}
+                              </button>
+                            ) : (
+                              <p className="text-xs text-amber-400/90 mt-1">{st.warning}</p>
+                            )
                           )}
                           {snap && snap.tracks?.length > 0 && (
                             <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-1">
@@ -1250,13 +1312,15 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                                       </button>
                                     </>
                                   )}
-                                  <Link
-                                    href={`/mix/${w.date}`}
-                                    onClick={e => e.stopPropagation()}
-                                    className="text-[11px] text-purple-300 hover:text-purple-200 underline"
-                                  >
-                                    View chart →
-                                  </Link>
+                                  {onAiDjMix && (
+                                    <button
+                                      onClick={e => { e.stopPropagation(); loadSnapshotIntoTracklist(w, snap); }}
+                                      title="Load this mix into the main track list — delete, similar and suggest actions available there"
+                                      className="text-[11px] text-purple-300 hover:text-purple-200 underline"
+                                    >
+                                      Tracklist →
+                                    </button>
+                                  )}
                                 </span>
                               </p>
                               <div className="max-h-44 overflow-y-auto no-scrollbar space-y-0.5">
@@ -1301,7 +1365,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                       return (
                         <div className="pt-1 space-y-1.5">
                           <p className="text-xs text-slate-500">
-                            Routes at this distance ({w.distanceMi}–{(w.distanceMi + 0.5).toFixed(1)}mi) · {r.offset + 1}–{Math.min(r.offset + 3, r.total)} of {r.total}
+                            Runs at the distance ({w.distanceMi}–{(w.distanceMi + 0.5).toFixed(1)}mi) · {r.offset + 1}–{Math.min(r.offset + 3, r.total)} of {r.total}
                           </p>
                           <div className="flex items-center gap-1.5">
                             <button
@@ -1321,6 +1385,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                                     setRouteMap({
                                       id: a.activity_id,
                                       label: `${routeDate(a)} · ${a.distance.toFixed(1)}mi`,
+                                      segments: mixSegmentsFor(w),
                                     });
                                   }}
                                   className="flex-1 min-w-0 truncate whitespace-nowrap text-center text-xs px-1.5 py-1 rounded-lg border bg-sky-500/15 border-sky-500/30 text-sky-300 hover:bg-sky-500/25 transition-colors"
@@ -1415,6 +1480,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
         <RouteMapLightbox
           activityId={routeMap.id}
           label={routeMap.label}
+          workoutSegments={routeMap.segments}
           onClose={() => setRouteMap(null)}
         />
       )}

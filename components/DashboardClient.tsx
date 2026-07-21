@@ -322,6 +322,10 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [suggest, setSuggest] = useState<SuggestState | null>(null);
   const suggestSourceRef = useRef<EventSource | null>(null);
   const [noBpmFilter, setNoBpmFilter] = useState(false);
+  // Set when an AI DJ mix warns that tracks were excluded for missing
+  // audio-feature data (Energy/Danceability/Valence) — shows those exact
+  // tracks in the main list so they can be investigated, same pattern as noBpmFilter.
+  const [missingFeaturesFilter, setMissingFeaturesFilter] = useState<string[] | null>(null);
   const [similarNotice, setSimilarNotice] = useState<string | null>(null);
   const [enriching, setEnriching] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
@@ -333,6 +337,9 @@ export function DashboardClient({ spotifyUser }: Props) {
   const noBpmCsvInputRef = useRef<HTMLInputElement>(null);
   const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[] } | null>(null);
   const [remixing, setRemixing] = useState(false);
+  const [flowMixing, setFlowMixing] = useState(false);
+  const [flowMixError, setFlowMixError] = useState<string | null>(null);
+  const [flowMixWarning, setFlowMixWarning] = useState<{ text: string; uris: string[] } | null>(null);
   // Manual close for the pace/BPM chart — also closes automatically whenever
   // the mix becomes stale (a track was deleted) or a remix starts, since the
   // chart's data would no longer match the actual track list either way.
@@ -569,6 +576,11 @@ export function DashboardClient({ spotifyUser }: Props) {
       setFilteredTracks(allTracks.filter(t => t.bpm === 0));
       return;
     }
+    if (missingFeaturesFilter) {
+      const uriSet = new Set(missingFeaturesFilter);
+      setFilteredTracks(allTracks.filter(t => uriSet.has(t.uri)));
+      return;
+    }
     if (similarFilter) {
       const byUri = new Map(allTracks.map(t => [t.uri, t]));
       const ranked = similarFilter.uris
@@ -608,7 +620,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       }
       setFilteredTracks(result);
     }
-  }, [selectedZones, allTracks, paceFilter, sprintBpmFilter, similarFilter, noBpmFilter, aiDjMix, singleTrackFilter]);
+  }, [selectedZones, allTracks, paceFilter, sprintBpmFilter, similarFilter, noBpmFilter, missingFeaturesFilter, aiDjMix, singleTrackFilter]);
 
   // For seeds not in the playlist pool (BBC tracks, 0-BPM tracks) the CSV
   // lookup in the python bridge can't work — fetch features from ReccoBeats
@@ -656,6 +668,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       setPaceFilter(null);
       setSprintBpmFilter(null);
       setNoBpmFilter(false);
+      setMissingFeaturesFilter(null);
       setAiDjMix(null);
       setSingleTrackFilter(null);
       if (csvName) setPlaylistName(`${csvName} – like ${track.name}`);
@@ -677,6 +690,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     setSprintBpmFilter(null);
     setSimilarFilter(null);
     setNoBpmFilter(false);
+    setMissingFeaturesFilter(null);
     setSingleTrackFilter(null);
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
     setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false, avoidUris });
@@ -719,6 +733,112 @@ export function DashboardClient({ spotifyUser }: Props) {
       await runnaScheduleRef.current.remix(aiDjMix.date, avoidUris);
     } finally {
       setRemixing(false);
+    }
+  }
+
+  // Surfaces tracks an AI DJ mix build excluded for missing audio-feature
+  // data (Energy/Danceability/Valence) in the main track list, so they can
+  // be investigated — triggered from the warning link on a Mix/Push button.
+  function showMissingTracks(uris: string[]) {
+    setSelectedZones([]);
+    setPaceFilter(null);
+    setSprintBpmFilter(null);
+    setSimilarFilter(null);
+    setAiDjMix(null);
+    setSingleTrackFilter(null);
+    setNoBpmFilter(false);
+    setMissingFeaturesFilter(uris);
+  }
+
+  // "Push to AI DJ": takes every track currently filtered into the selected
+  // zone(s) and asks the AI DJ to sequence them for smooth transitions
+  // (BPM/energy/key are a local guide between neighbouring tracks, not a
+  // per-segment target like the workout-based Mix button) — no tracks are
+  // dropped by BPM fit, only by thumbs-down feedback. Trimmed to the next
+  // scheduled Runna run's estimated duration, when one is on the calendar.
+  async function pushZoneToAiDj() {
+    if (filteredTracks.length === 0) return;
+    const zoneLabel = selectedZones.length === 1
+      ? `Zone ${selectedZones[0].number} Flow Mix`
+      : `Zones ${[...selectedZones].sort((a, b) => a.number - b.number).map(z => z.number).join("+")} Flow Mix`;
+    setFlowMixing(true);
+    setFlowMixError(null);
+    setFlowMixWarning(null);
+    try {
+      let durationSec: number | undefined;
+      try {
+        const schedRes = await fetch("/api/runna/workouts");
+        if (schedRes.ok) {
+          const { workouts } = await schedRes.json() as { workouts?: { date: string; durationSec: number }[] };
+          const today = new Date().toISOString().slice(0, 10);
+          const next = (workouts ?? [])
+            .filter(w => w.date >= today && w.durationSec > 0)
+            .sort((a, b) => a.date.localeCompare(b.date))[0];
+          durationSec = next?.durationSec;
+        }
+      } catch { /* no schedule available — build an untrimmed flow mix */ }
+
+      const res = await fetch("/api/ai-dj/flow-mix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: zoneLabel, trackUris: filteredTracks.map(t => t.uri), durationSec }),
+      });
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `Flow mix failed (${res.status})`);
+      }
+
+      let mix: { trackUris: string[]; totalSec: number; timeline: AiDjTimeline } | null = null;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const msg = JSON.parse(dataLine.slice(6)) as
+            & { trackUris?: string[]; totalSec?: number; timeline?: AiDjTimeline }
+            & { type: string; error?: string; count?: number; tracks?: string[]; uris?: string[]; fields?: string[]; llmFailures?: string[] };
+          if (msg.type === "error") {
+            throw new Error(msg.error ?? "Flow mix failed");
+          } else if (msg.type === "warning" && msg.uris?.length) {
+            // Library tracks missing data (Energy/Danceability/Valence/…)
+            // that couldn't be backfilled — excluded from the mix pool.
+            const names = (msg.tracks ?? []).join(", ");
+            const extra = (msg.count ?? 0) > (msg.tracks?.length ?? 0) ? ` +${msg.count! - msg.tracks!.length} more` : "";
+            const text = `⚠ ${msg.count} track${msg.count === 1 ? "" : "s"} missing ${
+              (msg.fields ?? []).join("/") || "data"} left out of the mix: ${names}${extra}`;
+            setFlowMixWarning({ text, uris: msg.uris });
+          } else if (msg.type === "done") {
+            mix = { trackUris: msg.trackUris ?? [], totalSec: msg.totalSec ?? 0, timeline: msg.timeline ?? [] };
+          }
+        }
+      }
+      if (!mix) throw new Error("Flow mix stream ended without a result");
+      if (!mix.trackUris.length) throw new Error("No tracks came back from the flow mix");
+
+      const tracks: TrackWithBPM[] = mix.timeline.flatMap(seg => seg.tracks).map(t => ({
+        id: t.uri.split(":")[2] ?? t.uri,
+        name: t.name,
+        artists: [{ name: t.artist }],
+        album: { name: "", images: [] },
+        duration_ms: Math.round((t.durationSec ?? 0) * 1000),
+        uri: t.uri,
+        bpm: Math.round(t.tempo),
+        energy: t.energy,
+      }));
+
+      handleAiDjMix(zoneLabel, zoneLabel, tracks, mix.totalSec, [], new Date().toISOString().slice(0, 10), mix.timeline);
+    } catch (e) {
+      setFlowMixError(e instanceof Error ? e.message : "Flow mix failed");
+    } finally {
+      setFlowMixing(false);
     }
   }
 
@@ -903,6 +1023,9 @@ export function DashboardClient({ spotifyUser }: Props) {
           danceability: s.danceability,
           valence: s.valence,
         })),
+        // Hand-picked individual tracks are an explicit choice — treat as an
+        // override of any prior deletion rather than pausing for review.
+        allowDeletedUris: uris,
       }),
     });
 
@@ -1122,6 +1245,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   setSprintBpmFilter(null);
                   setSimilarFilter(null);
                   setNoBpmFilter(false);
+                  setMissingFeaturesFilter(null);
                   setAiDjMix(null);
                   setSingleTrackFilter(null);
                   setSelectedZones([ALL_ZONE]);
@@ -1152,6 +1276,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                         setSprintBpmFilter(null);
                         setSimilarFilter(null);
                         setNoBpmFilter(true);
+                        setMissingFeaturesFilter(null);
                         setAiDjMix(null);
                         setSingleTrackFilter(null);
                         setEnrichMsg(null);
@@ -1179,6 +1304,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     setSprintBpmFilter(null);
                     setSimilarFilter(null);
                     setNoBpmFilter(false);
+                    setMissingFeaturesFilter(null);
                     setAiDjMix(null);
                     setSingleTrackFilter(null);
                     if (e.ctrlKey || e.metaKey) {
@@ -1220,6 +1346,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   setPaceFilter(null);
                   setSimilarFilter(null);
                   setNoBpmFilter(false);
+                  setMissingFeaturesFilter(null);
                   setAiDjMix(null);
                   setSingleTrackFilter(null);
                   setSprintBpmFilter(prev => prev === bpm ? null : bpm);
@@ -1268,6 +1395,10 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     <span className="text-red-400 font-medium">
                       Tracks without BPM info — fix with a BPM lookup, delete, or re-export via Exportify
                     </span>
+                  ) : missingFeaturesFilter ? (
+                    <span className="text-amber-400 font-medium">
+                      Tracks left out of a mix — missing Energy/Danceability/Valence data
+                    </span>
                   ) : similarFilter ? (
                     <span className="text-purple-400 font-medium">
                       Songs like &quot;{similarFilter.seed.name}&quot; — {similarFilter.seed.artists[0]?.name} · {similarFilter.seed.bpm} BPM
@@ -1302,7 +1433,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 edge (see resultsMaxHeight above) so a long track list
                 scrolls inside the card instead of pushing the page past the
                 Runna rail. No cap until the first measurement lands. */}
-            {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || sprintBpmFilter !== null || similarFilter || noBpmFilter || aiDjMix || singleTrackFilter) && (
+            {step !== "idle" && csvName && (selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || sprintBpmFilter !== null || similarFilter || noBpmFilter || missingFeaturesFilter || aiDjMix || singleTrackFilter) && (
               <div
                 ref={setResultsCardEl}
                 className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden flex flex-col"
@@ -1315,6 +1446,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                         if (singleTrackFilter) return filteredTracks[0] ? `"${filteredTracks[0].name}"` : "Track not in library";
                         if (aiDjMix) return `${filteredTracks.length} tracks in AI DJ mix for "${aiDjMix.workoutTitle}"`;
                         if (noBpmFilter) return `${filteredTracks.length} tracks without BPM info`;
+                        if (missingFeaturesFilter) return `${filteredTracks.length} tracks left out of a mix (missing audio-feature data)`;
                         if (similarFilter) return `${filteredTracks.length} songs like "${similarFilter.seed.name}"`;
                         if (paceFilter && paceFilter.paces.length > 0) {
                           const bpms = paceFilter.paces.map(p => p.bpm);
@@ -1337,6 +1469,15 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   {singleTrackFilter && (
                     <button
                       onClick={() => setSingleTrackFilter(null)}
+                      className="shrink-0 text-xs text-slate-400 hover:text-slate-200 border border-white/10 hover:border-white/20 rounded-lg px-3 py-1.5 transition-colors"
+                    >
+                      Clear filter
+                    </button>
+                  )}
+
+                  {missingFeaturesFilter && (
+                    <button
+                      onClick={() => setMissingFeaturesFilter(null)}
                       className="shrink-0 text-xs text-slate-400 hover:text-slate-200 border border-white/10 hover:border-white/20 rounded-lg px-3 py-1.5 transition-colors"
                     >
                       Clear filter
@@ -1389,6 +1530,29 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       {enrichMsg && <p className="text-xs text-slate-400">{enrichMsg}</p>}
                       {noBpmSaveMsg && <p className="text-xs text-slate-400">{noBpmSaveMsg}</p>}
                       {importBpmMsg && <p className="text-xs text-slate-400">{importBpmMsg}</p>}
+                    </div>
+                  )}
+
+                  {!noBpmFilter && !aiDjMix && step !== "partial" && filteredTracks.length > 0
+                    && selectedZones.length > 0 && !selectedZones.some(z => z.number === 0) && (
+                    <div className="flex flex-col items-end gap-1.5 shrink-0">
+                      <button
+                        onClick={pushZoneToAiDj}
+                        disabled={flowMixing}
+                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors"
+                      >
+                        {flowMixing ? <><Spinner />Mixing…</> : "🎧 Push to AI DJ"}
+                      </button>
+                      {flowMixError && <p className="text-xs text-red-400 max-w-[220px] text-right">{flowMixError}</p>}
+                      {flowMixWarning && (
+                        <button
+                          onClick={() => showMissingTracks(flowMixWarning.uris)}
+                          className="text-xs text-amber-400/90 max-w-[220px] text-right hover:underline"
+                          title="Show these tracks in the main track list"
+                        >
+                          {flowMixWarning.text}
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -1518,11 +1682,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 <div className="flex-1 min-h-0 flex flex-col">
                   {filteredTracks.length === 0 ? (
                     <div className="p-8 text-center text-slate-500 text-sm">
-                      {singleTrackFilter ? "This track isn't in the library." : noBpmFilter ? "All tracks have BPM info 🎉" : aiDjMix ? (remixing ? "Rebuilding mix…" : "No tracks in this mix.") : "No tracks in this BPM range. Try a different zone."}
+                      {singleTrackFilter ? "This track isn't in the library." : noBpmFilter ? "All tracks have BPM info 🎉" : missingFeaturesFilter ? "None of these tracks are in the library anymore." : aiDjMix ? (remixing ? "Rebuilding mix…" : "No tracks in this mix.") : "No tracks in this BPM range. Try a different zone."}
                     </div>
                   ) : (
                     <VirtualTrackList
-                      key={singleTrackFilter ? `single-${singleTrackFilter}` : aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : sprintBpmFilter !== null ? `sprint-${sprintBpmFilter}` : selectedZones.map(z=>z.number).sort().join("-")}
+                      key={singleTrackFilter ? `single-${singleTrackFilter}` : aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : missingFeaturesFilter ? `missing-${missingFeaturesFilter.join(",")}` : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : sprintBpmFilter !== null ? `sprint-${sprintBpmFilter}` : selectedZones.map(z=>z.number).sort().join("-")}
                       tracks={filteredTracks}
                       onDelete={handleDeleteTrack}
                       onSimilar={handleSimilar}
@@ -1593,8 +1757,10 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               activePaces={paceFilter?.paces.map(p => p.paceStr) ?? []}
               onAiDjMix={handleAiDjMix}
               onTrackClick={jumpToTrack}
+              onMissingTracks={showMissingTracks}
               onPaceFilter={(paceStr, bpm, multiSelect) => {
                 setNoBpmFilter(false);
+                setMissingFeaturesFilter(null);
                 setAiDjMix(null);
                 setSprintBpmFilter(null);
                 setSingleTrackFilter(null);

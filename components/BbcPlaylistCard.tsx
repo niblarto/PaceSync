@@ -7,6 +7,7 @@ import Link from "next/link";
 import { FunnelIcon, SparklesIcon, MetronomeIcon, MiniSpinner, handleArtError } from "./TrackRow";
 import { FloatingCard } from "./FloatingCard";
 import { useRunningPlaylist } from "./useRunningPlaylist";
+import { DeletedTracksReview, type RejectedTrack } from "./DeletedTracksReview";
 
 interface Track {
   uri: string;
@@ -162,6 +163,14 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
   const [programName, setProgramName] = useState(defaultName);
   const [updating, setUpdating] = useState(false);
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
+  // Pending "previously deleted tracks" review: import paused while the user
+  // decides which (if any) deleted tracks to override and re-import.
+  const [deletedReview, setDeletedReview] = useState<{
+    rejected: RejectedTrack[];
+    tracksWithUri: Track[];
+    noUri: number;
+    alreadyInLibrary: number;
+  } | null>(null);
   const [retryAfter, setRetryAfter] = useState<number | null>(null);
   const [episodePid, setEpisodePid] = useState<string>(pid);
   const [airDate, setAirDate] = useState<string | null>(null);
@@ -309,6 +318,7 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
     setUpdating(true);
     setUpdateMsg(null);
     setError(null);
+    setDeletedReview(null);
     try {
       const withUri = tracks.filter(t => t.uri);
       const noUri = tracks.length - withUri.length;
@@ -336,6 +346,38 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
         );
         return;
       }
+
+      // Previously-deleted tracks: pause and let the user review before
+      // anything reaches Spotify or the CSV. The commit continues from
+      // confirmDeletedReview with whatever overrides were ticked.
+      try {
+        const cr = await fetch("/api/tracks/check-deleted", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ uris: tracksWithUri.map(t => t.uri) }),
+        });
+        const cd = await cr.json() as { rejected?: RejectedTrack[] };
+        if (cd.rejected?.length) {
+          setDeletedReview({ rejected: cd.rejected, tracksWithUri, noUri, alreadyInLibrary });
+          return;
+        }
+      } catch { /* check is best-effort — fall through and add everything */ }
+
+      await commitUpdate(tracksWithUri, [], noUri, alreadyInLibrary);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update");
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  // Second phase of updateRunningPlaylist — runs after the deleted-tracks
+  // review (or directly when there was nothing to review). allowDeletedUris
+  // are the overridden tracks; rejected ones are already filtered out of
+  // tracksWithUri by the caller.
+  const commitUpdate = async (tracksWithUri: Track[], allowDeletedUris: string[], noUri: number, alreadyInLibrary: number) => {
+    setUpdating(true);
+    try {
       await addTracksBrowser(RUNNING_PLAYLIST_ID, tracksWithUri.map(t => t.uri));
 
       // Enrich with BPM/audio features via ReccoBeats, then add every track
@@ -379,7 +421,7 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
         const ar = await fetch("/api/tracks/add", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tracks: rows }),
+          body: JSON.stringify({ tracks: rows, allowDeletedUris }),
         });
         const ad = await ar.json() as { added?: number; error?: string };
         if (!ar.ok || ad.error) throw new Error(ad.error ?? `HTTP ${ar.status}`);
@@ -527,6 +569,29 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
         </p>
       )}
       {updateMsg && <p className="text-xs text-green-400">{updateMsg}</p>}
+
+      {deletedReview && (
+        <DeletedTracksReview
+          tracks={deletedReview.rejected}
+          busy={updating}
+          onConfirm={(allowUris) => {
+            const review = deletedReview;
+            setDeletedReview(null);
+            const rejectedUris = new Set(review.rejected.map(r => r.uri).filter(u => !allowUris.includes(u)));
+            const surviving = review.tracksWithUri.filter(t => !rejectedUris.has(t.uri));
+            if (surviving.length === 0) {
+              setUpdateMsg(`Nothing new to add · ${rejectedUris.size} previously-deleted track${rejectedUris.size === 1 ? "" : "s"} rejected`);
+              return;
+            }
+            void commitUpdate(surviving, allowUris, review.noUri, review.alreadyInLibrary)
+              .then(() => {
+                if (rejectedUris.size > 0) {
+                  setUpdateMsg(prev => `${prev ?? ""}${prev ? " · " : ""}${rejectedUris.size} previously-deleted rejected`);
+                }
+              });
+          }}
+        />
+      )}
 
       {tracks.length > 0 && (
         <div className="divide-y divide-white/10 max-h-64 overflow-y-auto no-scrollbar rounded-lg border border-white/10 bg-slate-950/40">

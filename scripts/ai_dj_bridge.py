@@ -33,6 +33,7 @@ import pandas as pd  # noqa: E402
 from bpm_matcher.camelot import to_camelot  # noqa: E402
 from ai_dj.llm import is_claude_model, is_gemini_model  # noqa: E402
 from ai_dj.workout import (  # noqa: E402
+    build_flow_mix,
     build_workout_playlist,
     garmin_cadence_buckets,
     max_projected_duration,
@@ -59,10 +60,85 @@ def _cadence_buckets() -> dict | None:
     return None
 
 
+def _progress(done, total, label, detail=None):
+    msg = {"type": "progress", "current": done, "total": total, "segment": label}
+    if detail:
+        msg["detail"] = detail
+    print(json.dumps(msg), flush=True)
+
+
+def _run_flow_mix(payload: dict, csv_path: str, track_uris: list):
+    """Sequences a fixed track pool (e.g. every track in a selected HR zone)
+    for smooth transitions instead of fitting workout segments — see
+    ai_dj.workout.build_flow_mix."""
+    title = payload.get("title") or "Flow Mix"
+
+    feedback = payload.get("trackFeedback")
+    if not isinstance(feedback, list):
+        feedback = None
+
+    play_counts = payload.get("playCounts")
+    if not isinstance(play_counts, dict):
+        play_counts = None
+
+    try:
+        budget_sec = float(payload["durationSec"]) if payload.get("durationSec") is not None else None
+    except (TypeError, ValueError):
+        budget_sec = None
+
+    model = payload.get("model") or ""
+    effort = payload.get("effort") or None
+    use_llm = is_claude_model(model) or is_gemini_model(model)
+
+    library = _load_library(csv_path)
+
+    try:
+        playlist = build_flow_mix(
+            title, library, track_uris, model=model, use_llm=use_llm,
+            track_feedback=feedback, play_counts=play_counts, effort=effort, progress=_progress,
+            budget_sec=budget_sec,
+        )
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}))
+        sys.exit(1)
+
+    timeline = [{
+        "segment": title,
+        "targetBpm": None,
+        "targetPaceSec": None,
+        "tracks": [
+            {
+                "uri": row.get("Track URI"),
+                "name": row["Track Name"],
+                "artist": row["Artist Name(s)"],
+                "startsAt": row["Starts At"],
+                "durationSec": float(row["Duration (ms)"] / 1000),
+                "tempo": float(row["Tempo"]),
+                "camelot": row["Camelot"],
+                "energy": float(row["Energy"]),
+            }
+            for _, row in playlist.iterrows()
+        ],
+    }]
+
+    print(json.dumps({
+        "trackUris": [u for u in playlist["Track URI"] if isinstance(u, str)],
+        "totalSec": float(playlist["Duration (ms)"].sum() / 1000),
+        "timeline": timeline,
+        "llmFailures": playlist.attrs.get("llm_failures") or [],
+    }))
+
+
 def main():
     payload = json.load(sys.stdin)
-    segments_text = payload.get("segments") or []
     csv_path = sys.argv[1]
+
+    track_uris = payload.get("trackUris")
+    if isinstance(track_uris, list) and track_uris:
+        _run_flow_mix(payload, csv_path, track_uris)
+        return
+
+    segments_text = payload.get("segments") or []
 
     segments = parse_workout(segments_text)
     if not segments:
@@ -102,12 +178,6 @@ def main():
 
     # One NDJSON progress line per segment; the final line is the mix (or
     # error) JSON. lib/ai-dj-mix.ts parses stdout line-by-line for these.
-    def _progress(done, total, label, detail=None):
-        msg = {"type": "progress", "current": done, "total": total, "segment": label}
-        if detail:
-            msg["detail"] = detail
-        print(json.dumps(msg), flush=True)
-
     try:
         playlist = build_workout_playlist(
             segments, library, model=model, use_llm=use_llm,
