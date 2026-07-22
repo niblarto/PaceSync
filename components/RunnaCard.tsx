@@ -503,12 +503,12 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                       </div>
                     )}
                     {run.planSteps.length > 0 && (
-                      <div className="space-y-0.5">
+                      <div className="space-y-0">
                         <p className="text-xs text-slate-500 font-medium mb-1">Workout</p>
                         {run.planSteps.map((step, i) => (
                           <p
                             key={i}
-                            className={`text-xs text-slate-400 ${step.startsWith("•") ? "pl-3" : "pt-1 first:pt-0"}`}
+                            className={`text-xs text-slate-400 leading-relaxed ${step.startsWith("•") ? "pl-5" : "pt-0.5 first:pt-0"}`}
                           >
                             {step}
                           </p>
@@ -1212,9 +1212,14 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                         {weather[w.date].windMph}mph · at {weather[w.date].sampledAt}
                       </p>
                     )}
-                    <div className="space-y-1">
+                    <div className="space-y-0">
                       {w.segments.map((seg, i) => (
-                        <p key={i} className="text-xs text-slate-400 leading-relaxed">{seg}</p>
+                        <p
+                          key={i}
+                          className={`text-xs text-slate-400 leading-relaxed ${seg.trim().startsWith("•") ? "pl-5" : "pt-0.5 first:pt-0"}`}
+                        >
+                          {seg}
+                        </p>
                       ))}
                     </div>
                     {w.appUrl && (
