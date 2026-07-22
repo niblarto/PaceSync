@@ -10,11 +10,12 @@ A Next.js web app for managing a Spotify running playlist based on heart rate zo
 - Add tracks from BBC Radio playlists directly to Spotify — with BPM data fetched automatically. BBC programme cards live on their own **BBC Radio** page (`/bbc`), linked from the dashboard header
 - Click any track to play it **instantly on your active Spotify device** (falls back to opening the app/web player if nothing's active)
 - Delete tracks from Spotify and local CSV simultaneously
-- Import and auto-save your Exportify CSV export, or import a full AI DJ track library — both support append/overwrite and a browse-then-save review step before anything is written
+- Import and auto-save your Exportify CSV export — supports append/overwrite and a browse-then-save review step before anything is written
 - Runna training calendar integration with zone suggestions and per-pace BPM filter buttons (driven by your real Garmin cadence data)
 - **Song matching**: filter the playlist to songs similar to any track (BPM, musical key, energy)
 - **Song suggestions**: discover new tracks *not* in your playlist that match a seed track by style or tempo (via Last.fm / Deezer / ReccoBeats), and add them to the playlist with one click
 - **Automatic BPM enrichment**: tracks without BPM data are looked up on ReccoBeats automatically, with a Deezer-ISRC fallback for tracks ReccoBeats doesn't know by Spotify ID — and a manual **save-to-playlist / re-import** round-trip in the dashboard for anything neither source can match (see [Tracks without BPM data](#tracks-without-bpm-data))
+- **Check for missing data**: a per-playlist heal sweep in Settings that backfills missing Spotify URIs, genres, and audio features in one pass, with a live status/log and Spotify rate-limit awareness — plus workbook import (FreeYourMusic/Chosic) for bulk backfills (see [Checking for missing library data](#checking-for-missing-library-data))
 - **🎧 AI DJ Mix** (optional): build a pace-matched playlist for any Runna workout — including strength sessions (up-tempo, high-energy, any BPM) — with a live progress bar, per-segment LLM detail, per-run-type BPM limits, and a pin option so a mix survives future rule changes. Choose a **Local LLM** (Ollama, via the [AI_DJ companion app](https://github.com/niblarto/AI_DJ)), **Claude**, or **Gemini** as the backend, with a prompt log and usage/cost tracking in Settings. See [AI DJ Mix](#ai-dj-mix-optional) below
 - Dedup playlist, to remove duplicate tracks
 - Garmin activity stats: pace/cadence/HR charts and activity summaries, read directly from a local [GarminDB](https://github.com/tcgoetz/GarminDB) database
@@ -189,8 +190,8 @@ PaceSync can pull tracks from BBC Radio programmes and add them directly to your
 1. Go to the **BBC Radio** page and click **Add BBC Programme**.
 2. Click on a Station (e.g. Radio 2, Radio 6 Music)
 3. Search for a BBC programme by name (e.g. "6 Music's 90s Forever", "Sarah Cox Breakfast Show").
-4. Select the programme from the results — a card will appear showing the most recent episode's tracklist. The programme is saved by its stable **brand** ID rather than that week's episode ID, so the card keeps resolving to whichever episode is actually current as weeks pass.
-5. Click **Update "\<playlist name>"** on the card to add all tracks from that episode to your active Spotify playlist immediately (or **Save to Spotify** to save the episode as its own standalone playlist instead).
+4. Select the programme from the results — a card will appear showing the most recent episode's tracklist. If the resolved pid turns out to be a stale one-off episode rather than the show's own brand ID, PaceSync walks the BBC API forward to the true latest episode automatically, so the card keeps showing whichever episode is actually current as weeks pass.
+5. Click **Update "\<playlist name>"** on the card to add all tracks from that episode to your active Spotify playlist immediately.
 
 **Automatic weekly updates:**
 
@@ -198,9 +199,13 @@ Once a programme card is added, the weekly cron job (Fridays at 14:00) will auto
 
 **BPM data is fetched automatically.**
 
-When you click **Update "\<playlist name>"** on a BBC card, PaceSync looks up each track's audio features (tempo, key, energy, danceability, valence) on [ReccoBeats](https://reccobeats.com) — a free, keyless API that accepts Spotify track IDs — and appends them to the active playlist's CSV. The status message shows how many tracks got BPM data (e.g. *"Added 12 tracks · 11 with BPM data"*), and they appear in zone/pace filters straight away.
+When you click **Update "\<playlist name>"** on a BBC card, PaceSync looks up each track's audio features (tempo, key, energy, danceability, valence) on [ReccoBeats](https://reccobeats.com) — a free, keyless API that accepts Spotify track IDs — before anything is added, and appends them to the active playlist's CSV. The status message shows how many tracks got BPM data (e.g. *"Added 12 tracks · 11 with BPM data"*), and they appear in zone/pace filters straight away.
 
 Any track ReccoBeats/Deezer can't match still gets added to Spotify **and** written to the CSV (with blank feature columns, called out in the status message as *"N added without BPM data (will retry)"*) — nothing added through the app is ever silently invisible locally. See [Tracks without BPM data](#tracks-without-bpm-data) below for how to fill those in.
+
+**Previously-deleted tracks are never silently re-added.** If a BBC episode includes a track you've deleted from the library before, the manual Update flow pauses and asks you to confirm before re-adding it; the weekly cron auto-rejects them outright with no re-add possible.
+
+**Optional BPM range filter:** Settings → Integrations & BBC has a **"Drop tracks outside BPM range"** toggle. When enabled, any BBC track (manual or via the weekly cron) whose tempo falls outside the library's usable BPM range (the union of your per-run-type BPM overrides in Settings) is dropped before it reaches Spotify or the CSV, instead of being added and left for the heal sweep to sort out later.
 
 ---
 
@@ -238,13 +243,29 @@ Same discovery pipeline, but ranked with BPM at 70% of the weighting — results
 The **All Songs** tile shows a count of tracks with no BPM info (red when non-zero).
 
 - **On dashboard load**, PaceSync automatically tries to fill these in from ReccoBeats — found features are written back into the active playlist's CSV and the count drops on its own.
-- A track added through the app (BBC card, song suggestions) that ReccoBeats/Deezer can't match is still written to the CSV with blank feature columns rather than being dropped — so it stays visible here and keeps getting retried by the heal sweep, instead of silently existing on Spotify but nowhere locally.
+- A track added through the app (BBC card, song suggestions) that ReccoBeats/Deezer can't match is still written to the CSV with blank feature columns rather than being dropped — so it stays visible here and keeps getting retried by the **Check for missing data** heal sweep (see below), instead of silently existing on Spotify but nowhere locally.
 - **Click the count** to filter the main list to just those tracks. From there you can:
   - Click **Retry BPM lookup** to re-attempt the ReccoBeats/Deezer lookup manually
   - Click **Save to "No BPM"** to push just these tracks to a Spotify playlist named `No BPM` — run it through an external BPM-analysis tool, then re-export it via [exportify.net](https://exportify.net)
   - Click **Import filled CSV** and upload that re-exported CSV — it's matched back to the library by Track URI and fills in only the columns that are still blank (never overwrites data that's already there)
   - Delete tracks that shouldn't be in the playlist (trash icon)
   - Or re-export the *whole* playlist from [exportify.net](https://exportify.net) and re-upload via **Settings → Import Playlist** if you'd rather refresh everything at once
+
+---
+
+## Checking for missing library data
+
+Each playlist's card in **Settings → Select playlist** has a **Check for missing data** button that sweeps the whole active library (not just tracks with no BPM) for gaps, and tries to fill them without touching Spotify's own broken audio-feature endpoints:
+
+- Shows a live status card while it runs — a breakdown of how many tracks are missing a Spotify URI, genre, or audio features, plus a scrolling log window with progress.
+- **Spotify URIs**: searches Spotify by track name + artist to fill in any missing URI.
+- **Genres**: fetched from [Deezer](https://www.deezer.com) (Spotify no longer exposes artist genres to newer developer accounts).
+- **Audio features (BPM etc.)**: the same ReccoBeats/Deezer pipeline used elsewhere in the app.
+- Respects a persisted Spotify rate-limit cooldown — if a sweep gets 429'd, the countdown until it clears is shown, and later sweeps (including on other playlists) won't hit Spotify again until it expires.
+- Switching the active playlist cancels any heal sweep in progress and clears its log.
+- **Fill URIs from workbook**: upload a FreeYourMusic-style export to backfill missing Spotify URIs by matching track/artist.
+- **Chosic heal**: upload a richer [Chosic](https://www.chosic.com) export (.csv or .xlsx) to backfill full audio features (tempo, key, energy, danceability, valence) in one pass, with unit/format conversion handled automatically.
+- **Export missing URIs** downloads just the tracks with no Spotify match as a spreadsheet, and **Delete missing URIs** removes rows that could never be matched (nothing to unfollow on Spotify, since they were never added there).
 
 ---
 
