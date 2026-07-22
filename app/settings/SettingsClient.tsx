@@ -129,6 +129,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [bbcBrowserTargetPid, setBbcBrowserTargetPid] = useState<string | undefined>();
   const [bbcBrowserTargetName, setBbcBrowserTargetName] = useState<string | undefined>();
   const [bbcSaveMsg, setBbcSaveMsg] = useState<string | null>(null);
+  const [bbcBpmFilterEnabled, setBbcBpmFilterEnabled] = useState(false);
+  const [bbcBpmFilterSaving, setBbcBpmFilterSaving] = useState(false);
 
   // ── Runna URL state ────────────────────────────────────────────────────────
   const [runnaUrl, setRunnaUrl] = useState("");
@@ -1117,6 +1119,190 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
   const [healNowError, setHealNowError] = useState<string | null>(null);
 
+  // ── Delete every row missing a Track URI — never matched to Spotify, so
+  // there's nothing to unfollow there; a local-library-only cleanup. ──
+  const [deletingMissingUris, setDeletingMissingUris] = useState(false);
+  const [deleteMissingUrisConfirm, setDeleteMissingUrisConfirm] = useState(false);
+  const [deleteMissingUrisError, setDeleteMissingUrisError] = useState<string | null>(null);
+
+  async function deleteMissingUriTracks() {
+    if (!deleteMissingUrisConfirm) { setDeleteMissingUrisConfirm(true); return; }
+    setDeleteMissingUrisConfirm(false);
+    setDeletingMissingUris(true);
+    setDeleteMissingUrisError(null);
+    try {
+      const res = await fetch("/api/settings/playlists/delete-missing-uris", { method: "POST" });
+      const d = await res.json() as { removed?: number; error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to delete");
+      loadPlaylistList();
+      loadActiveTracks();
+      loadCoverage();
+      fetchHealStatusSnapshot();
+    } catch (e) {
+      setDeleteMissingUrisError(e instanceof Error ? e.message : "Failed to delete");
+    } finally {
+      setDeletingMissingUris(false);
+    }
+  }
+
+  // ── Fill missing Spotify URIs from a FreeYourMusic/MediaMonkey-style
+  // workbook (id/name/artist/album columns) — matches name+artist against
+  // rows in the active playlist's CSV that have no Track URI at all. ──
+  const uriWorkbookRef = useRef<HTMLInputElement>(null);
+  const [uriWorkbookBusy, setUriWorkbookBusy] = useState(false);
+  const [uriWorkbookMsg, setUriWorkbookMsg] = useState<string | null>(null);
+  const [uriWorkbookError, setUriWorkbookError] = useState<string | null>(null);
+
+  async function handleUriWorkbookUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setUriWorkbookBusy(true);
+    setUriWorkbookError(null);
+    setUriWorkbookMsg(null);
+    try {
+      const XLSX = await import("xlsx");
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const json = XLSX.utils.sheet_to_json(sheet, { defval: "" }) as Record<string, unknown>[];
+      if (json.length === 0) throw new Error("Workbook has no rows on its first sheet.");
+
+      // Column names vary a bit by export tool — match case-insensitively
+      // against the first row's actual headers instead of assuming exact case.
+      const headerKeys = Object.keys(json[0]);
+      const findCol = (want: string) => headerKeys.find(h => h.trim().toLowerCase() === want);
+      const idCol = findCol("id");
+      const nameCol = findCol("name");
+      const artistCol = findCol("artist");
+      if (!idCol || !nameCol || !artistCol) {
+        throw new Error(`Couldn't find id/name/artist columns — found: ${headerKeys.join(", ")}`);
+      }
+
+      const rows = json
+        .map(r => ({ id: String(r[idCol] ?? "").trim(), name: String(r[nameCol] ?? "").trim(), artist: String(r[artistCol] ?? "").trim() }))
+        .filter(r => r.id && r.name && r.artist);
+      if (rows.length === 0) throw new Error("No rows with id/name/artist all present.");
+
+      const res = await fetch("/api/tracks/fill-uris-from-workbook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows }),
+      });
+      const d = await res.json() as { checked?: number; matched?: number; workbookRows?: number; error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to match against the library");
+
+      setUriWorkbookMsg(`Matched ${d.matched} of ${d.checked} URI-less tracks against ${d.workbookRows} workbook rows`);
+      loadPlaylistList();
+      loadActiveTracks();
+      loadCoverage();
+      fetchHealStatusSnapshot();
+    } catch (err) {
+      setUriWorkbookError(err instanceof Error ? err.message : "Failed to read workbook");
+    } finally {
+      setUriWorkbookBusy(false);
+    }
+  }
+
+  // ── Full heal from a Chosic-exported workbook (Song/Artist/BPM/Camelot/
+  // Energy/Duration/Genres/Album/Dance/Acoustic/Instrument/Valence/Speech/
+  // Live/Loud (Db)/Key/Time Signature/Spotify Track Id/ISRC/Explicit) —
+  // fills URI, duration, genres, and every audio feature in one pass. ──
+  const chosicWorkbookRef = useRef<HTMLInputElement>(null);
+  const [chosicWorkbookBusy, setChosicWorkbookBusy] = useState(false);
+  const [chosicWorkbookMsg, setChosicWorkbookMsg] = useState<string | null>(null);
+  const [chosicWorkbookError, setChosicWorkbookError] = useState<string | null>(null);
+
+  async function handleChosicWorkbookUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setChosicWorkbookBusy(true);
+    setChosicWorkbookError(null);
+    setChosicWorkbookMsg(null);
+    try {
+      const XLSX = await import("xlsx");
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const json = XLSX.utils.sheet_to_json(sheet, { defval: "" }) as Record<string, unknown>[];
+      if (json.length === 0) throw new Error("Workbook has no rows on its first sheet.");
+
+      const headerKeys = Object.keys(json[0]);
+      const findCol = (...want: string[]) => headerKeys.find(h => want.includes(h.trim().toLowerCase()));
+      const cols = {
+        name: findCol("song"),
+        artist: findCol("artist"),
+        id: findCol("spotify track id", "spotify id"),
+        bpm: findCol("bpm"),
+        energy: findCol("energy"),
+        duration: findCol("duration"),
+        popularity: findCol("popularity"),
+        genres: findCol("genres"),
+        album: findCol("album"),
+        albumDate: findCol("album date"),
+        dance: findCol("dance"),
+        acoustic: findCol("acoustic"),
+        instrumental: findCol("instrument"),
+        valence: findCol("valence"),
+        speech: findCol("speech"),
+        live: findCol("live"),
+        loudness: findCol("loud (db)", "loud"),
+        key: findCol("key"),
+        timeSignature: findCol("time signa", "time signature"),
+        explicit: findCol("explicit"),
+      };
+      if (!cols.name || !cols.artist) {
+        throw new Error(`Couldn't find Song/Artist columns — found: ${headerKeys.join(", ")}`);
+      }
+
+      const str = (v: unknown) => String(v ?? "").trim();
+      const rows = json
+        .map(r => ({
+          id: cols.id ? str(r[cols.id]) : undefined,
+          name: str(r[cols.name!]),
+          artist: str(r[cols.artist!]),
+          bpm: cols.bpm ? r[cols.bpm] : undefined,
+          energy: cols.energy ? r[cols.energy] : undefined,
+          duration: cols.duration ? str(r[cols.duration]) : undefined,
+          popularity: cols.popularity ? r[cols.popularity] : undefined,
+          genres: cols.genres ? str(r[cols.genres]) : undefined,
+          album: cols.album ? str(r[cols.album]) : undefined,
+          albumDate: cols.albumDate ? str(r[cols.albumDate]) : undefined,
+          dance: cols.dance ? r[cols.dance] : undefined,
+          acoustic: cols.acoustic ? r[cols.acoustic] : undefined,
+          instrumental: cols.instrumental ? r[cols.instrumental] : undefined,
+          valence: cols.valence ? r[cols.valence] : undefined,
+          speech: cols.speech ? r[cols.speech] : undefined,
+          live: cols.live ? r[cols.live] : undefined,
+          loudness: cols.loudness ? r[cols.loudness] : undefined,
+          key: cols.key ? str(r[cols.key]) : undefined,
+          timeSignature: cols.timeSignature ? r[cols.timeSignature] : undefined,
+          explicit: cols.explicit ? str(r[cols.explicit]) : undefined,
+        }))
+        .filter(r => r.name && r.artist);
+      if (rows.length === 0) throw new Error("No rows with Song/Artist both present.");
+
+      const res = await fetch("/api/tracks/heal-from-workbook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows }),
+      });
+      const d = await res.json() as { checked?: number; matched?: number; urisFilled?: number; workbookRows?: number; error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to heal from workbook");
+
+      setChosicWorkbookMsg(`Filled data on ${d.matched} of ${d.checked} tracks (${d.urisFilled} new URIs) from ${d.workbookRows} workbook rows`);
+      loadPlaylistList();
+      loadActiveTracks();
+      loadCoverage();
+      fetchHealStatusSnapshot();
+    } catch (err) {
+      setChosicWorkbookError(err instanceof Error ? err.message : "Failed to read workbook");
+    } finally {
+      setChosicWorkbookBusy(false);
+    }
+  }
+
   // "Check for missing data" button — triggers the same heal sweep that
   // already runs automatically after every CSV write, on demand for the
   // active playlist. The progress bar above (healProgress) picks it up via
@@ -1155,6 +1341,30 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .finally(() => setBbcLoading(false));
   }, []);
 
+  useEffect(() => {
+    fetch("/api/settings/bbc-bpm-filter")
+      .then(r => r.json())
+      .then((d: { enabled?: boolean }) => setBbcBpmFilterEnabled(d.enabled ?? false))
+      .catch(() => {});
+  }, []);
+
+  async function saveBbcBpmFilter(enabled: boolean) {
+    setBbcBpmFilterSaving(true);
+    try {
+      const res = await fetch("/api/settings/bbc-bpm-filter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!res.ok) throw new Error();
+      setBbcBpmFilterEnabled(enabled);
+    } catch {
+      // best-effort — toggle stays at its previous value on failure
+    } finally {
+      setBbcBpmFilterSaving(false);
+    }
+  }
+
   // Auto-open browser when arriving from dashboard edit/add links
   useEffect(() => {
     if (bbcMode && !bbcLoading) {
@@ -1162,6 +1372,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setBbcBrowserTargetPid(bbcReplacePid);
       setBbcBrowserTargetName(bbcReplaceName);
       setBbcBrowserOpen(true);
+      setActiveTab("integrations");
     }
   }, [bbcMode, bbcReplacePid, bbcReplaceName, bbcLoading]);
 
@@ -2152,8 +2363,37 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                         title="Check for missing BPM/duration/audio-feature data and try to fill the gaps"
                         className="text-xs rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 px-2.5 py-1 transition-colors whitespace-nowrap"
                       >
-                        {healProgress?.running ? "Checking…" : "Check for missing data"}
+                        {healProgress?.running ? "Checking…" : "Check missing"}
                       </button>
+                    )}
+                    {p.id === activePlaylistId && (
+                      <>
+                        <input ref={uriWorkbookRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleUriWorkbookUpload} className="hidden" />
+                        <button
+                          onClick={() => uriWorkbookRef.current?.click()}
+                          disabled={uriWorkbookBusy}
+                          title="Upload a FreeYourMusic/MediaMonkey file (id/name/artist columns) to fill in missing Spotify URIs by matching name + artist"
+                          className="text-xs rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 px-2.5 py-1 transition-colors whitespace-nowrap"
+                        >
+                          {uriWorkbookBusy ? "Matching…" : "Fill URIs"}
+                        </button>
+                        <a
+                          href="/api/settings/playlists/export-missing-uris"
+                          title="Download every track missing a Spotify URI as an .xlsx (name/artist/album) — check it against another source"
+                          className="text-xs rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 text-slate-300 px-2.5 py-1 transition-colors whitespace-nowrap"
+                        >
+                          Export missing
+                        </a>
+                        <input ref={chosicWorkbookRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleChosicWorkbookUpload} className="hidden" />
+                        <button
+                          onClick={() => chosicWorkbookRef.current?.click()}
+                          disabled={chosicWorkbookBusy}
+                          title="Upload a Chosic-exported file (Song/Artist/BPM/Key/Genres/Spotify Track Id/…) to fill in URI, duration, genres, and every audio feature"
+                          className="text-xs rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 px-2.5 py-1 transition-colors whitespace-nowrap"
+                        >
+                          {chosicWorkbookBusy ? "Healing…" : "Chosic heal"}
+                        </button>
+                      </>
                     )}
                     <button
                       onClick={() => { setDeleteTarget(p); setDeleteUnfollow(true); }}
@@ -2170,6 +2410,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             </div>
           )}
           {playlistListError && <p className="text-xs text-red-400">{playlistListError}</p>}
+          {uriWorkbookMsg && <p className="text-xs text-green-400">{uriWorkbookMsg}</p>}
+          {uriWorkbookError && <p className="text-xs text-red-400">{uriWorkbookError}</p>}
+          {chosicWorkbookMsg && <p className="text-xs text-green-400">{chosicWorkbookMsg}</p>}
+          {chosicWorkbookError && <p className="text-xs text-red-400">{chosicWorkbookError}</p>}
 
           {/* CSV heal-sweep status — backfills BPM/audio-feature/genre data
               after a save/import or "Check for missing data" above; can run
@@ -2177,7 +2421,28 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               instead of the page looking like nothing happened. */}
           {healStatus && (
             <div className="rounded-lg bg-slate-800/40 border border-white/10 p-3 space-y-1.5">
-              <p className="text-sm font-medium text-slate-200">{healStatus.total} tracks</p>
+              <div className="flex items-center gap-3">
+                <p className="text-sm font-medium text-slate-200">{healStatus.total} tracks</p>
+                {healStatus.missingUri > 0 && (
+                  <button
+                    onClick={deleteMissingUriTracks}
+                    disabled={deletingMissingUris}
+                    title="Remove every track with no Spotify URI from the local library (nothing to unfollow on Spotify — these were never matched)"
+                    className={`text-xs rounded-lg border px-2.5 py-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${
+                      deleteMissingUrisConfirm
+                        ? "border-red-500/50 bg-red-500/20 text-red-300 hover:bg-red-500/30"
+                        : "border-white/10 bg-slate-800/60 hover:bg-slate-700/60 text-slate-300"
+                    }`}
+                  >
+                    {deletingMissingUris
+                      ? "Deleting…"
+                      : deleteMissingUrisConfirm
+                        ? `Confirm delete ${healStatus.missingUri}?`
+                        : `Delete ${healStatus.missingUri} missing`}
+                  </button>
+                )}
+              </div>
+              {deleteMissingUrisError && <p className="text-xs text-red-400">{deleteMissingUrisError}</p>}
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
                 {healStatus.missingUri > 0 && <span className="text-red-400">{healStatus.missingUri} missing Spotify URI</span>}
                 {healStatus.missingDuration > 0 && <span>{healStatus.missingDuration} missing duration</span>}
@@ -2613,6 +2878,31 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         )}
 
         {bbcSaveMsg && <p className="text-sm text-green-400">{bbcSaveMsg}</p>}
+
+        {/* BPM range filter toggle */}
+        <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-800/50 border border-white/5 px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-slate-200">Drop tracks outside BPM range</p>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Applies to manual and automatic BBC imports — tracks outside the library's zone coverage are never added.
+            </p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={bbcBpmFilterEnabled}
+            disabled={bbcBpmFilterSaving}
+            onClick={() => saveBbcBpmFilter(!bbcBpmFilterEnabled)}
+            className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-40 ${
+              bbcBpmFilterEnabled ? "bg-green-500" : "bg-slate-700"
+            }`}
+          >
+            <span
+              className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                bbcBpmFilterEnabled ? "translate-x-5" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
 
         {/* Run Now */}
         {!bbcBrowserOpen && (

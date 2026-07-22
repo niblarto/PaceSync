@@ -157,9 +157,6 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
   const [progress, setProgress] = useState(0);
   const [progressTotal, setProgressTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [savedUrl, setSavedUrl] = useState<string | null>(null);
-  const [playlistName, setPlaylistName] = useState(defaultName);
   const [programName, setProgramName] = useState(defaultName);
   const [updating, setUpdating] = useState(false);
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
@@ -176,12 +173,18 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
   const [airDate, setAirDate] = useState<string | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [suggestAnchor, setSuggestAnchor] = useState<HTMLElement | null>(null);
+  // /api/bbc/tracks resolves the episode more thoroughly (3-step fallback)
+  // than /api/bbc/episode-info's own lookup, and the two can disagree. Once
+  // loadTracks has set an authoritative date, a slower episode-info response
+  // from the mount-time fetch must not come in afterward and clobber it.
+  const loadedOnceRef = useRef(false);
 
   // Fetch episode date on mount without requiring the user to press Load
   useEffect(() => {
     fetch(`/api/bbc/episode-info?pid=${pid}`)
       .then(r => r.json())
       .then((d: { episodePid?: string; airDate?: string | null }) => {
+        if (loadedOnceRef.current) return;
         if (d.episodePid) setEpisodePid(d.episodePid);
         if (d.airDate) setAirDate(d.airDate);
       })
@@ -225,7 +228,6 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
     if (!token) { setError("Not signed in"); return; }
     setLoading(true);
     setError(null);
-    setSavedUrl(null);
     setRetryAfter(null);
     setProgress(0);
     setProgressTotal(0);
@@ -253,10 +255,10 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
           const msg = JSON.parse(part.slice(6)) as Record<string, unknown>;
 
           if (msg.type === "start") {
+            loadedOnceRef.current = true;
             setProgressTotal(msg.total as number);
             if (msg.programName) {
               setProgramName(msg.programName as string);
-              setPlaylistName(msg.programName as string);
             }
             if (msg.episodePid) setEpisodePid(msg.episodePid as string);
             if (msg.airDate) setAirDate(msg.airDate as string);
@@ -267,7 +269,6 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
             setRetryAfter((msg.retryAfter as number | null) ?? null);
             if (msg.programName) {
               setProgramName(msg.programName as string);
-              setPlaylistName(msg.programName as string);
             }
             if (msg.airDate) setAirDate(msg.airDate as string);
           } else if (msg.type === "error") {
@@ -281,35 +282,6 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
       setLoading(false);
       setProgress(0);
       setProgressTotal(0);
-    }
-  };
-
-  const savePlaylist = async () => {
-    const tracksWithUri = tracks.filter(t => t.uri);
-    if (!tracksWithUri.length || !playlistName) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/spotify/create-playlist", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: playlistName,
-          description: `${programName} via PaceSync`,
-          trackUris: tracksWithUri.map(t => t.uri),
-        }),
-      });
-      const data = await res.json() as { url?: string; tracksAdded?: boolean; trackUris?: string[]; error?: string };
-      if (data.error) throw new Error(data.error);
-      if (data.tracksAdded === false && data.url) {
-        const playlistId = data.url.split("/").pop()!;
-        try { await addTracksBrowser(playlistId, data.trackUris ?? tracksWithUri.map(t => t.uri)); } catch { /* show link anyway */ }
-      }
-      setSavedUrl(data.url ?? null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save");
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -378,20 +350,9 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
   const commitUpdate = async (tracksWithUri: Track[], allowDeletedUris: string[], noUri: number, alreadyInLibrary: number) => {
     setUpdating(true);
     try {
-      await addTracksBrowser(RUNNING_PLAYLIST_ID, tracksWithUri.map(t => t.uri));
-
-      // Enrich with BPM/audio features via ReccoBeats, then add every track
-      // to the local CSV pool regardless of whether enrichment found a match
-      // — a track that Spotify accepted but ReccoBeats/Deezer couldn't match
-      // (common for extended mixes, live versions, etc.) still needs a CSV
-      // row so healActiveCsv() can keep retrying it later; skipping the row
-      // entirely here left such tracks in Spotify but permanently invisible
-      // to the local library.
-      //
-      // Enrichment and the CSV write are in separate try/catches on purpose:
-      // an enrichment failure (network error, ReccoBeats down, etc.) must
-      // not prevent the CSV write, or the track ends up in Spotify but
-      // silently missing from the local library with no error shown.
+      // Enrich with BPM/audio features via ReccoBeats *before* anything hits
+      // Spotify or the CSV, so the BPM range filter (when enabled) can drop
+      // out-of-range tracks before they're added anywhere.
       let features: Record<string, { tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number }> = {};
       let enriched = 0;
       try {
@@ -409,12 +370,59 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
         const ed = await er.json() as { features?: typeof features };
         features = ed.features ?? {};
         enriched = Object.keys(features).length;
-      } catch { /* enrichment is best-effort — the CSV write below still runs */ }
+      } catch { /* enrichment is best-effort — filtering/CSV write below still run */ }
 
+      let bpmRejected = 0;
+      let filtered = tracksWithUri;
+      try {
+        const fr = await fetch("/api/settings/bbc-bpm-filter");
+        const fd = await fr.json() as { enabled?: boolean };
+        if (fd.enabled) {
+          const tempos: Record<string, number> = {};
+          for (const t of tracksWithUri) {
+            const id = t.uri.split(":").pop()!;
+            const tempo = features[id]?.tempo;
+            if (tempo != null) tempos[id] = tempo;
+          }
+          const rr = await fetch("/api/bbc/bpm-range", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tempos }),
+          });
+          const rd = await rr.json() as { inRange?: Record<string, boolean> };
+          const inRange = rd.inRange ?? {};
+          filtered = tracksWithUri.filter(t => {
+            const id = t.uri.split(":").pop()!;
+            // No BPM match — can't judge range, so keep it (existing
+            // behavior already tolerates missing BPM at add-time).
+            return !(id in inRange) || inRange[id];
+          });
+          bpmRejected = tracksWithUri.length - filtered.length;
+        }
+      } catch { /* filter is best-effort — fall through with everything kept */ }
+
+      if (filtered.length === 0) {
+        setUpdateMsg(
+          `Nothing new to add` +
+          (bpmRejected > 0 ? ` · ${bpmRejected} outside BPM range (dropped)` : "") +
+          (alreadyInLibrary > 0 ? ` · ${alreadyInLibrary} already in the library` : "") +
+          (noUri > 0 ? ` · ${noUri} not found on Spotify` : "")
+        );
+        return;
+      }
+
+      await addTracksBrowser(RUNNING_PLAYLIST_ID, filtered.map(t => t.uri));
+
+      // Add every track to the local CSV pool regardless of whether
+      // enrichment found a match — a track that Spotify accepted but
+      // ReccoBeats/Deezer couldn't match (common for extended mixes, live
+      // versions, etc.) still needs a CSV row so healActiveCsv() can keep
+      // retrying it later; skipping the row entirely here left such tracks
+      // in Spotify but permanently invisible to the local library.
       let added = 0;
       let csvError: string | null = null;
       try {
-        const rows = tracksWithUri.map(t => {
+        const rows = filtered.map(t => {
           const id = t.uri.split(":").pop()!;
           return { uri: `spotify:track:${id}`, name: t.name, artist: t.artistName, ...features[id] };
         });
@@ -433,11 +441,13 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
         csvError = e instanceof Error ? e.message : "CSV write failed";
       }
 
-      const noBpm = added - enriched;
+      const filteredEnriched = filtered.filter(t => features[t.uri.split(":").pop()!]).length;
+      const noBpm = added - filteredEnriched;
       setUpdateMsg(
-        `Added ${tracksWithUri.length} new track${tracksWithUri.length !== 1 ? "s" : ""} to Spotify` +
-        (enriched > 0 ? ` · ${enriched} with BPM data` : "") +
+        `Added ${filtered.length} new track${filtered.length !== 1 ? "s" : ""} to Spotify` +
+        (enriched > 0 ? ` · ${filteredEnriched} with BPM data` : "") +
         (noBpm > 0 ? ` · ${noBpm} added without BPM data (will retry)` : "") +
+        (bpmRejected > 0 ? ` · ${bpmRejected} outside BPM range (dropped)` : "") +
         (alreadyInLibrary > 0 ? ` · ${alreadyInLibrary} already in the library (skipped)` : "") +
         (noUri > 0 ? ` · ${noUri} not found on Spotify` : "") +
         (csvError ? ` · ⚠️ local library not updated: ${csvError}` : "")
@@ -478,36 +488,15 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap justify-end">
-          {tracks.length > 0 && !savedUrl && (
-            <>
-              <input
-                type="text"
-                value={playlistName}
-                onChange={e => setPlaylistName(e.target.value)}
-                className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-2.5 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 w-44"
-              />
-              <button
-                onClick={savePlaylist}
-                disabled={saving}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
-              >
-                {saving ? <><Spinner />Saving…</> : "Save to Spotify"}
-              </button>
-              <button
-                onClick={updateRunningPlaylist}
-                disabled={updating}
-                title={`Add these tracks to your active playlist, "${runningPlaylistName}"`}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-600 hover:bg-slate-500 disabled:opacity-40 text-slate-200 text-xs font-medium px-3 py-1.5 transition-colors whitespace-nowrap"
-              >
-                {updating ? <><Spinner />Updating…</> : `Update "${runningPlaylistName}"`}
-              </button>
-            </>
-          )}
-          {savedUrl && (
-            <a href={savedUrl} target="_blank" rel="noopener noreferrer"
-              className="text-xs text-green-400 hover:text-green-300 underline">
-              Open in Spotify ↗
-            </a>
+          {tracks.length > 0 && (
+            <button
+              onClick={updateRunningPlaylist}
+              disabled={updating}
+              title={`Add these tracks to your active playlist, "${runningPlaylistName}"`}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-600 hover:bg-slate-500 disabled:opacity-40 text-slate-200 text-xs font-medium px-3 py-1.5 transition-colors whitespace-nowrap"
+            >
+              {updating ? <><Spinner />Updating…</> : `Update "${runningPlaylistName}"`}
+            </button>
           )}
           <button
             onClick={loadTracks}

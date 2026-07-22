@@ -94,21 +94,43 @@ export async function GET(req: NextRequest) {
     if (epDate && epDate <= now) {
       // Already aired — but a newer episode may have aired since. Walk
       // forward through peers.next while each next episode has also
-      // already aired, capped to avoid any pathological/circular chain.
+      // already aired. Daily/near-daily shows can be many weeks of hops
+      // behind a stale saved pid, so the cap here is generous; a transient
+      // fetch failure on one hop retries a couple of times before giving up
+      // rather than silently stranding the walk on whatever pid it reached.
       let curPid = pid;
       let curDate = broadcastDate!;
       let curInfo = info;
-      for (let hops = 0; hops < 20; hops++) {
+      for (let hops = 0; hops < 200; hops++) {
         const next = curInfo.peers?.next;
         if (!next?.pid) break;
         const nextDate = next.first_broadcast_date ? new Date(next.first_broadcast_date) : null;
         if (!nextDate || nextDate > now) break; // next hasn't aired yet — stop here
-        const nextInfo = await fetchProgInfo(next.pid);
+        let nextInfo: ProgInfo | null = null;
+        for (let attempt = 0; attempt < 3 && !nextInfo; attempt++) {
+          nextInfo = await fetchProgInfo(next.pid);
+        }
         if (!nextInfo) break;
         curPid = next.pid;
         curDate = next.first_broadcast_date!;
         curInfo = nextInfo;
       }
+
+      if (brandPid && curPid !== brandPid) {
+        const viaBrand = await latestPastFromBrand(brandPid);
+        if (viaBrand.pid !== curPid) {
+          const viaBrandInfo = await fetchProgInfo(viaBrand.pid);
+          const viaBrandDate = viaBrandInfo?.first_broadcast_date ? new Date(viaBrandInfo.first_broadcast_date) : null;
+          if (viaBrandDate && viaBrandDate > new Date(curDate)) {
+            return NextResponse.json({
+              episodePid: viaBrand.pid,
+              airDate: viaBrand.airDate,
+              brandPid, brandTitle,
+            });
+          }
+        }
+      }
+
       return NextResponse.json({
         episodePid: curPid,
         airDate: formatAirDate(curDate),

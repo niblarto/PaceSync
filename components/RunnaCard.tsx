@@ -999,7 +999,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       const mixRes = await fetch("/api/ai-dj/mix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w), avoidUris }),
+        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w), avoidUris, date: w.date }),
       });
       if (!mixRes.ok || !mixRes.body) {
         const err = await mixRes.json().catch(() => ({})) as { error?: string };

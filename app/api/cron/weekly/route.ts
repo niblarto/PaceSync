@@ -11,6 +11,9 @@ import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
 import { findPreviouslyDeleted } from "@/lib/deleted-tracks";
 import { addTracksToLibrary } from "@/lib/library-add";
 import { healActiveCsv } from "@/lib/csv-heal";
+import { getBbcBpmFilterEnabled } from "@/lib/bbc-bpm-filter-config";
+import { isWithinLibraryBpmRange } from "@/lib/bbc-bpm-filter";
+import { fetchFeatures } from "@/lib/track-enrich";
 
 // Resolved per call so a playlist change in Settings applies immediately.
 const runningPlaylistId = () => loadRunningPlaylistConfig().id;
@@ -86,7 +89,64 @@ function extractDataPids(html: string, brandPid: string): string[] {
   return pids;
 }
 
+interface EpPeer { pid: string; first_broadcast_date?: string }
+interface ProgInfo { type?: string; first_broadcast_date?: string; peers?: { next?: EpPeer } }
+
+async function fetchProgInfo(pid: string): Promise<ProgInfo | null> {
+  try {
+    const res = await fetch(`https://www.bbc.co.uk/programmes/${pid}.json`, {
+      headers: { "User-Agent": UA }, signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { programme?: ProgInfo };
+    return data?.programme ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Walks peers.next forward from a known episode pid to the most recently
+// aired one — used when the configured "brand" pid has actually stored a
+// stale episode pid (episodes.json 404s for those, since it's a brand-only
+// endpoint), so the normal lookup below can't find anything newer on its own.
+async function latestViaPeersWalk(episodePid: string): Promise<string | null> {
+  const info = await fetchProgInfo(episodePid);
+  if (!info || info.type !== "episode" || !info.first_broadcast_date) return null;
+
+  const now = new Date();
+  let curPid = episodePid;
+  let curInfo = info;
+  for (let hops = 0; hops < 200; hops++) {
+    const next = curInfo.peers?.next;
+    if (!next?.pid) break;
+    const nextDate = next.first_broadcast_date ? new Date(next.first_broadcast_date) : null;
+    if (!nextDate || nextDate > now) break;
+    let nextInfo: ProgInfo | null = null;
+    for (let attempt = 0; attempt < 3 && !nextInfo; attempt++) {
+      nextInfo = await fetchProgInfo(next.pid);
+    }
+    if (!nextInfo) break;
+    curPid = next.pid;
+    curInfo = nextInfo;
+  }
+  return curPid;
+}
+
 async function findLatestEpisodePid(brandPid: string): Promise<string> {
+  // 0. The configured pid may itself be an episode (not a true brand pid) —
+  // episodes.json and the HTML fallbacks below only work against brand-style
+  // pids and can return misleadingly plausible-looking (but wrong/stale)
+  // results for an episode pid instead of failing cleanly (e.g. the iPlayer
+  // "episodes" page for a single episode lists only a couple of nearby
+  // episodes, not the show's actual catalogue, and lexicographic-max over
+  // that tiny set can easily pick a stale one). So when the pid resolves as
+  // an episode, walking peers.next is authoritative and takes priority.
+  const viaWalk = await latestViaPeersWalk(brandPid);
+  if (viaWalk) {
+    console.log(`[cron] ${brandPid} is an episode pid — walked peers.next to ${viaWalk}`);
+    return viaWalk;
+  }
+
   // 1. BBC Programmes JSON API — newest-first, elements[0] = latest broadcast
   try {
     const res = await fetch(`https://www.bbc.co.uk/programmes/${brandPid}/episodes.json?limit=1`, {
@@ -215,10 +275,33 @@ async function processPlaylist(
   // back into either Spotify or the library CSV).
   const previouslyDeleted = findPreviouslyDeleted(added.map(a => a.uri));
   const rejectedCount = Object.keys(previouslyDeleted).length;
-  const surviving = added.filter(a => !previouslyDeleted[a.uri]);
+  let surviving = added.filter(a => !previouslyDeleted[a.uri]);
   if (rejectedCount > 0) {
     console.log(`[cron/weekly] ${name}: auto-rejected ${rejectedCount} previously-deleted track(s): ${
       Object.values(previouslyDeleted).map(d => `${d.name} — ${d.artist}`).join(", ")}`);
+  }
+
+  // Optional BPM range filter — drop tracks outside the library's zone
+  // coverage before they reach Spotify or the CSV. Tracks ReccoBeats/Deezer
+  // can't match are kept (can't judge range, existing behavior already
+  // tolerates missing BPM).
+  if (getBbcBpmFilterEnabled() && surviving.length > 0) {
+    try {
+      const features = await fetchFeatures(surviving.map(a => ({
+        id: a.uri.split(":").pop()!, name: a.name, artist: a.artist,
+      })));
+      const beforeCount = surviving.length;
+      surviving = surviving.filter(a => {
+        const tempo = features[a.uri.split(":").pop()!]?.tempo;
+        return tempo == null || isWithinLibraryBpmRange(tempo);
+      });
+      const bpmRejected = beforeCount - surviving.length;
+      if (bpmRejected > 0) {
+        console.log(`[cron/weekly] ${name}: dropped ${bpmRejected} track(s) outside BPM range`);
+      }
+    } catch (e) {
+      console.warn(`[cron/weekly] ${name}: BPM filter fetch failed, keeping all tracks:`, e);
+    }
   }
 
   // Add matched URIs to Running playlist in chunks of 100

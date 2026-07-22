@@ -191,7 +191,13 @@ def main():
         sys.exit(1)
 
     timeline = []
-    for seg_label, group in playlist.groupby("Segment", sort=False):
+    # Group by contiguous block, not raw label — a repeated segment label
+    # (e.g. a "1mi at 8:55/mi" step reused later in a progressive/repeat
+    # workout) must not merge with its earlier, non-adjacent occurrence: see
+    # ai_dj/server.py's identical fix for the full explanation.
+    block_id = (playlist["Segment"] != playlist["Segment"].shift()).cumsum()
+    for _, group in playlist.groupby(block_id, sort=False):
+        seg_label = group["Segment"].iloc[0]
         target_pace = group["Target Pace"].iloc[0] if "Target Pace" in group.columns else None
         target_bpm = group["Target BPM"].iloc[0]
         timeline.append({
