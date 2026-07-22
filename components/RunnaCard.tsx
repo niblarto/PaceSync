@@ -665,6 +665,11 @@ interface RunnaScheduleProps {
 // tracks card's aiDjMix state carries.
 export interface RunnaScheduleHandle {
   remix: (date: string, avoidUris: string[]) => Promise<void>;
+  topUp: (
+    date: string,
+    avoidUris: string[],
+    onResult: (tracks: TrackWithBPM[], totalSec: number, timeline: AiDjTimeline) => void,
+  ) => Promise<void>;
 }
 
 // Strength sessions have no pace segments — synthesize one the mixer's
@@ -984,7 +989,11 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     onAiDjMix(snap.workoutTitle || w.title, mixName(w), tracks, totalSec, mixSegmentsFor(w), w.date, segs);
   }
 
-  async function buildMix(w: RunnaWorkout, seedAvoidUris?: string[]) {
+  async function buildMix(
+    w: RunnaWorkout,
+    seedAvoidUris?: string[],
+    onResult?: (tracks: TrackWithBPM[], totalSec: number, timeline: AiDjTimelineSegment[]) => void,
+  ) {
     // A remix should sound different: send every track from every prior
     // build this session so the mixer demotes them (they only reappear if
     // the BPM pool runs dry). seedAvoidUris (from DashboardClient's
@@ -1067,7 +1076,13 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       // Accumulate across remixes: avoiding only the latest build lets the
       // mixer alternate between the same two setlists.
       const accumulatedUris = Array.from(new Set([...(mixState[w.uid]?.uris ?? []), ...mix.trackUris]));
-      onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w), w.date, mix.timeline, accumulatedUris);
+      if (onResult) {
+        // Top-up call: the caller splices this result with kept tracks
+        // itself rather than replacing the whole mix via onAiDjMix.
+        onResult(tracks, mix.totalSec, mix.timeline);
+      } else {
+        onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w), w.date, mix.timeline, accumulatedUris);
+      }
       setMixState(s => ({
         ...s,
         [w.uid]: { status: "done", warning: s[w.uid]?.warning, warningUris: s[w.uid]?.warningUris, uris: accumulatedUris },
@@ -1075,6 +1090,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to build mix";
       setMixState(s => ({ ...s, [w.uid]: { status: "error", error: msg, warning: s[w.uid]?.warning } }));
+      if (onResult) throw e; // top-up caller needs to see the failure directly
     }
   }
 
@@ -1084,6 +1100,12 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       if (!w) return Promise.resolve();
       setExpanded(w.uid);
       return buildMix(w, avoidUris);
+    },
+    topUp(date, avoidUris, onResult) {
+      const w = workouts.find(x => x.date === date);
+      if (!w) return Promise.resolve();
+      setExpanded(w.uid);
+      return buildMix(w, avoidUris, onResult);
     },
   }), [workouts]);
 

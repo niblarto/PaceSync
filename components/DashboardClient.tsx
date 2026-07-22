@@ -335,8 +335,9 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [importingBpmCsv, setImportingBpmCsv] = useState(false);
   const [importBpmMsg, setImportBpmMsg] = useState<string | null>(null);
   const noBpmCsvInputRef = useRef<HTMLInputElement>(null);
-  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[] } | null>(null);
+  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[]; originalCount: number } | null>(null);
   const [remixing, setRemixing] = useState(false);
+  const [toppingUp, setToppingUp] = useState(false);
   const [flowMixing, setFlowMixing] = useState(false);
   const [flowMixError, setFlowMixError] = useState<string | null>(null);
   const [flowMixWarning, setFlowMixWarning] = useState<{ text: string; uris: string[] } | null>(null);
@@ -693,7 +694,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     setMissingFeaturesFilter(null);
     setSingleTrackFilter(null);
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
-    setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false, avoidUris });
+    setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false, avoidUris, originalCount: unique.length });
     setChartDismissed(false);
     setPlaylistName(name);
     setPinSaved(false);
@@ -733,6 +734,50 @@ export function DashboardClient({ spotifyUser }: Props) {
       await runnaScheduleRef.current.remix(aiDjMix.date, avoidUris);
     } finally {
       setRemixing(false);
+    }
+  }
+
+  // Keeps every surviving track from a stale mix as-is and only asks the AI
+  // DJ for enough fresh tracks to replace the ones that were deleted, rather
+  // than rebuilding the whole thing — for when the rest of the mix is fine
+  // and only a track or two needs swapping out. Fresh tracks are appended
+  // after the survivors (their original segment/position isn't tracked), and
+  // any candidate sharing an artist with a kept track is skipped so the
+  // no-repeat-artist rule a full build enforces isn't undermined by the
+  // splice.
+  async function topUpAiDjMix() {
+    if (!aiDjMix || !runnaScheduleRef.current) return;
+    const gap = aiDjMix.originalCount - aiDjMix.tracks.length;
+    if (gap <= 0) return;
+    setToppingUp(true);
+    setSaveError(null);
+    const keptUris = aiDjMix.tracks.map(t => t.uri);
+    const keptArtists = new Set(aiDjMix.tracks.flatMap(t => t.artists.map(a => a.name.toLowerCase())));
+    const avoidUris = Array.from(new Set([...(aiDjMix.avoidUris ?? []), ...keptUris]));
+    try {
+      await runnaScheduleRef.current.topUp(aiDjMix.date, avoidUris, (freshTracks) => {
+        const additions: TrackWithBPM[] = [];
+        for (const t of freshTracks) {
+          if (additions.length >= gap) break;
+          if (keptUris.includes(t.uri)) continue;
+          if (t.artists.some(a => keptArtists.has(a.name.toLowerCase()))) continue;
+          additions.push(t);
+        }
+        setAiDjMix(prev => {
+          if (!prev) return prev;
+          const merged = [...prev.tracks, ...additions];
+          return {
+            ...prev,
+            tracks: merged,
+            totalSec: merged.reduce((sum, t) => sum + t.duration_ms / 1000, 0),
+            stale: merged.length < prev.originalCount,
+          };
+        });
+      });
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "Failed to top up mix");
+    } finally {
+      setToppingUp(false);
     }
   }
 
@@ -1558,15 +1603,25 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
                   {!noBpmFilter && step !== "partial" && aiDjMix?.stale && (
                     <div className="flex flex-col items-end gap-1.5 shrink-0">
-                      <button
-                        onClick={remixAiDjMix}
-                        disabled={remixing}
-                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors"
-                      >
-                        {remixing ? <><Spinner />Remixing…</> : "🎧 Remix"}
-                      </button>
-                      <p className="text-xs text-slate-500 max-w-[220px] text-right">
-                        Tracks were deleted — remix to rebuild the playlist without them.
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={topUpAiDjMix}
+                          disabled={remixing || toppingUp}
+                          title="Keep the tracks that are left and add new ones to replace what was deleted"
+                          className="inline-flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/15 hover:bg-purple-500/25 disabled:opacity-40 disabled:cursor-not-allowed text-purple-300 font-semibold text-xs px-4 py-1.5 transition-colors whitespace-nowrap"
+                        >
+                          {toppingUp ? <><Spinner />Filling gap…</> : "🎧 Fill the gap"}
+                        </button>
+                        <button
+                          onClick={remixAiDjMix}
+                          disabled={remixing || toppingUp}
+                          className="inline-flex items-center justify-center gap-2 rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors"
+                        >
+                          {remixing ? <><Spinner />Remixing…</> : "🎧 Remix"}
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-500 max-w-[260px] text-right">
+                        Tracks were deleted — fill the gap to keep the rest and add replacements, or remix to rebuild from scratch.
                       </p>
                     </div>
                   )}
