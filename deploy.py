@@ -99,6 +99,7 @@ FILES = [
     ('app/api/bbc/schedule/route.ts',             'app/api/bbc/schedule/route.ts'),
     ('app/api/bbc/programmes/route.ts',           'app/api/bbc/programmes/route.ts'),
     ('app/api/bbc/bpm-range/route.ts',            'app/api/bbc/bpm-range/route.ts'),
+    ('app/api/bbc/reject-track/route.ts',          'app/api/bbc/reject-track/route.ts'),
     ('app/api/settings/bbc-bpm-filter/route.ts',  'app/api/settings/bbc-bpm-filter/route.ts'),
     ('lib/bbc-bpm-filter.ts',                     'lib/bbc-bpm-filter.ts'),
     ('lib/bbc-bpm-filter-config.ts',              'lib/bbc-bpm-filter-config.ts'),

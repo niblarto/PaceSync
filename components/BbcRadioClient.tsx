@@ -35,7 +35,7 @@ export function BbcRadioClient() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 h-14 flex items-center justify-between">
+        <div className="max-w-[1600px] mx-auto px-4 h-14 flex items-center justify-between">
           <Link href="/dashboard" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">
             ← Dashboard
           </Link>
@@ -46,7 +46,7 @@ export function BbcRadioClient() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 py-6">
+      <main className="max-w-[1600px] mx-auto px-4 py-6">
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 items-start">
           {programmes.map(p => (
             <BbcPlaylistCard

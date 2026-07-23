@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { useSession } from "next-auth/react";
 import { freshSpotifyToken } from "@/lib/spotify-browser";
 import Link from "next/link";
-import { FunnelIcon, SparklesIcon, MetronomeIcon, MiniSpinner, handleArtError } from "./TrackRow";
+import { FunnelIcon, SparklesIcon, MetronomeIcon, TrashIcon, MiniSpinner, handleArtError } from "./TrackRow";
 import { FloatingCard } from "./FloatingCard";
 import { useRunningPlaylist } from "./useRunningPlaylist";
 import { DeletedTracksReview, type RejectedTrack } from "./DeletedTracksReview";
@@ -13,6 +13,9 @@ interface Track {
   uri: string;
   name: string;
   artistName: string;
+  // undefined = not checked yet, null = looked up but no BPM match found,
+  // number = found.
+  tempo?: number | null;
 }
 
 interface Props {
@@ -37,12 +40,13 @@ function Spinner() {
   );
 }
 
-function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy }: {
+function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy, onDelete }: {
   track: Track;
   index: number;
   onSimilar?: (track: Track) => void;
   onSuggest?: (track: Track, mode: "style" | "tempo") => void;
   suggestBusy?: "style" | "tempo" | null;
+  onDelete?: (track: Track) => void;
 }) {
   const { data: session } = useSession();
   const trackId = track.uri?.split(":")?.[2];
@@ -105,9 +109,28 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy }: {
           <p className="truncate text-slate-200 group-hover:text-green-400 transition-colors">{track.name}</p>
           <p className="truncate text-xs text-slate-500">{track.artistName}</p>
         </div>
+        {track.tempo !== undefined && (
+          <span
+            className={`text-xs font-mono font-semibold rounded px-1.5 py-0.5 shrink-0 ${
+              track.tempo === null ? "text-slate-500 bg-slate-700/40" : "text-green-400 bg-green-500/10"
+            }`}
+            title={track.tempo === null ? "No BPM match found on ReccoBeats/Deezer" : undefined}
+          >
+            {track.tempo === null ? "???" : Math.round(track.tempo)} BPM
+          </span>
+        )}
         {trackId && <span className="text-slate-700 group-hover:text-green-500 text-xs shrink-0">↗</span>}
       </button>
 
+      {onDelete && (
+        <button
+          onClick={() => onDelete(track)}
+          className="opacity-0 group-hover:opacity-100 ml-1 p-1.5 text-slate-600 hover:text-red-400 transition-all shrink-0 rounded"
+          title="Exclude this track — won't be imported and won't be suggested again"
+        >
+          <TrashIcon />
+        </button>
+      )}
       {trackId && onSimilar && (
         <button
           onClick={() => onSimilar(track)}
@@ -158,6 +181,7 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
   const [progressTotal, setProgressTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [programName, setProgramName] = useState(defaultName);
+  const [enrichingBpm, setEnrichingBpm] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
   // Pending "previously deleted tracks" review: import paused while the user
@@ -209,6 +233,100 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
       countdownRef.current = null;
     }
   }, [retryAfter]);
+
+  // Best-effort BPM lookup for the results list, run before Update is
+  // clicked — failures are silent since the badge is optional and Update's
+  // own enrichment (commitUpdate) still runs the authoritative pass. When
+  // the BPM range filter is enabled (Settings), also drops tracks outside
+  // the library's usable range from the list here, so they're never shown
+  // as importable in the first place rather than only being dropped later
+  // at Update time.
+  async function enrichTempos(loaded: Track[]) {
+    const withUri = loaded.filter(t => t.uri);
+    if (withUri.length === 0) return;
+    setEnrichingBpm(true);
+    try {
+      await enrichTemposInner(withUri);
+    } finally {
+      setEnrichingBpm(false);
+    }
+  }
+
+  async function enrichTemposInner(withUri: Track[]) {
+    let features: Record<string, { tempo: number }> | null = null;
+    try {
+      const res = await fetch("/api/bpm/enrich", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: withUri.map(t => ({ id: t.uri.split(":").pop()!, name: t.name, artist: t.artistName })),
+        }),
+      });
+      const data = await res.json() as { features?: Record<string, { tempo: number }> };
+      features = data.features ?? {};
+    } catch { /* request itself failed — leave badges unset rather than showing "???" for everything */ }
+
+    if (features) {
+      const found = features;
+      setTracks(prev => prev.map(t => {
+        if (!t.uri) return t; // never queried — no Spotify match to look BPM up for
+        const id = t.uri.split(":").pop();
+        const tempo = id ? found[id]?.tempo : undefined;
+        return { ...t, tempo: tempo ?? null }; // queried but no match -> null ("???")
+      }));
+    }
+
+    if (!features) return; // enrichment failed entirely — nothing to range-check
+    try {
+      const fr = await fetch("/api/settings/bbc-bpm-filter");
+      const fd = await fr.json() as { enabled?: boolean };
+      if (!fd.enabled) return;
+      const tempos: Record<string, number> = {};
+      for (const t of withUri) {
+        const id = t.uri.split(":").pop()!;
+        const tempo = features[id]?.tempo;
+        if (tempo != null) tempos[id] = tempo;
+      }
+      const rr = await fetch("/api/bbc/bpm-range", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tempos }),
+      });
+      const rd = await rr.json() as { inRange?: Record<string, boolean> };
+      const inRange = rd.inRange ?? {};
+      // With the filter on, only tracks with a found, in-range BPM stay —
+      // unlike the plain "keep unknowns" rule elsewhere, a track with no
+      // BPM match ("???") is also dropped here rather than shown as
+      // importable. This is a local, unlogged removal (not recordDeletedTracks)
+      // since it's just missing data, not a rejection — the track can
+      // reappear on a future load/Refresh once its BPM is found. Tracks with
+      // no Spotify match at all (no uri, so never queried for BPM) are a
+      // separate concern and untouched here.
+      setTracks(prev => prev.filter(t => {
+        if (!t.uri) return true;
+        const id = t.uri.split(":").pop();
+        return !!id && inRange[id] === true;
+      }));
+    } catch { /* filter is best-effort — leave the list as loaded */ }
+  }
+
+  // Excludes a track from these results before import — recorded in the same
+  // deleted-tracks log a real delete uses, so future BBC imports (manual
+  // review, or the cron's auto-reject) treat it exactly like a track the
+  // user removed from the library.
+  async function rejectTrack(track: Track) {
+    // Identity by reference, not uri — unmatched tracks all share uri === ""
+    // and would otherwise all get removed by a single click.
+    setTracks(prev => prev.filter(t => t !== track));
+    if (!track.uri) return; // nothing to log — it was never matched to Spotify
+    try {
+      await fetch("/api/bbc/reject-track", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uri: track.uri, name: track.name, artist: track.artistName }),
+      });
+    } catch { /* best-effort — track is already removed from view either way */ }
+  }
 
   async function addTracksBrowser(playlistId: string, uris: string[]): Promise<void> {
     const token = await freshSpotifyToken();
@@ -265,12 +383,14 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
           } else if (msg.type === "progress") {
             setProgress(msg.current as number);
           } else if (msg.type === "done") {
-            setTracks((msg.tracks as Track[]) ?? []);
+            const loaded = (msg.tracks as Track[]) ?? [];
+            setTracks(loaded);
             setRetryAfter((msg.retryAfter as number | null) ?? null);
             if (msg.programName) {
               setProgramName(msg.programName as string);
             }
             if (msg.airDate) setAirDate(msg.airDate as string);
+            void enrichTempos(loaded);
           } else if (msg.type === "error") {
             setError(msg.error as string);
           }
@@ -545,6 +665,12 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
         </div>
       )}
 
+      {enrichingBpm && (
+        <p className="text-xs text-slate-500 flex items-center gap-1.5">
+          <MiniSpinner /> Looking up BPM…
+        </p>
+      )}
+
       {error && <p className="text-xs text-red-400">{error}</p>}
       {retryAfter !== null && (
         <p className="text-xs text-amber-400">
@@ -597,6 +723,7 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
                 onSimilar={onSimilar}
                 onSuggest={onSuggest}
                 suggestBusy={suggestBusy && t.uri?.split(":")?.[2] === suggestBusy.trackId ? suggestBusy.mode : null}
+                onDelete={rejectTrack}
               />
             </div>
           ))}
