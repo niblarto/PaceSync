@@ -511,11 +511,13 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
           });
           const rd = await rr.json() as { inRange?: Record<string, boolean> };
           const inRange = rd.inRange ?? {};
+          // A track with no BPM match is also dropped here, not just
+          // out-of-range ones — there's no way to judge its range. This is
+          // a silent drop, not a delete-list rejection: it can still be
+          // added later (e.g. via Update again once its BPM is found).
           filtered = tracksWithUri.filter(t => {
             const id = t.uri.split(":").pop()!;
-            // No BPM match — can't judge range, so keep it (existing
-            // behavior already tolerates missing BPM at add-time).
-            return !(id in inRange) || inRange[id];
+            return inRange[id] === true;
           });
           bpmRejected = tracksWithUri.length - filtered.length;
         }

@@ -282,9 +282,13 @@ async function processPlaylist(
   }
 
   // Optional BPM range filter — drop tracks outside the library's zone
-  // coverage before they reach Spotify or the CSV. Tracks ReccoBeats/Deezer
-  // can't match are kept (can't judge range, existing behavior already
-  // tolerates missing BPM).
+  // coverage before they reach Spotify or the CSV. A track ReccoBeats/Deezer
+  // can't match is also dropped (not just out-of-range ones) since there's
+  // no way to judge its range, but this is a silent, unlogged drop (not
+  // recordDeletedTracks) — it may resurface on a future cron run once its
+  // BPM is found, unlike a real deletion which is permanent. If the
+  // features fetch itself fails, everything is kept rather than dropped, so
+  // a transient API outage can't wipe an entire episode's tracks.
   if (getBbcBpmFilterEnabled() && surviving.length > 0) {
     try {
       const features = await fetchFeatures(surviving.map(a => ({
@@ -293,11 +297,11 @@ async function processPlaylist(
       const beforeCount = surviving.length;
       surviving = surviving.filter(a => {
         const tempo = features[a.uri.split(":").pop()!]?.tempo;
-        return tempo == null || isWithinLibraryBpmRange(tempo);
+        return tempo != null && isWithinLibraryBpmRange(tempo);
       });
       const bpmRejected = beforeCount - surviving.length;
       if (bpmRejected > 0) {
-        console.log(`[cron/weekly] ${name}: dropped ${bpmRejected} track(s) outside BPM range`);
+        console.log(`[cron/weekly] ${name}: dropped ${bpmRejected} track(s) with no BPM match or outside range`);
       }
     } catch (e) {
       console.warn(`[cron/weekly] ${name}: BPM filter fetch failed, keeping all tracks:`, e);

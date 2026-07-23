@@ -451,6 +451,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [deletedTracksLoading, setDeletedTracksLoading] = useState(false);
   const [deletedTracksError, setDeletedTracksError] = useState<string | null>(null);
   const [forgettingUris, setForgettingUris] = useState<Set<string>>(new Set());
+  const [deletedTracksFilter, setDeletedTracksFilter] = useState("");
 
   const [cronRunning, setCronRunning] = useState(false);
   const [cronResults, setCronResults] = useState<{ name: string; matched: number; found: number; error?: string }[] | null>(null);
@@ -3995,25 +3996,57 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     <div className="space-y-6">
 
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
-        <div>
-          <h3 className="font-semibold text-slate-200">Deleted Tracks</h3>
-          <p className="text-sm text-slate-400 mt-1">
-            Tracks removed from the library are logged here so they don&apos;t silently reappear via BBC episodes, CSV imports, or the weekly cron.
-            Removing a track from this list lets it be imported again without a review prompt. Click a track to play it in Spotify.
-          </p>
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h3 className="font-semibold text-slate-200">Deleted Tracks</h3>
+            <p className="text-sm text-slate-400 mt-1">
+              Tracks removed from the library are logged here so they don&apos;t silently reappear via BBC episodes, CSV imports, or the weekly cron.
+              Removing a track from this list lets it be imported again without a review prompt. Click a track to play it in Spotify.
+            </p>
+          </div>
+          {!!deletedTracksList?.length && (
+            <span className="shrink-0 text-xs text-slate-500 whitespace-nowrap">
+              {deletedTracksList.length} deleted track{deletedTracksList.length === 1 ? "" : "s"}
+            </span>
+          )}
         </div>
 
         {deletedTracksError && <p className="text-sm text-red-400">{deletedTracksError}</p>}
 
-        {deletedTracksLoading ? (
-          <div className="space-y-2">
-            {[1, 2, 3].map(n => <div key={n} className="h-10 rounded-lg bg-slate-800/50 animate-pulse" />)}
-          </div>
-        ) : !deletedTracksList || deletedTracksList.length === 0 ? (
-          <p className="text-sm text-slate-500">No deleted tracks logged.</p>
-        ) : (
+        {!deletedTracksLoading && !!deletedTracksList?.length && (
+          <input
+            type="text"
+            value={deletedTracksFilter}
+            onChange={e => setDeletedTracksFilter(e.target.value)}
+            placeholder="Filter by track or artist…"
+            className="w-full rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+          />
+        )}
+
+        {(() => {
+          const q = deletedTracksFilter.trim().toLowerCase();
+          const filteredDeletedTracks = !deletedTracksList ? null
+            : q ? deletedTracksList.filter(t =>
+                t.name.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q))
+            : deletedTracksList;
+
+          if (deletedTracksLoading) {
+            return (
+              <div className="space-y-2">
+                {[1, 2, 3].map(n => <div key={n} className="h-10 rounded-lg bg-slate-800/50 animate-pulse" />)}
+              </div>
+            );
+          }
+          if (!filteredDeletedTracks || filteredDeletedTracks.length === 0) {
+            return (
+              <p className="text-sm text-slate-500">
+                {deletedTracksList?.length && q ? "No deleted tracks match your filter." : "No deleted tracks logged."}
+              </p>
+            );
+          }
+          return (
           <div className="divide-y divide-white/5 rounded-lg border border-white/10 bg-slate-950/40 max-h-[28rem] overflow-y-auto">
-            {deletedTracksList.map(t => (
+            {filteredDeletedTracks.map(t => (
               <div key={t.uri} className="flex items-center gap-3 px-3 py-2 group">
                 <button
                   onClick={() => openInSpotify(t.uri)}
@@ -4035,7 +4068,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               </div>
             ))}
           </div>
-        )}
+          );
+        })()}
       </div>
 
     </div>
