@@ -11,8 +11,9 @@ interface Props {
   onSimilar?: () => void;
   onSuggestStyle?: () => void;
   onSuggestTempo?: () => void;
+  onSuggestArtist?: () => void;
   /** Which suggest search is currently running for THIS track (shows a spinner on that icon) */
-  suggestBusy?: "style" | "tempo" | null;
+  suggestBusy?: "style" | "tempo" | "artist" | null;
   /** Confirmed "Today's Run" mixes this track has featured in, if any */
   playedCount?: number;
 }
@@ -108,6 +109,14 @@ export function MetronomeIcon() {
   );
 }
 
+export function ArtistIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+      <path fillRule="evenodd" d="M10 8a3 3 0 100-6 3 3 0 000 6zM3.465 14.493a1.23 1.23 0 00.41 1.412A9.957 9.957 0 0010 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 00-13.074.003z" clipRule="evenodd" />
+    </svg>
+  );
+}
+
 export function TrashIcon() {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
@@ -132,7 +141,7 @@ export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string)
   }
 }
 
-export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, onSuggestTempo, suggestBusy, playedCount }: Props) {
+export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(track.name)}`;
@@ -212,6 +221,20 @@ export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, on
           title="Search new songs like this (tempo)"
         >
           {suggestBusy === "tempo" ? <MiniSpinner /> : <MetronomeIcon />}
+        </button>
+      )}
+      {onSuggestArtist && (
+        <button
+          onClick={onSuggestArtist}
+          disabled={!!suggestBusy}
+          className={`p-1.5 transition-all shrink-0 rounded ${
+            suggestBusy === "artist"
+              ? "opacity-100 text-blue-400"
+              : "opacity-0 group-hover:opacity-100 text-slate-600 hover:text-blue-400"
+          }`}
+          title="Search more by this artist (most popular)"
+        >
+          {suggestBusy === "artist" ? <MiniSpinner /> : <ArtistIcon />}
         </button>
       )}
       {onDelete && (

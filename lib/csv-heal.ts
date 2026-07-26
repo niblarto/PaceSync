@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "fs/promises";
 import path from "path";
 import { activeCsvPath } from "@/lib/running-playlist-config";
+import { parseCsvRow, csvEscape, isBlank } from "@/lib/csv-store";
 import { deezerDurationMs, deezerGenres, fetchFeatures, lastfmDurationMs, sleep, TrackFeatures } from "@/lib/track-enrich";
 
 // Live progress for the Settings page to poll — a heal sweep on a large
@@ -101,29 +102,6 @@ const FEATURE_COLS: Array<[string, keyof TrackFeatures]> = [
   ["Tempo", "tempo"], ["Key", "key"], ["Mode", "mode"],
   ["Energy", "energy"], ["Danceability", "danceability"], ["Valence", "valence"],
 ];
-
-// Quote-aware CSV row parser (same semantics as the client-side one)
-function parseCsvRow(line: string): string[] {
-  const result: string[] = [];
-  let current = "";
-  let inQuotes = false;
-  for (const ch of line) {
-    if (ch === '"') { inQuotes = !inQuotes; }
-    else if (ch === "," && !inQuotes) { result.push(current); current = ""; }
-    else { current += ch; }
-  }
-  result.push(current);
-  return result;
-}
-
-function csvEscape(v: string): string {
-  return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
-}
-
-function isBlank(v: string | undefined): boolean {
-  const t = v?.trim().toLowerCase();
-  return !t || t === "nan";
-}
 
 function parseRetryAfter(raw: string): number {
   const delta = parseInt(raw, 10);

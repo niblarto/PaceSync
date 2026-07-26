@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile } from "fs/promises";
 import { activeCsvPath } from "@/lib/running-playlist-config";
+import { readCsv } from "@/lib/csv-store";
 import { getPlayedCounts } from "@/lib/todays-run-history";
 import { loadBpmOverrides, RUN_KINDS } from "@/lib/bpm-overrides";
 
@@ -27,19 +27,6 @@ import { loadBpmOverrides, RUN_KINDS } from "@/lib/bpm-overrides";
 
 const DOUBLETIME_THRESHOLD = 95;
 
-function parseCsvRow(line: string): string[] {
-  const result: string[] = [];
-  let current = "";
-  let inQuotes = false;
-  for (const ch of line) {
-    if (ch === '"') { inQuotes = !inQuotes; }
-    else if (ch === "," && !inQuotes) { result.push(current); current = ""; }
-    else { current += ch; }
-  }
-  result.push(current);
-  return result;
-}
-
 interface BucketTrack { uri: string; name: string; artist: string; played: number; inRange: boolean }
 export interface CoverageBucket {
   bpm: number;       // effective (post-doubling) BPM, in 2-BPM-wide buckets
@@ -54,15 +41,13 @@ export async function GET() {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
-    const csv = await readFile(activeCsvPath(), "utf8");
-    const lines = csv.replace(/\r/g, "").split("\n").filter(l => l.trim());
-    if (lines.length < 2) return NextResponse.json({ buckets: [], totalTracks: 0, inRangeTracks: 0, outOfRangeTracks: 0 });
+    const { rows, col } = await readCsv(activeCsvPath());
+    if (rows.length === 0) return NextResponse.json({ buckets: [], totalTracks: 0, inRangeTracks: 0, outOfRangeTracks: 0 });
 
-    const headers = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim().toLowerCase());
-    const idxUri = headers.findIndex(h => ["track uri", "spotify uri", "spotify id", "uri", "id"].includes(h));
-    const idxBpm = headers.findIndex(h => ["bpm", "tempo"].includes(h));
-    const idxName = headers.findIndex(h => ["track name", "name", "song", "title"].includes(h));
-    const idxArtist = headers.findIndex(h => ["artist name(s)", "artist", "artists"].includes(h));
+    const idxUri = col("Track URI", "Spotify URI", "Spotify ID", "uri", "id");
+    const idxBpm = col("BPM", "Tempo");
+    const idxName = col("Track Name", "Name", "Song", "Title");
+    const idxArtist = col("Artist Name(s)", "Artist", "Artists");
     if (idxUri === -1 || idxBpm === -1) {
       return NextResponse.json({ buckets: [], totalTracks: 0, inRangeTracks: 0, outOfRangeTracks: 0 });
     }
@@ -87,8 +72,7 @@ export async function GET() {
     let totalTracks = 0;
     let inRangeTracks = 0;
 
-    for (let i = 1; i < lines.length; i++) {
-      const row = parseCsvRow(lines[i]);
+    for (const row of rows) {
       const uri = row[idxUri]?.trim();
       const rawBpm = parseFloat(row[idxBpm]);
       if (!uri?.startsWith("spotify:track:") || isNaN(rawBpm) || rawBpm <= 0) continue;

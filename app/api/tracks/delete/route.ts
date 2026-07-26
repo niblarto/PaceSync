@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile, writeFile } from "fs/promises";
 import { activeCsvPath } from "@/lib/running-playlist-config";
-import { parseCsvRow } from "@/lib/csv-merge";
+import { readCsv, writeCsv } from "@/lib/csv-store";
 import { recordDeletedTracks } from "@/lib/deleted-tracks";
 import { unpinMixesContaining } from "@/lib/pinned-mixes";
 import { removeTodaysRunEntry } from "@/lib/todays-run-history";
@@ -21,36 +20,33 @@ export async function DELETE(req: NextRequest) {
   const uris = spotifyUris?.length ? spotifyUris : (spotifyUri ? [spotifyUri] : []);
   if (uris.length === 0) return NextResponse.json({ error: "Missing spotifyUri(s)" }, { status: 400 });
 
-  const trackIds = Array.from(new Set(uris.map(u => u.startsWith("spotify:track:") ? u.slice("spotify:track:".length) : u)));
+  // Match by exact full URI, not a substring track-id pre-filter — a bare
+  // id could in principle be a substring of an unrelated row's id/other
+  // cell, which the old line.includes(id) check didn't guard against.
+  const fullUris = new Set(uris.map(u => u.startsWith("spotify:track:") ? u : `spotify:track:${u}`));
 
   const csvPath = activeCsvPath();
   try {
-    const csv = await readFile(csvPath, "utf8");
-    const lines = csv.split("\n");
-    const before = lines.length;
-    const headers = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim());
-    const idxUri = headers.indexOf("Track URI");
-    const idxName = headers.indexOf("Track Name");
-    const idxArtist = headers.indexOf("Artist Name(s)");
+    const { headers, rows, col } = await readCsv(csvPath);
+    const idxUri = col("Track URI");
+    const idxName = col("Track Name");
+    const idxArtist = col("Artist Name(s)");
     const removedRows: { uri: string; name?: string; artist?: string }[] = [];
-    const filtered = lines.filter((line, i) => {
-      if (i === 0) return true;
-      const hit = trackIds.some(id => line.includes(id));
-      if (hit) {
-        const row = parseCsvRow(line);
-        const uri = idxUri !== -1 ? row[idxUri]?.trim() : undefined;
-        if (uri) {
-          removedRows.push({
-            uri,
-            name: idxName !== -1 ? row[idxName]?.trim() : undefined,
-            artist: idxArtist !== -1 ? row[idxArtist]?.trim() : undefined,
-          });
-        }
+    const kept: string[][] = [];
+    for (const row of rows) {
+      const uri = idxUri !== -1 ? row[idxUri]?.trim() : undefined;
+      if (uri && fullUris.has(uri)) {
+        removedRows.push({
+          uri,
+          name: idxName !== -1 ? row[idxName]?.trim() : undefined,
+          artist: idxArtist !== -1 ? row[idxArtist]?.trim() : undefined,
+        });
+      } else {
+        kept.push(row);
       }
-      return !hit;
-    });
-    if (filtered.length < before) {
-      await writeFile(csvPath, filtered.join("\n"), "utf8");
+    }
+    if (removedRows.length > 0) {
+      await writeCsv(csvPath, headers, kept);
       // Log deletions so import paths can flag/reject these tracks if they
       // ever come back via BBC episodes, CSV appends, or the weekly cron.
       try { recordDeletedTracks(removedRows); } catch (e) { console.warn("[tracks/delete] deletion log failed:", e); }
@@ -59,11 +55,10 @@ export async function DELETE(req: NextRequest) {
       // loaded client-side, since the deleted track could belong to ANY
       // pinned date's mix, not just whatever's currently on screen.
       try {
-        const deletedUris = uris.map(u => u.startsWith("spotify:track:") ? u : `spotify:track:${u}`);
-        const unpinnedDates = unpinMixesContaining(deletedUris);
+        const unpinnedDates = unpinMixesContaining(Array.from(fullUris));
         for (const date of unpinnedDates) removeTodaysRunEntry(date);
       } catch (e) { console.warn("[tracks/delete] pin invalidation failed:", e); }
-      return NextResponse.json({ ok: true, csvRemoved: true, removed: before - filtered.length });
+      return NextResponse.json({ ok: true, csvRemoved: true, removed: removedRows.length });
     }
     return NextResponse.json({ ok: true, csvRemoved: false, removed: 0 });
   } catch (e) {

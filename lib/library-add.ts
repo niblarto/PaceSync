@@ -1,6 +1,5 @@
-import { readFile, writeFile } from "fs/promises";
 import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
-import { csvEscape } from "@/lib/csv-merge";
+import { readCsv, writeCsv, rowFrom } from "@/lib/csv-store";
 import { findPreviouslyDeleted, removeFromDeletedLog, type DeletedTrack } from "@/lib/deleted-tracks";
 import { recordAddedTracks } from "@/lib/added-tracks";
 
@@ -43,36 +42,30 @@ export async function addTracksToLibrary(tracks: LibraryAddTrack[], allowDeleted
   }
 
   const csvPath = activeCsvPath();
-  const csv = await readFile(csvPath, "utf8");
-  const lines = csv.split("\n");
-  const headers = lines[0].replace(/^﻿/, "").split(",").map(h => h.trim());
+  const { headers, rows, col } = await readCsv(csvPath);
+  const idxUri = col("Track URI", "Spotify URI", "uri", "id");
+  const existingUris = new Set(idxUri !== -1 ? rows.map(r => r[idxUri]?.trim()).filter(Boolean) : []);
 
-  const fresh = tracks.filter(t => t.uri && !rejectedUris.has(t.uri) && !csv.includes(t.uri));
+  const fresh = tracks.filter(t => t.uri && !rejectedUris.has(t.uri) && !existingUris.has(t.uri));
 
-  const newLines: string[] = [];
-  for (const t of fresh) {
-    const num = (v: number | undefined) => v == null ? "" : String(v);
-    const byName: Record<string, string> = {
-      "Track URI": t.uri,
-      "Track Name": t.name,
-      "Artist Name(s)": t.artist,
-      "Tempo": num(t.tempo),
-      "Key": num(t.key),
-      "Mode": num(t.mode),
-      "Energy": num(t.energy),
-      "Danceability": num(t.danceability),
-      "Valence": num(t.valence),
-    };
-    newLines.push(headers.map(h => csvEscape(byName[h] ?? "")).join(","));
-  }
+  const newRows = fresh.map(t => rowFrom(headers, {
+    "Track URI": t.uri,
+    "Track Name": t.name,
+    "Artist Name(s)": t.artist,
+    "Tempo": t.tempo,
+    "Key": t.key,
+    "Mode": t.mode,
+    "Energy": t.energy,
+    "Danceability": t.danceability,
+    "Valence": t.valence,
+  }));
 
-  if (newLines.length > 0) {
-    const body = csv.endsWith("\n") ? csv : csv + "\n";
-    await writeFile(csvPath, body + newLines.join("\n") + "\n", "utf8");
+  if (newRows.length > 0) {
+    await writeCsv(csvPath, headers, [...rows, ...newRows]);
     try {
       recordAddedTracks(loadRunningPlaylistConfig().csvFile, fresh.map(t => t.uri));
     } catch (e) { console.warn("[library-add] added-tracks log failed:", e); }
   }
 
-  return { added: newLines.length, rejected };
+  return { added: newRows.length, rejected };
 }

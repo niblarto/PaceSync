@@ -472,25 +472,45 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
     try {
       // Enrich with BPM/audio features via ReccoBeats *before* anything hits
       // Spotify or the CSV, so the BPM range filter (when enabled) can drop
-      // out-of-range tracks before they're added anywhere.
+      // out-of-range tracks before they're added anywhere. Reuses whatever
+      // enrichTempos already found for the results-list BPM badges instead
+      // of re-querying ReccoBeats/Deezer from scratch here — a redundant
+      // second lookup previously meant a single transient failure on THIS
+      // call alone (independent of the already-successful first one) could
+      // silently drop every track as "no BPM match", even though the list
+      // was visibly showing real BPM values a moment earlier. Only tracks
+      // never checked at all (tempo === undefined, e.g. added to the list
+      // after the initial enrichment pass already ran) get a fresh lookup.
       let features: Record<string, { tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number }> = {};
       let enriched = 0;
-      try {
-        const er = await fetch("/api/bpm/enrich", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            tracks: tracksWithUri.map(t => ({
-              id: t.uri.split(":").pop()!,
-              name: t.name,
-              artist: t.artistName,
-            })),
-          }),
-        });
-        const ed = await er.json() as { features?: typeof features };
-        features = ed.features ?? {};
-        enriched = Object.keys(features).length;
-      } catch { /* enrichment is best-effort — filtering/CSV write below still run */ }
+      const alreadyChecked: typeof features = {};
+      const needsLookup: Track[] = [];
+      for (const t of tracksWithUri) {
+        const id = t.uri.split(":").pop()!;
+        if (t.tempo === undefined) { needsLookup.push(t); continue; }
+        if (t.tempo != null) {
+          alreadyChecked[id] = { tempo: t.tempo, key: 0, mode: 0, energy: 0, danceability: 0, valence: 0 };
+        }
+      }
+      features = { ...alreadyChecked };
+      if (needsLookup.length > 0) {
+        try {
+          const er = await fetch("/api/bpm/enrich", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              tracks: needsLookup.map(t => ({
+                id: t.uri.split(":").pop()!,
+                name: t.name,
+                artist: t.artistName,
+              })),
+            }),
+          });
+          const ed = await er.json() as { features?: typeof features };
+          features = { ...features, ...(ed.features ?? {}) };
+        } catch { /* enrichment is best-effort — filtering/CSV write below still run */ }
+      }
+      enriched = Object.keys(features).length;
 
       let bpmRejected = 0;
       let filtered = tracksWithUri;

@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile } from "fs/promises";
 import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
-import { parseCsvRow } from "@/lib/csv-merge";
+import { readCsv } from "@/lib/csv-store";
 import { getRecentlyAdded } from "@/lib/added-tracks";
 
 // Tracks added to the active library in the last N days (default 7),
@@ -24,25 +23,22 @@ export async function GET(req: NextRequest) {
   const addedAtByUri = new Map(recent.map(r => [r.uri, r.addedAt]));
 
   try {
-    const csv = await readFile(activeCsvPath(), "utf8");
-    const lines = csv.replace(/\r/g, "").split("\n").filter(l => l.trim());
-    if (lines.length < 2) return NextResponse.json({ tracks: [] });
+    const { rows, col } = await readCsv(activeCsvPath());
+    if (rows.length === 0) return NextResponse.json({ tracks: [] });
 
-    const headers = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim().toLowerCase());
-    const idxUri = headers.findIndex(h => ["track uri", "spotify uri", "uri"].includes(h));
-    const idxName = headers.findIndex(h => ["track name", "name"].includes(h));
-    const idxArtist = headers.findIndex(h => ["artist name(s)", "artist"].includes(h));
-    const idxTempo = headers.findIndex(h => ["tempo", "bpm"].includes(h));
-    const idxEnergy = headers.indexOf("energy");
-    const idxDuration = headers.findIndex(h => ["duration (ms)", "duration_ms", "duration"].includes(h));
+    const idxUri = col("Track URI", "Spotify URI", "uri");
+    const idxName = col("Track Name", "Name");
+    const idxArtist = col("Artist Name(s)", "Artist");
+    const idxTempo = col("Tempo", "BPM");
+    const idxEnergy = col("Energy");
+    const idxDuration = col("Duration (ms)", "Duration_ms", "Duration");
     if (idxUri === -1) return NextResponse.json({ tracks: [] });
 
     const tracks: {
       uri: string; name: string; artist: string; tempo: number | null;
       energy: number | null; durationMs: number; addedAt: string;
     }[] = [];
-    for (let i = 1; i < lines.length; i++) {
-      const row = parseCsvRow(lines[i]);
+    for (const row of rows) {
       const uri = row[idxUri]?.trim();
       if (!uri || !addedAtByUri.has(uri)) continue;
       tracks.push({

@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile, writeFile } from "fs/promises";
 import { activeCsvPath } from "@/lib/running-playlist-config";
-import { parseCsvRow } from "@/lib/csv-merge";
+import { readCsv, writeCsv } from "@/lib/csv-store";
 
 // Removes every row in the active playlist's CSV that has no Track URI at
 // all — these were never matched to Spotify, so there's nothing to
@@ -15,20 +14,13 @@ export async function POST() {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const csvPath = activeCsvPath();
-  const csv = await readFile(csvPath, "utf8");
-  const lines = csv.split("\n");
-  const headers = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim());
-  const idxUri = headers.indexOf("Track URI");
+  const { headers, rows, col } = await readCsv(csvPath);
+  const idxUri = col("Track URI");
   if (idxUri === -1) return NextResponse.json({ error: "Library CSV is missing a Track URI column" }, { status: 500 });
 
-  const before = lines.length;
-  const filtered = lines.filter((line, i) => {
-    if (i === 0 || !line.trim()) return true;
-    const row = parseCsvRow(line);
-    return !!row[idxUri]?.trim();
-  });
-  const removed = before - filtered.length;
-  if (removed > 0) await writeFile(csvPath, filtered.join("\n"), "utf8");
+  const kept = rows.filter(row => !!row[idxUri]?.trim());
+  const removed = rows.length - kept.length;
+  if (removed > 0) await writeCsv(csvPath, headers, kept);
 
   return NextResponse.json({ ok: true, removed });
 }

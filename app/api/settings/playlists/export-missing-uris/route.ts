@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile } from "fs/promises";
 import { activeCsvPath } from "@/lib/running-playlist-config";
+import { readCsv, isBlank } from "@/lib/csv-store";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const XLSX = require("xlsx") as typeof import("xlsx");
 
@@ -12,33 +12,11 @@ const XLSX = require("xlsx") as typeof import("xlsx");
 // manual lookup) instead of guessing why "Fill URIs from workbook" left
 // them unmatched.
 
-function parseCsvRow(line: string): string[] {
-  const result: string[] = [];
-  let current = "";
-  let inQuotes = false;
-  for (const ch of line) {
-    if (ch === '"') inQuotes = !inQuotes;
-    else if (ch === "," && !inQuotes) { result.push(current); current = ""; }
-    else current += ch;
-  }
-  result.push(current);
-  return result;
-}
-
-function isBlank(v: string | undefined): boolean {
-  const t = v?.trim().toLowerCase();
-  return !t || t === "nan";
-}
-
 export async function GET(_req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const csvPath = activeCsvPath();
-  const csv = await readFile(csvPath, "utf8");
-  const lines = csv.split("\n");
-  const headers = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim());
-  const col = (name: string) => headers.indexOf(name);
+  const { rows: csvRows, col } = await readCsv(activeCsvPath());
   const idxUri = col("Track URI");
   const idxName = col("Track Name");
   const idxArtist = col("Artist Name(s)");
@@ -48,9 +26,7 @@ export async function GET(_req: NextRequest) {
   }
 
   const rows: { name: string; artist: string; album: string }[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
-    const row = parseCsvRow(lines[i]);
+  for (const row of csvRows) {
     if (!isBlank(row[idxUri])) continue;
     rows.push({
       name: row[idxName]?.trim() ?? "",

@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile } from "fs/promises";
 import { activeCsvPath, csvPathFor, listRunningPlaylists, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
-import { mergeCsvIntoFile, parseCsvRow, csvEscape } from "@/lib/csv-merge";
+import { mergeCsvIntoFile } from "@/lib/csv-merge";
+import { readCsv, csvEscape } from "@/lib/csv-store";
 import { healActiveCsv } from "@/lib/csv-heal";
 
 // Copies the given track URIs (already in the active playlist's library)
@@ -25,18 +25,14 @@ export async function POST(req: NextRequest) {
   const target = listRunningPlaylists().find(p => p.id === targetPlaylistId);
   if (!target) return NextResponse.json({ error: "Unknown target playlist" }, { status: 404 });
 
-  const sourceCsv = await readFile(activeCsvPath(), "utf8").catch(() => "");
-  if (!sourceCsv.trim()) return NextResponse.json({ error: "Active playlist has no library CSV" }, { status: 400 });
+  const { headers: header, rows, col } = await readCsv(activeCsvPath()).catch(() => ({ headers: [], rows: [], col: () => -1 }));
+  if (header.length === 0) return NextResponse.json({ error: "Active playlist has no library CSV" }, { status: 400 });
 
-  const lines = sourceCsv.replace(/\r/g, "").split("\n").filter(l => l.trim());
-  const header = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim());
-  const idxUri = header.findIndex(h => ["track uri", "spotify uri", "spotify id", "uri", "id"].includes(h.toLowerCase()));
+  const idxUri = col("Track URI", "Spotify URI", "Spotify ID", "uri", "id");
   if (idxUri === -1) return NextResponse.json({ error: "Active library has no Track URI column" }, { status: 500 });
 
   const uriSet = new Set(uris);
-  const matchedRows = lines.slice(1)
-    .map(l => parseCsvRow(l))
-    .filter(row => uriSet.has(row[idxUri]?.trim()));
+  const matchedRows = rows.filter(row => uriSet.has(row[idxUri]?.trim()));
 
   if (matchedRows.length === 0) return NextResponse.json({ error: "None of the requested tracks were found in the active library" }, { status: 404 });
 

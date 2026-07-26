@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile, writeFile } from "fs/promises";
 import { activeCsvPath } from "@/lib/running-playlist-config";
+import { readCsv, writeCsv, isBlank, matchKey } from "@/lib/csv-store";
 
 // Fills in Track URI, Duration, Popularity, Explicit, Genres, Album/Release
 // Date, and every audio feature (Tempo/Key/Mode/Energy/Danceability/
@@ -10,37 +10,6 @@ import { activeCsvPath } from "@/lib/running-playlist-config";
 // Signature) for rows in the active playlist's CSV, from a Chosic-exported
 // workbook — parsed client-side (xlsx) into plain JSON rows, matched here
 // by Spotify Track ID when the row already has one, else by name+artist.
-
-function parseCsvRow(line: string): string[] {
-  const result: string[] = [];
-  let current = "";
-  let inQuotes = false;
-  for (const ch of line) {
-    if (ch === '"') inQuotes = !inQuotes;
-    else if (ch === "," && !inQuotes) { result.push(current); current = ""; }
-    else current += ch;
-  }
-  result.push(current);
-  return result;
-}
-
-function csvEscape(v: string): string {
-  return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
-}
-
-function isBlank(v: string | undefined): boolean {
-  const t = v?.trim().toLowerCase();
-  return !t || t === "nan";
-}
-
-function matchKey(name: string, artist: string): string {
-  const clean = (s: string) => s
-    .toLowerCase()
-    .replace(/\s*[([-].*$/, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-  return `${clean(artist)}|||${clean(name)}`;
-}
 
 // "A Major" / "C#/Db Minor" -> Spotify pitch class (0=C..11=B) + mode (1=major/0=minor).
 const NOTE_TO_PITCH_CLASS: Record<string, number> = {
@@ -102,12 +71,12 @@ export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { rows } = await req.json() as { rows?: ChosicRow[] };
-  if (!rows?.length) return NextResponse.json({ error: "rows required" }, { status: 400 });
+  const { rows: workbookRows } = await req.json() as { rows?: ChosicRow[] };
+  if (!workbookRows?.length) return NextResponse.json({ error: "rows required" }, { status: 400 });
 
   const byId = new Map<string, ChosicRow>();
   const byNameArtist = new Map<string, ChosicRow>();
-  for (const r of rows) {
+  for (const r of workbookRows) {
     if (r.id) byId.set(r.id.trim(), r);
     if (r.name && r.artist) {
       const key = matchKey(r.name, r.artist);
@@ -116,10 +85,7 @@ export async function POST(req: NextRequest) {
   }
 
   const csvPath = activeCsvPath();
-  const csv = await readFile(csvPath, "utf8");
-  const lines = csv.split("\n");
-  const headers = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim());
-  const col = (name: string) => headers.indexOf(name);
+  const { headers, rows, col } = await readCsv(csvPath);
   const idxUri = col("Track URI");
   const idxName = col("Track Name");
   const idxArtist = col("Artist Name(s)");
@@ -148,9 +114,7 @@ export async function POST(req: NextRequest) {
   let matched = 0;
   let checked = 0;
   let urisFilled = 0;
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
-    const row = parseCsvRow(lines[i]);
+  for (const row of rows) {
     checked++;
 
     const uriVal = row[idxUri]?.trim() ?? "";
@@ -203,13 +167,10 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    if (changed) {
-      lines[i] = row.map(csvEscape).join(",");
-      matched++;
-    }
+    if (changed) matched++;
   }
 
-  if (matched > 0) await writeFile(csvPath, lines.join("\n"), "utf8");
+  if (matched > 0) await writeCsv(csvPath, headers, rows);
 
-  return NextResponse.json({ checked, matched, urisFilled, workbookRows: rows.length });
+  return NextResponse.json({ checked, matched, urisFilled, workbookRows: workbookRows.length });
 }
