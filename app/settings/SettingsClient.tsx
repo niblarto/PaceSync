@@ -2192,7 +2192,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     if (activeTab === "deleted-tracks" && !deletedTracksLoading) {
       void loadDeletedTracksList();
     }
-    if (activeTab === "tracklist" && tracklist === null && !tracklistLoading) {
+    // Same reasoning as deleted-tracks above — the tracklist can also be
+    // changed by the background CSV heal sweep (which runs after every
+    // add/delete and can rewrite rows), so a stale one-time load would show
+    // tracks that no longer match what's actually on disk.
+    if (activeTab === "tracklist" && !tracklistLoading) {
       void loadTracklist();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4474,16 +4478,32 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                 album: { name: "", images: [] }, duration_ms: t.durationMs,
                 uri: t.uri, bpm: t.bpm, energy: t.energy,
               };
+              const genres = t.genre.split(",").map(g => g.trim()).filter(Boolean);
               return (
-                <TrackRow
-                  key={t.uri}
-                  track={track}
-                  index={i}
-                  onDelete={tracklistDeletingUris.has(t.uri) ? undefined : () => deleteManagedTrack(t)}
-                  onSimilar={() => router.push(`/dashboard?similar=${encodeURIComponent(t.uri)}`)}
-                  onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=style`)}
-                  onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=tempo`)}
-                />
+                <div key={t.uri}>
+                  <TrackRow
+                    track={track}
+                    index={i}
+                    onDelete={tracklistDeletingUris.has(t.uri) ? undefined : () => deleteManagedTrack(t)}
+                    onSimilar={() => router.push(`/dashboard?similar=${encodeURIComponent(t.uri)}`)}
+                    onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=style`)}
+                    onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=tempo`)}
+                  />
+                  {genres.length > 0 && (
+                    <div className="flex flex-wrap gap-1 pl-[3.25rem] pr-3 pb-2 -mt-1">
+                      {genres.map(g => (
+                        <button
+                          key={g}
+                          onClick={() => setTracklistGenre(g)}
+                          title={`Filter by "${g}"`}
+                          className="text-[10px] leading-none rounded-full border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 hover:border-white/20 text-slate-400 hover:text-slate-200 px-2 py-1 transition-colors"
+                        >
+                          {g}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               );
             })}
             {tracklistVisibleCount < filteredTracklist.length && (
