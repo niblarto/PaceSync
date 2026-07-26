@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { FloatingCard } from "./FloatingCard";
 import { signOut, useSession } from "next-auth/react";
 import { freshSpotifyToken } from "@/lib/spotify-browser";
@@ -413,6 +414,32 @@ export function DashboardClient({ spotifyUser }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Deep link from elsewhere (e.g. the BBC page's recently-added list) into
+  // the exact same "filter to similar" / "search suggestions" behavior a
+  // dashboard button click would trigger, via ?similar=<uri> or
+  // ?suggest=<uri>&mode=style|tempo. Waits for allTracks so the seed track
+  // object (with its own bpm/energy/etc.) can be resolved from the URI
+  // rather than needing a second round-trip just to look it up.
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  useEffect(() => {
+    if (allTracks.length === 0) return;
+    const similarUri = searchParams.get("similar");
+    const suggestUri = searchParams.get("suggest");
+    if (!similarUri && !suggestUri) return;
+    const uri = similarUri ?? suggestUri!;
+    const seed = allTracks.find(t => t.uri === uri);
+    if (!seed) { router.replace("/dashboard"); return; }
+    if (similarUri) {
+      handleSimilar(seed);
+    } else {
+      const mode = searchParams.get("mode") === "tempo" ? "tempo" : "style";
+      handleSuggest(seed, mode, "bbc");
+    }
+    router.replace("/dashboard");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allTracks, searchParams]);
+
   // Enrich BPM-less tracks via ReccoBeats; updates the CSV and local state.
   // Returns how many tracks got features and which ones are still missing.
   const runEnrichment = useCallback(async (missing: TrackWithBPM[]): Promise<{ found: number; stillMissing: TrackWithBPM[] }> => {
@@ -754,21 +781,102 @@ export function DashboardClient({ spotifyUser }: Props) {
     const keptUris = aiDjMix.tracks.map(t => t.uri);
     const keptArtists = new Set(aiDjMix.tracks.flatMap(t => t.artists.map(a => a.name.toLowerCase())));
     const avoidUris = Array.from(new Set([...(aiDjMix.avoidUris ?? []), ...keptUris]));
+    // Additions are appended after the mix's last segment, so they should
+    // match ITS target BPM — otherwise the fresh rebuild's tracks (spanning
+    // every segment's wildly different targets, e.g. warmup through
+    // cooldown) get picked in whatever order they happen to come back,
+    // producing a BPM line that jumps around instead of holding near the
+    // pace this stretch of the run is actually targeting.
+    const targetBpm = aiDjMix.timeline[aiDjMix.timeline.length - 1]?.targetBpm ?? null;
+    const bpmDistance = (tempo: number) => targetBpm == null ? 0
+      : Math.min(Math.abs(tempo - targetBpm), Math.abs(tempo * 2 - targetBpm), Math.abs(tempo / 2 - targetBpm));
     try {
       await runnaScheduleRef.current.topUp(aiDjMix.date, avoidUris, (freshTracks) => {
-        const additions: TrackWithBPM[] = [];
-        for (const t of freshTracks) {
-          if (additions.length >= gap) break;
-          if (keptUris.includes(t.uri)) continue;
-          if (t.artists.some(a => keptArtists.has(a.name.toLowerCase()))) continue;
-          additions.push(t);
-        }
+        // freshTracks is a flattened rebuild of the WHOLE mix — the same
+        // track can legitimately appear in more than one of its segments
+        // (avoidUris is only a soft demotion in the mixer, not a hard
+        // exclusion), so dedupe by uri here too, not just against keptUris —
+        // otherwise a track already kept, or several duplicate entries of
+        // the same fresh candidate, can slip into additions and end up
+        // rendered twice at two different timeline positions.
+        const seenUris = new Set(keptUris);
+        const candidates = [...freshTracks]
+          .filter(t => {
+            if (seenUris.has(t.uri)) return false;
+            if (t.artists.some(a => keptArtists.has(a.name.toLowerCase()))) return false;
+            seenUris.add(t.uri);
+            return true;
+          })
+          .sort((a, b) => bpmDistance(a.bpm) - bpmDistance(b.bpm));
+        const additions = candidates.slice(0, gap);
         setAiDjMix(prev => {
           if (!prev) return prev;
           const merged = [...prev.tracks, ...additions];
+          // timeline must stay in sync with tracks — Pin/Save send timeline,
+          // not tracks, to the pin/history APIs, and the Pace/BPM chart
+          // (MixPaceChart, via timelineToChartTracks) plots each track by
+          // its own startsAt in listed order, assuming strictly increasing
+          // values — every addition sharing the same startsAt collapses them
+          // onto the same point and makes the chart render backward/
+          // overlapping steps. Appending a synthetic "gap fill" segment
+          // (rather than trying to splice additions back into their
+          // original segment slots, which isn't tracked) keeps every
+          // consumer of aiDjMix.timeline showing what's actually in the mix,
+          // but each addition's startsAt must be a real cumulative time
+          // continuing from the end of the mix so far, not a placeholder.
+          //
+          // Must derive the starting cursor from prev.timeline (what the
+          // chart actually renders from), not prev.tracks — handleAiDjMix
+          // deduplicates prev.tracks by uri but leaves prev.timeline
+          // untouched, so if the original build ever placed the same uri in
+          // two segments, prev.tracks is shorter than prev.timeline's
+          // flattened track list and summing its durations undercounts the
+          // real elapsed time, landing the new segment's tracks inside the
+          // time range still occupied by the real last segment instead of
+          // strictly after it.
+          const toSec = (mmss: string) => {
+            const p = mmss.split(":").map(Number);
+            return p.some(isNaN) ? 0 : p.reduce((acc, x) => acc * 60 + x, 0);
+          };
+          const toMmss = (sec: number) => {
+            const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+            return `${m}:${String(s).padStart(2, "0")}`;
+          };
+          const timelineTracks = prev.timeline.flatMap(s => s.tracks);
+          const lastTimelineTrack = timelineTracks[timelineTracks.length - 1];
+          let cursorSec = lastTimelineTrack
+            ? toSec(lastTimelineTrack.startsAt) + (lastTimelineTrack.durationSec ?? 0)
+            : prev.tracks.reduce((sum, t) => sum + t.duration_ms / 1000, 0);
+          // Inherit the target BPM/pace from the mix's last real segment
+          // rather than leaving them null — additions are appended after
+          // everything else, so they're continuing that segment in time,
+          // and the Pace/BPM chart needs a real target to plot a matching
+          // line against instead of the target line dropping to nothing.
+          const lastSeg = prev.timeline[prev.timeline.length - 1];
+          const additionsSegment = additions.length > 0 ? [{
+            segment: lastSeg?.segment ?? "Gap fill",
+            targetBpm: lastSeg?.targetBpm ?? null,
+            targetPaceSec: lastSeg?.targetPaceSec ?? null,
+            tracks: additions.map(t => {
+              const durationSec = Math.round(t.duration_ms / 1000);
+              const startsAt = toMmss(cursorSec);
+              cursorSec += durationSec;
+              return {
+                uri: t.uri,
+                name: t.name,
+                artist: t.artists.map(a => a.name).join(", "),
+                startsAt,
+                durationSec,
+                tempo: t.bpm,
+                camelot: null,
+                energy: t.energy,
+              };
+            }),
+          }] : [];
           return {
             ...prev,
             tracks: merged,
+            timeline: [...prev.timeline, ...additionsSegment],
             totalSec: merged.reduce((sum, t) => sum + t.duration_ms / 1000, 0),
             stale: merged.length < prev.originalCount,
           };
@@ -978,16 +1086,36 @@ export function DashboardClient({ spotifyUser }: Props) {
         setTodaysRunSaved(true);
       }
       // Snapshot which mix "Today's Run" now holds, so the past run can be
-      // reviewed song-by-song against the pace actually run.
-      if (aiDjMix?.timeline?.length) {
-        fetch("/api/todays-run/history", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ date: aiDjMix.date, workoutTitle: aiDjMix.workoutTitle, timeline: aiDjMix.timeline }),
-        })
-          .then(() => setMixSavedNonce(n => n + 1)) // refresh the Runna card's saved-mix tracklist
-          .catch(() => {});
-      }
+      // reviewed song-by-song against the pace actually run. This must run
+      // for every save, not just AI-DJ-built ones — otherwise a save made
+      // from any other source (BPM/pace filter, similar-tracks selection,
+      // etc.) overwrites the actual Spotify playlist while leaving this
+      // snapshot pointing at whatever the last AI DJ save was, and the
+      // Runna Summary card then shows that stale tracklist instead.
+      const todaysRunDate = aiDjMix?.date ?? new Date().toISOString().slice(0, 10);
+      const timeline: AiDjTimeline = aiDjMix?.timeline?.length
+        ? aiDjMix.timeline
+        : [{
+            segment: "Today's Run",
+            targetBpm: null,
+            tracks: filteredTracks.map(t => ({
+              uri: t.uri,
+              name: t.name,
+              artist: t.artists.map(a => a.name).join(", "),
+              startsAt: "0:00",
+              durationSec: Math.round(t.duration_ms / 1000),
+              tempo: t.bpm,
+              camelot: null,
+              energy: t.energy,
+            })),
+          }];
+      fetch("/api/todays-run/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date: todaysRunDate, workoutTitle: aiDjMix?.workoutTitle ?? "Today's Run", timeline }),
+      })
+        .then(() => setMixSavedNonce(n => n + 1)) // refresh the Runna card's saved-mix tracklist
+        .catch(() => {});
     } catch (e) {
       setTodaysRunError(e instanceof Error ? e.message : "Failed to save playlist");
     } finally {
@@ -1101,10 +1229,22 @@ export function DashboardClient({ spotifyUser }: Props) {
     // Deleting a track out of an AI DJ mix invalidates it — the mix was
     // built against a library that no longer exists. Mark it stale so the
     // save buttons give way to a Remix button.
+    let hadTrack = false;
     setAiDjMix(prev => {
       if (!prev || !prev.tracks.some(t => t.id === track.id)) return prev;
+      hadTrack = true;
       return { ...prev, tracks: prev.tracks.filter(t => t.id !== track.id), stale: true };
     });
+
+    // A pin only makes sense for the exact tracklist it was taken from —
+    // once a track it contained is deleted, the pinned tracklist no longer
+    // matches reality. /api/tracks/delete itself unpins ANY pinned mix
+    // (any date) containing the deleted track server-side, which is the
+    // authoritative fix — this just gives instant UI feedback for the
+    // CURRENTLY loaded mix's Pin button, and always bumps mixSavedNonce so
+    // the Runna Schedule card's "Pinned mix" panel refetches and drops a
+    // now-invalidated pin regardless of which mix (if any) is on screen.
+    if (hadTrack) setPinSaved(false);
 
     const fullUri = track.uri.startsWith("spotify:") ? track.uri : `spotify:track:${track.uri}`;
 
@@ -1124,12 +1264,17 @@ export function DashboardClient({ spotifyUser }: Props) {
       console.warn("[delete] No Spotify access token — skipping Spotify removal");
     }
 
-    // Remove from CSV (server-side file write)
+    // Remove from CSV (server-side file write) — this route also unpins any
+    // pinned mix (any workout date) containing the deleted track, so bump
+    // mixSavedNonce afterward regardless of hadTrack to make sure the Runna
+    // Schedule card's "Pinned mix" panel refetches and drops it.
     fetch("/api/tracks/delete", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ spotifyUri: fullUri }),
-    }).catch(() => {});
+    })
+      .then(() => setMixSavedNonce(n => n + 1))
+      .catch(() => {});
   }
 
 

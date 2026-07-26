@@ -1,7 +1,8 @@
 import { readFile, writeFile } from "fs/promises";
-import { activeCsvPath } from "@/lib/running-playlist-config";
+import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
 import { csvEscape } from "@/lib/csv-merge";
 import { findPreviouslyDeleted, removeFromDeletedLog, type DeletedTrack } from "@/lib/deleted-tracks";
+import { recordAddedTracks } from "@/lib/added-tracks";
 
 // Single shared "add tracks to the library CSV" path — used by the
 // /api/tracks/add route (BBC card, similar-song suggestions) and the weekly
@@ -68,6 +69,9 @@ export async function addTracksToLibrary(tracks: LibraryAddTrack[], allowDeleted
   if (newLines.length > 0) {
     const body = csv.endsWith("\n") ? csv : csv + "\n";
     await writeFile(csvPath, body + newLines.join("\n") + "\n", "utf8");
+    try {
+      recordAddedTracks(loadRunningPlaylistConfig().csvFile, fresh.map(t => t.uri));
+    } catch (e) { console.warn("[library-add] added-tracks log failed:", e); }
   }
 
   return { added: newLines.length, rejected };

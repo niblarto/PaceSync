@@ -2,7 +2,12 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { BbcPlaylistCard } from "./BbcPlaylistCard";
+import { TrackRow } from "./TrackRow";
+import { freshSpotifyToken } from "@/lib/spotify-browser";
+import { useRunningPlaylist } from "./useRunningPlaylist";
+import type { TrackWithBPM } from "@/types";
 
 const BBC_DEFAULTS = [
   { pid: "m001j52w", name: "6 Music Playlist" },
@@ -10,8 +15,17 @@ const BBC_DEFAULTS = [
   { pid: "m002xsbn", name: "Lauren Laverne" },
 ];
 
+interface RecentlyAddedTrack {
+  uri: string; name: string; artist: string;
+  tempo: number | null; energy: number | null; durationMs: number; addedAt: string;
+}
+
 export function BbcRadioClient() {
+  const router = useRouter();
+  const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
   const [programmes, setProgrammes] = useState<{ pid: string; name: string; synopsis?: string }[]>(BBC_DEFAULTS);
+  const [recentTracks, setRecentTracks] = useState<TrackWithBPM[] | null>(null);
+  const [deletingUris, setDeletingUris] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetch("/api/bbc/programmes")
@@ -22,6 +36,25 @@ export function BbcRadioClient() {
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    fetch("/api/tracks/recently-added?days=7")
+      .then(r => r.json())
+      .then((d: { tracks?: RecentlyAddedTrack[] }) => {
+        const mapped: TrackWithBPM[] = (d.tracks ?? []).map(t => ({
+          id: t.uri.split(":").pop() ?? t.uri,
+          name: t.name,
+          artists: [{ name: t.artist }],
+          album: { name: "", images: [] },
+          duration_ms: t.durationMs,
+          uri: t.uri,
+          bpm: t.tempo != null ? Math.round(t.tempo) : 0,
+          energy: t.energy ?? 0,
+        }));
+        setRecentTracks(mapped);
+      })
+      .catch(() => setRecentTracks([]));
+  }, []);
+
   function removeProgramme(pid: string) {
     const updated = programmes.filter(p => p.pid !== pid);
     setProgrammes(updated);
@@ -29,6 +62,24 @@ export function BbcRadioClient() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ programmes: updated }),
+    }).catch(() => {});
+  }
+
+  async function deleteRecentTrack(track: TrackWithBPM) {
+    setDeletingUris(prev => new Set(prev).add(track.uri));
+    setRecentTracks(prev => prev?.filter(t => t.uri !== track.uri) ?? prev);
+    const token = await freshSpotifyToken();
+    if (token && RUNNING_PLAYLIST_ID) {
+      fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ items: [{ uri: track.uri }] }),
+      }).catch(() => {});
+    }
+    fetch("/api/tracks/delete", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ spotifyUri: track.uri }),
     }).catch(() => {});
   }
 
@@ -46,7 +97,28 @@ export function BbcRadioClient() {
         </div>
       </header>
 
-      <main className="max-w-[1600px] mx-auto px-4 py-6">
+      <main className="max-w-[1600px] mx-auto px-4 py-6 space-y-6">
+        {!!recentTracks?.length && (
+          <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5">
+            <h2 className="font-semibold mb-3">
+              🎵 Added this week <span className="text-slate-500 font-normal">({recentTracks.length})</span>
+            </h2>
+            <div className="divide-y divide-slate-800/50">
+              {recentTracks.map((track, i) => (
+                <TrackRow
+                  key={track.uri}
+                  track={track}
+                  index={i}
+                  onDelete={deletingUris.has(track.uri) ? undefined : () => deleteRecentTrack(track)}
+                  onSimilar={() => router.push(`/dashboard?similar=${encodeURIComponent(track.uri)}`)}
+                  onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=style`)}
+                  onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=tempo`)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 items-start">
           {programmes.map(p => (
             <BbcPlaylistCard

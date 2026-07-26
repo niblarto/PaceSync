@@ -822,7 +822,12 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   const [mixState, setMixState] = useState<Record<string, MixStatus>>({});
   interface RoutePage { items: RouteActivity[]; offset: number; total: number; loading?: boolean }
   const [routes, setRoutes] = useState<Record<string, RoutePage>>({});
-  const [routeMap, setRouteMap] = useState<{ id: string | number; label: string; segments?: string[] } | null>(null);
+  interface RouteMixTrack { uri: string | null; name: string; artist: string; startsAtSec: number; durationSec?: number; tempo: number | null }
+  const [routeMap, setRouteMap] = useState<{
+    id: string | number; label: string; segments?: string[];
+    workoutDate?: string; runDate?: string; distanceMi?: number;
+    mixTracks?: RouteMixTrack[];
+  } | null>(null);
   const [courses, setCourses] = useState<GarminCourse[] | null>(null);
   const [courseOffsets, setCourseOffsets] = useState<Record<string, number>>({});
   const [weather, setWeather] = useState<Record<string, DayWeather>>({});
@@ -858,6 +863,9 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   const [unpinningDate, setUnpinningDate] = useState<string | null>(null);
   const [pinningDate, setPinningDate] = useState<string | null>(null);
   const [deletingDate, setDeletingDate] = useState<string | null>(null);
+
+  interface PinnedRouteInfo { activityId: string; name: string; distanceMi: number; runDate: string }
+  const [pinnedRoutes, setPinnedRoutes] = useState<Record<string, PinnedRouteInfo | null>>({});
 
   async function unpinMix(date: string) {
     setUnpinningDate(date);
@@ -935,6 +943,22 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     fetchRoutes(w.uid, w.distanceMi, 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, garminConfigured, workouts]);
+
+  // Fetch which route (if any) is pinned for this workout date. Refetches
+  // whenever the route map lightbox closes, since pin/unpin happens there.
+  useEffect(() => {
+    if (!expanded || !garminConfigured) return;
+    const w = workouts.find(x => x.uid === expanded);
+    if (!w) return;
+    if (pinnedRoutes[w.date] !== undefined && routeMap !== null) return;
+    fetch(`/api/garmin/pin-route?date=${w.date}`)
+      .then(r => r.json())
+      .then((d: { route?: PinnedRouteInfo | null }) => {
+        setPinnedRoutes(s => ({ ...s, [w.date]: d.route ?? null }));
+      })
+      .catch(() => setPinnedRoutes(s => ({ ...s, [w.date]: null })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, garminConfigured, workouts, routeMap]);
 
   // Garmin Connect course library — fetched once, filtered per card below.
   useEffect(() => {
@@ -1383,6 +1407,27 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                         </>
                       );
                     })()}
+                    {garminConfigured && pinnedRoutes[w.date] && (
+                      <button
+                        onClick={e => {
+                          e.stopPropagation();
+                          const pr = pinnedRoutes[w.date]!;
+                          setRouteMap({
+                            id: pr.activityId,
+                            label: `${pr.runDate} · ${pr.distanceMi.toFixed(1)}mi`,
+                            segments: mixSegmentsFor(w),
+                            workoutDate: w.date,
+                            runDate: pr.runDate,
+                            distanceMi: pr.distanceMi,
+                            mixTracks: mixSnapshots[w.date]?.tracks,
+                          });
+                        }}
+                        className="w-full text-left text-xs px-2.5 py-1.5 rounded-lg border border-purple-500/40 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 transition-colors"
+                        title={pinnedRoutes[w.date]!.name || undefined}
+                      >
+                        📌 Pinned route: {pinnedRoutes[w.date]!.runDate} · {pinnedRoutes[w.date]!.distanceMi.toFixed(1)}mi
+                      </button>
+                    )}
                     {garminConfigured && isRun && w.distanceMi && (() => {
                       const r = routes[w.uid];
                       if (!r || r.total === 0) return null;
@@ -1413,6 +1458,10 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                                       id: a.activity_id,
                                       label: `${routeDate(a)} · ${a.distance.toFixed(1)}mi`,
                                       segments: mixSegmentsFor(w),
+                                      workoutDate: w.date,
+                                      runDate: routeDate(a),
+                                      distanceMi: a.distance,
+                                      mixTracks: mixSnapshots[w.date]?.tracks,
                                     });
                                   }}
                                   className="flex-1 min-w-0 truncate whitespace-nowrap text-center text-xs px-1.5 py-1 rounded-lg border bg-sky-500/15 border-sky-500/30 text-sky-300 hover:bg-sky-500/25 transition-colors"
@@ -1508,6 +1557,10 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
           activityId={routeMap.id}
           label={routeMap.label}
           workoutSegments={routeMap.segments}
+          workoutDate={routeMap.workoutDate}
+          runDate={routeMap.runDate}
+          distanceMi={routeMap.distanceMi}
+          mixTracks={routeMap.mixTracks}
           onClose={() => setRouteMap(null)}
         />
       )}

@@ -5,6 +5,8 @@ import { readFile, writeFile } from "fs/promises";
 import { activeCsvPath } from "@/lib/running-playlist-config";
 import { parseCsvRow } from "@/lib/csv-merge";
 import { recordDeletedTracks } from "@/lib/deleted-tracks";
+import { unpinMixesContaining } from "@/lib/pinned-mixes";
+import { removeTodaysRunEntry } from "@/lib/todays-run-history";
 
 // CSV-only deletion — Spotify removal is handled client-side with the browser token.
 // Accepts either a single spotifyUri (back-compat) or a spotifyUris batch, doing one
@@ -52,6 +54,15 @@ export async function DELETE(req: NextRequest) {
       // Log deletions so import paths can flag/reject these tracks if they
       // ever come back via BBC episodes, CSV appends, or the weekly cron.
       try { recordDeletedTracks(removedRows); } catch (e) { console.warn("[tracks/delete] deletion log failed:", e); }
+      // A pinned mix containing a just-deleted track no longer matches
+      // reality — unpin it regardless of which mix (if any) happens to be
+      // loaded client-side, since the deleted track could belong to ANY
+      // pinned date's mix, not just whatever's currently on screen.
+      try {
+        const deletedUris = uris.map(u => u.startsWith("spotify:track:") ? u : `spotify:track:${u}`);
+        const unpinnedDates = unpinMixesContaining(deletedUris);
+        for (const date of unpinnedDates) removeTodaysRunEntry(date);
+      } catch (e) { console.warn("[tracks/delete] pin invalidation failed:", e); }
       return NextResponse.json({ ok: true, csvRemoved: true, removed: before - filtered.length });
     }
     return NextResponse.json({ ok: true, csvRemoved: false, removed: 0 });

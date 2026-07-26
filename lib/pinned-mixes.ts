@@ -48,3 +48,24 @@ export function removePinnedMix(date: string): void {
   delete all[date];
   saveAll(all);
 }
+
+// Unpins every pinned mix that contains any of the given track URIs — used
+// when a track is deleted from the library, so a pinned mix can never keep
+// pointing at a track that no longer exists, regardless of which mix (if
+// any) happens to be loaded in the browser at the time. Returns the dates
+// that were unpinned, so callers can also drop their history snapshot.
+export function unpinMixesContaining(uris: string[]): string[] {
+  if (uris.length === 0) return [];
+  const uriSet = new Set(uris);
+  const all = loadAll();
+  const affectedDates: string[] = [];
+  for (const [date, mix] of Object.entries(all)) {
+    const hasMatch = mix.timeline.some(seg => seg.tracks.some(t => t.uri && uriSet.has(t.uri)));
+    if (hasMatch) affectedDates.push(date);
+  }
+  if (affectedDates.length > 0) {
+    for (const date of affectedDates) delete all[date];
+    saveAll(all);
+  }
+  return affectedDates;
+}

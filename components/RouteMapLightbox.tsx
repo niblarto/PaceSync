@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useSession } from "next-auth/react";
+import { playInSpotify } from "./TrackRow";
 import "leaflet/dist/leaflet.css";
 
 // Lightbox showing an activity's GPS route on OpenStreetMap tiles, drawn
@@ -16,6 +18,15 @@ interface Props {
       the route is colour-coded by workout section instead of measured pace,
       with a hover tooltip showing each section's target. */
   workoutSegments?: string[];
+  /** When opened from a scheduled workout's "Runs at the distance" list,
+      these let the pin button attach this route to that workout date. */
+  workoutDate?: string;
+  runDate?: string;
+  distanceMi?: number;
+  /** The pinned mix's tracklist, when this workout date has one — shown as
+      a side panel; hovering a track highlights the stretch of route it
+      plays over (by elapsed time). */
+  mixTracks?: { uri: string | null; name: string; artist: string; startsAtSec: number; durationSec?: number; tempo: number | null }[];
   onClose: () => void;
 }
 
@@ -105,7 +116,8 @@ function sectionTooltip(s: WorkoutSection): string {
   }
 }
 
-export function RouteMapLightbox({ activityId, label, workoutSegments, onClose }: Props) {
+export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDate, runDate, distanceMi, mixTracks, onClose }: Props) {
+  const { data: session } = useSession();
   const mapRef = useRef<HTMLDivElement>(null);
   const [name, setName] = useState<string | null>(null);
   const [stats, setStats] = useState<string | null>(null);
@@ -116,6 +128,55 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, onClose }
   const [view, setView] = useState<"street" | "satellite">("street");
   const viewRef = useRef(view);
   viewRef.current = view;
+
+  // GPS points kept around (not just used at draw time) so hovering a track
+  // in the side panel can slice out and highlight the matching stretch of
+  // route without a re-fetch.
+  const pointsRef = useRef<RoutePoint[] | null>(null);
+  const highlightLayerRef = useRef<import("leaflet").Polyline | null>(null);
+  const [hoveredTrackIdx, setHoveredTrackIdx] = useState<number | null>(null);
+
+  const [pinnedActivityId, setPinnedActivityId] = useState<string | null | undefined>(undefined); // undefined = not checked yet
+  const [pinning, setPinning] = useState(false);
+
+  useEffect(() => {
+    if (!workoutDate) return;
+    fetch(`/api/garmin/pin-route?date=${workoutDate}`)
+      .then(r => r.json())
+      .then((d: { route?: { activityId: string } | null }) => setPinnedActivityId(d.route?.activityId ?? null))
+      .catch(() => setPinnedActivityId(null));
+  }, [workoutDate]);
+
+  const isPinned = pinnedActivityId != null && String(pinnedActivityId) === String(activityId);
+
+  async function togglePin() {
+    if (!workoutDate) return;
+    setPinning(true);
+    try {
+      if (isPinned) {
+        await fetch("/api/garmin/pin-route", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ date: workoutDate }),
+        });
+        setPinnedActivityId(null);
+      } else {
+        await fetch("/api/garmin/pin-route", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            date: workoutDate,
+            activityId,
+            name: name ?? label,
+            distanceMi: distanceMi ?? 0,
+            runDate: runDate ?? "",
+          }),
+        });
+        setPinnedActivityId(String(activityId));
+      }
+    } catch { /* best-effort — button reflects last-known state either way */ }
+    finally { setPinning(false); }
+  }
   const layersRef = useRef<{
     map: import("leaflet").Map;
     street: import("leaflet").TileLayer;
@@ -196,6 +257,7 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, onClose }
         layersRef.current = { map, street, satellite };
 
         const points = data.points;
+        pointsRef.current = points;
 
         if (sections.length > 0) {
           setShowingWorkoutOverlay(true);
@@ -311,7 +373,7 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, onClose }
       }
     })();
 
-    return () => { cancelled = true; layersRef.current = null; map?.remove(); };
+    return () => { cancelled = true; layersRef.current = null; pointsRef.current = null; map?.remove(); };
   }, [activityId]);
 
   // Swap the base tiles when the street/satellite toggle changes.
@@ -327,13 +389,50 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, onClose }
     }
   }, [view]);
 
+  // Draw/clear an animated highlight over the stretch of route a hovered
+  // track plays across — matched by elapsed time (mix tracks are timed
+  // sequentially from the mix start, same clock as the GPS log's elapsed
+  // seconds), not distance, since a track plays for a duration regardless
+  // of pace.
+  useEffect(() => {
+    const l = layersRef.current;
+    const points = pointsRef.current;
+    if (highlightLayerRef.current) {
+      highlightLayerRef.current.remove();
+      highlightLayerRef.current = null;
+    }
+    if (hoveredTrackIdx === null || !l || !points || !mixTracks) return;
+    const track = mixTracks[hoveredTrackIdx];
+    if (!track) return;
+    const startSec = track.startsAtSec;
+    const endSec = track.startsAtSec + (track.durationSec ?? 0);
+    const seg = points.filter(p => {
+      const t = p[3];
+      return t !== null && t >= startSec && t <= endSec;
+    });
+    if (seg.length < 2) return;
+    import("leaflet").then(L => {
+      // Re-check in case hover moved on again before this resolved.
+      if (highlightLayerRef.current) return;
+      const layer = L.polyline(seg.map(p => [p[0], p[1]] as [number, number]), {
+        color: "#ffffff",
+        weight: 7,
+        opacity: 1,
+        dashArray: "1,14",
+        lineCap: "round",
+        className: "route-highlight-flash",
+      }).addTo(l.map);
+      highlightLayerRef.current = layer;
+    });
+  }, [hoveredTrackIdx, mixTracks]);
+
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-[72rem] rounded-2xl bg-slate-900 border border-white/10 overflow-hidden shadow-2xl"
+        className="w-full max-w-[100rem] h-[92vh] rounded-2xl bg-slate-900 border border-white/10 overflow-hidden shadow-2xl flex flex-col"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
@@ -372,6 +471,20 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, onClose }
             >
               Garmin Connect ↗
             </a>
+            {workoutDate && (
+              <button
+                onClick={togglePin}
+                disabled={pinning || pinnedActivityId === undefined}
+                title={isPinned ? "Unpin this route from the scheduled workout" : "Pin this route to the scheduled workout so it's easy to reselect"}
+                className={`inline-flex items-center gap-1.5 rounded-lg border text-xs px-2.5 py-1 transition-colors disabled:opacity-40 ${
+                  isPinned
+                    ? "border-purple-500/40 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25"
+                    : "border-white/10 text-slate-400 hover:text-slate-200 hover:border-white/20"
+                }`}
+              >
+                📌 {isPinned ? "Pinned" : "Pin to workout"}
+              </button>
+            )}
             <button
               onClick={onClose}
               className="text-slate-500 hover:text-slate-200 text-xl leading-none transition-colors"
@@ -381,16 +494,52 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, onClose }
             </button>
           </div>
         </div>
-        <div className="relative h-[69vh] min-h-[368px] bg-slate-800">
-          <div ref={mapRef} className="absolute inset-0" />
-          {loading && !error && (
-            <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">
-              Loading route…
-            </div>
-          )}
-          {error && (
-            <div className="absolute inset-0 flex items-center justify-center text-sm text-red-400">
-              {error}
+        <div className="flex-1 min-h-0 flex">
+          <div className="relative flex-1 bg-slate-800">
+            <div ref={mapRef} className="absolute inset-0" />
+            {loading && !error && (
+              <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">
+                Loading route…
+              </div>
+            )}
+            {error && (
+              <div className="absolute inset-0 flex items-center justify-center text-sm text-red-400">
+                {error}
+              </div>
+            )}
+          </div>
+          {!!mixTracks?.length && (
+            <div className="w-72 shrink-0 border-l border-white/10 bg-slate-950/60 overflow-y-auto no-scrollbar">
+              <p className="sticky top-0 px-3 py-2 text-xs font-medium text-slate-400 bg-slate-950/90 backdrop-blur-sm border-b border-white/10">
+                🎧 Pinned mix — hover to see where it plays
+              </p>
+              <div className="divide-y divide-white/5">
+                {mixTracks.map((t, i) => (
+                  <button
+                    key={`${t.uri ?? t.name}-${i}`}
+                    type="button"
+                    onMouseEnter={() => setHoveredTrackIdx(i)}
+                    onMouseLeave={() => setHoveredTrackIdx(prev => (prev === i ? null : prev))}
+                    onClick={() => { if (t.uri) playInSpotify(t.uri, session?.accessToken).catch(() => {}); }}
+                    disabled={!t.uri}
+                    title={t.uri ? "Play in Spotify" : undefined}
+                    className={`w-full text-left px-3 py-2 transition-colors disabled:cursor-default ${
+                      hoveredTrackIdx === i ? "bg-cyan-500/15" : "hover:bg-white/5"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs text-slate-500 tabular-nums shrink-0">{mmss(t.startsAtSec)}</p>
+                      {t.tempo != null && (
+                        <span className="text-[11px] font-mono font-semibold text-green-400 bg-green-500/10 rounded px-1 py-0.5 shrink-0">
+                          {Math.round(t.tempo)}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-slate-200 truncate">{t.name}</p>
+                    <p className="text-xs text-slate-500 truncate">{t.artist}</p>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </div>

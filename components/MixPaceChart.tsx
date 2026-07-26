@@ -255,7 +255,14 @@ export function MixPaceChart({ tracks }: { tracks: MixChartTrack[] }) {
     return spans;
   })();
   const splitSegmentSpans = segmentSpans.flatMap(s => {
-    const m = s.segment.match(REST_SUFFIX_RE);
+    // A "5x ..." repeat-block label's rest applies once PER REP, not once at
+    // the very end of the whole merged block — splitting it off here would
+    // carve out a single sliver-thin "rest" strip for the entire span's
+    // total rest time, rather than showing 5 separate dips (which the
+    // segment model doesn't track per-rep). Keep the full label, including
+    // the rest text, as one strip instead of mis-splitting it.
+    const isRepeatBlock = /^\d+x\s/.test(s.segment);
+    const m = isRepeatBlock ? null : s.segment.match(REST_SUFFIX_RE);
     if (!m) return [s];
     const value = parseInt(m[2], 10);
     const restSec = m[3].startsWith("min") ? value * 60 : value;

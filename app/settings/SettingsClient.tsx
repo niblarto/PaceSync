@@ -10,7 +10,9 @@ import { DedupCard } from "@/components/DedupCard";
 import { invalidateRunningPlaylistCache } from "@/components/useRunningPlaylist";
 import { freshSpotifyToken } from "@/lib/spotify-browser";
 import { DeletedTracksReview, type RejectedTrack } from "@/components/DeletedTracksReview";
-import { openInSpotify } from "@/components/TrackRow";
+import { openInSpotify, TrackRow } from "@/components/TrackRow";
+import { useRunningPlaylist } from "@/components/useRunningPlaylist";
+import type { TrackWithBPM } from "@/types";
 
 const ZONE_DETAILS = [
   {
@@ -107,6 +109,7 @@ interface SettingsClientProps {
 export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: SettingsClientProps = {}) {
   const router = useRouter();
   const { data: session } = useSession();
+  const runningPlaylist = useRunningPlaylist();
 
   // ── HR zone state ──────────────────────────────────────────────────────────
   const [maxHR, setMaxHR] = useState(166);
@@ -452,6 +455,231 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [deletedTracksError, setDeletedTracksError] = useState<string | null>(null);
   const [forgettingUris, setForgettingUris] = useState<Set<string>>(new Set());
   const [deletedTracksFilter, setDeletedTracksFilter] = useState("");
+
+  // ── Tracklist management tab ─────────────────────────────────────────────────
+  interface ManagedTrack {
+    id: string; name: string; artist: string; genre: string;
+    uri: string; bpm: number; energy: number; durationMs: number;
+    addedAt: string | null; // ISO timestamp from the CSV's "Added At" column, if present
+  }
+  const [tracklist, setTracklist] = useState<ManagedTrack[] | null>(null);
+  const [tracklistLoading, setTracklistLoading] = useState(false);
+  const [tracklistError, setTracklistError] = useState<string | null>(null);
+  const [tracklistFilter, setTracklistFilter] = useState("");
+  const [tracklistBpmMin, setTracklistBpmMin] = useState("");
+  const [tracklistBpmMax, setTracklistBpmMax] = useState("");
+  const [tracklistGenre, setTracklistGenre] = useState("");
+  const [tracklistSort, setTracklistSort] = useState<{ key: "name" | "artist" | "bpm" | "genre" | "added"; dir: "asc" | "desc" }>({ key: "name", dir: "asc" });
+  const [tracklistDeletingUris, setTracklistDeletingUris] = useState<Set<string>>(new Set());
+  const [tracklistVisibleCount, setTracklistVisibleCount] = useState(100);
+  const tracklistContainerRef = useRef<HTMLDivElement>(null);
+  const tracklistSentinelRef = useRef<HTMLDivElement>(null);
+  const [bulkDeleteArtist, setBulkDeleteArtist] = useState("");
+  const [bulkDeleteTarget, setBulkDeleteTarget] = useState<{ kind: "genre" | "artist"; value: string; tracks: ManagedTrack[] } | null>(null);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkDeleteProgress, setBulkDeleteProgress] = useState<{ done: number; total: number } | null>(null);
+
+  function parseTracklistCsv(text: string): ManagedTrack[] {
+    const stripped = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
+    const lines = stripped.replace(/\r/g, "").split("\n").filter(Boolean);
+    if (lines.length < 2) return [];
+    const parseRow = (line: string): string[] => {
+      const out: string[] = [];
+      let cur = "", inQ = false;
+      for (const ch of line) {
+        if (ch === '"') inQ = !inQ;
+        else if (ch === "," && !inQ) { out.push(cur); cur = ""; }
+        else cur += ch;
+      }
+      out.push(cur);
+      return out;
+    };
+    const headers = parseRow(lines[0]);
+    const col = (...names: string[]) => headers.findIndex(h => names.some(n => h.trim().toLowerCase() === n.toLowerCase()));
+    const idxUri = col("Track URI", "Spotify URI", "uri", "id");
+    const idxName = col("Track Name", "Name");
+    const idxArtist = col("Artist Name(s)", "Artist");
+    const idxBpm = col("BPM", "Tempo");
+    const idxEnergy = col("Energy");
+    const idxGenre = col("Genres", "Genre");
+    const idxDuration = col("Track Duration (ms)", "Duration (ms)", "Duration");
+    const idxAdded = col("Added At", "Date Added", "Added");
+    if (idxUri === -1 || idxName === -1) return [];
+
+    const tracks: ManagedTrack[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const row = parseRow(lines[i]);
+      const raw = row[idxUri]?.trim() ?? "";
+      if (!raw) continue;
+      const uri = raw.startsWith("spotify:") ? raw : `spotify:track:${raw}`;
+      const bpm = idxBpm !== -1 ? parseFloat(row[idxBpm]) : NaN;
+      tracks.push({
+        id: uri.split(":").pop() ?? uri,
+        name: row[idxName]?.trim() || "Unknown",
+        artist: idxArtist !== -1 ? (row[idxArtist]?.trim() || "Unknown") : "Unknown",
+        genre: idxGenre !== -1 ? (row[idxGenre]?.trim() ?? "") : "",
+        uri,
+        bpm: !isNaN(bpm) && bpm > 0 ? Math.round(bpm) : 0,
+        energy: idxEnergy !== -1 ? (parseFloat(row[idxEnergy]) || 0) : 0,
+        durationMs: idxDuration !== -1 ? (parseInt(row[idxDuration], 10) || 0) : 0,
+        addedAt: idxAdded !== -1 ? (row[idxAdded]?.trim() || null) : null,
+      });
+    }
+    return tracks;
+  }
+
+  const loadTracklist = useCallback(async () => {
+    setTracklistLoading(true);
+    setTracklistError(null);
+    try {
+      const res = await fetch("/api/playlist-csv");
+      if (!res.ok) throw new Error("Failed to load library CSV");
+      const text = await res.text();
+      setTracklist(parseTracklistCsv(text));
+    } catch (e) {
+      setTracklistError(e instanceof Error ? e.message : "Failed to load tracklist");
+    } finally {
+      setTracklistLoading(false);
+    }
+  }, []);
+
+  async function deleteManagedTrack(track: ManagedTrack) {
+    setTracklistDeletingUris(prev => new Set(prev).add(track.uri));
+    setTracklist(prev => prev?.filter(t => t.uri !== track.uri) ?? prev);
+    const token = await freshSpotifyToken();
+    if (token && runningPlaylist.id) {
+      fetch(`https://api.spotify.com/v1/playlists/${runningPlaylist.id}/items`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ items: [{ uri: track.uri }] }),
+      }).catch(() => {});
+    }
+    fetch("/api/tracks/delete", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ spotifyUri: track.uri }),
+    }).catch(() => {});
+  }
+
+  const allGenres = tracklist
+    ? Array.from(new Set(tracklist.flatMap(t => t.genre.split(",").map(g => g.trim()).filter(Boolean)))).sort()
+    : [];
+  const allArtists = tracklist
+    ? Array.from(new Set(tracklist.map(t => t.artist).filter(Boolean))).sort()
+    : [];
+
+  const filteredTracklist = (() => {
+    if (!tracklist) return null;
+    const q = tracklistFilter.trim().toLowerCase();
+    const min = tracklistBpmMin ? parseFloat(tracklistBpmMin) : null;
+    const max = tracklistBpmMax ? parseFloat(tracklistBpmMax) : null;
+    const artistQ = bulkDeleteArtist.trim().toLowerCase();
+    let result = tracklist.filter(t => {
+      if (q && !t.name.toLowerCase().includes(q) && !t.artist.toLowerCase().includes(q)) return false;
+      if (min != null && (t.bpm === 0 || t.bpm < min)) return false;
+      if (max != null && (t.bpm === 0 || t.bpm > max)) return false;
+      if (tracklistGenre && !t.genre.toLowerCase().includes(tracklistGenre.toLowerCase())) return false;
+      // The bulk-delete artist field previews live as you type, same as
+      // every other filter here — matches by substring while typing, so
+      // the table shows exactly what "Delete artist" would remove.
+      if (artistQ && !t.artist.toLowerCase().includes(artistQ)) return false;
+      return true;
+    });
+    const { key, dir } = tracklistSort;
+    const mul = dir === "asc" ? 1 : -1;
+    result = [...result].sort((a, b) => {
+      if (key === "bpm") return (a.bpm - b.bpm) * mul;
+      if (key === "added") {
+        // Tracks with no "Added At" value (older library rows predating the
+        // column, or a non-Exportify import) sort last regardless of
+        // direction — there's nothing to compare them by, so they shouldn't
+        // jump to the front on a descending sort.
+        if (!a.addedAt && !b.addedAt) return 0;
+        if (!a.addedAt) return 1;
+        if (!b.addedAt) return -1;
+        return (new Date(a.addedAt).getTime() - new Date(b.addedAt).getTime()) * mul;
+      }
+      const av = a[key].toLowerCase(), bv = b[key].toLowerCase();
+      return av.localeCompare(bv) * mul;
+    });
+    return result;
+  })();
+
+  // Bulk-delete targets the CURRENTLY FILTERED view (search text + BPM range
+  // + genre dropdown + the bulk-delete artist field itself, which live-
+  // filters filteredTracklist as you type) — so whatever's on screen at the
+  // moment you click "Delete genre"/"Delete artist" is exactly what gets
+  // deleted, letting you preview the set first.
+  function tracksForGenre(genre: string): ManagedTrack[] {
+    if (!filteredTracklist) return [];
+    const target = genre.toLowerCase();
+    return filteredTracklist.filter(t => t.genre.split(",").map(g => g.trim().toLowerCase()).includes(target));
+  }
+
+  // Same per-track removal deleteManagedTrack does (Spotify playlist item +
+  // CSV row), run as a sequential batch with a live count so a large genre/
+  // artist doesn't look hung, and so a request failure partway through
+  // doesn't silently drop the rest.
+  async function runBulkDelete() {
+    if (!bulkDeleteTarget) return;
+    const { tracks } = bulkDeleteTarget;
+    setBulkDeleting(true);
+    setBulkDeleteProgress({ done: 0, total: tracks.length });
+    const token = await freshSpotifyToken();
+    const uris = tracks.map(t => t.uri);
+    setTracklist(prev => prev?.filter(t => !uris.includes(t.uri)) ?? prev);
+
+    for (let i = 0; i < tracks.length; i++) {
+      const track = tracks[i];
+      if (token && runningPlaylist.id) {
+        try {
+          await fetch(`https://api.spotify.com/v1/playlists/${runningPlaylist.id}/items`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ items: [{ uri: track.uri }] }),
+          });
+        } catch { /* best-effort — CSV delete below still runs */ }
+      }
+      try {
+        await fetch("/api/tracks/delete", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ spotifyUri: track.uri }),
+        });
+      } catch { /* best-effort */ }
+      setBulkDeleteProgress({ done: i + 1, total: tracks.length });
+    }
+
+    setBulkDeleting(false);
+    setBulkDeleteTarget(null);
+    setBulkDeleteProgress(null);
+    if (bulkDeleteTarget.kind === "genre") setTracklistGenre("");
+    else setBulkDeleteArtist("");
+  }
+
+  function toggleTracklistSort(key: "name" | "artist" | "bpm" | "genre" | "added") {
+    setTracklistSort(prev => prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" });
+  }
+
+  // Reset the incremental render window whenever the filtered/sorted set
+  // changes shape, so switching filters doesn't leave a scroll position
+  // from a much longer previous list.
+  useEffect(() => {
+    setTracklistVisibleCount(100);
+  }, [tracklistFilter, tracklistBpmMin, tracklistBpmMax, tracklistGenre, tracklistSort]);
+
+  useEffect(() => {
+    const container = tracklistContainerRef.current;
+    const sentinel = tracklistSentinelRef.current;
+    const total = filteredTracklist?.length ?? 0;
+    if (!container || !sentinel || tracklistVisibleCount >= total) return;
+    const obs = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) setTracklistVisibleCount(c => Math.min(c + 100, total)); },
+      { root: container, rootMargin: "120px" },
+    );
+    obs.observe(sentinel);
+    return () => obs.disconnect();
+  }, [tracklistVisibleCount, filteredTracklist]);
 
   const [cronRunning, setCronRunning] = useState(false);
   const [cronResults, setCronResults] = useState<{ name: string; matched: number; found: number; error?: string }[] | null>(null);
@@ -1951,13 +2179,21 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     { key: "integrations", label: "Integrations & BBC" },
     { key: "notifications", label: "Notifications & 2FA" },
     { key: "deleted-tracks", label: "Deleted Tracks" },
+    { key: "tracklist", label: "Tracklist" },
   ] as const;
   type TabKey = typeof TABS[number]["key"];
   const [activeTab, setActiveTab] = useState<TabKey>("heart-rate");
 
   useEffect(() => {
-    if (activeTab === "deleted-tracks" && deletedTracksList === null && !deletedTracksLoading) {
+    // Always refetch on switching to this tab (not just the first time) —
+    // deletions can happen from other tabs (e.g. Tracklist's per-track or
+    // bulk delete), which write to the same deleted-tracks log but have no
+    // way to update this tab's already-loaded state directly.
+    if (activeTab === "deleted-tracks" && !deletedTracksLoading) {
       void loadDeletedTracksList();
+    }
+    if (activeTab === "tracklist" && tracklist === null && !tracklistLoading) {
+      void loadTracklist();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
@@ -4075,6 +4311,193 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     </div>
     </div>
 
+    {/* ── Tab 6: Tracklist ── */}
+    <div className={activeTab === "tracklist" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
+    <div className="space-y-6">
+
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h3 className="font-semibold text-slate-200">Tracklist</h3>
+            <p className="text-sm text-slate-400 mt-1">
+              Every track in the active library — the same play/delete/similar/suggest options as the dashboard, plus filtering and sorting.
+            </p>
+          </div>
+          {!!tracklist?.length && (
+            <span className="shrink-0 text-xs text-slate-500 whitespace-nowrap">
+              {filteredTracklist?.length ?? 0} of {tracklist.length} tracks
+            </span>
+          )}
+        </div>
+
+        {tracklistError && <p className="text-sm text-red-400">{tracklistError}</p>}
+
+        {!tracklistLoading && !!tracklist?.length && (
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              value={tracklistFilter}
+              onChange={e => setTracklistFilter(e.target.value)}
+              placeholder="Search by track or artist…"
+              className="flex-1 min-w-48 rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+            />
+            <input
+              type="number"
+              value={tracklistBpmMin}
+              onChange={e => setTracklistBpmMin(e.target.value)}
+              placeholder="Min BPM"
+              className="w-24 rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+            />
+            <input
+              type="number"
+              value={tracklistBpmMax}
+              onChange={e => setTracklistBpmMax(e.target.value)}
+              placeholder="Max BPM"
+              className="w-24 rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+            />
+            {allGenres.length > 0 && (
+              <>
+                <input
+                  type="text"
+                  list="tracklist-genre-options"
+                  value={tracklistGenre}
+                  onChange={e => setTracklistGenre(e.target.value)}
+                  placeholder="Filter by genre…"
+                  className="rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 max-w-48"
+                />
+                <datalist id="tracklist-genre-options">
+                  {allGenres.map(g => <option key={g} value={g} />)}
+                </datalist>
+              </>
+            )}
+            {(tracklistFilter || tracklistBpmMin || tracklistBpmMax || tracklistGenre) && (
+              <button
+                onClick={() => { setTracklistFilter(""); setTracklistBpmMin(""); setTracklistBpmMax(""); setTracklistGenre(""); }}
+                className="text-xs text-slate-400 hover:text-slate-200 underline"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
+
+        {!tracklistLoading && !!tracklist?.length && (allGenres.length > 0 || allArtists.length > 0) && (
+          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-white/5">
+            <span className="text-xs text-slate-500 shrink-0">Bulk delete:</span>
+            {allGenres.length > 0 && (
+              <>
+                {/* Reuses the genre filter input/state directly (not a
+                    separate selection) so typing a genre here immediately
+                    filters the table below to preview exactly what "Delete
+                    genre" would remove. */}
+                <input
+                  type="text"
+                  list="tracklist-genre-options"
+                  value={tracklistGenre}
+                  onChange={e => setTracklistGenre(e.target.value)}
+                  placeholder="Type a genre…"
+                  className="rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-red-500 max-w-48"
+                />
+                <button
+                  onClick={() => tracklistGenre && setBulkDeleteTarget({ kind: "genre", value: tracklistGenre, tracks: tracksForGenre(tracklistGenre) })}
+                  disabled={!tracklistGenre}
+                  className="text-xs rounded-lg border border-red-500/40 bg-red-500/10 hover:bg-red-500/20 disabled:opacity-30 disabled:cursor-not-allowed text-red-300 font-medium px-3 py-1.5 transition-colors whitespace-nowrap"
+                >
+                  Delete genre
+                </button>
+              </>
+            )}
+            {allArtists.length > 0 && (
+              <>
+                {/* Free-text with live matching suggestions (datalist) —
+                    typing filters the table below as you go, same as the
+                    genre select above, rather than requiring an exact pick
+                    from a long dropdown. */}
+                <input
+                  type="text"
+                  list="bulk-delete-artist-options"
+                  value={bulkDeleteArtist}
+                  onChange={e => setBulkDeleteArtist(e.target.value)}
+                  placeholder="Type an artist…"
+                  className="rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-red-500 max-w-48"
+                />
+                <datalist id="bulk-delete-artist-options">
+                  {allArtists.map(a => <option key={a} value={a} />)}
+                </datalist>
+                <button
+                  onClick={() => bulkDeleteArtist && filteredTracklist && setBulkDeleteTarget({ kind: "artist", value: bulkDeleteArtist, tracks: filteredTracklist })}
+                  disabled={!bulkDeleteArtist}
+                  className="text-xs rounded-lg border border-red-500/40 bg-red-500/10 hover:bg-red-500/20 disabled:opacity-30 disabled:cursor-not-allowed text-red-300 font-medium px-3 py-1.5 transition-colors whitespace-nowrap"
+                >
+                  Delete artist
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {!tracklistLoading && !!tracklist?.length && (
+          <div className="flex items-center gap-1 text-xs">
+            <span className="text-slate-500 mr-1">Sort by:</span>
+            {(tracklist.some(t => t.addedAt)
+              ? (["name", "artist", "bpm", "genre", "added"] as const)
+              : (["name", "artist", "bpm", "genre"] as const)
+            ).map(key => (
+              <button
+                key={key}
+                onClick={() => toggleTracklistSort(key)}
+                className={`px-2.5 py-1 rounded-lg border transition-colors capitalize ${
+                  tracklistSort.key === key
+                    ? "border-green-500/40 bg-green-500/15 text-green-300"
+                    : "border-white/10 text-slate-400 hover:text-slate-200 hover:border-white/20"
+                }`}
+              >
+                {key}{tracklistSort.key === key ? (tracklistSort.dir === "asc" ? " ↑" : " ↓") : ""}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {tracklistLoading ? (
+          <div className="space-y-2">
+            {[1, 2, 3, 4, 5].map(n => <div key={n} className="h-14 rounded-lg bg-slate-800/50 animate-pulse" />)}
+          </div>
+        ) : !filteredTracklist || filteredTracklist.length === 0 ? (
+          <p className="text-sm text-slate-500">
+            {tracklist?.length ? "No tracks match your filters." : "No tracks in the active library."}
+          </p>
+        ) : (
+          <div ref={tracklistContainerRef} className="divide-y divide-slate-800/50 rounded-lg border border-white/10 bg-slate-950/40 max-h-[32rem] overflow-y-auto no-scrollbar">
+            {filteredTracklist.slice(0, tracklistVisibleCount).map((t, i) => {
+              const track: TrackWithBPM = {
+                id: t.id, name: t.name, artists: [{ name: t.artist }],
+                album: { name: "", images: [] }, duration_ms: t.durationMs,
+                uri: t.uri, bpm: t.bpm, energy: t.energy,
+              };
+              return (
+                <TrackRow
+                  key={t.uri}
+                  track={track}
+                  index={i}
+                  onDelete={tracklistDeletingUris.has(t.uri) ? undefined : () => deleteManagedTrack(t)}
+                  onSimilar={() => router.push(`/dashboard?similar=${encodeURIComponent(t.uri)}`)}
+                  onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=style`)}
+                  onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=tempo`)}
+                />
+              );
+            })}
+            {tracklistVisibleCount < filteredTracklist.length && (
+              <div ref={tracklistSentinelRef} className="py-2 text-center text-xs text-slate-600">
+                {tracklistVisibleCount} of {filteredTracklist.length}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+    </div>
+    </div>
+
     {deleteTarget && (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
         <div className="rounded-xl bg-slate-900 border border-white/10 p-5 max-w-sm w-full space-y-4">
@@ -4108,6 +4531,56 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               className="rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white text-sm font-semibold px-4 py-2 transition-colors"
             >
               {deleting ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {bulkDeleteTarget && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+        <div className="rounded-xl bg-slate-900 border border-white/10 p-5 max-w-sm w-full space-y-4">
+          <div>
+            <h3 className="font-semibold text-slate-100">
+              Delete all "{bulkDeleteTarget.value}" tracks?
+            </h3>
+            <p className="text-sm text-slate-400 mt-1">
+              This removes {bulkDeleteTarget.tracks.length} track{bulkDeleteTarget.tracks.length === 1 ? "" : "s"}
+              {" "}({bulkDeleteTarget.kind === "genre" ? "genre" : "artist"}: {bulkDeleteTarget.value}) from Spotify and the local library. This can't be undone in bulk — you'd need to re-add each track individually.
+            </p>
+            {(tracklistFilter || tracklistBpmMin || tracklistBpmMax
+              || (bulkDeleteTarget.kind === "genre" && bulkDeleteArtist)
+              || (bulkDeleteTarget.kind === "artist" && tracklistGenre)) && (
+              <p className="text-xs text-amber-400 mt-2">
+                Scoped to your other active filters too — clear them first if you meant to delete every "{bulkDeleteTarget.value}" track regardless of those.
+              </p>
+            )}
+          </div>
+          {bulkDeleteProgress && (
+            <div className="space-y-1">
+              <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-red-500 rounded-full transition-all duration-200"
+                  style={{ width: `${Math.round((bulkDeleteProgress.done / bulkDeleteProgress.total) * 100)}%` }}
+                />
+              </div>
+              <p className="text-xs text-slate-500 text-right">{bulkDeleteProgress.done} / {bulkDeleteProgress.total}</p>
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={() => setBulkDeleteTarget(null)}
+              disabled={bulkDeleting}
+              className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 text-sm font-medium px-4 py-2 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={runBulkDelete}
+              disabled={bulkDeleting}
+              className="rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white text-sm font-semibold px-4 py-2 transition-colors"
+            >
+              {bulkDeleting ? "Deleting…" : `Delete ${bulkDeleteTarget.tracks.length}`}
             </button>
           </div>
         </div>
