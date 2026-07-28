@@ -106,6 +106,8 @@ FILES = [
     ('app/api/settings/bbc-bpm-filter/route.ts',  'app/api/settings/bbc-bpm-filter/route.ts'),
     ('lib/bbc-bpm-filter.ts',                     'lib/bbc-bpm-filter.ts'),
     ('lib/bbc-bpm-filter-config.ts',              'lib/bbc-bpm-filter-config.ts'),
+    ('app/api/settings/dashboard-layout/route.ts', 'app/api/settings/dashboard-layout/route.ts'),
+    ('lib/dashboard-layout-config.ts',            'lib/dashboard-layout-config.ts'),
     ('app/api/itunes-art/route.ts',               'app/api/itunes-art/route.ts'),
     ('app/api/spotify/playlist-uris/route.ts',    'app/api/spotify/playlist-uris/route.ts'),
     ('app/api/cron/weekly/route.ts',              'app/api/cron/weekly/route.ts'),

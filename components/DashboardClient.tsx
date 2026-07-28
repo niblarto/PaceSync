@@ -322,6 +322,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [saveError, setSaveError]       = useState<string | null>(null);
   const [garminConfigured, setGarminConfigured] = useState(false);
   const [aiDjEnabled, setAiDjEnabled] = useState(false);
+  const [zonesColumnHidden, setZonesColumnHidden] = useState(false);
   const [paceFilter, setPaceFilter] = useState<{ paces: Array<{ paceStr: string; bpm: number }> } | null>(null);
   const [sprintBpmFilter, setSprintBpmFilter] = useState<number | null>(null);
   const [similarFilter, setSimilarFilter] = useState<{ seed: TrackWithBPM; uris: string[] } | null>(null);
@@ -373,6 +374,13 @@ export function DashboardClient({ spotifyUser }: Props) {
     fetch("/api/settings/ai-dj")
       .then(r => r.json())
       .then((d: { enabled?: boolean }) => { setAiDjEnabled(d.enabled ?? false); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/settings/dashboard-layout")
+      .then(r => r.json())
+      .then((d: { zonesColumnHidden?: boolean }) => { setZonesColumnHidden(d.zonesColumnHidden ?? false); })
       .catch(() => {});
   }, []);
 
@@ -1580,9 +1588,18 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
       </header>
 
       <div className="max-w-[1800px] mx-auto px-4 py-8 flex-1 w-full">
-        <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] xl:grid-cols-[280px_1fr_740px] gap-6 items-stretch">
+        <div className={`grid grid-cols-1 gap-6 items-stretch ${
+          zonesColumnHidden ? "xl:grid-cols-[1fr_740px]" : "lg:grid-cols-[280px_1fr] xl:grid-cols-[280px_1fr_740px]"
+        }`}>
 
-          {/* Col 1: Zones */}
+          {/* Col 1: Zones — hidden via the "Hide zones column" toggle in
+              Settings > Integrations, next to AI DJ. Columns 2/3 grow to
+              fill the freed space via the grid template above; column 2's
+              results-card height is re-measured against column 3's own
+              bottom edge on every resize (see the ResizeObserver below), so
+              it stays correctly sized whether or not this column is shown —
+              nothing here depends on column 1's width or presence. */}
+          {!zonesColumnHidden && (
           <aside className="space-y-4 flex flex-col">
             <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
@@ -1723,6 +1740,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               />
             )}
           </aside>
+          )}
 
           {/* Col 2: Main content */}
           <main className="space-y-6 min-w-0 flex flex-col min-h-0">
@@ -2135,9 +2153,13 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 too. Column 1 keeps its own layout/height — this only
                 overlaps it visually (relative + negative margin, not
                 absolute positioning, so it still pushes the page content
-                below it down normally instead of floating detached). */}
+                below it down normally instead of floating detached).
+                The -304px offset (280px column + 24px gap) only makes sense
+                when column 1 is actually there to lay over — with it hidden,
+                that same negative margin pushes the chart off the left edge
+                of the page instead, so it's skipped entirely in that case. */}
             {aiDjMix && !aiDjMix.stale && !remixing && !chartDismissed && aiDjMix.timeline?.length > 0 && (
-              <div className="lg:-ml-[304px] lg:w-[calc(100%+304px)] rounded-xl bg-slate-900/85 backdrop-blur-sm border-4 border-purple-500/40 p-5">
+              <div className={`${zonesColumnHidden ? "" : "lg:-ml-[304px] lg:w-[calc(100%+304px)]"} rounded-xl bg-slate-900/85 backdrop-blur-sm border-4 border-purple-500/40 p-5`}>
                 <div className="flex items-start justify-between gap-4">
                   <h2 className="font-semibold text-sm text-slate-300 mb-1">Pace &amp; BPM — &quot;{aiDjMix.workoutTitle}&quot;</h2>
                   <button
@@ -2181,7 +2203,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               onAiDjMix={handleAiDjMix}
               onTrackClick={jumpToTrack}
               onMissingTracks={showMissingTracks}
-              onPaceFilter={(paceStr, bpm, multiSelect) => {
+              // Pace-chip buttons are a shortcut into the zones column's pace
+              // filter, so they're pointless (and shouldn't render at all —
+              // RunnaScheduleCard gates the chips on this prop being set)
+              // once that column is hidden.
+              onPaceFilter={zonesColumnHidden ? undefined : (paceStr, bpm, multiSelect) => {
                 setNoBpmFilter(false);
                 setMissingFeaturesFilter(null);
                 setAiDjMix(null);

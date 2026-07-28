@@ -157,6 +157,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [bbcSaveMsg, setBbcSaveMsg] = useState<string | null>(null);
   const [bbcBpmFilterEnabled, setBbcBpmFilterEnabled] = useState(false);
   const [bbcBpmFilterSaving, setBbcBpmFilterSaving] = useState(false);
+  const [zonesColumnHidden, setZonesColumnHidden] = useState(false);
+  const [zonesColumnHiddenSaving, setZonesColumnHiddenSaving] = useState(false);
 
   // ── Runna URL state ────────────────────────────────────────────────────────
   const [runnaUrl, setRunnaUrl] = useState("");
@@ -1667,6 +1669,30 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .then((d: { enabled?: boolean }) => setBbcBpmFilterEnabled(d.enabled ?? false))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    fetch("/api/settings/dashboard-layout")
+      .then(r => r.json())
+      .then((d: { zonesColumnHidden?: boolean }) => setZonesColumnHidden(d.zonesColumnHidden ?? false))
+      .catch(() => {});
+  }, []);
+
+  async function saveZonesColumnHidden(hidden: boolean) {
+    setZonesColumnHiddenSaving(true);
+    try {
+      const res = await fetch("/api/settings/dashboard-layout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ zonesColumnHidden: hidden }),
+      });
+      if (!res.ok) throw new Error();
+      setZonesColumnHidden(hidden);
+    } catch {
+      // best-effort — toggle stays at its previous value on failure
+    } finally {
+      setZonesColumnHiddenSaving(false);
+    }
+  }
 
   async function saveBbcBpmFilter(enabled: boolean) {
     setBbcBpmFilterSaving(true);
@@ -3347,6 +3373,29 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             <span>Enabled — mix buttons shown on workouts</span>
           </div>
         )}
+        <div className="flex items-start justify-between gap-3 rounded-lg bg-slate-800/40 border border-white/5 px-3 py-2.5">
+          <div>
+            <p className="text-sm font-medium text-slate-300">Hide zones column on dashboard</p>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Hides the Heart Rate Zones column so the track list and Runna rail have more room.
+            </p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={zonesColumnHidden}
+            onClick={() => { if (!zonesColumnHiddenSaving) saveZonesColumnHidden(!zonesColumnHidden); }}
+            disabled={zonesColumnHiddenSaving}
+            className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-40 ${
+              zonesColumnHidden ? "bg-purple-500" : "bg-slate-700"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                zonesColumnHidden ? "translate-x-5" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
         {aiDjEnabled && (
           <div className="flex items-start justify-between gap-3 rounded-lg bg-slate-800/40 border border-white/5 px-3 py-2.5">
             <div>
