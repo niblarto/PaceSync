@@ -132,6 +132,22 @@ export function MixPaceChart({ tracks }: { tracks: MixChartTrack[] }) {
     setXDomain(null);
   }, [tracks]);
 
+  // Narrow (mobile-width) containers get tighter axis margins so the pace
+  // axis sits snug against the left edge and the BPM axis against the right
+  // edge, instead of desktop's wider margins (originally sized to match the
+  // segment/track strips' own left/right padding below — see isNarrow usage
+  // there too, so both stay aligned under the chart's plotted area either way).
+  const [isNarrow, setIsNarrow] = useState(false);
+  useEffect(() => {
+    const el = chartWrapRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(([entry]) => {
+      setIsNarrow(entry.contentRect.width < 480);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   const totalSec = tracks.length
     ? Math.max(...tracks.map(t => t.startsAtSec + t.durationSec))
     : 0;
@@ -216,6 +232,101 @@ export function MixPaceChart({ tracks }: { tracks: MixChartTrack[] }) {
     };
   }, [totalSec]);
 
+  // Touch support (mobile): one finger pans (mirrors mouse-drag), two
+  // fingers pinch to zoom (mirrors wheel-zoom, anchored on the pinch
+  // midpoint instead of the cursor). Native touch listeners rather than
+  // React's synthetic touch props, since preventDefault() must run on a
+  // non-passive listener to stop the page itself from scrolling/zooming
+  // while a gesture is in progress on the chart.
+  useEffect(() => {
+    const el = chartWrapRef.current;
+    if (!el) return;
+
+    let panStartX: number | null = null;
+    let panStartDomain: [number, number] | null = null;
+    let pinchStartDist: number | null = null;
+    let pinchStartDomain: [number, number] | null = null;
+    let pinchStartCenterFrac = 0.5;
+
+    const dist = (a: Touch, b: Touch) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+
+    const onTouchStart = (e: TouchEvent) => {
+      const recs = tracksRef.current;
+      if (recs.length < 2 || totalSec <= 0) return;
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        panStartX = null;
+        pinchStartDist = dist(e.touches[0], e.touches[1]);
+        pinchStartDomain = xDomainRef.current ?? [0, totalSec];
+        const rect = el.getBoundingClientRect();
+        const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        pinchStartCenterFrac = Math.min(1, Math.max(0, (midX - rect.left) / rect.width));
+      } else if (e.touches.length === 1) {
+        pinchStartDist = null;
+        panStartX = e.touches[0].clientX;
+        panStartDomain = xDomainRef.current ?? [0, totalSec];
+      }
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (totalSec <= 0) return;
+      const dataMin = 0;
+      const dataMax = totalSec;
+      const rect = el.getBoundingClientRect();
+
+      if (e.touches.length === 2 && pinchStartDist != null && pinchStartDomain != null) {
+        e.preventDefault();
+        const newDist = dist(e.touches[0], e.touches[1]);
+        const scale = pinchStartDist / Math.max(1, newDist); // fingers apart -> zoom in
+        const [startLo, startHi] = pinchStartDomain;
+        const center = startLo + pinchStartCenterFrac * (startHi - startLo);
+        let span = (startHi - startLo) * scale;
+        span = Math.min(dataMax - dataMin, Math.max(30, span));
+        let lo = center - pinchStartCenterFrac * span;
+        let hi = lo + span;
+        if (lo < dataMin) { lo = dataMin; hi = lo + span; }
+        if (hi > dataMax) { hi = dataMax; lo = hi - span; }
+        setXDomain(span >= dataMax - dataMin ? null : [Math.round(lo), Math.round(hi)]);
+      } else if (e.touches.length === 1 && panStartX != null && panStartDomain != null) {
+        e.preventDefault();
+        const [startLo, startHi] = panStartDomain;
+        const span = startHi - startLo;
+        const dxFrac = (e.touches[0].clientX - panStartX) / rect.width;
+        let lo = startLo - dxFrac * span;
+        let hi = lo + span;
+        if (lo < dataMin) { lo = dataMin; hi = lo + span; }
+        if (hi > dataMax) { hi = dataMax; lo = hi - span; }
+        setXDomain([Math.round(lo), Math.round(hi)]);
+      }
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length === 0) {
+        panStartX = null;
+        panStartDomain = null;
+        pinchStartDist = null;
+        pinchStartDomain = null;
+      } else if (e.touches.length === 1) {
+        // Lifted one finger out of a pinch — resume as a single-finger pan
+        // from here instead of jumping/stopping.
+        pinchStartDist = null;
+        panStartX = e.touches[0].clientX;
+        panStartDomain = xDomainRef.current ?? [0, totalSec];
+      }
+    };
+
+    el.addEventListener("touchstart", onTouchStart, { passive: false });
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    el.addEventListener("touchend", onTouchEnd);
+    el.addEventListener("touchcancel", onTouchEnd);
+    return () => {
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("touchend", onTouchEnd);
+      el.removeEventListener("touchcancel", onTouchEnd);
+    };
+  }, [totalSec]);
+
   if (!tracks.length) return null;
 
   const timelineDomain: [number, number] = xDomain ?? [0, totalSec];
@@ -285,7 +396,7 @@ export function MixPaceChart({ tracks }: { tracks: MixChartTrack[] }) {
   return (
     <div>
       <p className="text-xs text-slate-500 mb-4">
-        Target pace vs. song BPM per segment · scroll to zoom, drag to pan{xDomain ? " · " : ", "}
+        Target pace vs. song BPM per segment · scroll/pinch to zoom, drag to pan{xDomain ? " · " : ", "}
         {xDomain
           ? <button onClick={() => setXDomain(null)} className="text-sky-400 hover:text-sky-300 underline">reset zoom</button>
           : "double-click to reset"}
@@ -298,7 +409,7 @@ export function MixPaceChart({ tracks }: { tracks: MixChartTrack[] }) {
         style={{ touchAction: "none", userSelect: "none" }}
       >
         <ResponsiveContainer width="100%" height={220}>
-          <ComposedChart data={records} margin={{ top: 4, right: 52, left: 4, bottom: 0 }}>
+          <ComposedChart data={records} margin={{ top: 4, right: isNarrow ? 4 : 52, left: 4, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
             <XAxis
               dataKey="t"
@@ -365,7 +476,7 @@ export function MixPaceChart({ tracks }: { tracks: MixChartTrack[] }) {
       </div>
 
       {segmentBlocks.length > 0 && (
-        <div className="mt-2" style={{ paddingLeft: 40, paddingRight: 88 }}>
+        <div className="mt-2" style={{ paddingLeft: 40, paddingRight: isNarrow ? 40 : 88 }}>
           <div className="relative h-6 rounded overflow-hidden border border-white/5 bg-slate-800/60">
             {segmentBlocks.map((b, i) => {
               const leftPct = span > 0 ? ((b.clipStart - timelineDomain[0]) / span) * 100 : 0;
@@ -400,7 +511,7 @@ export function MixPaceChart({ tracks }: { tracks: MixChartTrack[] }) {
       )}
 
       {timelineTracks.length > 0 && (
-        <div className="mt-2" style={{ paddingLeft: 40, paddingRight: 88 }}>
+        <div className="mt-2" style={{ paddingLeft: 40, paddingRight: isNarrow ? 40 : 88 }}>
           <div className="relative h-6 rounded overflow-hidden border border-white/5 bg-slate-800/40">
             {timelineTracks.map((t, i) => {
               const leftPct = span > 0 ? ((t.clipStart - timelineDomain[0]) / span) * 100 : 0;

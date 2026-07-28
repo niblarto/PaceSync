@@ -401,13 +401,19 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                       });
                     }
                   }}
-                  className="w-full px-5 py-3 flex items-center gap-3 text-left hover:bg-slate-800/40 transition-colors"
+                  className="w-full px-5 py-3 flex items-center flex-wrap sm:flex-nowrap gap-x-3 gap-y-1 text-left hover:bg-slate-800/40 transition-colors"
                 >
                   <span className={`text-xs shrink-0 w-20 ${isToday(run.date) ? "text-green-400 font-semibold" : "text-slate-500"}`}>
                     {pastDayLabel(run.date)}
                   </span>
 
-                  <span className="text-sm text-slate-200 flex-1 min-w-0 truncate">{run.title}</span>
+                  {/* Title gets its own full-width line below the breakpoint
+                      (basis-full forces the wrap) instead of truncating —
+                      the fixed-width slots to its right (date/stats/badge)
+                      don't leave enough room for a title on a phone-width
+                      card; sm: and up keeps the original single-row layout
+                      unchanged. */}
+                  <span className="order-last sm:order-none basis-full sm:basis-auto text-sm text-slate-200 flex-1 min-w-0 sm:truncate">{run.title}</span>
 
                   {/* Actual stats */}
                   <span className="text-xs text-slate-400 shrink-0 tabular-nums">
@@ -657,6 +663,12 @@ interface RunnaScheduleProps {
       audio-feature data — the parent surfaces those tracks in the main
       track list so they can be investigated. */
   onMissingTracks?: (uris: string[]) => void;
+  /** Whether to show the "Runs at the distance"/"Courses close to this
+      distance" chip rows that open the Leaflet route-map lightbox. Defaults
+      to true (desktop). The route map's hover-to-highlight track panel and
+      Leaflet controls aren't touch-friendly, so the mobile dashboard passes
+      false to hide these chips rather than show a broken interaction. */
+  showRouteMaps?: boolean;
 }
 
 // Exposed to the parent so the tracks card's Remix button can drive this
@@ -805,7 +817,7 @@ function courseMatchesDate(name: string, date: string): boolean {
 }
 
 export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaScheduleProps>(function RunnaScheduleCard(
-  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0, onTrackClick, onMissingTracks }: RunnaScheduleProps = {},
+  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0, onTrackClick, onMissingTracks, showRouteMaps = true }: RunnaScheduleProps = {},
   ref,
 ) {
   const { workouts: allWorkouts, pastRuns, loading, error } = useRunnaData();
@@ -1186,7 +1198,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                       });
                     }
                   }}
-                  className="w-full px-5 py-3 flex items-center gap-3 text-left hover:bg-slate-800/40 transition-colors"
+                  className="w-full px-5 py-3 flex items-center flex-wrap sm:flex-nowrap gap-x-3 gap-y-1 text-left hover:bg-slate-800/40 transition-colors"
                 >
                   {/* Fixed-width weather slot (empty past the forecast range)
                       so the date column stays aligned all the way down. */}
@@ -1201,7 +1213,11 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                     {dayLabel(w.date)}
                   </span>
 
-                  <span className="text-sm text-slate-200 flex-1 min-w-0 truncate">{w.title}</span>
+                  {/* Same full-width-title-wraps-below approach as the
+                      Summary card row above (see its comment) — the fixed
+                      right-hand slots (stats/type/zone/chevron) crowd out
+                      the title on a narrow screen. */}
+                  <span className="order-last sm:order-none basis-full sm:basis-auto text-sm text-slate-200 flex-1 min-w-0 sm:truncate">{w.title}</span>
 
                   {isRun && (
                     <span className="text-xs text-slate-500 shrink-0">
@@ -1407,7 +1423,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                         </>
                       );
                     })()}
-                    {garminConfigured && pinnedRoutes[w.date] && (
+                    {showRouteMaps && garminConfigured && pinnedRoutes[w.date] && (
                       <button
                         onClick={e => {
                           e.stopPropagation();
@@ -1428,7 +1444,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                         📌 Pinned route: {pinnedRoutes[w.date]!.runDate} · {pinnedRoutes[w.date]!.distanceMi.toFixed(1)}mi
                       </button>
                     )}
-                    {garminConfigured && isRun && w.distanceMi && (() => {
+                    {showRouteMaps && garminConfigured && isRun && w.distanceMi && (() => {
                       const r = routes[w.uid];
                       if (!r || r.total === 0) return null;
                       const canNewer = r.offset > 0;
@@ -1483,7 +1499,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                         </div>
                       );
                     })()}
-                    {garminConfigured && isRun && w.distanceMi && courses && (() => {
+                    {showRouteMaps && garminConfigured && isRun && w.distanceMi && courses && (() => {
                       // Courses close to this run's distance — a shade under
                       // through +0.25mi over — newest first (the API already
                       // sorts by creation date descending).

@@ -22,18 +22,40 @@ async function hasValidLocalAuth(req: NextRequest): Promise<boolean> {
   }
 }
 
-export async function middleware(req: NextRequest) {
-  if (await hasValidLocalAuth(req)) return NextResponse.next();
+// Phones hitting the desktop dashboard get bounced to the separate mobile
+// dashboard (/mobile) instead. Tablets are deliberately excluded (iPad's UA
+// contains "Mobile" on some iOS versions, so iPad is matched explicitly
+// before the generic mobile check to make sure it's never caught) — they
+// keep using the desktop 3-column layout, same as PCs.
+const TABLET_UA_RE = /iPad|Tablet|(?:Android(?!.*Mobile))/i;
+const MOBILE_UA_RE = /iPhone|iPod|Android.*Mobile|Windows Phone|BlackBerry|Mobile.*Firefox/i;
 
-  const url = req.nextUrl.clone();
-  url.pathname = "/login";
-  url.search = "";
-  return NextResponse.redirect(url);
+function isMobileUserAgent(ua: string): boolean {
+  if (TABLET_UA_RE.test(ua)) return false;
+  return MOBILE_UA_RE.test(ua);
+}
+
+export async function middleware(req: NextRequest) {
+  if (!(await hasValidLocalAuth(req))) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/login";
+    url.search = "";
+    return NextResponse.redirect(url);
+  }
+
+  if (req.nextUrl.pathname.startsWith("/dashboard") && isMobileUserAgent(req.headers.get("user-agent") ?? "")) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/mobile";
+    return NextResponse.redirect(url);
+  }
+
+  return NextResponse.next();
 }
 
 export const config = {
   matcher: [
     "/dashboard/:path*",
+    "/mobile/:path*",
     "/settings/:path*",
     "/garmin/:path*",
     "/strava/:path*",

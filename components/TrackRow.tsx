@@ -16,6 +16,10 @@ interface Props {
   suggestBusy?: "style" | "tempo" | "artist" | null;
   /** Confirmed "Today's Run" mixes this track has featured in, if any */
   playedCount?: number;
+  /** Whether to show the BPM badge and track-length column. Defaults to true
+      (desktop); the mobile dashboard passes false to save row width for the
+      title on a narrow screen. */
+  showStats?: boolean;
 }
 
 export function MiniSpinner() {
@@ -141,7 +145,7 @@ export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string)
   }
 }
 
-export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount }: Props) {
+export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, showStats = true }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(track.name)}`;
@@ -176,12 +180,16 @@ export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, on
         </div>
 
         <div className="flex items-center gap-3 shrink-0">
-          <span className="text-xs font-mono font-semibold text-green-400 bg-green-500/10 rounded px-1.5 py-0.5">
-            {track.bpm} BPM
-          </span>
-          <span className="text-xs text-slate-600 w-10 text-right tabular-nums">
-            {formatMs(track.duration_ms)}
-          </span>
+          {showStats && (
+            <>
+              <span className="text-xs font-mono font-semibold text-green-400 bg-green-500/10 rounded px-1.5 py-0.5">
+                {track.bpm} BPM
+              </span>
+              <span className="text-xs text-slate-600 w-10 text-right tabular-nums">
+                {formatMs(track.duration_ms)}
+              </span>
+            </>
+          )}
           <span className="text-slate-700 group-hover:text-green-500 text-xs shrink-0">↗</span>
         </div>
       </button>
