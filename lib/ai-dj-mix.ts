@@ -2,7 +2,7 @@ import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { computeEasyPaceBias } from "@/lib/run-pace-bias";
 import { getAllTrackVotes } from "@/lib/track-feedback";
-import { getPlayedTracks, getPlayedCounts } from "@/lib/todays-run-history";
+import { getPlayedTracks, getPlayedCounts, getLastEasyPaceSec } from "@/lib/todays-run-history";
 import { loadBpmOverrides } from "@/lib/bpm-overrides";
 import { readFile } from "fs/promises";
 import { join } from "path";
@@ -163,10 +163,13 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
     return buildMixLocally(segments, easyBias, trackFeedback, onProgress, avoidUris, config.geminiModel);
   }
 
+  const lastEasyPaceSec = getLastEasyPaceSec();
   const body = JSON.stringify({
     title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback,
     playedTracks: getPlayedTracks(), playCounts: getPlayedCounts(), bpmOverrides: loadBpmOverrides(),
     avoidTracks: avoidUris?.length ? avoidUris : undefined,
+    // Remote AI DJ service (ai_dj/server.py) expects "MM:SS", not seconds.
+    easyPace: lastEasyPaceSec != null ? `${Math.floor(lastEasyPaceSec / 60)}:${String(Math.round(lastEasyPaceSec % 60)).padStart(2, "0")}` : undefined,
   });
   try {
     if (onProgress) {
@@ -268,6 +271,7 @@ function buildMixLocally(
     segments, easyBias, trackFeedback,
     playedTracks: getPlayedTracks(), playCounts: getPlayedCounts(), bpmOverrides: loadBpmOverrides(),
     avoidTracks: avoidUris?.length ? avoidUris : undefined,
+    easyPaceSec: getLastEasyPaceSec() ?? undefined,
     model, effort,
   }, onProgress);
 }

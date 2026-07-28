@@ -128,6 +128,29 @@ export function getPlayedCounts(): Record<string, number> {
   return counts;
 }
 
+// Most recent conversational/easy-pace ceiling actually used to build a
+// mix, across saved history (newest date first, since getAllTodaysRunEntries
+// already sorts that way) — the fitness-adaptive replacement for a hardcoded
+// default: gets quicker as training progresses, drops back if there's a
+// lapse (injury, break), because it just reflects whatever Runna's own "no
+// faster than X/mi" ceiling most recently said. Undefined when there's no
+// history yet (first run ever, or history file missing) — callers fall back
+// to DEFAULT_EASY_PACE only in that case.
+export function getLastEasyPaceSec(): number | null {
+  const entries = getAllTodaysRunEntries();
+  for (const entry of entries) {
+    if (entry.approved === false) continue; // disputed — not a real reflection of what was run
+    for (const t of entry.tracks) {
+      if (!t.targetPaceSec) continue;
+      const label = t.segment.toLowerCase();
+      if (label.includes("conversational") || label.includes("easy") || label.includes("recovery")) {
+        return t.targetPaceSec;
+      }
+    }
+  }
+  return null;
+}
+
 // Tracks that have already featured in a run (entries up to today — a mix
 // pre-built for tomorrow hasn't been played yet). Sent to the mix builder so
 // played-but-unvoted tracks rank below unplayed ones at the pace band they

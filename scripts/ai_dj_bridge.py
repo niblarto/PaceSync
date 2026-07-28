@@ -140,7 +140,19 @@ def main():
 
     segments_text = payload.get("segments") or []
 
-    segments = parse_workout(segments_text)
+    # Fitness-adaptive fallback pace for segments with no stated target and no
+    # "no faster than X/mi" ceiling of their own: the most recent easy-pace
+    # ceiling actually used in a past workout (lib/todays-run-history.ts
+    # getLastEasyPaceSec), so it gets quicker as training progresses and
+    # drops back after a lapse — instead of a hardcoded value that never
+    # adapts. Falls back to parse_workout's own DEFAULT_EASY_PACE when there's
+    # no history yet (first run ever).
+    try:
+        easy_pace_sec = float(payload["easyPaceSec"]) if payload.get("easyPaceSec") else None
+    except (TypeError, ValueError):
+        easy_pace_sec = None
+
+    segments = parse_workout(segments_text, **({"easy_pace_sec": easy_pace_sec} if easy_pace_sec else {}))
     if not segments:
         print(json.dumps({"error": "No runnable segments recognized in the workout"}))
         sys.exit(1)
