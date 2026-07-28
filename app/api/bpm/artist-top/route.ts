@@ -17,11 +17,22 @@ export async function GET(req: NextRequest) {
   if (!artistName) return NextResponse.json({ error: "artist required" }, { status: 400 });
 
   try {
-    const ar = await fetch(`https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}&limit=1`);
+    const ar = await fetch(`https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}&limit=25`);
     if (!ar.ok) return NextResponse.json({ error: `Deezer artist search failed (${ar.status})` }, { status: 502 });
     const ad = await ar.json() as { data?: { id: number; name: string }[] };
-    const artist = ad.data?.[0];
-    if (!artist) return NextResponse.json({ error: `No Deezer artist found for "${artistName}"` }, { status: 404 });
+    const candidates = ad.data ?? [];
+    if (candidates.length === 0) return NextResponse.json({ error: `No Deezer artist found for "${artistName}"` }, { status: 404 });
+
+    // Deezer's search is relevance-ranked, not exact — "Hybrid" happily
+    // matches "Hybrid Minds" as its #1 result. Require a case-insensitive
+    // exact name match (ignoring surrounding whitespace) instead of blindly
+    // taking the top relevance hit, so a short/partial query never silently
+    // pulls top tracks for a different, longer-named artist.
+    const wanted = artistName.trim().toLowerCase();
+    const artist = candidates.find(a => a.name.trim().toLowerCase() === wanted);
+    if (!artist) {
+      return NextResponse.json({ error: `No exact Deezer match for "${artistName}" (closest: "${candidates[0].name}")` }, { status: 404 });
+    }
 
     const tr = await fetch(`https://api.deezer.com/artist/${artist.id}/top?limit=15`);
     if (!tr.ok) return NextResponse.json({ error: `Deezer top tracks failed (${tr.status})` }, { status: 502 });
@@ -34,10 +45,12 @@ export async function GET(req: NextRequest) {
     // Deezer's own relevance/rank so it's still "popular songs", just via a
     // different endpoint.
     if (tracks.length === 0) {
-      const sr = await fetch(`https://api.deezer.com/search?q=artist:"${encodeURIComponent(artistName)}"&limit=15`);
+      const sr = await fetch(`https://api.deezer.com/search?q=artist:"${encodeURIComponent(artist.name)}"&limit=25`);
       if (sr.ok) {
         const sd = await sr.json() as { data?: { title: string; artist: { name: string }; rank?: number }[] };
-        tracks = (sd.data ?? []).sort((a, b) => (b.rank ?? 0) - (a.rank ?? 0));
+        tracks = (sd.data ?? [])
+          .filter(t => t.artist.name.trim().toLowerCase() === wanted)
+          .sort((a, b) => (b.rank ?? 0) - (a.rank ?? 0));
       }
     }
 

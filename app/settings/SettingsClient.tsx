@@ -98,6 +98,29 @@ function zoneLabel(z: ZoneRow, i: number) {
   return `${z.min} – ${z.max} bpm`;
 }
 
+// Groups near-duplicate library tracks (same song, different Spotify track
+// IDs — e.g. an original single vs. a "- Remastered 2011" reissue, which the
+// exact-URI DedupCard can never catch since they're genuinely different
+// URIs). Mirrors lib/csv-store.ts's matchKey normalization so grouping stays
+// consistent with the rest of the app's name+artist matching.
+function dupMatchKey(name: string, artist: string): string {
+  const clean = (s: string) => s
+    .toLowerCase()
+    .replace(/\s*[([-].*$/, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  return `${clean(artist)}|||${clean(name)}`;
+}
+
+// True when the track's own name explicitly says it's a remaster/reissue
+// (the part matchKey strips off to do its matching) — used only to prefer
+// keeping this version when a duplicate group has exactly one such track;
+// with zero or multiple remasters in a group, there's no clear winner and
+// the group is left for manual review instead of guessing.
+function isRemaster(name: string): boolean {
+  return /remaster|re-?master|reissue/i.test(name);
+}
+
 interface BbcProgramme { pid: string; name: string; synopsis?: string }
 
 interface SettingsClientProps {
@@ -478,6 +501,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [bulkDeleteTarget, setBulkDeleteTarget] = useState<{ kind: "genre" | "artist"; value: string; tracks: ManagedTrack[] } | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [bulkDeleteProgress, setBulkDeleteProgress] = useState<{ done: number; total: number } | null>(null);
+  const [duplicatesOpen, setDuplicatesOpen] = useState(false);
 
   // "Added this week" — moved here from the BBC page so it lives alongside
   // the rest of the library-management UI; collapsed by default since it's
@@ -611,6 +635,29 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const allArtists = tracklist
     ? Array.from(new Set(tracklist.map(t => t.artist).filter(Boolean))).sort()
     : [];
+
+  // Near-duplicate groups: same song (by dupMatchKey) appearing under two-plus
+  // different Spotify track IDs. When exactly one track in the group is a
+  // remaster, that one is flagged as the suggested keeper; otherwise (zero or
+  // multiple remasters — including the "two different-length copies, neither
+  // marked as a remaster" case) it's left fully ambiguous for manual review.
+  const duplicateGroups = (() => {
+    if (!tracklist) return [];
+    const byKey = new Map<string, ManagedTrack[]>();
+    for (const t of tracklist) {
+      const key = dupMatchKey(t.name, t.artist);
+      const group = byKey.get(key);
+      if (group) group.push(t); else byKey.set(key, [t]);
+    }
+    return Array.from(byKey.values())
+      .filter(g => g.length > 1)
+      .map(group => {
+        const remasters = group.filter(t => isRemaster(t.name));
+        const suggestedKeepUri = remasters.length === 1 ? remasters[0].uri : null;
+        return { key: dupMatchKey(group[0].name, group[0].artist), tracks: group, suggestedKeepUri };
+      })
+      .sort((a, b) => a.tracks[0].name.localeCompare(b.tracks[0].name));
+  })();
 
   const filteredTracklist = (() => {
     if (!tracklist) return null;
@@ -4387,6 +4434,66 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=style`)}
                   onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=tempo`)}
                 />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {duplicateGroups.length > 0 && (
+        <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+          <button
+            onClick={() => setDuplicatesOpen(o => !o)}
+            className="w-full flex items-center justify-between gap-4 p-5 text-left hover:bg-slate-800/40 transition-colors"
+          >
+            <div>
+              <h3 className="font-semibold text-slate-200">
+                🎭 Possible duplicates <span className="text-slate-500 font-normal">({duplicateGroups.length})</span>
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Same song under different Spotify IDs — e.g. an original vs. a remaster. Not caught by Dedup Playlist above, which only removes exact repeats.
+              </p>
+            </div>
+            <span className={`text-slate-500 text-sm shrink-0 transition-transform ${duplicatesOpen ? "rotate-180" : ""}`}>▾</span>
+          </button>
+          {duplicatesOpen && (
+            <div className="divide-y divide-slate-800/50 border-t border-white/10">
+              {duplicateGroups.map(group => (
+                <div key={group.key} className="px-5 py-3 space-y-1.5">
+                  <p className="text-xs text-slate-500">
+                    {group.tracks[0].name.replace(/\s*[([-].*$/, "")} — {group.tracks[0].artist}
+                    {group.suggestedKeepUri && <span className="text-green-500"> · remaster found, suggested keeper marked</span>}
+                  </p>
+                  {group.tracks.map(t => (
+                    <div
+                      key={t.uri}
+                      className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm ${
+                        t.uri === group.suggestedKeepUri ? "bg-green-500/10 border border-green-500/30" : "bg-slate-800/40"
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <button
+                          onClick={() => openInSpotify(t.uri)}
+                          className="truncate text-left hover:underline hover:text-green-400 transition-colors"
+                          title={`${t.name} — open in Spotify`}
+                        >
+                          {t.name}
+                          {t.uri === group.suggestedKeepUri && <span className="text-green-400 text-xs font-medium ml-2">Keep</span>}
+                        </button>
+                        <p className="text-xs text-slate-500">
+                          {Math.floor(t.durationMs / 60000)}:{String(Math.round((t.durationMs % 60000) / 1000)).padStart(2, "0")} · {t.bpm || "?"} BPM
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => deleteManagedTrack(t)}
+                        disabled={tracklistDeletingUris.has(t.uri)}
+                        className="shrink-0 text-xs text-red-400 hover:text-red-300 border border-red-500/30 hover:border-red-500/50 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
+                      >
+                        Delete this one
+                      </button>
+                    </div>
+                  ))}
+                </div>
               ))}
             </div>
           )}
