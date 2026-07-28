@@ -1145,10 +1145,28 @@ export function DashboardClient({ spotifyUser }: Props) {
   // /v1/search pattern used elsewhere (bbc/tracks, csv-heal) so it can be
   // added to the playlist the same way as a style/tempo suggestion.
   async function handleSuggestArtist(track: TrackWithBPM, origin: "list" | "bbc") {
-    suggestSourceRef.current?.close();
-    setSuggest({ seed: track, mode: "artist", origin, progress: "Searching Deezer…", results: null, error: null });
+    return searchArtistTopTracks(track.artists[0]?.name ?? "", origin, track);
+  }
 
-    const artistName = track.artists[0]?.name ?? "";
+  // Shared by the per-track "more by this artist" button (has a real seed
+  // track) and the free-text search box's "no matches — search Deezer"
+  // fallback (no seed track at all, just typed-in text) — the latter passes
+  // a synthetic seed purely so SuggestionsCard has something to render as
+  // its header ("Popular songs by <name>").
+  async function searchArtistTopTracks(artistName: string, origin: "list" | "bbc", seedTrack?: TrackWithBPM) {
+    suggestSourceRef.current?.close();
+    const seed: TrackWithBPM = seedTrack ?? {
+      id: `search:${artistName}`,
+      name: artistName,
+      artists: [{ name: artistName }],
+      album: { name: "", images: [] },
+      duration_ms: 0,
+      uri: "",
+      bpm: 0,
+      energy: 0,
+    };
+    setSuggest({ seed, mode: "artist", origin, progress: "Searching Deezer…", results: null, error: null });
+
     try {
       // Deezer has no CORS headers, so this goes through our own server route.
       const dr = await fetch(`/api/bpm/artist-top?artist=${encodeURIComponent(artistName)}`);
@@ -2069,8 +2087,24 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
                 <div className="flex-1 min-h-0 flex flex-col">
                   {filteredTracks.length === 0 ? (
-                    <div className="p-8 text-center text-slate-500 text-sm">
-                      {singleTrackFilter ? "This track isn't in the library." : noBpmFilter ? "All tracks have BPM info 🎉" : missingFeaturesFilter ? "None of these tracks are in the library anymore." : aiDjMix ? (remixing ? "Rebuilding mix…" : "No tracks in this mix.") : "No tracks in this BPM range. Try a different zone."}
+                    <div className="p-8 text-center text-slate-500 text-sm space-y-3">
+                      <p>
+                        {searchText.trim()
+                          ? `No tracks match "${searchText.trim()}" in your library.`
+                          : singleTrackFilter ? "This track isn't in the library."
+                          : noBpmFilter ? "All tracks have BPM info 🎉"
+                          : missingFeaturesFilter ? "None of these tracks are in the library anymore."
+                          : aiDjMix ? (remixing ? "Rebuilding mix…" : "No tracks in this mix.")
+                          : "No tracks in this BPM range. Try a different zone."}
+                      </p>
+                      {searchText.trim() && (
+                        <button
+                          onClick={() => searchArtistTopTracks(searchText.trim(), "list")}
+                          className="inline-flex items-center gap-2 rounded-lg bg-blue-500/15 border border-blue-500/40 hover:bg-blue-500/25 text-blue-300 font-semibold text-xs px-4 py-1.5 transition-colors"
+                        >
+                          ☺ Search Deezer for &quot;{searchText.trim()}&quot; top songs
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <VirtualTrackList

@@ -479,6 +479,50 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [bulkDeleteProgress, setBulkDeleteProgress] = useState<{ done: number; total: number } | null>(null);
 
+  // "Added this week" — moved here from the BBC page so it lives alongside
+  // the rest of the library-management UI; collapsed by default since it's
+  // secondary to the main tracklist below.
+  const [recentTracks, setRecentTracks] = useState<TrackWithBPM[] | null>(null);
+  const [recentTracksOpen, setRecentTracksOpen] = useState(false);
+  const [recentDeletingUris, setRecentDeletingUris] = useState<Set<string>>(new Set());
+
+  function loadRecentTracks() {
+    fetch("/api/tracks/recently-added?days=7")
+      .then(r => r.json())
+      .then((d: { tracks?: { uri: string; name: string; artist: string; tempo: number | null; energy: number | null; durationMs: number }[] }) => {
+        const mapped: TrackWithBPM[] = (d.tracks ?? []).map(t => ({
+          id: t.uri.split(":").pop() ?? t.uri,
+          name: t.name,
+          artists: [{ name: t.artist }],
+          album: { name: "", images: [] },
+          duration_ms: t.durationMs,
+          uri: t.uri,
+          bpm: t.tempo != null ? Math.round(t.tempo) : 0,
+          energy: t.energy ?? 0,
+        }));
+        setRecentTracks(mapped);
+      })
+      .catch(() => setRecentTracks([]));
+  }
+
+  async function deleteRecentTrack(track: TrackWithBPM) {
+    setRecentDeletingUris(prev => new Set(prev).add(track.uri));
+    setRecentTracks(prev => prev?.filter(t => t.uri !== track.uri) ?? prev);
+    const token = await freshSpotifyToken();
+    if (token && runningPlaylist.id) {
+      fetch(`https://api.spotify.com/v1/playlists/${runningPlaylist.id}/items`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ items: [{ uri: track.uri }] }),
+      }).catch(() => {});
+    }
+    fetch("/api/tracks/delete", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ spotifyUri: track.uri }),
+    }).catch(() => {});
+  }
+
   function parseTracklistCsv(text: string): ManagedTrack[] {
     const stripped = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
     const lines = stripped.replace(/\r/g, "").split("\n").filter(Boolean);
@@ -2198,6 +2242,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     // tracks that no longer match what's actually on disk.
     if (activeTab === "tracklist" && !tracklistLoading) {
       void loadTracklist();
+      loadRecentTracks();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
@@ -4318,6 +4363,35 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     {/* ── Tab 6: Tracklist ── */}
     <div className={activeTab === "tracklist" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
+
+      {!!recentTracks?.length && (
+        <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+          <button
+            onClick={() => setRecentTracksOpen(o => !o)}
+            className="w-full flex items-center justify-between gap-4 p-5 text-left hover:bg-slate-800/40 transition-colors"
+          >
+            <h3 className="font-semibold text-slate-200">
+              🎵 Added this week <span className="text-slate-500 font-normal">({recentTracks.length})</span>
+            </h3>
+            <span className={`text-slate-500 text-sm transition-transform ${recentTracksOpen ? "rotate-180" : ""}`}>▾</span>
+          </button>
+          {recentTracksOpen && (
+            <div className="divide-y divide-slate-800/50 border-t border-white/10 px-5">
+              {recentTracks.map((track, i) => (
+                <TrackRow
+                  key={track.uri}
+                  track={track}
+                  index={i}
+                  onDelete={recentDeletingUris.has(track.uri) ? undefined : () => deleteRecentTrack(track)}
+                  onSimilar={() => router.push(`/dashboard?similar=${encodeURIComponent(track.uri)}`)}
+                  onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=style`)}
+                  onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=tempo`)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
         <div className="flex items-start justify-between gap-4 flex-wrap">
