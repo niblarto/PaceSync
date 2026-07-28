@@ -4,7 +4,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { FloatingCard } from "./FloatingCard";
 import { signOut, useSession } from "next-auth/react";
-import { freshSpotifyToken } from "@/lib/spotify-browser";
+import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
+import { SpotifyRateLimitBanner } from "./SpotifyRateLimitBanner";
 import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
@@ -510,24 +511,13 @@ export function DashboardClient({ spotifyUser }: Props) {
       const ids = batch.map(t => t.id).join(",");
       let res: Response;
       try {
-        res = await fetch(`https://api.spotify.com/v1/tracks?ids=${ids}`, {
+        res = await spotifyFetch(`https://api.spotify.com/v1/tracks?ids=${ids}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
       } catch {
         continue; // network hiccup — leave these tracks alone
       }
-      if (res.status === 429) {
-        const wait = parseInt(res.headers.get("Retry-After") ?? "5", 10);
-        await sleep((isNaN(wait) ? 5 : wait) * 1000);
-        try {
-          res = await fetch(`https://api.spotify.com/v1/tracks?ids=${ids}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-        } catch {
-          continue;
-        }
-      }
-      if (!res.ok) continue; // still failing after one retry — don't risk deleting on a bad response
+      if (!res.ok) continue; // still failing after retries — don't risk deleting on a bad response
       const data = await res.json() as { tracks?: (unknown | null)[] };
       const dead = batch.filter((_, j) => data.tracks?.[j] == null);
       for (const t of dead) {
@@ -1029,7 +1019,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       try {
         let url: string | null = "https://api.spotify.com/v1/me/playlists?limit=50";
         while (url) {
-          const res: Response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+          const res: Response = await spotifyFetch(url, { headers: { Authorization: `Bearer ${token}` } });
           if (!res.ok) break;
           const data = await res.json() as { items: { id: string; name: string }[]; next: string | null };
           const hit = data.items.find(p => p.name.toLowerCase() === TODAYS_RUN_PLAYLIST.toLowerCase());
@@ -1188,9 +1178,14 @@ export function DashboardClient({ spotifyUser }: Props) {
       const suggestions: Suggestion[] = [];
       const uriByIndex: string[] = [];
       // Sequential, one request at a time (never Promise.all) to stay under
-      // Spotify's rate limit; on a 429 back off for the server's requested
-      // Retry-After and retry that same track rather than skipping it, same
-      // pattern as the BBC import search loop (app/api/bbc/tracks/route.ts).
+      // Spotify's rate limit; spotifyFetch auto-retries a short (<=4s) 429,
+      // but returns the 429 as-is for a longer one — continuing this loop in
+      // that case would immediately fire the next track's request too,
+      // hammering Spotify further and guaranteeing every remaining track
+      // also 429s (which is what "counting down like a retry but never
+      // actually finding anything" looked like). Stop the whole search
+      // instead and surface it as an error the user can retry manually once
+      // the banner's countdown clears.
       for (let i = 0; i < topTracks.length; i++) {
         const t = topTracks[i];
         setSuggest(s => s && { ...s, progress: `Matching on Spotify… ${i + 1}/${topTracks.length}` });
@@ -1198,21 +1193,16 @@ export function DashboardClient({ spotifyUser }: Props) {
         const q = encodeURIComponent(`${t.title} ${t.artist}`);
         type SpotifySearchHit = { uri: string; name: string; artists: { name: string }[]; external_urls?: { spotify?: string } };
         let hit: SpotifySearchHit | undefined;
-        for (let attempt = 0; attempt < 3; attempt++) {
-          const sr = await fetch(
-            `https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`,
-            { headers: { Authorization: `Bearer ${token}` } },
-          );
-          if (sr.status === 429) {
-            const retryAfter = parseInt(sr.headers.get("Retry-After") ?? "5", 10) || 5;
-            setSuggest(s => s && { ...s, progress: `Rate limited by Spotify — waiting ${retryAfter}s…` });
-            await new Promise(r => setTimeout(r, retryAfter * 1000));
-            continue;
-          }
-          if (!sr.ok) break;
+        const sr = await spotifyFetch(
+          `https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (sr.status === 429) {
+          throw new Error("Rate limited by Spotify — wait for the banner to clear, then try again.");
+        }
+        if (sr.ok) {
           const sd = await sr.json() as { tracks?: { items?: SpotifySearchHit[] } };
           hit = sd.tracks?.items?.[0];
-          break;
         }
         if (!hit || existing.has(hit.uri)) continue;
         if (suggestions.some(s => s.spotifyUrl === (hit!.external_urls?.spotify ?? null))) continue;
@@ -1435,7 +1425,7 @@ export function DashboardClient({ spotifyUser }: Props) {
 
     // Remove from Spotify directly from browser (same pattern as DedupCard)
     if (token) {
-      fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
+      spotifyFetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ items: [{ uri: fullUri }] }),
@@ -1510,7 +1500,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     const token = await freshSpotifyToken();
     if (!token) throw new Error("No access token");
     for (let i = 0; i < uris.length; i += 100) {
-      const res = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
+      const res = await spotifyFetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ uris: uris.slice(i, i + 100) }),
@@ -1586,6 +1576,8 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           </div>
         </div>
       </header>
+
+      <SpotifyRateLimitBanner />
 
       <div className="max-w-[1800px] mx-auto px-4 py-8 flex-1 w-full">
         <div className={`grid grid-cols-1 gap-6 items-stretch ${
@@ -1895,6 +1887,32 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       className="shrink-0 text-xs text-slate-400 hover:text-slate-200 border border-white/10 hover:border-white/20 rounded-lg px-3 py-1.5 transition-colors"
                     >
                       Clear filter
+                    </button>
+                  )}
+
+                  {aiDjMix && (
+                    <button
+                      onClick={() => {
+                        setAiDjMix(null);
+                        setChartDismissed(false);
+                        // Same reset as clicking the "All Songs" tile — closing
+                        // the mix should return to browsing the full library,
+                        // not drop back to "no zone selected" (which hides the
+                        // results card entirely, since aiDjMix was the thing
+                        // keeping it open).
+                        setSearchText("");
+                        setPaceFilter(null);
+                        setSprintBpmFilter(null);
+                        setSimilarFilter(null);
+                        setNoBpmFilter(false);
+                        setMissingFeaturesFilter(null);
+                        setSingleTrackFilter(null);
+                        setSelectedZones([ALL_ZONE]);
+                        if (csvName) setPlaylistName(csvName);
+                      }}
+                      className="shrink-0 text-xs text-slate-400 hover:text-slate-200 border border-white/10 hover:border-white/20 rounded-lg px-3 py-1.5 transition-colors"
+                    >
+                      Close mix
                     </button>
                   )}
 

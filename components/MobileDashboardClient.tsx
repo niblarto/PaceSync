@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import type { TrackWithBPM } from "@/types";
-import { freshSpotifyToken } from "@/lib/spotify-browser";
-import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
+import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
+import { SpotifyRateLimitBanner } from "./SpotifyRateLimitBanner";
 import { TrackRow } from "./TrackRow";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
@@ -127,7 +127,6 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
   const [playedCounts, setPlayedCounts] = useState<Record<string, number>>({});
 
   const [searchText, setSearchText] = useState("");
-  const [selectedZoneNumber, setSelectedZoneNumber] = useState(0); // 0 = All Songs
   const [aiDjMix, setAiDjMix] = useState<AiDjMixState | null>(null);
   const [remixing, setRemixing] = useState(false);
   const [toppingUp, setToppingUp] = useState(false);
@@ -137,8 +136,6 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
   const [pinSaving, setPinSaving] = useState(false);
   const [pinSaved, setPinSaved] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
-
-  const zones = getDefaultZones();
 
   useEffect(() => {
     fetch("/api/playlist-csv")
@@ -186,20 +183,12 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
 
   const displayedTracks: TrackWithBPM[] = aiDjMix
     ? aiDjMix.tracks
-    : (() => {
-        const base = searchText.trim()
-          ? allTracks.filter(t => {
-              const q = searchText.trim().toLowerCase();
-              return t.name.toLowerCase().includes(q) || t.artists.some(a => a.name.toLowerCase().includes(q));
-            })
-          : selectedZoneNumber === 0
-            ? allTracks
-            : (() => {
-                const zone = zones.find(z => z.number === selectedZoneNumber);
-                return zone ? filterTracksByBPM(allTracks, zone.bpmMin, zone.bpmMax) : allTracks;
-              })();
-        return base;
-      })();
+    : searchText.trim()
+      ? allTracks.filter(t => {
+          const q = searchText.trim().toLowerCase();
+          return t.name.toLowerCase().includes(q) || t.artists.some(a => a.name.toLowerCase().includes(q));
+        })
+      : allTracks;
 
   async function handleDeleteTrack(track: TrackWithBPM) {
     const token = await freshSpotifyToken();
@@ -208,7 +197,7 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
 
     const fullUri = track.uri.startsWith("spotify:") ? track.uri : `spotify:track:${track.uri}`;
     if (token) {
-      fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
+      spotifyFetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ items: [{ uri: fullUri }] }),
@@ -225,7 +214,7 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
     const token = await freshSpotifyToken();
     if (!token) throw new Error("No access token");
     for (let i = 0; i < uris.length; i += 100) {
-      const res = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
+      const res = await spotifyFetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ uris: uris.slice(i, i + 100) }),
@@ -349,6 +338,8 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
         </div>
       </header>
 
+      <SpotifyRateLimitBanner />
+
       <div className="flex-1 flex flex-col min-h-0">
         <div className={tab === "tracks" ? "flex-1 min-h-0 flex flex-col" : "hidden"}>
           {aiDjMix && (
@@ -425,33 +416,6 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
                   </button>
                 )}
               </div>
-              {!searchText.trim() && (
-                <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-                  <button
-                    onClick={() => setSelectedZoneNumber(0)}
-                    className={`shrink-0 text-xs px-3 py-1.5 rounded-lg border transition-colors ${
-                      selectedZoneNumber === 0
-                        ? "bg-green-500/20 border-green-500 text-green-300"
-                        : "bg-slate-800/60 border-white/10 text-slate-400"
-                    }`}
-                  >
-                    All Songs
-                  </button>
-                  {zones.map(z => (
-                    <button
-                      key={z.number}
-                      onClick={() => setSelectedZoneNumber(z.number)}
-                      className={`shrink-0 text-xs px-3 py-1.5 rounded-lg border transition-colors whitespace-nowrap ${
-                        selectedZoneNumber === z.number
-                          ? "bg-green-500/20 border-green-500 text-green-300"
-                          : "bg-slate-800/60 border-white/10 text-slate-400"
-                      }`}
-                    >
-                      Zone {z.number} · {z.bpmMin}-{z.bpmMax}
-                    </button>
-                  ))}
-                </div>
-              )}
               <p className="text-xs text-slate-500">
                 {displayedTracks.length} of {allTracks.length} tracks
               </p>

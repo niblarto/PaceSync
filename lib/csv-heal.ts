@@ -3,6 +3,7 @@ import path from "path";
 import { activeCsvPath } from "@/lib/running-playlist-config";
 import { parseCsvRow, csvEscape, isBlank } from "@/lib/csv-store";
 import { deezerDurationMs, deezerGenres, fetchFeatures, lastfmDurationMs, sleep, TrackFeatures } from "@/lib/track-enrich";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
 
 // Live progress for the Settings page to poll — a heal sweep on a large
 // library (thousands of rows) can run for a long time, and previously gave
@@ -39,21 +40,9 @@ async function writeProgress(p: HealProgress): Promise<void> {
 // sweep entirely, re-request immediately, eat another 429, and reset the
 // clock to a brand-new Retry-After each time (the "22:44:36" clear time
 // kept drifting later on every retriggered sweep instead of counting down).
-// Persisted to disk (not just an in-memory module var) so it survives a
-// redeploy/restart mid-cooldown too.
-const RATE_LIMIT_PATH = path.join(process.cwd(), "spotify-rate-limit.json");
-
-async function getSpotifyBlockedUntil(): Promise<string | null> {
-  try {
-    const raw = JSON.parse(await readFile(RATE_LIMIT_PATH, "utf8")) as { until?: string };
-    if (raw.until && new Date(raw.until).getTime() > Date.now()) return raw.until;
-  } catch { /* no file yet, or expired */ }
-  return null;
-}
-
-async function setSpotifyBlockedUntil(until: string): Promise<void> {
-  try { await writeFile(RATE_LIMIT_PATH, JSON.stringify({ until }), "utf8"); } catch { /* best-effort */ }
-}
+// Shared with the dashboard's spotifyFetch proxy (lib/spotify-rate-limit.ts) —
+// same persisted-to-disk sentinel, so a rate limit hit by one is honored by
+// the other instead of each keeping its own clock.
 
 export async function getHealProgress(): Promise<HealProgress | null> {
   try {
@@ -102,14 +91,6 @@ const FEATURE_COLS: Array<[string, keyof TrackFeatures]> = [
   ["Tempo", "tempo"], ["Key", "key"], ["Mode", "mode"],
   ["Energy", "energy"], ["Danceability", "danceability"], ["Valence", "valence"],
 ];
-
-function parseRetryAfter(raw: string): number {
-  const delta = parseInt(raw, 10);
-  if (!isNaN(delta)) return delta;
-  const date = new Date(raw).getTime();
-  if (!isNaN(date)) return Math.max(0, Math.ceil((date - Date.now()) / 1000));
-  return 30;
-}
 
 async function spotifyAppToken(): Promise<string | null> {
   const id = process.env.SPOTIFY_CLIENT_ID;
