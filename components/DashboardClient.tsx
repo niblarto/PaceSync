@@ -1161,7 +1161,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   // contains."
   function dedupeTimeline(timeline: AiDjTimeline, allowedUris?: Set<string>): AiDjTimeline {
     const seen = new Set<string>();
-    return timeline.map(seg => ({
+    const filtered = timeline.map(seg => ({
       ...seg,
       tracks: seg.tracks.filter(t => {
         if (allowedUris && !allowedUris.has(t.uri)) return false;
@@ -1170,6 +1170,31 @@ export function DashboardClient({ spotifyUser }: Props) {
         return true;
       }),
     })).filter(seg => seg.tracks.length > 0);
+    // Every remaining track's startsAt was computed against the ORIGINAL
+    // (pre-filter) track order — removing any track upstream of it (a
+    // duplicate, or one excluded by allowedUris) leaves every later track's
+    // stored startsAt too early, which is what the route-map overlay
+    // (RouteMapLightbox, elapsed-time-based highlighting) actually plots
+    // against. Recompute every startsAt fresh from cumulative duration in
+    // final play order so a pinned mix's timings are always internally
+    // consistent, regardless of what got filtered out above.
+    const toSec = (mmss: string) => {
+      const p = mmss.split(":").map(Number);
+      return p.some(isNaN) ? 0 : p.reduce((acc, x) => acc * 60 + x, 0);
+    };
+    const toMmss = (sec: number) => {
+      const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+      return `${m}:${String(s).padStart(2, "0")}`;
+    };
+    let cursorSec = 0;
+    return filtered.map(seg => ({
+      ...seg,
+      tracks: seg.tracks.map(t => {
+        const startsAt = toMmss(cursorSec);
+        cursorSec += t.durationSec ?? toSec(t.startsAt);
+        return { ...t, startsAt };
+      }),
+    }));
   }
 
   async function pinMix(mix: { date: string; workoutTitle: string; totalSec: number; timeline: AiDjTimeline; startedAtMs?: number; allowedUris?: Set<string> }, silent = false) {
@@ -1278,7 +1303,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       // Runna Summary card then shows that stale tracklist instead.
       const todaysRunDate = aiDjMix?.date ?? new Date().toISOString().slice(0, 10);
       const timeline: AiDjTimeline = aiDjMix?.timeline?.length
-        ? dedupeTimeline(aiDjMix.timeline)
+        ? dedupeTimeline(aiDjMix.timeline, new Set(aiDjMix.tracks.map(t => t.uri)))
         : [{
             segment: "Today's Run",
             targetBpm: null,
@@ -2481,6 +2506,9 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               onTrackClick={jumpToTrack}
               onMissingTracks={showMissingTracks}
               onShowCandidates={showSegmentCandidates}
+              onUnpinned={(date, title) => {
+                if (aiDjMix?.date === date && aiDjMix.workoutTitle === title) setPinSaved(false);
+              }}
               // Pace-chip buttons are a shortcut into the zones column's pace
               // filter, so they're pointless (and shouldn't render at all —
               // RunnaScheduleCard gates the chips on this prop being set)

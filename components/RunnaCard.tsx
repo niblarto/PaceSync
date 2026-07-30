@@ -699,6 +699,12 @@ interface RunnaScheduleProps {
       Pro splits, since their displayed segment text no longer lines up
       1:1 with what was actually mixed. */
   onShowCandidates?: (date: string, title: string, segmentIndex: number, segmentLabel: string) => void;
+  /** Called when this card's own "Unpin" button removes a workout's pin —
+      lets the parent drop its "Pinned!" button state if that workout's mix
+      happens to be the one currently loaded into the main track list (the
+      parent owns that state and has no other way to learn the pin it's
+      showing was just removed from here). */
+  onUnpinned?: (date: string, title: string) => void;
   /** Whether to show the "Runs at the distance"/"Courses close to this
       distance" chip rows that open the Leaflet route-map lightbox. Defaults
       to true (desktop). The route map's hover-to-highlight track panel and
@@ -877,7 +883,7 @@ function courseMatchesDate(name: string, date: string): boolean {
 }
 
 export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaScheduleProps>(function RunnaScheduleCard(
-  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0, onTrackClick, onMissingTracks, showRouteMaps = true, onShowCandidates }: RunnaScheduleProps = {},
+  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0, onTrackClick, onMissingTracks, showRouteMaps = true, onShowCandidates, onUnpinned }: RunnaScheduleProps = {},
   ref,
 ) {
   const { workouts: allWorkouts, pastRuns, loading, error } = useRunnaData();
@@ -959,6 +965,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
         body: JSON.stringify({ date, title }),
       });
       setMixSnapshots(s => ({ ...s, [date]: null }));
+      onUnpinned?.(date, title);
     } finally {
       setUnpinningDate(null);
     }

@@ -83,6 +83,41 @@ export async function getPinnedMix(date: string, title: string): Promise<PinnedM
   return serialize(() => loadAll()[workoutKey(date, title)] ?? null);
 }
 
+// Normalizes a timeline before it's ever written: dedupes tracks by uri
+// (a track can legitimately appear in more than one segment — the mixer
+// doesn't hard-exclude a track once placed) and recomputes every
+// remaining track's startsAt from scratch in final play order. Applied
+// unconditionally inside setPinnedMix so every write path is normalized
+// here once, rather than trusting each caller to have already deduped and
+// retimed its own timeline (a client-side dedupeTimeline existed for this
+// but a route re-pinning a stale/raw timeline — e.g. "Save to Today's
+// Run" sending aiDjMix.timeline as-is — bypassed it, leaving every track
+// after a removed one with a stale, too-early startsAt that then fed the
+// wrong offsets into the route-map's song-position overlay).
+function dedupeAndRetimeTimeline(timeline: AiDjMixResponse["timeline"]): AiDjMixResponse["timeline"] {
+  const seen = new Set<string>();
+  const deduped = timeline
+    .map(seg => ({ ...seg, tracks: seg.tracks.filter(t => (seen.has(t.uri) ? false : (seen.add(t.uri), true))) }))
+    .filter(seg => seg.tracks.length > 0);
+  const toSec = (mmss: string) => {
+    const p = mmss.split(":").map(Number);
+    return p.some(isNaN) ? 0 : p.reduce((acc, x) => acc * 60 + x, 0);
+  };
+  const toMmss = (sec: number) => {
+    const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+  };
+  let cursorSec = 0;
+  return deduped.map(seg => ({
+    ...seg,
+    tracks: seg.tracks.map(t => {
+      const startsAt = toMmss(cursorSec);
+      cursorSec += t.durationSec ?? toSec(t.startsAt);
+      return { ...t, startsAt };
+    }),
+  }));
+}
+
 // Rejects (no-op, returns false) a write whose startedAtMs is older than
 // either the currently-stored pin's startedAtMs or the workout's delete
 // cursor (set by removePinnedMix) — closes the race where an
@@ -100,7 +135,7 @@ export async function setPinnedMix(entry: PinnedMix): Promise<boolean> {
       const deletedAt = loadDeleteCursors()[key];
       if (deletedAt !== undefined && deletedAt > entry.startedAtMs) return false;
     }
-    all[key] = entry;
+    all[key] = { ...entry, timeline: dedupeAndRetimeTimeline(entry.timeline) };
     saveAll(all);
     return true;
   });
