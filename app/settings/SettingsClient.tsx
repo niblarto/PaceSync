@@ -288,6 +288,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   } | null>(null);
   const [coverageLoaded, setCoverageLoaded] = useState(false);
   const [expandedBucket, setExpandedBucket] = useState<number | null>(null);
+  const [showNeverUsable, setShowNeverUsable] = useState(false);
   const loadCoverage = useCallback(() => {
     fetch("/api/settings/library-coverage")
       .then(r => r.json())
@@ -3061,7 +3062,17 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   <p className="text-[10px] text-slate-500 uppercase tracking-wide">Presentable</p>
                 </div>
                 <div className="rounded-lg bg-red-500/10 border border-red-500/20 px-2 py-2 space-y-1">
-                  <p className="text-lg font-semibold text-red-400">{coverage.outOfRangeTracks}</p>
+                  {coverage.outOfRangeTracks > 0 ? (
+                    <button
+                      onClick={() => setShowNeverUsable(v => !v)}
+                      className="w-full text-lg font-semibold text-red-400 hover:text-red-300 transition-colors"
+                      title="Click to see these tracks"
+                    >
+                      {coverage.outOfRangeTracks}
+                    </button>
+                  ) : (
+                    <p className="text-lg font-semibold text-red-400">{coverage.outOfRangeTracks}</p>
+                  )}
                   <p className="text-[10px] text-slate-500 uppercase tracking-wide">Never usable</p>
                   {coverage.outOfRangeTracks > 0 && (
                     <button
@@ -3080,6 +3091,17 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               </div>
               {coverageDeleteMsg && <p className="text-xs text-green-400">{coverageDeleteMsg}</p>}
               {coverageDeleteError && <p className="text-xs text-red-400">{coverageDeleteError}</p>}
+
+              {showNeverUsable && (
+                <div className="rounded-lg border border-red-500/20 divide-y divide-white/5 font-mono text-[11px] max-h-60 overflow-y-auto no-scrollbar">
+                  {coverage.buckets.flatMap(b => b.tracks.filter(t => !t.inRange).map(t => ({ ...t, bpm: b.bpm }))).map(t => (
+                    <div key={t.uri} className="px-3 py-1 flex items-center justify-between gap-3">
+                      <span className="text-slate-300 truncate">{t.name} — <span className="text-slate-500">{t.artist}</span></span>
+                      <span className="text-slate-600 shrink-0">{t.bpm} BPM</span>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs max-h-80 overflow-y-auto no-scrollbar">
                 {coverage.buckets.map(b => {
