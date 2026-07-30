@@ -259,18 +259,21 @@ export async function GET(req: NextRequest) {
 
         send({ type: "start", total: bbcTracks.length, programName, episodePid, airDate });
 
-        const preflightBlocked = await getSpotifyBlockedUntil();
-        if (preflightBlocked) {
-          const waitSec = Math.max(0, Math.ceil((new Date(preflightBlocked).getTime() - Date.now()) / 1000));
-          if (waitSec > 0) {
-            console.log(`[bbc/tracks] Spotify rate-limited, waiting ${waitSec}s before starting searches`);
-            send({ type: "rate-limited", waitSec });
-            await sleep(waitSec * 1000);
-          }
-        }
-
         const spotifyResults: CacheEntry[] = [];
         let retryAfter: number | null = null;
+
+        // Already rate-limited from an earlier request — this can be a very
+        // long wait (Spotify's app-level throttle can run 20+ hours), so
+        // don't block this request on it: skip every uncached track
+        // immediately (same as a 429 hit mid-run below) and let the "done"
+        // event's retryAfter tell the UI exactly when to try again, instead
+        // of the connection just hanging until it times out.
+        const preflightBlocked = await getSpotifyBlockedUntil();
+        if (preflightBlocked) {
+          retryAfter = Math.max(0, Math.ceil((new Date(preflightBlocked).getTime() - Date.now()) / 1000));
+          console.log(`[bbc/tracks] Spotify already rate-limited (${retryAfter}s left) — skipping searches`);
+          send({ type: "rate-limited", waitSec: retryAfter });
+        }
         const initialCacheSize = spotifyCache.size;
         let cacheHits = 0;
         let newHits = 0;
