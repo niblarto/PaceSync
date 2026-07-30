@@ -32,6 +32,31 @@ function usePaceSpm(enabled: boolean): PaceSpmRow[] {
   return rows;
 }
 
+// Mirrors ai_dj/workout.py's _is_segment_line: true for actual workout
+// steps, false for card header lines like "Tempo • 4.5mi • 35m - 45m"
+// (label • label • label, no instruction). The Python mixer filters these
+// out before assigning segment indices, but w.segments (parsed straight
+// from the ICS DESCRIPTION) keeps them — so any index into w.segments used
+// to match a mixer progress event must skip these lines the same way, or
+// the indices drift by however many header lines precede it.
+const PACE_RE = /\d+:\d{2}\/mi/;
+const REST_RE = /\d+\s*(?:min|s)\s*(?:walking\s*)?rest/i;
+function isMixedSegmentLine(line: string): boolean {
+  if ((line.match(/•/g) ?? []).length >= 2) return false;
+  const stripped = line.replace(/^•+/, "").trim();
+  if (stripped.includes("•")) return false;
+  const t = stripped.toLowerCase();
+  return (
+    PACE_RE.test(stripped)
+    || REST_RE.test(stripped)
+    || t.includes(" at ")
+    || t.includes("warm up") || t.includes("warmup")
+    || t.includes("cool down") || t.includes("cooldown")
+    || t.includes("conversational")
+    || t.includes("strength")
+  );
+}
+
 function parsePacesFromSegments(segments: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -1337,24 +1362,31 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                       </p>
                     )}
                     <div className="space-y-0">
-                      {w.segments.map((seg, i) => {
+                      {(() => {
                         // Saved Pace Pro splits replace the mixed segments
                         // entirely for this race (see mixSegmentsFor) — the
                         // displayed text/index here no longer lines up with
                         // what was actually sent to the mixer, so skip the
                         // candidates link rather than show the wrong pool.
-                        const clickable = !!onShowCandidates && !(w.type === "race" && raceSplits[w.date]?.splits.length);
-                        return (
-                          <p
-                            key={i}
-                            onClick={clickable ? () => onShowCandidates!(w.date, w.title, i, seg) : undefined}
-                            className={`text-xs text-slate-400 leading-relaxed ${seg.trim().startsWith("•") ? "pl-5" : "pt-0.5 first:pt-0"} ${clickable ? "cursor-pointer hover:text-slate-200 hover:underline underline-offset-2" : ""}`}
-                            title={clickable ? "View candidate tracks the mixer chose from for this segment" : undefined}
-                          >
-                            {seg}
-                          </p>
-                        );
-                      })}
+                        const canLink = !!onShowCandidates && !(w.type === "race" && raceSplits[w.date]?.splits.length);
+                        let mixerIdx = 0;
+                        return w.segments.map((seg, i) => {
+                          const isMixed = isMixedSegmentLine(seg);
+                          const idx = mixerIdx;
+                          if (isMixed) mixerIdx++;
+                          const clickable = canLink && isMixed;
+                          return (
+                            <p
+                              key={i}
+                              onClick={clickable ? () => onShowCandidates!(w.date, w.title, idx, seg) : undefined}
+                              className={`text-xs text-slate-400 leading-relaxed ${seg.trim().startsWith("•") ? "pl-5" : "pt-0.5 first:pt-0"} ${clickable ? "cursor-pointer hover:text-slate-200 hover:underline underline-offset-2" : ""}`}
+                              title={clickable ? "View candidate tracks the mixer chose from for this segment" : undefined}
+                            >
+                              {seg}
+                            </p>
+                          );
+                        });
+                      })()}
                     </div>
                     {w.appUrl && (
                       <a
