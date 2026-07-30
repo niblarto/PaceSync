@@ -1532,9 +1532,25 @@ export function DashboardClient({ spotifyUser }: Props) {
   // extraPlayCounts, without excluding it outright.
   function removeTrackFromMix(track: TrackWithBPM) {
     setRemovedFromMix(prev => ({ ...prev, [track.uri]: track }));
-    setAiDjMix(prev => (prev && prev.tracks.some(t => t.uri === track.uri))
-      ? { ...prev, tracks: prev.tracks.filter(t => t.uri !== track.uri), stale: true }
-      : prev);
+    let hadTrack = false;
+    setAiDjMix(prev => {
+      if (!prev || !prev.tracks.some(t => t.uri === track.uri)) return prev;
+      hadTrack = true;
+      return { ...prev, tracks: prev.tracks.filter(t => t.uri !== track.uri), stale: true };
+    });
+    if (!hadTrack) return;
+    // The pinned mix (if any) is exactly this now-changed tracklist — it no
+    // longer matches reality, so unpin THIS workout specifically (not every
+    // pin containing the track library-wide, unlike a real delete, since the
+    // track itself still legitimately belongs in other workouts' mixes).
+    setPinSaved(false);
+    fetch("/api/ai-dj/pin", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date: aiDjMix!.date, title: aiDjMix!.workoutTitle }),
+    })
+      .then(() => setMixSavedNonce(n => n + 1))
+      .catch(() => {});
   }
 
   async function handleDeleteTrack(track: TrackWithBPM) {
