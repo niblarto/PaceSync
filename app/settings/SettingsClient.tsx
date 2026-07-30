@@ -532,6 +532,54 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       .catch(() => setRecentTracks([]));
   }
 
+  // Tracks missing data (BPM/duration/genres) the AI DJ mixer needs — same
+  // scan the mix-build's pre-build warning and the dashboard's persistent
+  // banner both use, exposed here so gaps can be reviewed/deleted without
+  // having to build a mix first. Collapsed by default, same as above.
+  interface IncompleteManagedTrack extends TrackWithBPM { missing: string[]; fields: Record<string, boolean> }
+  const [incompleteTracks, setIncompleteTracks] = useState<IncompleteManagedTrack[] | null>(null);
+  const [incompleteTracksOpen, setIncompleteTracksOpen] = useState(false);
+  const [incompleteDeletingUris, setIncompleteDeletingUris] = useState<Set<string>>(new Set());
+
+  function loadIncompleteTracks() {
+    fetch("/api/settings/incomplete-tracks")
+      .then(r => r.json())
+      .then((d: { tracks?: { uri: string; name: string; artist: string; missing: string[]; fields: Record<string, boolean> }[] }) => {
+        const mapped: IncompleteManagedTrack[] = (d.tracks ?? []).map(t => ({
+          id: t.uri.split(":").pop() ?? t.uri,
+          name: t.name,
+          artists: [{ name: t.artist }],
+          album: { name: "", images: [] },
+          duration_ms: 0,
+          uri: t.uri,
+          bpm: 0,
+          energy: 0,
+          missing: t.missing,
+          fields: t.fields,
+        }));
+        setIncompleteTracks(mapped);
+      })
+      .catch(() => setIncompleteTracks([]));
+  }
+
+  async function deleteIncompleteTrack(track: IncompleteManagedTrack) {
+    setIncompleteDeletingUris(prev => new Set(prev).add(track.uri));
+    setIncompleteTracks(prev => prev?.filter(t => t.uri !== track.uri) ?? prev);
+    const token = await freshSpotifyToken();
+    if (token && runningPlaylist.id) {
+      fetch(`https://api.spotify.com/v1/playlists/${runningPlaylist.id}/items`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ items: [{ uri: track.uri }] }),
+      }).catch(() => {});
+    }
+    fetch("/api/tracks/delete", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ spotifyUri: track.uri }),
+    }).catch(() => {});
+  }
+
   async function deleteRecentTrack(track: TrackWithBPM) {
     setRecentDeletingUris(prev => new Set(prev).add(track.uri));
     setRecentTracks(prev => prev?.filter(t => t.uri !== track.uri) ?? prev);
@@ -1397,16 +1445,27 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // a running sweep finishes so the numbers reflect what actually got
   // healed instead of the stale pre-sweep snapshot from when the button
   // was clicked.
+  const [spotifyBlockedUntil, setSpotifyBlockedUntil] = useState<string | null>(null);
+
   const fetchHealStatusSnapshot = useCallback(async () => {
     try {
       const res = await fetch("/api/settings/heal-now-status");
       if (!res.ok) return;
-      const data = await res.json() as { status?: typeof healStatus };
+      const data = await res.json() as { status?: typeof healStatus; spotifyBlockedUntil?: string | null };
       if (data.status) setHealStatus(data.status);
+      setSpotifyBlockedUntil(data.spotifyBlockedUntil ?? null);
     } catch { /* best-effort */ }
   }, []);
 
-  useEffect(() => { fetchHealStatusSnapshot(); }, [fetchHealStatusSnapshot]);
+  useEffect(() => {
+    fetchHealStatusSnapshot();
+    // Also poll periodically so an active Spotify cooldown's countdown/
+    // expiry is picked up without needing a sweep to run or the page to
+    // reload — same "always current" expectation as the dashboard's own
+    // Spotify rate-limit banner.
+    const id = setInterval(fetchHealStatusSnapshot, 60_000);
+    return () => clearInterval(id);
+  }, [fetchHealStatusSnapshot]);
 
   const wasRunningRef = useRef(false);
 
@@ -1422,10 +1481,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           wasRunningRef.current = true;
           healTimerRef.current = setTimeout(fetchHealStatus, 3_000);
         } else if (wasRunningRef.current) {
-          // Sweep just finished — refresh the column-blank snapshot so it
-          // shows post-heal numbers instead of the pre-heal click-time ones.
+          // Sweep just finished — refresh the column-blank snapshot and the
+          // per-track "errors" list so both show post-heal numbers instead
+          // of the pre-heal click-time ones.
           wasRunningRef.current = false;
           fetchHealStatusSnapshot();
+          loadIncompleteTracks();
         }
       }
     } catch { /* stop polling on error — next save will restart it */ }
@@ -2317,6 +2378,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     if (activeTab === "tracklist" && !tracklistLoading) {
       void loadTracklist();
       loadRecentTracks();
+      loadIncompleteTracks();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
@@ -4529,6 +4591,69 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=tempo`)}
                 />
               ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!!incompleteTracks?.length && (
+        <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+          <button
+            onClick={() => setIncompleteTracksOpen(o => !o)}
+            className="w-full flex items-center justify-between gap-4 p-5 text-left hover:bg-slate-800/40 transition-colors"
+          >
+            <div>
+              <h3 className="font-semibold text-slate-200">
+                ⚠ Tracks with errors <span className="text-slate-500 font-normal">({incompleteTracks.length})</span>
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Missing BPM, duration, or genre data — excluded from AI DJ mixes until fixed.
+              </p>
+              {spotifyBlockedUntil && new Date(spotifyBlockedUntil).getTime() > Date.now() && (
+                <p className="text-xs text-amber-400 mt-0.5">
+                  ⚠ Spotify rate limit active — clears {new Date(spotifyBlockedUntil).toLocaleTimeString()}
+                </p>
+              )}
+            </div>
+            <span className={`text-slate-500 text-sm shrink-0 transition-transform ${incompleteTracksOpen ? "rotate-180" : ""}`}>▾</span>
+          </button>
+          {incompleteTracksOpen && (
+            <div className="border-t border-white/10">
+              <div className="px-5 py-3 flex items-center justify-between gap-3 border-b border-white/10">
+                <p className="text-xs text-slate-500">
+                  {healProgress?.running
+                    ? `Healing… ${healProgress.current}/${healProgress.total}`
+                    : "Backfills BPM/duration/genres from Spotify/Deezer/Last.fm where possible."}
+                </p>
+                <button
+                  onClick={healNow}
+                  disabled={!!healProgress?.running}
+                  className="shrink-0 inline-flex items-center gap-2 rounded-lg bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 text-amber-300 font-medium text-xs px-3 py-1.5 transition-colors disabled:opacity-40"
+                >
+                  {healProgress?.running ? "Healing…" : `Heal all ${incompleteTracks.length} tracks`}
+                </button>
+              </div>
+              <div className="divide-y divide-slate-800/50 px-5">
+                {incompleteTracks.map((track, i) => (
+                  <div key={track.uri} className="py-1.5">
+                    <TrackRow
+                      track={track}
+                      index={i}
+                      onDelete={incompleteDeletingUris.has(track.uri) ? undefined : () => deleteIncompleteTrack(track)}
+                      onSimilar={() => router.push(`/dashboard?similar=${encodeURIComponent(track.uri)}`)}
+                      onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=style`)}
+                      onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=tempo`)}
+                    />
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 pl-3 -mt-1 pb-2">
+                      {Object.entries(track.fields).map(([field, ok]) => (
+                        <span key={field} className={`text-xs flex items-center gap-1 ${ok ? "text-green-400/80" : "text-red-400"}`}>
+                          {ok ? "✓" : "✗"} {field}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>

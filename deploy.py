@@ -87,6 +87,7 @@ FILES = [
     ('app/api/settings/heal-status/route.ts',     'app/api/settings/heal-status/route.ts'),
     ('app/api/settings/heal-now/route.ts',        'app/api/settings/heal-now/route.ts'),
     ('app/api/settings/heal-now-status/route.ts', 'app/api/settings/heal-now-status/route.ts'),
+    ('app/api/settings/incomplete-tracks/route.ts', 'app/api/settings/incomplete-tracks/route.ts'),
     ('app/api/settings/heal-cancel/route.ts',     'app/api/settings/heal-cancel/route.ts'),
     ('app/api/settings/active-tracks/route.ts',   'app/api/settings/active-tracks/route.ts'),
     ('app/api/settings/deleted-tracks/route.ts',  'app/api/settings/deleted-tracks/route.ts'),

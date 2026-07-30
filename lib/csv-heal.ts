@@ -177,11 +177,21 @@ export interface IncompleteTrack {
   name: string;
   artist: string;
   missing: string[]; // column names with no value
+  // Every watched column's satisfied (true) / missing (false) state, for a
+  // per-field tick/cross display — includes columns that ARE present, not
+  // just the ones in `missing`, so a UI can render the full satisfied-vs-
+  // missing picture per track rather than only the gaps.
+  fields: Record<string, boolean>;
 }
 
-// Read-only scan: which rows are missing data the AI DJ needs? Used to warn
-// before a mix build (the mixer excludes these rows rather than crashing).
-export async function scanActiveCsv(): Promise<{ checked: number; incomplete: IncompleteTrack[] }> {
+// Shared by scanActiveCsv (mix-affecting fields only) and scanActiveCsvAll
+// (every field the heal sweep tracks, including genres) — watched controls
+// which columns count as "missing". includeMissingUri additionally reports
+// rows with no Track URI at all (scanActiveCsv's existing callers only
+// ever expected rows that HAVE a uri, so that behavior is preserved by
+// default — scanActiveCsvAll opts in since it's meant to show every kind
+// of gap, URI included).
+async function scanActiveCsvWith(watched: string[], includeMissingUri = false): Promise<{ checked: number; incomplete: IncompleteTrack[] }> {
   const csv = await readFile(activeCsvPath(), "utf8");
   const lines = csv.split("\n");
   const headers = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim());
@@ -189,7 +199,6 @@ export async function scanActiveCsv(): Promise<{ checked: number; incomplete: In
   const idxUri = col("Track URI");
   const idxName = col("Track Name");
   const idxArtist = col("Artist Name(s)");
-  const watched = ["Duration (ms)", ...FEATURE_COLS.map(([h]) => h)];
   const incomplete: IncompleteTrack[] = [];
   let checked = 0;
   if (idxUri === -1) return { checked, incomplete };
@@ -197,21 +206,56 @@ export async function scanActiveCsv(): Promise<{ checked: number; incomplete: In
     if (!lines[i].trim()) continue;
     checked++;
     const row = parseCsvRow(lines[i]);
-    if (!row[idxUri]?.trim()) continue;
-    const missing = watched.filter(h => {
+    const hasUri = !!row[idxUri]?.trim();
+    if (!hasUri) {
+      if (includeMissingUri) {
+        incomplete.push({
+          uri: `row-${i}`,
+          name: row[idxName]?.trim() || `Row ${i}`,
+          artist: row[idxArtist]?.trim() ?? "",
+          missing: ["Track URI"],
+          fields: { "Track URI": false },
+        });
+      }
+      continue;
+    }
+    const fields: Record<string, boolean> = { "Track URI": true };
+    const missing: string[] = [];
+    for (const h of watched) {
       const idx = col(h);
-      return idx !== -1 && isBlank(row[idx]);
-    });
+      const present = idx !== -1 && !isBlank(row[idx]);
+      fields[h] = present;
+      if (!present) missing.push(h);
+    }
     if (missing.length > 0) {
       incomplete.push({
         uri: row[idxUri].trim(),
         name: row[idxName]?.trim() || row[idxUri].trim(),
         artist: row[idxArtist]?.trim() ?? "",
         missing,
+        fields,
       });
     }
   }
   return { checked, incomplete };
+}
+
+// Read-only scan: which rows are missing data the AI DJ needs? Used to warn
+// before a mix build (the mixer excludes these rows rather than crashing).
+// Deliberately excludes "Genres" — it doesn't affect mix-building, so a
+// genre-only gap shouldn't block/warn about a build. See scanActiveCsvAll
+// for a scan that also reports genre gaps (e.g. Settings' "Tracks with
+// errors" section, which is about library completeness generally, not just
+// what the mixer currently cares about).
+export async function scanActiveCsv(): Promise<{ checked: number; incomplete: IncompleteTrack[] }> {
+  return scanActiveCsvWith(["Duration (ms)", ...FEATURE_COLS.map(([h]) => h)]);
+}
+
+// Same as scanActiveCsv but also flags rows missing "Genres" and rows with
+// no Track URI at all, for surfacing every kind of incompleteness the heal
+// sweep tracks, not just the subset that excludes a track from mix-building.
+export async function scanActiveCsvAll(): Promise<{ checked: number; incomplete: IncompleteTrack[] }> {
+  return scanActiveCsvWith(["Duration (ms)", "Genres", ...FEATURE_COLS.map(([h]) => h)], true);
 }
 
 export interface CsvStatus {
