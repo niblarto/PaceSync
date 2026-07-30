@@ -180,6 +180,7 @@ FILES = [
     ('app/bbc/page.tsx',                          'app/bbc/page.tsx'),
     ('components/DedupCard.tsx',                  'components/DedupCard.tsx'),
     ('components/SpotifyRateLimitBanner.tsx',     'components/SpotifyRateLimitBanner.tsx'),
+    ('components/MissingDataBanner.tsx',          'components/MissingDataBanner.tsx'),
     ('components/DashboardClient.tsx',            'components/DashboardClient.tsx'),
     ('components/MobileDashboardClient.tsx',      'components/MobileDashboardClient.tsx'),
     ('components/SignInButton.tsx',               'components/SignInButton.tsx'),

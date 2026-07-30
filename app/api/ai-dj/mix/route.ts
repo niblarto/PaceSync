@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { buildAiDjMix } from "@/lib/ai-dj-mix";
-import { healActiveCsv, scanActiveCsv } from "@/lib/csv-heal";
+import { scanActiveCsv } from "@/lib/csv-heal";
 import { getRecentBuildUris, recordMixBuild } from "@/lib/recent-mix-builds";
 import { setMixCandidates } from "@/lib/mix-candidates";
 
@@ -40,24 +40,20 @@ export async function POST(req: NextRequest) {
         // Padding comment flushes past browsers' 1 KB SSE buffer
         controller.enqueue(encoder.encode(`: ${"x".repeat(1024)}\n\n`));
 
-        // Library rows missing data (Duration/Tempo/…) get excluded from the
-        // mix pool — try to heal them first, then warn about whatever's left
-        // so incomplete tracks never disappear silently.
+        // Library rows missing data (Duration/Tempo/…) are excluded from the
+        // mix pool — this is a local, read-only scan (never touches Spotify;
+        // fixing gaps is a deliberate Settings -> "Heal now" action), just
+        // warns so incomplete tracks never disappear silently.
         try {
-          if ((await scanActiveCsv()).incomplete.length > 0) {
-            send({ type: "progress", current: 0, total: 1, segment: "Fixing missing track data…" });
-            await healActiveCsv();
-            const { incomplete } = await scanActiveCsv();
-            if (incomplete.length > 0) {
-              console.warn(`[ai-dj] ${incomplete.length} tracks still missing data after heal`);
-              send({
-                type: "warning",
-                count: incomplete.length,
-                tracks: incomplete.slice(0, 8).map(t => `${t.name}${t.artist ? ` — ${t.artist}` : ""}`),
-                uris: incomplete.map(t => t.uri),
-                fields: Array.from(new Set(incomplete.flatMap(t => t.missing))),
-              });
-            }
+          const { incomplete } = await scanActiveCsv();
+          if (incomplete.length > 0) {
+            send({
+              type: "warning",
+              count: incomplete.length,
+              tracks: incomplete.slice(0, 8).map(t => `${t.name}${t.artist ? ` — ${t.artist}` : ""}`),
+              uris: incomplete.map(t => t.uri),
+              fields: Array.from(new Set(incomplete.flatMap(t => t.missing))),
+            });
           }
         } catch (e) {
           console.warn("[ai-dj] pre-mix CSV scan failed:", e); // never block the mix

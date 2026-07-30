@@ -8,7 +8,6 @@ import { readFile } from "fs/promises";
 import { join } from "path";
 import { spawn } from "child_process";
 import { activeCsvPath } from "@/lib/running-playlist-config";
-import { healActiveCsv } from "@/lib/csv-heal";
 
 // The AI DJ service may run a local LLM per workout segment — allow it time.
 const MIX_TIMEOUT_MS = 180_000;
@@ -149,12 +148,10 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
     return { ok: false, error: "segments required" };
   }
 
-  // Backfill any rows missing Duration/BPM data before reading the library —
-  // incomplete rows are excluded from the mix pool, so heal them while we can.
-  // (No-op when the CSV is complete; the /api/ai-dj/mix route scans and warns
-  // about anything that couldn't be healed.)
-  try { await healActiveCsv(); } catch { /* never block the mix */ }
-
+  // Rows missing Duration/BPM data are excluded from the mix pool — the mix
+  // build is local/CSV-only and never touches Spotify itself; fixing gaps
+  // is a deliberate Settings -> "Heal now" action, and /api/ai-dj/mix scans
+  // and warns about anything still incomplete.
   let csv: string;
   try {
     csv = await readFile(activeCsvPath(), "utf8");
@@ -314,8 +311,6 @@ export async function buildAiDjFlowMix(title: string, trackUris: string[], onPro
   if (!trackUris?.length) {
     return { ok: false, error: "No tracks to mix" };
   }
-
-  try { await healActiveCsv(); } catch { /* never block the mix */ }
 
   let csv: string;
   try {

@@ -6,6 +6,7 @@ import { signOut, useSession } from "next-auth/react";
 import type { TrackWithBPM } from "@/types";
 import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import { SpotifyRateLimitBanner } from "./SpotifyRateLimitBanner";
+import { MissingDataBanner } from "./MissingDataBanner";
 import { TrackRow } from "./TrackRow";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
@@ -351,6 +352,7 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
       </header>
 
       <SpotifyRateLimitBanner />
+      <MissingDataBanner />
 
       <div className="flex-1 flex flex-col min-h-0">
         <div className={tab === "tracks" ? "flex-1 min-h-0 flex flex-col" : "hidden"}>

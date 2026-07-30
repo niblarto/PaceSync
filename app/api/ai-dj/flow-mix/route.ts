@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { buildAiDjFlowMix } from "@/lib/ai-dj-mix";
-import { healActiveCsv, scanActiveCsv } from "@/lib/csv-heal";
+import { scanActiveCsv } from "@/lib/csv-heal";
 
 // SSE variant of /api/ai-dj/mix, but for a fixed track pool (e.g. every
 // track in a selected HR zone) instead of workout segments — the AI DJ just
@@ -29,20 +29,15 @@ export async function POST(req: NextRequest) {
         controller.enqueue(encoder.encode(`: ${"x".repeat(1024)}\n\n`));
 
         try {
-          if ((await scanActiveCsv()).incomplete.length > 0) {
-            send({ type: "progress", current: 0, total: 1, segment: "Fixing missing track data…" });
-            await healActiveCsv();
-            const { incomplete } = await scanActiveCsv();
-            if (incomplete.length > 0) {
-              console.warn(`[ai-dj] ${incomplete.length} tracks still missing data after heal`);
-              send({
-                type: "warning",
-                count: incomplete.length,
-                tracks: incomplete.slice(0, 8).map(t => `${t.name}${t.artist ? ` — ${t.artist}` : ""}`),
-                uris: incomplete.map(t => t.uri),
-                fields: Array.from(new Set(incomplete.flatMap(t => t.missing))),
-              });
-            }
+          const { incomplete } = await scanActiveCsv();
+          if (incomplete.length > 0) {
+            send({
+              type: "warning",
+              count: incomplete.length,
+              tracks: incomplete.slice(0, 8).map(t => `${t.name}${t.artist ? ` — ${t.artist}` : ""}`),
+              uris: incomplete.map(t => t.uri),
+              fields: Array.from(new Set(incomplete.flatMap(t => t.missing))),
+            });
           }
         } catch (e) {
           console.warn("[ai-dj] pre-mix CSV scan failed:", e);

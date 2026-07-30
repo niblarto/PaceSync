@@ -6,6 +6,7 @@ import { FloatingCard } from "./FloatingCard";
 import { signOut, useSession } from "next-auth/react";
 import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import { SpotifyRateLimitBanner } from "./SpotifyRateLimitBanner";
+import { MissingDataBanner } from "./MissingDataBanner";
 import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
@@ -1822,6 +1823,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
       </header>
 
       <SpotifyRateLimitBanner />
+      <MissingDataBanner />
 
       <div className="max-w-[1800px] mx-auto px-4 py-8 flex-1 w-full">
         <div className={`grid grid-cols-1 gap-6 items-stretch ${
