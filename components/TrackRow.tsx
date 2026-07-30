@@ -20,6 +20,11 @@ interface Props {
       (desktop); the mobile dashboard passes false to save row width for the
       title on a narrow screen. */
   showStats?: boolean;
+  /** True for the last track clicked to play in Spotify — tints the title
+      orange so it stays visually marked until a different track is clicked. */
+  isPlaying?: boolean;
+  /** Fired right before playInSpotify — lets the parent track which row was last clicked. */
+  onPlay?: () => void;
 }
 
 export function MiniSpinner() {
@@ -145,7 +150,7 @@ export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string)
   }
 }
 
-export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, showStats = true }: Props) {
+export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, showStats = true, isPlaying, onPlay }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(track.name)}`;
@@ -153,7 +158,7 @@ export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, on
   return (
     <div className="flex items-center group">
       <button
-        onClick={() => { playInSpotify(track.uri, session?.accessToken).catch(() => {}); }}
+        onClick={() => { onPlay?.(); playInSpotify(track.uri, session?.accessToken).catch(() => {}); }}
         className="flex-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-800/60 transition-colors text-left"
       >
         <span className="w-5 text-right text-xs text-slate-600 shrink-0">{index + 1}</span>
@@ -168,7 +173,7 @@ export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, on
         </div>
 
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium truncate group-hover:text-green-400 transition-colors">{track.name}</p>
+          <p className={`text-sm font-medium truncate transition-colors ${isPlaying ? "text-orange-400" : "group-hover:text-green-400"}`}>{track.name}</p>
           <p className="text-xs text-slate-500 truncate">
             {track.artists.map((a) => a.name).join(", ")}
             {!!playedCount && (

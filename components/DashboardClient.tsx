@@ -66,6 +66,9 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, onSuggestArt
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const highlightRowRef = useRef<HTMLDivElement | null>(null);
+  // Last track clicked to play in Spotify — tinted orange until a different
+  // track is clicked, so it stays visually marked in a long list.
+  const [lastPlayedUri, setLastPlayedUri] = useState<string | null>(null);
 
   const loadMore = useCallback(() => {
     setVisibleCount(c => Math.min(c + 50, tracks.length));
@@ -114,6 +117,8 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, onSuggestArt
             onSuggestArtist={onSuggestArtist ? () => onSuggestArtist(track) : undefined}
             suggestBusy={suggestBusy?.trackId === track.id ? suggestBusy.mode : null}
             playedCount={playedCounts?.[track.uri]}
+            isPlaying={lastPlayedUri === track.uri}
+            onPlay={() => setLastPlayedUri(track.uri)}
           />
         </div>
       ))}
