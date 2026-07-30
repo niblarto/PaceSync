@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { useSearchParams, useRouter } from "next/navigation";
 import { FloatingCard } from "./FloatingCard";
 import { signOut, useSession } from "next-auth/react";
@@ -363,6 +364,12 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [pinSaving, setPinSaving] = useState(false);
   const [pinSaved, setPinSaved] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
+  // Segment candidate pool browser: the tracks the mixer chose from for one
+  // workout segment, opened by clicking that segment's description in the
+  // Runna schedule card (RunnaScheduleCard's onShowCandidates).
+  const [candidatesModal, setCandidatesModal] = useState<{ segmentLabel: string; tracks: TrackWithBPM[] } | null>(null);
+  const [candidatesLoading, setCandidatesLoading] = useState(false);
+  const [candidatesError, setCandidatesError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/settings/garmin")
@@ -912,6 +919,34 @@ export function DashboardClient({ spotifyUser }: Props) {
     setSingleTrackFilter(null);
     setNoBpmFilter(false);
     setMissingFeaturesFilter(uris);
+  }
+
+  // Opens the segment-candidates modal: fetches the saved candidate pool
+  // for one workout segment and resolves its URIs against the already-
+  // loaded library (allTracks) into full TrackWithBPM rows, so the modal
+  // can reuse the same VirtualTrackList/TrackRow UI (and actions) as the
+  // main list. Candidates no longer in the library are silently skipped.
+  async function showSegmentCandidates(date: string, title: string, segmentIndex: number, segmentLabel: string) {
+    setCandidatesModal({ segmentLabel, tracks: [] });
+    setCandidatesLoading(true);
+    setCandidatesError(null);
+    try {
+      const res = await fetch(`/api/ai-dj/candidates?date=${date}&title=${encodeURIComponent(title)}`);
+      const data = await res.json() as { segments?: { segment: string; candidateUris: string[] }[]; error?: string };
+      if (data.error) throw new Error(data.error);
+      const seg = data.segments?.[segmentIndex];
+      if (!seg) {
+        setCandidatesError("No saved candidates for this segment — try rebuilding the mix.");
+        return;
+      }
+      const byUri = new Map(allTracks.map(t => [t.uri, t]));
+      const tracks = seg.candidateUris.map(u => byUri.get(u)).filter((t): t is TrackWithBPM => !!t);
+      setCandidatesModal({ segmentLabel, tracks });
+    } catch (e) {
+      setCandidatesError(e instanceof Error ? e.message : "Failed to load candidates");
+    } finally {
+      setCandidatesLoading(false);
+    }
   }
 
   // "Push to AI DJ": takes every track currently filtered into the selected
@@ -2239,6 +2274,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               onAiDjMix={handleAiDjMix}
               onTrackClick={jumpToTrack}
               onMissingTracks={showMissingTracks}
+              onShowCandidates={showSegmentCandidates}
               // Pace-chip buttons are a shortcut into the zones column's pace
               // filter, so they're pointless (and shouldn't render at all —
               // RunnaScheduleCard gates the chips on this prop being set)
@@ -2282,7 +2318,92 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
         </div>
       )}
 
+      {candidatesModal && (
+        <CandidatesLightbox
+          segmentLabel={candidatesModal.segmentLabel}
+          tracks={candidatesModal.tracks}
+          loading={candidatesLoading}
+          error={candidatesError}
+          onDelete={handleDeleteTrack}
+          onSimilar={handleSimilar}
+          onSuggest={handleSuggest}
+          onSuggestArtist={(track) => handleSuggestArtist(track, "list")}
+          onClose={() => setCandidatesModal(null)}
+        />
+      )}
+
     </div>
+  );
+}
+
+// Portal-based lightbox (same structure as RouteMapLightbox) showing the
+// track pool the AI DJ mixer chose from for one workout segment, using the
+// same VirtualTrackList/TrackRow row UI and actions as the main track list
+// — so a candidate can be played, deleted, or used to search for similar/
+// suggested tracks directly from here.
+function CandidatesLightbox({ segmentLabel, tracks, loading, error, onDelete, onSimilar, onSuggest, onSuggestArtist, onClose }: {
+  segmentLabel: string;
+  tracks: TrackWithBPM[];
+  loading: boolean;
+  error: string | null;
+  onDelete: (track: TrackWithBPM) => void;
+  onSimilar: (track: TrackWithBPM) => void;
+  onSuggest: (track: TrackWithBPM, mode: "style" | "tempo") => void;
+  onSuggestArtist: (track: TrackWithBPM) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-3xl h-[80vh] rounded-2xl bg-slate-900 border border-white/10 overflow-hidden shadow-2xl flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
+          <div className="min-w-0">
+            <h3 className="font-semibold text-sm truncate">🎧 Candidate tracks</h3>
+            <p className="text-xs text-slate-500 truncate">{segmentLabel}</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-slate-500 hover:text-slate-200 text-xl leading-none transition-colors shrink-0"
+            title="Close (Esc)"
+          >
+            ×
+          </button>
+        </div>
+        <div className="flex-1 min-h-0">
+          {loading ? (
+            <div className="h-full flex items-center justify-center text-sm text-slate-400">
+              <Spinner /> <span className="ml-2">Loading candidates…</span>
+            </div>
+          ) : error ? (
+            <div className="h-full flex items-center justify-center text-sm text-red-400 px-8 text-center">{error}</div>
+          ) : tracks.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-sm text-slate-500 px-8 text-center">
+              None of this segment&apos;s candidate tracks are in the library anymore.
+            </div>
+          ) : (
+            <VirtualTrackList
+              tracks={tracks}
+              onDelete={onDelete}
+              onSimilar={onSimilar}
+              onSuggest={onSuggest}
+              onSuggestArtist={onSuggestArtist}
+            />
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

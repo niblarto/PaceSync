@@ -39,7 +39,7 @@ export type AiDjMixResult =
 // the slow part) — lets the API route stream a real progress bar. `detail`
 // carries the LLM interaction status for that segment (candidates sent,
 // tracks returned, fallback) when the builder reports one.
-export type AiDjProgress = (current: number, total: number, segment: string, detail?: string) => void;
+export type AiDjProgress = (current: number, total: number, segment: string, detail?: string, candidateUris?: string[]) => void;
 
 // Real cadence per 5s pace bucket from GarminDB (sec/mi -> SPM), sent to the
 // remote AI DJ service so its pace->BPM uses measured turnover instead of a
@@ -111,9 +111,9 @@ async function fetchMixStream(url: string, body: string, onProgress: AiDjProgres
       if (!dataLine) continue; // padding/comment frame
       const msg = JSON.parse(dataLine.slice(6)) as
         & Partial<AiDjMixResponse>
-        & { type: string; current?: number; total?: number; segment?: string; detail?: string; error?: string };
+        & { type: string; current?: number; total?: number; segment?: string; detail?: string; error?: string; candidateUris?: string[] };
       if (msg.type === "progress") {
-        onProgress(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "", msg.detail);
+        onProgress(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "", msg.detail, msg.candidateUris);
       } else if (msg.type === "done") {
         return { ok: true, mix: { trackUris: msg.trackUris!, totalSec: msg.totalSec!, timeline: msg.timeline!, llmFailures: msg.llmFailures } };
       } else if (msg.type === "error") {
@@ -221,9 +221,9 @@ function runBridge(stdinPayload: object, onProgress?: AiDjProgress): Promise<AiD
     const takeLine = (line: string) => {
       if (!line.trim()) return;
       try {
-        const msg = JSON.parse(line) as { type?: string; current?: number; total?: number; segment?: string; detail?: string };
+        const msg = JSON.parse(line) as { type?: string; current?: number; total?: number; segment?: string; detail?: string; candidateUris?: string[] };
         if (msg.type === "progress") {
-          onProgress?.(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "", msg.detail);
+          onProgress?.(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "", msg.detail, msg.candidateUris);
           return;
         }
       } catch { /* partial or non-JSON line — treat as payload candidate */ }

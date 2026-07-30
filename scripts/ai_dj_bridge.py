@@ -60,10 +60,12 @@ def _cadence_buckets() -> dict | None:
     return None
 
 
-def _progress(done, total, label, detail=None):
+def _progress(done, total, label, detail=None, candidate_uris=None):
     msg = {"type": "progress", "current": done, "total": total, "segment": label}
     if detail:
         msg["detail"] = detail
+    if candidate_uris:
+        msg["candidateUris"] = candidate_uris
     print(json.dumps(msg), flush=True)
 
 

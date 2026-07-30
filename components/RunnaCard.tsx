@@ -664,6 +664,13 @@ interface RunnaScheduleProps {
       audio-feature data — the parent surfaces those tracks in the main
       track list so they can be investigated. */
   onMissingTracks?: (uris: string[]) => void;
+  /** Called when a segment's description line is clicked — the parent
+      fetches that workout's saved candidate pool for the segment at
+      `segmentIndex` and opens it in a browsable panel using the main
+      track list's row UI. Not fired for race workouts using saved Pace
+      Pro splits, since their displayed segment text no longer lines up
+      1:1 with what was actually mixed. */
+  onShowCandidates?: (date: string, title: string, segmentIndex: number, segmentLabel: string) => void;
   /** Whether to show the "Runs at the distance"/"Courses close to this
       distance" chip rows that open the Leaflet route-map lightbox. Defaults
       to true (desktop). The route map's hover-to-highlight track panel and
@@ -841,7 +848,7 @@ function courseMatchesDate(name: string, date: string): boolean {
 }
 
 export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaScheduleProps>(function RunnaScheduleCard(
-  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0, onTrackClick, onMissingTracks, showRouteMaps = true }: RunnaScheduleProps = {},
+  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0, onTrackClick, onMissingTracks, showRouteMaps = true, onShowCandidates }: RunnaScheduleProps = {},
   ref,
 ) {
   const { workouts: allWorkouts, pastRuns, loading, error } = useRunnaData();
@@ -1330,14 +1337,24 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                       </p>
                     )}
                     <div className="space-y-0">
-                      {w.segments.map((seg, i) => (
-                        <p
-                          key={i}
-                          className={`text-xs text-slate-400 leading-relaxed ${seg.trim().startsWith("•") ? "pl-5" : "pt-0.5 first:pt-0"}`}
-                        >
-                          {seg}
-                        </p>
-                      ))}
+                      {w.segments.map((seg, i) => {
+                        // Saved Pace Pro splits replace the mixed segments
+                        // entirely for this race (see mixSegmentsFor) — the
+                        // displayed text/index here no longer lines up with
+                        // what was actually sent to the mixer, so skip the
+                        // candidates link rather than show the wrong pool.
+                        const clickable = !!onShowCandidates && !(w.type === "race" && raceSplits[w.date]?.splits.length);
+                        return (
+                          <p
+                            key={i}
+                            onClick={clickable ? () => onShowCandidates!(w.date, w.title, i, seg) : undefined}
+                            className={`text-xs text-slate-400 leading-relaxed ${seg.trim().startsWith("•") ? "pl-5" : "pt-0.5 first:pt-0"} ${clickable ? "cursor-pointer hover:text-slate-200 hover:underline underline-offset-2" : ""}`}
+                            title={clickable ? "View candidate tracks the mixer chose from for this segment" : undefined}
+                          >
+                            {seg}
+                          </p>
+                        );
+                      })}
                     </div>
                     {w.appUrl && (
                       <a

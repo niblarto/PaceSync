@@ -4,6 +4,7 @@ import { authOptions } from "@/lib/auth";
 import { buildAiDjMix } from "@/lib/ai-dj-mix";
 import { healActiveCsv, scanActiveCsv } from "@/lib/csv-heal";
 import { getRecentBuildUris, recordMixBuild } from "@/lib/recent-mix-builds";
+import { setMixCandidates } from "@/lib/mix-candidates";
 
 // SSE: streams {"type":"progress","current","total","segment"} as each
 // workout segment builds, then {"type":"done",...mix} or {"type":"error"}.
@@ -62,7 +63,14 @@ export async function POST(req: NextRequest) {
           console.warn("[ai-dj] pre-mix CSV scan failed:", e); // never block the mix
         }
 
-        const result = await buildAiDjMix(title, segments, (current, total, segment, detail) => {
+        // Accumulated per-segment candidate pools (only sent while a
+        // segment's LLM call is in flight) — saved once the mix finishes so
+        // the schedule card can let the user browse what the mixer chose
+        // from, not just the final picks.
+        const candidatesBySegment = new Map<number, { segment: string; candidateUris: string[] }>();
+
+        const result = await buildAiDjMix(title, segments, (current, total, segment, detail, candidateUris) => {
+          if (candidateUris?.length) candidatesBySegment.set(current, { segment, candidateUris });
           send({ type: "progress", current, total, segment, detail });
         }, mergedAvoidUris);
         if (!result.ok) {
@@ -78,6 +86,11 @@ export async function POST(req: NextRequest) {
             send({ type: "warning", llmFailures: result.mix.llmFailures });
           }
           if (date) recordMixBuild(date, result.mix.trackUris);
+          if (date && candidatesBySegment.size > 0) {
+            const segments = Array.from(candidatesBySegment.keys()).sort((a, b) => a - b)
+              .map(i => candidatesBySegment.get(i)!);
+            setMixCandidates({ date, workoutTitle: title, segments, savedAt: new Date().toISOString() });
+          }
           send({ type: "done", ...result.mix });
         }
       } catch (err) {
