@@ -709,11 +709,12 @@ interface RunnaScheduleProps {
 // silently — the workout is looked up by date since that's what the
 // tracks card's aiDjMix state carries.
 export interface RunnaScheduleHandle {
-  remix: (date: string, avoidUris: string[]) => Promise<void>;
+  remix: (date: string, avoidUris: string[], extraPlayCounts?: Record<string, number>) => Promise<void>;
   topUp: (
     date: string,
     avoidUris: string[],
     onResult: (tracks: TrackWithBPM[], totalSec: number, timeline: AiDjTimeline) => void,
+    extraPlayCounts?: Record<string, number>,
   ) => Promise<void>;
 }
 
@@ -1138,6 +1139,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     w: RunnaWorkout,
     seedAvoidUris?: string[],
     onResult?: (tracks: TrackWithBPM[], totalSec: number, timeline: AiDjTimelineSegment[]) => void,
+    extraPlayCounts?: Record<string, number>,
   ) {
     // A remix should sound different: send every track from every prior
     // build this session so the mixer demotes them (they only reappear if
@@ -1153,7 +1155,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       const mixRes = await fetch("/api/ai-dj/mix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w, raceSplits[w.date]), avoidUris, date: w.date }),
+        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w, raceSplits[w.date]), avoidUris, date: w.date, extraPlayCounts }),
       });
       if (!mixRes.ok || !mixRes.body) {
         const err = await mixRes.json().catch(() => ({})) as { error?: string };
@@ -1240,17 +1242,17 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   }
 
   useImperativeHandle(ref, () => ({
-    remix(date, avoidUris) {
+    remix(date, avoidUris, extraPlayCounts) {
       const w = workouts.find(x => x.date === date);
       if (!w) return Promise.resolve();
       setExpanded(w.uid);
-      return buildMix(w, avoidUris);
+      return buildMix(w, avoidUris, undefined, extraPlayCounts);
     },
-    topUp(date, avoidUris, onResult) {
+    topUp(date, avoidUris, onResult, extraPlayCounts) {
       const w = workouts.find(x => x.date === date);
       if (!w) return Promise.resolve();
       setExpanded(w.uid);
-      return buildMix(w, avoidUris, onResult);
+      return buildMix(w, avoidUris, onResult, extraPlayCounts);
     },
   }), [workouts]);
 

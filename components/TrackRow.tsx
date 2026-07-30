@@ -8,6 +8,9 @@ interface Props {
   track: TrackWithBPM;
   index: number;
   onDelete?: () => void;
+  /** Drops the track from the currently-viewed AI DJ mix only — stays in the
+      library for other mixes/remixes, unlike onDelete's permanent removal. */
+  onRemoveFromMix?: () => void;
   onSimilar?: () => void;
   onSuggestStyle?: () => void;
   onSuggestTempo?: () => void;
@@ -126,6 +129,15 @@ export function ArtistIcon() {
   );
 }
 
+export function EjectIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+      <path d="M9.47 2.22a.75.75 0 011.06 0l6 6a.75.75 0 01-1.06 1.06L10 3.81 4.53 9.28a.75.75 0 01-1.06-1.06l6-6z" />
+      <path d="M3.75 12.5a.75.75 0 01.75-.75h11a.75.75 0 010 1.5h-11a.75.75 0 01-.75-.75z" />
+    </svg>
+  );
+}
+
 export function TrashIcon() {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
@@ -150,7 +162,7 @@ export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string)
   }
 }
 
-export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, showStats = true, isPlaying, onPlay }: Props) {
+export function TrackRow({ track, index, onDelete, onRemoveFromMix, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, showStats = true, isPlaying, onPlay }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(track.name)}`;
@@ -248,6 +260,15 @@ export function TrackRow({ track, index, onDelete, onSimilar, onSuggestStyle, on
           title="Search more by this artist (most popular)"
         >
           {suggestBusy === "artist" ? <MiniSpinner /> : <ArtistIcon />}
+        </button>
+      )}
+      {onRemoveFromMix && (
+        <button
+          onClick={onRemoveFromMix}
+          className="opacity-0 group-hover:opacity-100 p-1.5 text-slate-600 hover:text-amber-400 transition-all shrink-0 rounded"
+          title="Remove from this mix (keeps it in your library)"
+        >
+          <EjectIcon />
         </button>
       )}
       {onDelete && (

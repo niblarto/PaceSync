@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { title, segments, avoidUris, date } = await req.json() as { title: string; segments: string[]; avoidUris?: string[]; date?: string };
+  const { title, segments, avoidUris, date, extraPlayCounts } = await req.json() as { title: string; segments: string[]; avoidUris?: string[]; date?: string; extraPlayCounts?: Record<string, number> };
   if (!segments?.length) {
     return NextResponse.json({ error: "segments required" }, { status: 400 });
   }
@@ -72,7 +72,7 @@ export async function POST(req: NextRequest) {
         const result = await buildAiDjMix(title, segments, (current, total, segment, detail, candidateUris) => {
           if (candidateUris?.length) candidatesBySegment.set(current, { segment, candidateUris });
           send({ type: "progress", current, total, segment, detail });
-        }, mergedAvoidUris);
+        }, mergedAvoidUris, extraPlayCounts);
         if (!result.ok) {
           console.error(`[ai-dj] ${result.error}`);
           send({ type: "error", error: result.error });

@@ -124,9 +124,23 @@ async function fetchMixStream(url: string, body: string, onProgress: AiDjProgres
   return { ok: false, error: "AI DJ stream ended without a result" };
 }
 
+// Adds each URI's extra count on top of its real history play count (rather
+// than overwriting it), so a track that's genuinely been played a lot AND
+// was just removed from this mix stacks both penalties.
+function mergePlayCounts(base: Record<string, number>, extra?: Record<string, number>): Record<string, number> {
+  if (!extra) return base;
+  const merged = { ...base };
+  for (const [uri, n] of Object.entries(extra)) merged[uri] = (merged[uri] ?? 0) + n;
+  return merged;
+}
+
 // avoidUris: tracks from the mix being rebuilt ("Remix") — the mixer demotes
 // them like already-played tracks so a rebuild comes out mostly different.
-export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[]): Promise<AiDjMixResult> {
+// extraPlayCounts: tracks explicitly "removed from mix" this session — added
+// on top of their real play count so the weighted sort demotes them hard
+// (min(count,10)*PLAY_COUNT_WEIGHT already hits the max penalty at count=1)
+// without excluding them outright, matching PLAY_COUNT_WEIGHT's own scale.
+export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[], extraPlayCounts?: Record<string, number>): Promise<AiDjMixResult> {
   const config = loadAiDjConfig();
   if (!config?.enabled) {
     return { ok: false, error: "AI DJ is not enabled in Settings" };
@@ -151,22 +165,23 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   const easyBias = computeEasyPaceBias();
   if (easyBias > 0) console.log(`[ai-dj] recent easy runs ran ~${easyBias}s/mi fast — easing easy segments`);
   const trackFeedback = getAllTrackVotes();
+  const playCounts = mergePlayCounts(getPlayedCounts(), extraPlayCounts);
 
   // Claude/Gemini run right here on the Pi via the on-Pi bridge — no
   // dependency on the separate Ollama service PC being on. Ollama-backed
   // "local" mixes still need that PC (its GPU runs the model), so those go
   // over HTTP.
   if (config.provider === "claude") {
-    return buildMixLocally(segments, easyBias, trackFeedback, onProgress, avoidUris, config.claudeModel, config.claudeEffort);
+    return buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, config.claudeModel, config.claudeEffort);
   }
   if (config.provider === "gemini") {
-    return buildMixLocally(segments, easyBias, trackFeedback, onProgress, avoidUris, config.geminiModel);
+    return buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, config.geminiModel);
   }
 
   const lastEasyPaceSec = getLastEasyPaceSec();
   const body = JSON.stringify({
     title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback,
-    playedTracks: getPlayedTracks(), playCounts: getPlayedCounts(), bpmOverrides: loadBpmOverrides(),
+    playedTracks: getPlayedTracks(), playCounts, bpmOverrides: loadBpmOverrides(),
     avoidTracks: avoidUris?.length ? avoidUris : undefined,
     // Remote AI DJ service (ai_dj/server.py) expects "MM:SS", not seconds.
     easyPace: lastEasyPaceSec != null ? `${Math.floor(lastEasyPaceSec / 60)}:${String(Math.round(lastEasyPaceSec % 60)).padStart(2, "0")}` : undefined,
@@ -194,7 +209,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
     // shape, and it uses the local Garmin DB for exact pace->BPM.
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[ai-dj] remote service failed (${msg}) — trying on-Pi fallback`);
-    const local = await buildMixLocally(segments, easyBias, trackFeedback, onProgress, avoidUris);
+    const local = await buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris);
     if (local.ok) return local;
     const hint = /timeout|abort/i.test(msg)
       ? "AI DJ service timed out"
@@ -264,12 +279,12 @@ function runBridge(stdinPayload: object, onProgress?: AiDjProgress): Promise<AiD
 }
 
 function buildMixLocally(
-  segments: string[], easyBias = 0, trackFeedback: object[] = [], onProgress?: AiDjProgress, avoidUris?: string[],
+  segments: string[], easyBias = 0, trackFeedback: object[] = [], playCounts: Record<string, number> = {}, onProgress?: AiDjProgress, avoidUris?: string[],
   model?: string, effort?: string,
 ): Promise<AiDjMixResult> {
   return runBridge({
     segments, easyBias, trackFeedback,
-    playedTracks: getPlayedTracks(), playCounts: getPlayedCounts(), bpmOverrides: loadBpmOverrides(),
+    playedTracks: getPlayedTracks(), playCounts, bpmOverrides: loadBpmOverrides(),
     avoidTracks: avoidUris?.length ? avoidUris : undefined,
     easyPaceSec: getLastEasyPaceSec() ?? undefined,
     model, effort,

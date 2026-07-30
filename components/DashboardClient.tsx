@@ -47,9 +47,11 @@ const ALL_ZONE: RunningZone = {
   textColor: "text-white",
 };
 
-function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, playedCounts }: {
+function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, playedCounts }: {
   tracks: TrackWithBPM[];
   onDelete?: (track: TrackWithBPM) => void;
+  /** Drops a track from the currently-viewed AI DJ mix only (keeps it in the library) — only passed while an aiDjMix is active. */
+  onRemoveFromMix?: (track: TrackWithBPM) => void;
   onSimilar?: (track: TrackWithBPM) => void;
   onSuggest?: (track: TrackWithBPM, mode: "style" | "tempo") => void;
   onSuggestArtist?: (track: TrackWithBPM) => void;
@@ -111,6 +113,7 @@ function VirtualTrackList({ tracks, onDelete, onSimilar, onSuggest, onSuggestArt
             track={track}
             index={i}
             onDelete={onDelete ? () => onDelete(track) : undefined}
+            onRemoveFromMix={onRemoveFromMix ? () => onRemoveFromMix(track) : undefined}
             onSimilar={onSimilar ? () => onSimilar(track) : undefined}
             onSuggestStyle={onSuggest ? () => onSuggest(track, "style") : undefined}
             onSuggestTempo={onSuggest ? () => onSuggest(track, "tempo") : undefined}
@@ -368,6 +371,11 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [pinSaving, setPinSaving] = useState(false);
   const [pinSaved, setPinSaved] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
+  // Tracks explicitly "removed from mix" this session (soft removal — stays
+  // in the library, unlike Delete) — keyed by uri. Sent as extraPlayCounts
+  // on the next remix/fill-the-gap so the mixer heavily demotes them
+  // instead of picking them straight back in. Cleared on a fresh build.
+  const [removedFromMix, setRemovedFromMix] = useState<Record<string, TrackWithBPM>>({});
   // Segment candidate pool filter: filters the main track list down to the
   // tracks the mixer chose from for one workout segment, set by clicking
   // that segment's description in the Runna schedule card
@@ -759,6 +767,9 @@ export function DashboardClient({ spotifyUser }: Props) {
     setTodaysRunSaved(false);
     setTodaysRunError(null);
     setTodaysRunUrl(null);
+    // A fresh build/remix starts a new mix session — any previous "removed
+    // from mix" penalties don't apply to it.
+    setRemovedFromMix({});
     // Every fresh build/remix becomes the workout's pinned mix automatically
     // — the nightly pre-build should always use whatever the user last built
     // here rather than silently generating its own on top of it.
@@ -787,8 +798,11 @@ export function DashboardClient({ spotifyUser }: Props) {
     // Clear the old tracks immediately so the stale mix can't linger (or be
     // saved) while the rebuild runs.
     setAiDjMix(prev => prev ? { ...prev, tracks: [] } : prev);
+    // Tracks explicitly removed from this mix session get heavily demoted
+    // (not hard-excluded) in the rebuild too, same as a fill-the-gap.
+    const extraPlayCounts = Object.fromEntries(Object.keys(removedFromMix).map(uri => [uri, 1]));
     try {
-      await runnaScheduleRef.current.remix(aiDjMix.date, avoidUris);
+      await runnaScheduleRef.current.remix(aiDjMix.date, avoidUris, extraPlayCounts);
     } finally {
       setRemixing(false);
     }
@@ -820,6 +834,10 @@ export function DashboardClient({ spotifyUser }: Props) {
     const targetBpm = aiDjMix.timeline[aiDjMix.timeline.length - 1]?.targetBpm ?? null;
     const bpmDistance = (tempo: number) => targetBpm == null ? 0
       : Math.min(Math.abs(tempo - targetBpm), Math.abs(tempo * 2 - targetBpm), Math.abs(tempo / 2 - targetBpm));
+    // Tracks explicitly removed from this mix session get heavily demoted
+    // (not hard-excluded) so the gap-fill doesn't just pick them straight
+    // back in.
+    const extraPlayCounts = Object.fromEntries(Object.keys(removedFromMix).map(uri => [uri, 1]));
     try {
       await runnaScheduleRef.current.topUp(aiDjMix.date, avoidUris, (freshTracks) => {
         // freshTracks is a flattened rebuild of the WHOLE mix — the same
@@ -919,7 +937,7 @@ export function DashboardClient({ spotifyUser }: Props) {
             stale,
           };
         });
-      });
+      }, extraPlayCounts);
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : "Failed to top up mix");
     } finally {
@@ -1505,6 +1523,18 @@ export function DashboardClient({ spotifyUser }: Props) {
 
     onProgress?.("done");
     return { added: addedCount, alreadyInLibrary: uris.length - addedCount };
+  }
+
+  // Soft removal: drops a track from the currently-viewed mix only — no
+  // Spotify/CSV/library changes at all, unlike handleDeleteTrack. Marks the
+  // mix stale (same "Fill the gap / Remix" UI a delete triggers) and records
+  // the track so the next build/fill-the-gap can heavily penalize it via
+  // extraPlayCounts, without excluding it outright.
+  function removeTrackFromMix(track: TrackWithBPM) {
+    setRemovedFromMix(prev => ({ ...prev, [track.uri]: track }));
+    setAiDjMix(prev => (prev && prev.tracks.some(t => t.uri === track.uri))
+      ? { ...prev, tracks: prev.tracks.filter(t => t.uri !== track.uri), stale: true }
+      : prev);
   }
 
   async function handleDeleteTrack(track: TrackWithBPM) {
@@ -2298,6 +2328,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       key={singleTrackFilter ? `single-${singleTrackFilter}` : aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : missingFeaturesFilter ? `missing-${missingFeaturesFilter.join(",")}` : candidatesFilter ? `candidates-${candidatesFilter.segmentLabel}` : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : sprintBpmFilter !== null ? `sprint-${sprintBpmFilter}` : selectedZones.map(z=>z.number).sort().join("-")}
                       tracks={filteredTracks}
                       onDelete={handleDeleteTrack}
+                      onRemoveFromMix={aiDjMix ? removeTrackFromMix : undefined}
                       onSimilar={handleSimilar}
                       onSuggest={handleSuggest}
                       onSuggestArtist={(track) => handleSuggestArtist(track, "list")}
