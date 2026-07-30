@@ -718,6 +718,19 @@ function mixSegmentsFor(w: RunnaWorkout, raceSplits?: RaceSplitsEntry | null): s
   return [`Strength • ${mins}m - ${mins}m`, `${mins} min strength session`];
 }
 
+// Shorten a segment label for the one-line mixing-progress row: drop
+// parenthetical asides and the generic "at a conversational pace" phrase,
+// e.g. "1.25mi warm up at a conversational pace (no faster than 9:10/mi)"
+// -> "1.25mi warm up", but "3mi at 7:55/mi (7:40-8:10/mi), 150s walking
+// rest" -> "3mi at 7:55/mi" (numeric pace clauses are kept).
+function shortSegmentLabel(label: string): string {
+  return label
+    .replace(/\([^)]*\)/g, "")
+    .split(",")[0]
+    .replace(/\s+at a conversational pace\b.*$/i, "")
+    .trim();
+}
+
 type MixProgress = { current: number; total: number; segment: string; detail?: string };
 type MixStatus = { status: "building" | "done" | "error"; error?: string; warning?: string; warningUris?: string[]; startedAt?: number; progress?: MixProgress; uris?: string[] };
 
@@ -1397,7 +1410,9 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                             )}
                           </div>
                           {st?.status === "building" && st.progress?.detail && (
-                            <p className="text-[11px] text-slate-500 pl-0.5 -mt-1 truncate">{st.progress.detail}</p>
+                            <p className="text-[11px] text-slate-500 pl-0.5 -mt-1 truncate">
+                              {st.progress.segment ? `${shortSegmentLabel(st.progress.segment)}: ${st.progress.detail}` : st.progress.detail}
+                            </p>
                           )}
                           {st?.warning && (
                             st.warningUris?.length ? (
