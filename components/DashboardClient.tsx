@@ -1097,6 +1097,12 @@ export function DashboardClient({ spotifyUser }: Props) {
   // setAiDjMix, without racing that state update's own render cycle.
   async function pinMix(mix: { date: string; workoutTitle: string; totalSec: number; timeline: AiDjTimeline }, silent = false) {
     if (!mix.timeline?.length) return;
+    // Always clear pinSaved up front, silent or not — otherwise a stale
+    // "true" left over from a PREVIOUS mix's successful pin can keep the
+    // button showing "Pinned!" (and disabled) for a brand new, not-yet-
+    // pinned mix if this attempt then fails, hiding the failure entirely
+    // and blocking the user from retrying via the button.
+    setPinSaved(false);
     if (!silent) { setPinSaving(true); setPinError(null); }
     try {
       const res = await fetch("/api/ai-dj/pin", {
@@ -1114,7 +1120,17 @@ export function DashboardClient({ spotifyUser }: Props) {
       setPinSaved(true);
       setMixSavedNonce(n => n + 1); // refresh the Runna card's tracklist panel
     } catch (e) {
-      if (!silent) setPinError(e instanceof Error ? e.message : "Pin failed");
+      const msg = e instanceof Error ? e.message : "Pin failed";
+      if (!silent) {
+        setPinError(msg);
+      } else {
+        // Auto-pin runs silently by design (no spinner/toast for a routine
+        // background save), but a failure must never be entirely invisible —
+        // surface it as a real error the manual Pin button can retry, rather
+        // than swallowing it and leaving the mix unpinned with no sign why.
+        console.error(`[ai-dj/pin] auto-pin failed for "${mix.workoutTitle}" (${mix.date}):`, msg);
+        setPinError(`Auto-pin failed: ${msg} — click Pin to retry`);
+      }
     } finally {
       if (!silent) setPinSaving(false);
     }
