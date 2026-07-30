@@ -55,7 +55,7 @@ export async function DELETE(req: NextRequest) {
       // loaded client-side, since the deleted track could belong to ANY
       // pinned date's mix, not just whatever's currently on screen.
       try {
-        const unpinned = unpinMixesContaining(Array.from(fullUris));
+        const unpinned = await unpinMixesContaining(Array.from(fullUris), Date.now());
         for (const { date, title } of unpinned) removeTodaysRunEntry(date, title);
       } catch (e) { console.warn("[tracks/delete] pin invalidation failed:", e); }
       return NextResponse.json({ ok: true, csvRemoved: true, removed: removedRows.length });

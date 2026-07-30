@@ -31,3 +31,4 @@ running-playlist.json
 .deploy-manifest.json
 garmin-auto-sync-marker.json
 csv-heal-progress.json
+pi_log.txt

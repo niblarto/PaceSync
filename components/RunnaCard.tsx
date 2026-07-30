@@ -678,8 +678,11 @@ interface RunnaScheduleProps {
   onPaceFilter?: (paceStr: string, bpm: number, multiSelect: boolean) => void;
   activePaces?: string[];
   aiDjEnabled?: boolean;
-  /** Called once a mix is built — the parent populates the central track list/save UI rather than saving directly */
-  onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimelineSegment[], avoidUris?: string[]) => void;
+  /** Called once a mix is built — the parent populates the central track list/save UI rather than saving directly.
+      startedAtMs is the wall-clock time this build STARTED (captured client-side before the request went out) —
+      the parent passes it straight through to the pin write so a stale, still-in-flight build can never clobber
+      a result from a build that started later, regardless of which network response actually lands last. */
+  onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimelineSegment[], avoidUris?: string[], startedAtMs?: number) => void;
   /** Bumped by the parent after a mix is saved — invalidates the saved-mix tracklist cache */
   mixSavedNonce?: number;
   /** Called when a track in this card is clicked, alongside opening it in Spotify — the
@@ -713,7 +716,7 @@ export interface RunnaScheduleHandle {
   topUp: (
     date: string,
     avoidUris: string[],
-    onResult: (tracks: TrackWithBPM[], totalSec: number, timeline: AiDjTimeline) => void,
+    onResult: (tracks: TrackWithBPM[], totalSec: number, timeline: AiDjTimeline, startedAtMs: number) => void,
     extraPlayCounts?: Record<string, number>,
   ) => Promise<void>;
 }
@@ -1138,7 +1141,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   async function buildMix(
     w: RunnaWorkout,
     seedAvoidUris?: string[],
-    onResult?: (tracks: TrackWithBPM[], totalSec: number, timeline: AiDjTimelineSegment[]) => void,
+    onResult?: (tracks: TrackWithBPM[], totalSec: number, timeline: AiDjTimelineSegment[], startedAtMs: number) => void,
     extraPlayCounts?: Record<string, number>,
   ) {
     // A remix should sound different: send every track from every prior
@@ -1150,12 +1153,19 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     // Falling back to mixState only covers the plain (non-remix) "AI DJ
     // Mix" button, which has no seedAvoidUris of its own.
     const avoidUris = seedAvoidUris ?? mixState[w.uid]?.uris;
+    // Captured BEFORE the request goes out — this wall-clock time is what
+    // makes "started later" the ordering key the pin store checks against,
+    // not "resolved later". Using a real timestamp (rather than an
+    // in-memory per-workout counter) means there's nothing to reset or
+    // desync across a page reload/component remount — the server always has
+    // an absolute reference to compare against.
+    const startedAtMs = Date.now();
     setMixState(s => ({ ...s, [w.uid]: { status: "building", startedAt: Date.now(), uris: avoidUris } }));
     try {
       const mixRes = await fetch("/api/ai-dj/mix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w, raceSplits[w.date]), avoidUris, date: w.date, extraPlayCounts }),
+        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w, raceSplits[w.date]), avoidUris, date: w.date, extraPlayCounts, startedAtMs }),
       });
       if (!mixRes.ok || !mixRes.body) {
         const err = await mixRes.json().catch(() => ({})) as { error?: string };
@@ -1226,9 +1236,9 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       if (onResult) {
         // Top-up call: the caller splices this result with kept tracks
         // itself rather than replacing the whole mix via onAiDjMix.
-        onResult(tracks, mix.totalSec, mix.timeline);
+        onResult(tracks, mix.totalSec, mix.timeline, startedAtMs);
       } else {
-        onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w, raceSplits[w.date]), w.date, mix.timeline, accumulatedUris);
+        onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w, raceSplits[w.date]), w.date, mix.timeline, accumulatedUris, startedAtMs);
       }
       setMixState(s => ({
         ...s,

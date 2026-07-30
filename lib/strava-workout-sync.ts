@@ -43,8 +43,8 @@ async function waitForThirdPartyRename(token: string, activityId: number | strin
   return activity;
 }
 
-function trackLines(date: string, title: string): string[] {
-  const pinned = getPinnedMix(date, title);
+async function trackLines(date: string, title: string): Promise<string[]> {
+  const pinned = await getPinnedMix(date, title);
   if (pinned) return timelineToHistoryTracks(pinned.timeline).map(t => `${t.name} — ${t.artist}`);
   const history = getTodaysRunEntry(date, title);
   if (!history || history.approved === false) return [];
@@ -203,7 +203,7 @@ export async function appendTracksToStravaActivity(date: string, title: string):
   if (!tokenResult.ok) return { ok: false, error: `Strava not connected (${tokenResult.reason})` };
   const token = tokenResult.token;
 
-  const tracks = trackLines(date, title);
+  const tracks = await trackLines(date, title);
   if (!tracks.length) return { ok: true, updated: false, reason: `No confirmed mix tracks for ${date}` };
 
   try {

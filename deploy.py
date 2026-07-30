@@ -207,6 +207,8 @@ FILES = [
     ('lib/race-splits.ts',                        'lib/race-splits.ts'),
     ('app/api/ai-dj/candidates/route.ts',         'app/api/ai-dj/candidates/route.ts'),
     ('lib/mix-candidates.ts',                     'lib/mix-candidates.ts'),
+    ('app/api/ai-dj/removed-tracks/route.ts',     'app/api/ai-dj/removed-tracks/route.ts'),
+    ('lib/removed-tracks.ts',                     'lib/removed-tracks.ts'),
     ('app/api/garmin/pin-route/route.ts',          'app/api/garmin/pin-route/route.ts'),
     ('lib/workout-key.ts',                        'lib/workout-key.ts'),
     ('lib/pinned-routes.ts',                       'lib/pinned-routes.ts'),

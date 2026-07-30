@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
   }
   // A pinned mix outranks the history snapshot — it's what the nightly
   // pre-build will actually put in "Today's Run" for that date.
-  const pin = getPinnedMix(date, title);
+  const pin = await getPinnedMix(date, title);
   if (pin?.timeline?.length) {
     return NextResponse.json({
       entry: {
@@ -62,11 +62,11 @@ export async function POST(req: NextRequest) {
   // pin's content with this mix, rather than letting the stale pin win. The
   // pin is updated (not removed) so the cron re-applies *this* mix instead
   // of auto-building a different one.
-  const pin = getPinnedMix(body.date, body.workoutTitle);
+  const pin = await getPinnedMix(body.date, body.workoutTitle);
   if (pin) {
     const totalSec = body.timeline.reduce(
       (sum, seg) => sum + seg.tracks.reduce((s, t) => s + (t.durationSec ?? 0), 0), 0);
-    setPinnedMix({
+    await setPinnedMix({
       date: body.date,
       workoutTitle: body.workoutTitle,
       totalSec,
@@ -88,7 +88,7 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: "date and title required" }, { status: 400 });
   }
   removeTodaysRunEntry(date, title);
-  removePinnedMix(date, title);
+  await removePinnedMix(date, title);
   return NextResponse.json({ ok: true });
 }
 

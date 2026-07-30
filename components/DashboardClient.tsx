@@ -371,11 +371,15 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [pinSaving, setPinSaving] = useState(false);
   const [pinSaved, setPinSaved] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
-  // Tracks explicitly "removed from mix" this session (soft removal — stays
-  // in the library, unlike Delete) — keyed by uri. Sent as extraPlayCounts
-  // on the next remix/fill-the-gap so the mixer heavily demotes them
-  // instead of picking them straight back in. Cleared on a fresh build.
-  const [removedFromMix, setRemovedFromMix] = useState<Record<string, TrackWithBPM>>({});
+  // Tracks explicitly "removed from mix" this workout's current session
+  // (soft removal — stays in the library, unlike Delete) — keyed by uri,
+  // value unused beyond key existence. Sent as extraPlayCounts on the next
+  // remix/fill-the-gap so the mixer heavily demotes them, and hard-excluded
+  // from a fill-the-gap's own additions. Persisted server-side (see
+  // lib/removed-tracks.ts) so a page reload doesn't silently drop the
+  // exclusion — cleared (both here and server-side) on a fresh build/remix,
+  // and loaded+merged in whenever a workout's mix is (re)opened.
+  const [removedFromMix, setRemovedFromMix] = useState<Record<string, true>>({});
   // Segment candidate pool filter: filters the main track list down to the
   // tracks the mixer chose from for one workout segment, set by clicking
   // that segment's description in the Runna schedule card
@@ -746,7 +750,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   // Populates the central track list/save UI from an AI DJ mix (built in
   // RunnaScheduleCard) instead of saving straight to Spotify — the user picks
   // which playlist(s) to save to from here.
-  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimeline, avoidUris?: string[]) {
+  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimeline, avoidUris?: string[], startedAtMs?: number) {
     setSelectedZones([]);
     setPaceFilter(null);
     setSprintBpmFilter(null);
@@ -767,13 +771,34 @@ export function DashboardClient({ spotifyUser }: Props) {
     setTodaysRunSaved(false);
     setTodaysRunError(null);
     setTodaysRunUrl(null);
-    // A fresh build/remix starts a new mix session — any previous "removed
-    // from mix" penalties don't apply to it.
-    setRemovedFromMix({});
+    // startedAtMs is only set for a genuinely fresh build/remix (buildMix's
+    // own call) — loadSnapshotIntoTracklist (reopening a saved/pinned mix)
+    // calls this with no startedAtMs at all. A fresh build starts a new
+    // session, so any previous "removed from mix" penalties (for THIS
+    // workout) are cleared, both client- and server-side. Reopening a saved
+    // mix instead LOADS this workout's persisted ejections — a page reload
+    // clears the in-memory state, so this is what actually restores the
+    // exclusion instead of silently forgetting it.
+    if (startedAtMs !== undefined) {
+      setRemovedFromMix({});
+      fetch("/api/ai-dj/removed-tracks", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date, title: workoutTitle }),
+      }).catch(() => {});
+    } else {
+      fetch(`/api/ai-dj/removed-tracks?date=${date}&title=${encodeURIComponent(workoutTitle)}`)
+        .then(r => r.json())
+        .then((d: { uris?: string[] }) => {
+          if (!d.uris?.length) return;
+          setRemovedFromMix(prev => ({ ...prev, ...Object.fromEntries(d.uris!.map(u => [u, true as const])) }));
+        })
+        .catch(() => {});
+    }
     // Every fresh build/remix becomes the workout's pinned mix automatically
     // — the nightly pre-build should always use whatever the user last built
     // here rather than silently generating its own on top of it.
-    pinMix({ date, workoutTitle, totalSec, timeline }, true);
+    pinMix({ date, workoutTitle, totalSec, timeline, startedAtMs, allowedUris: new Set(unique.map(t => t.uri)) }, true);
   }
 
   // Rebuild the AI DJ mix from the same workout segments — either because a
@@ -839,7 +864,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     // back in.
     const extraPlayCounts = Object.fromEntries(Object.keys(removedFromMix).map(uri => [uri, 1]));
     try {
-      await runnaScheduleRef.current.topUp(aiDjMix.date, avoidUris, (freshTracks) => {
+      await runnaScheduleRef.current.topUp(aiDjMix.date, avoidUris, (freshTracks, _totalSec, _timeline, startedAtMs) => {
         // freshTracks is a flattened rebuild of the WHOLE mix — the same
         // track can legitimately appear in more than one of its segments
         // (avoidUris is only a soft demotion in the mixer, not a hard
@@ -851,6 +876,12 @@ export function DashboardClient({ spotifyUser }: Props) {
         const candidates = [...freshTracks]
           .filter(t => {
             if (seenUris.has(t.uri)) return false;
+            // extraPlayCounts only demotes a removed track in the mixer's
+            // own ranking (a soft penalty) — it can still come back if the
+            // rest of the pool runs dry, so it must also be hard-excluded
+            // here or a gap-fill can silently re-add exactly what was just
+            // ejected.
+            if (removedFromMix[t.uri]) return false;
             if (t.artists.some(a => keptArtists.has(a.name.toLowerCase()))) return false;
             seenUris.add(t.uri);
             return true;
@@ -924,18 +955,16 @@ export function DashboardClient({ spotifyUser }: Props) {
           const newTimeline = [...prev.timeline, ...additionsSegment];
           const newTotalSec = merged.reduce((sum, t) => sum + t.duration_ms / 1000, 0);
           const stale = merged.length < prev.originalCount;
+          const next = { ...prev, tracks: merged, timeline: newTimeline, totalSec: newTotalSec, stale };
           // A gap-fill that fully restores the mix back to its original
           // length re-pins automatically, same as a fresh build/remix — a
           // partial fill (still short) leaves the existing pin/stale state
-          // alone so the Pin button stays available for the next fill.
-          if (!stale) pinMix({ date: prev.date, workoutTitle: prev.workoutTitle, totalSec: newTotalSec, timeline: newTimeline }, true);
-          return {
-            ...prev,
-            tracks: merged,
-            timeline: newTimeline,
-            totalSec: newTotalSec,
-            stale,
-          };
+          // alone so the Pin button stays available for the next fill. The
+          // pin call is derived from the exact same `next` object being
+          // written to aiDjMix state (not a second, independently-built
+          // literal) so the two can never structurally drift apart.
+          if (!stale) pinMix({ date: next.date, workoutTitle: next.workoutTitle, totalSec: next.totalSec, timeline: next.timeline, startedAtMs, allowedUris: new Set(merged.map(t => t.uri)) }, true);
+          return next;
         });
       }, extraPlayCounts);
     } catch (e) {
@@ -1119,11 +1148,23 @@ export function DashboardClient({ spotifyUser }: Props) {
   // uri (handleAiDjMix). The pin payload must match that exactly, or the
   // pinned mix (reconstructed by flattening every segment's tracks) ends up
   // longer than what the UI ever showed as "the mix" for this build.
-  function dedupeTimeline(timeline: AiDjTimeline): AiDjTimeline {
+  //
+  // allowedUris additionally restricts the timeline to exactly the URIs the
+  // caller says are actually in the displayed mix right now (aiDjMix.tracks)
+  // — topUpAiDjMix's incremental append (prev.timeline + a new "gap fill"
+  // segment, repeated across however many Fill the gap clicks happen in a
+  // session) has no structural guarantee of staying in lockstep with the
+  // always-fresh, always-deduped aiDjMix.tracks list, so extra tracks from
+  // an earlier round can end up in the timeline the display never showed.
+  // Filtering to allowedUris here makes the pinned tracklist provably a
+  // subset of "what's on screen," not just "whatever the timeline currently
+  // contains."
+  function dedupeTimeline(timeline: AiDjTimeline, allowedUris?: Set<string>): AiDjTimeline {
     const seen = new Set<string>();
     return timeline.map(seg => ({
       ...seg,
       tracks: seg.tracks.filter(t => {
+        if (allowedUris && !allowedUris.has(t.uri)) return false;
         if (seen.has(t.uri)) return false;
         seen.add(t.uri);
         return true;
@@ -1131,9 +1172,9 @@ export function DashboardClient({ spotifyUser }: Props) {
     })).filter(seg => seg.tracks.length > 0);
   }
 
-  async function pinMix(mix: { date: string; workoutTitle: string; totalSec: number; timeline: AiDjTimeline }, silent = false) {
+  async function pinMix(mix: { date: string; workoutTitle: string; totalSec: number; timeline: AiDjTimeline; startedAtMs?: number; allowedUris?: Set<string> }, silent = false) {
     if (!mix.timeline?.length) return;
-    const timeline = dedupeTimeline(mix.timeline);
+    const timeline = dedupeTimeline(mix.timeline, mix.allowedUris);
     // Always clear pinSaved up front, silent or not — otherwise a stale
     // "true" left over from a PREVIOUS mix's successful pin can keep the
     // button showing "Pinned!" (and disabled) for a brand new, not-yet-
@@ -1150,10 +1191,12 @@ export function DashboardClient({ spotifyUser }: Props) {
           workoutTitle: mix.workoutTitle,
           totalSec: mix.totalSec,
           timeline,
+          startedAtMs: mix.startedAtMs,
         }),
       });
-      const d = await res.json() as { error?: string };
+      const d = await res.json() as { error?: string; stale?: boolean };
       if (!res.ok) throw new Error(d.error ?? "Pin failed");
+      if (d.stale) throw new Error("A newer build has already been pinned for this workout");
       setPinSaved(true);
       setMixSavedNonce(n => n + 1); // refresh the Runna card's tracklist panel
     } catch (e) {
@@ -1531,26 +1574,44 @@ export function DashboardClient({ spotifyUser }: Props) {
   // the track so the next build/fill-the-gap can heavily penalize it via
   // extraPlayCounts, without excluding it outright.
   function removeTrackFromMix(track: TrackWithBPM) {
-    setRemovedFromMix(prev => ({ ...prev, [track.uri]: track }));
-    let hadTrack = false;
-    setAiDjMix(prev => {
-      if (!prev || !prev.tracks.some(t => t.uri === track.uri)) return prev;
-      hadTrack = true;
-      return { ...prev, tracks: prev.tracks.filter(t => t.uri !== track.uri), stale: true };
-    });
-    if (!hadTrack) return;
+    if (!aiDjMix) return;
+    setRemovedFromMix(prev => ({ ...prev, [track.uri]: true }));
+    // Always drop the track and invalidate the pin, even if aiDjMix.tracks
+    // (read fresh via the updater) no longer contains this exact uri —
+    // filteredTracks (what's actually rendered/clicked) is a separate piece
+    // of state, refreshed from aiDjMix.tracks by its own effect, so it can
+    // legitimately lag one render behind a just-completed build/fill-the-gap
+    // that already changed aiDjMix.tracks. Gating on a match there caused
+    // ejects to silently no-op whenever they landed in that window.
+    setAiDjMix(prev => prev
+      ? { ...prev, tracks: prev.tracks.filter(t => t.uri !== track.uri), stale: true }
+      : prev);
     // The pinned mix (if any) is exactly this now-changed tracklist — it no
     // longer matches reality, so unpin THIS workout specifically (not every
     // pin containing the track library-wide, unlike a real delete, since the
     // track itself still legitimately belongs in other workouts' mixes).
+    // Stamping the delete with "now" (not just deleting) means a build that
+    // was already in flight before this eject — captured its OWN startedAtMs
+    // before this moment — can't land afterward and silently re-pin the mix
+    // with the just-ejected track still in it.
     setPinSaved(false);
+    const { date, workoutTitle } = aiDjMix;
     fetch("/api/ai-dj/pin", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ date: aiDjMix!.date, title: aiDjMix!.workoutTitle }),
+      body: JSON.stringify({ date, title: workoutTitle, atMs: Date.now() }),
     })
       .then(() => setMixSavedNonce(n => n + 1))
-      .catch(() => {});
+      .catch(e => console.error("[remove-from-mix] unpin fetch failed:", e));
+    // Persist the ejection so it survives a page reload — previously this
+    // only lived in browser memory, and a reload silently forgot which
+    // tracks were ejected, letting a later Fill the gap/Remix pick them
+    // straight back in.
+    fetch("/api/ai-dj/removed-tracks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date, workoutTitle, uri: track.uri }),
+    }).catch(e => console.error("[remove-from-mix] persist failed:", e));
   }
 
   async function handleDeleteTrack(track: TrackWithBPM) {

@@ -82,7 +82,9 @@ export async function buildAndSaveMixesFor(targetDate: string, label: "pre-build
   // Morning retry only: don't rebuild/overwrite a workout the evening job (or
   // a manual save) already covered — only fill genuinely empty slots.
   if (label === "morning retry") {
-    targetWorkouts = targetWorkouts.filter(w => !getPinnedMix(w.date, w.title) && !getTodaysRunEntry(w.date, w.title));
+    const covered = await Promise.all(targetWorkouts.map(async w =>
+      !!(await getPinnedMix(w.date, w.title)) || !!getTodaysRunEntry(w.date, w.title)));
+    targetWorkouts = targetWorkouts.filter((_, i) => !covered[i]);
   }
 
   if (targetWorkouts.length === 0) {
@@ -109,7 +111,7 @@ export async function buildAndSaveMixesFor(targetDate: string, label: "pre-build
 
   for (const w of targetWorkouts) {
     // A mix pinned to this workout from the dashboard wins over a fresh build
-    const pinned = getPinnedMix(w.date, w.title);
+    const pinned = await getPinnedMix(w.date, w.title);
     let mix: AiDjMixResponse;
     if (pinned?.timeline?.length) {
       const uris: string[] = [];

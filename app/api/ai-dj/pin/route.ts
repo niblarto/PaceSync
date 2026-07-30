@@ -37,7 +37,7 @@ export async function GET(req: NextRequest) {
   if (!DATE_RE.test(date) || !title) {
     return NextResponse.json({ error: "date (YYYY-MM-DD) and title required" }, { status: 400 });
   }
-  const pin = getPinnedMix(date, title);
+  const pin = await getPinnedMix(date, title);
   return NextResponse.json({ pinned: !!pin, workoutTitle: pin?.workoutTitle ?? null, pinnedAt: pin?.pinnedAt ?? null });
 }
 
@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const body = await req.json() as {
     date?: string; workoutTitle?: string; totalSec?: number;
-    timeline?: AiDjMixResponse["timeline"];
+    timeline?: AiDjMixResponse["timeline"]; startedAtMs?: number;
   };
   if (!body.date || !DATE_RE.test(body.date) || !body.workoutTitle) {
     return NextResponse.json({ error: "date and workoutTitle required" }, { status: 400 });
@@ -65,13 +65,18 @@ export async function POST(req: NextRequest) {
     totalSec = totalSec || entry.tracks.reduce((sum, t) => sum + t.durationSec, 0);
   }
 
-  setPinnedMix({
+  const applied = await setPinnedMix({
     date: body.date,
     workoutTitle: body.workoutTitle,
     totalSec,
     timeline,
     pinnedAt: new Date().toISOString(),
+    startedAtMs: body.startedAtMs,
   });
+  if (!applied) {
+    console.log(`[ai-dj/pin] rejected stale pin write for ${body.date} ("${body.workoutTitle}"), startedAtMs=${body.startedAtMs}`);
+    return NextResponse.json({ ok: true, stale: true });
+  }
   console.log(`[ai-dj/pin] pinned mix for ${body.date} ("${body.workoutTitle}")`);
   return NextResponse.json({ ok: true });
 }
@@ -79,11 +84,11 @@ export async function POST(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const { date, title } = await req.json() as { date?: string; title?: string };
+  const { date, title, atMs } = await req.json() as { date?: string; title?: string; atMs?: number };
   if (!date || !DATE_RE.test(date) || !title) {
     return NextResponse.json({ error: "date and title required" }, { status: 400 });
   }
-  removePinnedMix(date, title);
+  await removePinnedMix(date, title, atMs);
   // Unpinning deletes the mix outright, not just the pin — otherwise the
   // "Today's Run" history snapshot would keep it around as a fallback and
   // the pinned-mix UI would just relabel it "saved" instead of removing it.
