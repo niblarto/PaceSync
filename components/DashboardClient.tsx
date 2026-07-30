@@ -759,6 +759,10 @@ export function DashboardClient({ spotifyUser }: Props) {
     setTodaysRunSaved(false);
     setTodaysRunError(null);
     setTodaysRunUrl(null);
+    // Every fresh build/remix becomes the workout's pinned mix automatically
+    // — the nightly pre-build should always use whatever the user last built
+    // here rather than silently generating its own on top of it.
+    pinMix({ date, workoutTitle, totalSec, timeline }, true);
   }
 
   // Rebuild the AI DJ mix from the same workout segments — either because a
@@ -899,12 +903,20 @@ export function DashboardClient({ spotifyUser }: Props) {
               };
             }),
           }] : [];
+          const newTimeline = [...prev.timeline, ...additionsSegment];
+          const newTotalSec = merged.reduce((sum, t) => sum + t.duration_ms / 1000, 0);
+          const stale = merged.length < prev.originalCount;
+          // A gap-fill that fully restores the mix back to its original
+          // length re-pins automatically, same as a fresh build/remix — a
+          // partial fill (still short) leaves the existing pin/stale state
+          // alone so the Pin button stays available for the next fill.
+          if (!stale) pinMix({ date: prev.date, workoutTitle: prev.workoutTitle, totalSec: newTotalSec, timeline: newTimeline }, true);
           return {
             ...prev,
             tracks: merged,
-            timeline: [...prev.timeline, ...additionsSegment],
-            totalSec: merged.reduce((sum, t) => sum + t.duration_ms / 1000, 0),
-            stale: merged.length < prev.originalCount,
+            timeline: newTimeline,
+            totalSec: newTotalSec,
+            stale,
           };
         });
       });
@@ -1080,19 +1092,21 @@ export function DashboardClient({ spotifyUser }: Props) {
 
   // Pin the built mix to its workout date — the nightly pre-build then uses
   // this exact tracklist for "Today's Run" instead of generating a fresh one.
-  async function pinMixToWorkout() {
-    if (!aiDjMix?.timeline?.length) return;
-    setPinSaving(true);
-    setPinError(null);
+  // Takes explicit mix data (rather than reading aiDjMix off state) so a
+  // just-built or just-topped-up mix can be auto-pinned immediately after
+  // setAiDjMix, without racing that state update's own render cycle.
+  async function pinMix(mix: { date: string; workoutTitle: string; totalSec: number; timeline: AiDjTimeline }, silent = false) {
+    if (!mix.timeline?.length) return;
+    if (!silent) { setPinSaving(true); setPinError(null); }
     try {
       const res = await fetch("/api/ai-dj/pin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          date: aiDjMix.date,
-          workoutTitle: aiDjMix.workoutTitle,
-          totalSec: aiDjMix.totalSec,
-          timeline: aiDjMix.timeline,
+          date: mix.date,
+          workoutTitle: mix.workoutTitle,
+          totalSec: mix.totalSec,
+          timeline: mix.timeline,
         }),
       });
       const d = await res.json() as { error?: string };
@@ -1100,10 +1114,15 @@ export function DashboardClient({ spotifyUser }: Props) {
       setPinSaved(true);
       setMixSavedNonce(n => n + 1); // refresh the Runna card's tracklist panel
     } catch (e) {
-      setPinError(e instanceof Error ? e.message : "Pin failed");
+      if (!silent) setPinError(e instanceof Error ? e.message : "Pin failed");
     } finally {
-      setPinSaving(false);
+      if (!silent) setPinSaving(false);
     }
+  }
+
+  function pinMixToWorkout() {
+    if (!aiDjMix?.timeline?.length) return;
+    return pinMix(aiDjMix);
   }
 
   async function saveTodaysRun() {
