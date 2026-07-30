@@ -1095,8 +1095,27 @@ export function DashboardClient({ spotifyUser }: Props) {
   // Takes explicit mix data (rather than reading aiDjMix off state) so a
   // just-built or just-topped-up mix can be auto-pinned immediately after
   // setAiDjMix, without racing that state update's own render cycle.
+  // A track can legitimately appear in more than one timeline segment (the
+  // mixer doesn't hard-exclude a track once placed), but aiDjMix.tracks —
+  // what the UI's own track count and list are built from — is deduped by
+  // uri (handleAiDjMix). The pin payload must match that exactly, or the
+  // pinned mix (reconstructed by flattening every segment's tracks) ends up
+  // longer than what the UI ever showed as "the mix" for this build.
+  function dedupeTimeline(timeline: AiDjTimeline): AiDjTimeline {
+    const seen = new Set<string>();
+    return timeline.map(seg => ({
+      ...seg,
+      tracks: seg.tracks.filter(t => {
+        if (seen.has(t.uri)) return false;
+        seen.add(t.uri);
+        return true;
+      }),
+    })).filter(seg => seg.tracks.length > 0);
+  }
+
   async function pinMix(mix: { date: string; workoutTitle: string; totalSec: number; timeline: AiDjTimeline }, silent = false) {
     if (!mix.timeline?.length) return;
+    const timeline = dedupeTimeline(mix.timeline);
     // Always clear pinSaved up front, silent or not — otherwise a stale
     // "true" left over from a PREVIOUS mix's successful pin can keep the
     // button showing "Pinned!" (and disabled) for a brand new, not-yet-
@@ -1112,7 +1131,7 @@ export function DashboardClient({ spotifyUser }: Props) {
           date: mix.date,
           workoutTitle: mix.workoutTitle,
           totalSec: mix.totalSec,
-          timeline: mix.timeline,
+          timeline,
         }),
       });
       const d = await res.json() as { error?: string };
@@ -1198,7 +1217,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       // Runna Summary card then shows that stale tracklist instead.
       const todaysRunDate = aiDjMix?.date ?? new Date().toISOString().slice(0, 10);
       const timeline: AiDjTimeline = aiDjMix?.timeline?.length
-        ? aiDjMix.timeline
+        ? dedupeTimeline(aiDjMix.timeline)
         : [{
             segment: "Today's Run",
             targetBpm: null,
