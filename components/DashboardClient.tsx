@@ -1,7 +1,6 @@
 ﻿"use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { createPortal } from "react-dom";
 import { useSearchParams, useRouter } from "next/navigation";
 import { FloatingCard } from "./FloatingCard";
 import { signOut, useSession } from "next-auth/react";
@@ -364,12 +363,11 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [pinSaving, setPinSaving] = useState(false);
   const [pinSaved, setPinSaved] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
-  // Segment candidate pool browser: the tracks the mixer chose from for one
-  // workout segment, opened by clicking that segment's description in the
-  // Runna schedule card (RunnaScheduleCard's onShowCandidates).
-  const [candidatesModal, setCandidatesModal] = useState<{ segmentLabel: string; tracks: TrackWithBPM[] } | null>(null);
-  const [candidatesLoading, setCandidatesLoading] = useState(false);
-  const [candidatesError, setCandidatesError] = useState<string | null>(null);
+  // Segment candidate pool filter: filters the main track list down to the
+  // tracks the mixer chose from for one workout segment, set by clicking
+  // that segment's description in the Runna schedule card
+  // (RunnaScheduleCard's onShowCandidates).
+  const [candidatesFilter, setCandidatesFilter] = useState<{ segmentLabel: string; uris: string[] } | null>(null);
 
   useEffect(() => {
     fetch("/api/settings/garmin")
@@ -627,6 +625,11 @@ export function DashboardClient({ spotifyUser }: Props) {
       setFilteredTracks(allTracks.filter(t => uriSet.has(t.uri)));
       return;
     }
+    if (candidatesFilter) {
+      const uriSet = new Set(candidatesFilter.uris);
+      setFilteredTracks(allTracks.filter(t => uriSet.has(t.uri)));
+      return;
+    }
     if (similarFilter) {
       const byUri = new Map(allTracks.map(t => [t.uri, t]));
       const ranked = similarFilter.uris
@@ -666,7 +669,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       }
       setFilteredTracks(result);
     }
-  }, [selectedZones, allTracks, paceFilter, sprintBpmFilter, similarFilter, noBpmFilter, missingFeaturesFilter, aiDjMix, singleTrackFilter, searchText]);
+  }, [selectedZones, allTracks, paceFilter, sprintBpmFilter, similarFilter, noBpmFilter, missingFeaturesFilter, candidatesFilter, aiDjMix, singleTrackFilter, searchText]);
 
   // For seeds not in the playlist pool (BBC tracks, 0-BPM tracks) the CSV
   // lookup in the python bridge can't work — fetch features from ReccoBeats
@@ -921,31 +924,28 @@ export function DashboardClient({ spotifyUser }: Props) {
     setMissingFeaturesFilter(uris);
   }
 
-  // Opens the segment-candidates modal: fetches the saved candidate pool
-  // for one workout segment and resolves its URIs against the already-
-  // loaded library (allTracks) into full TrackWithBPM rows, so the modal
-  // can reuse the same VirtualTrackList/TrackRow UI (and actions) as the
-  // main list. Candidates no longer in the library are silently skipped.
+  // Filters the main track list down to the candidate pool the AI DJ mixer
+  // chose from for one workout segment — same "results card" pattern as
+  // noBpmFilter/missingFeaturesFilter, so every existing per-track action
+  // (delete, similar, suggest, play) already works unmodified.
   async function showSegmentCandidates(date: string, title: string, segmentIndex: number, segmentLabel: string) {
-    setCandidatesModal({ segmentLabel, tracks: [] });
-    setCandidatesLoading(true);
-    setCandidatesError(null);
+    setSelectedZones([]);
+    setPaceFilter(null);
+    setSprintBpmFilter(null);
+    setSimilarFilter(null);
+    setAiDjMix(null);
+    setSingleTrackFilter(null);
+    setNoBpmFilter(false);
+    setMissingFeaturesFilter(null);
+    setSearchText("");
+    setCandidatesFilter({ segmentLabel, uris: [] });
     try {
       const res = await fetch(`/api/ai-dj/candidates?date=${date}&title=${encodeURIComponent(title)}`);
       const data = await res.json() as { segments?: { segment: string; candidateUris: string[] }[]; error?: string };
-      if (data.error) throw new Error(data.error);
       const seg = data.segments?.[segmentIndex];
-      if (!seg) {
-        setCandidatesError("No saved candidates for this segment — try rebuilding the mix.");
-        return;
-      }
-      const byUri = new Map(allTracks.map(t => [t.uri, t]));
-      const tracks = seg.candidateUris.map(u => byUri.get(u)).filter((t): t is TrackWithBPM => !!t);
-      setCandidatesModal({ segmentLabel, tracks });
-    } catch (e) {
-      setCandidatesError(e instanceof Error ? e.message : "Failed to load candidates");
-    } finally {
-      setCandidatesLoading(false);
+      setCandidatesFilter({ segmentLabel, uris: seg?.candidateUris ?? [] });
+    } catch {
+      setCandidatesFilter({ segmentLabel, uris: [] });
     }
   }
 
@@ -1796,6 +1796,30 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="font-semibold">Target zone</h2>
                   <div className="flex items-center gap-2">
+                    {(aiDjMix || noBpmFilter || missingFeaturesFilter || similarFilter || candidatesFilter
+                      || (paceFilter && paceFilter.paces.length > 0) || sprintBpmFilter !== null || singleTrackFilter
+                      || searchText.trim() || !selectedZones.some(z => z.number === 0)) && (
+                      <button
+                        onClick={() => {
+                          setSearchText("");
+                          setPaceFilter(null);
+                          setSprintBpmFilter(null);
+                          setSimilarFilter(null);
+                          setNoBpmFilter(false);
+                          setMissingFeaturesFilter(null);
+                          setCandidatesFilter(null);
+                          setSingleTrackFilter(null);
+                          setAiDjMix(null);
+                          setChartDismissed(false);
+                          setSelectedZones([ALL_ZONE]);
+                          if (csvName) setPlaylistName(csvName);
+                        }}
+                        className="text-xs px-2.5 py-1 rounded-lg bg-slate-700/60 border border-white/10 text-slate-300 hover:bg-slate-700 hover:text-white transition-colors"
+                        title="Clear all filters and show every track"
+                      >
+                        Show all tracks
+                      </button>
+                    )}
                     {RUNNING_PLAYLIST_ID && (
                       <button
                         onClick={() => openSpotifyAppFirst(
@@ -1864,7 +1888,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 edge (see resultsMaxHeight above) so a long track list
                 scrolls inside the card instead of pushing the page past the
                 Runna rail. No cap until the first measurement lands. */}
-            {step !== "idle" && csvName && (searchText.trim() || selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || sprintBpmFilter !== null || similarFilter || noBpmFilter || missingFeaturesFilter || aiDjMix || singleTrackFilter) && (
+            {step !== "idle" && csvName && (searchText.trim() || selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || sprintBpmFilter !== null || similarFilter || noBpmFilter || missingFeaturesFilter || candidatesFilter || aiDjMix || singleTrackFilter) && (
               <div
                 ref={setResultsCardEl}
                 className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden flex flex-col"
@@ -1897,6 +1921,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                         if (aiDjMix) return `${filteredTracks.length} tracks in AI DJ mix for "${aiDjMix.workoutTitle}"`;
                         if (noBpmFilter) return `${filteredTracks.length} tracks without BPM info`;
                         if (missingFeaturesFilter) return `${filteredTracks.length} tracks left out of a mix (missing audio-feature data)`;
+                        if (candidatesFilter) return `${filteredTracks.length} candidate tracks for "${candidatesFilter.segmentLabel}"`;
                         if (similarFilter) return `${filteredTracks.length} songs like "${similarFilter.seed.name}"`;
                         if (paceFilter && paceFilter.paces.length > 0) {
                           const bpms = paceFilter.paces.map(p => p.bpm);
@@ -1937,6 +1962,19 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   {missingFeaturesFilter && (
                     <button
                       onClick={() => setMissingFeaturesFilter(null)}
+                      className="shrink-0 text-xs text-slate-400 hover:text-slate-200 border border-white/10 hover:border-white/20 rounded-lg px-3 py-1.5 transition-colors"
+                    >
+                      Clear filter
+                    </button>
+                  )}
+
+                  {candidatesFilter && (
+                    <button
+                      onClick={() => {
+                        setCandidatesFilter(null);
+                        setSelectedZones([ALL_ZONE]);
+                        if (csvName) setPlaylistName(csvName);
+                      }}
                       className="shrink-0 text-xs text-slate-400 hover:text-slate-200 border border-white/10 hover:border-white/20 rounded-lg px-3 py-1.5 transition-colors"
                     >
                       Clear filter
@@ -2183,6 +2221,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                           : singleTrackFilter ? "This track isn't in the library."
                           : noBpmFilter ? "All tracks have BPM info 🎉"
                           : missingFeaturesFilter ? "None of these tracks are in the library anymore."
+                          : candidatesFilter ? "No saved candidates for this segment (or none are in the library anymore) — try rebuilding the mix."
                           : aiDjMix ? (remixing ? "Rebuilding mix…" : "No tracks in this mix.")
                           : "No tracks in this BPM range. Try a different zone."}
                       </p>
@@ -2197,7 +2236,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     </div>
                   ) : (
                     <VirtualTrackList
-                      key={singleTrackFilter ? `single-${singleTrackFilter}` : aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : missingFeaturesFilter ? `missing-${missingFeaturesFilter.join(",")}` : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : sprintBpmFilter !== null ? `sprint-${sprintBpmFilter}` : selectedZones.map(z=>z.number).sort().join("-")}
+                      key={singleTrackFilter ? `single-${singleTrackFilter}` : aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : missingFeaturesFilter ? `missing-${missingFeaturesFilter.join(",")}` : candidatesFilter ? `candidates-${candidatesFilter.segmentLabel}` : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : sprintBpmFilter !== null ? `sprint-${sprintBpmFilter}` : selectedZones.map(z=>z.number).sort().join("-")}
                       tracks={filteredTracks}
                       onDelete={handleDeleteTrack}
                       onSimilar={handleSimilar}
@@ -2318,92 +2357,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
         </div>
       )}
 
-      {candidatesModal && (
-        <CandidatesLightbox
-          segmentLabel={candidatesModal.segmentLabel}
-          tracks={candidatesModal.tracks}
-          loading={candidatesLoading}
-          error={candidatesError}
-          onDelete={handleDeleteTrack}
-          onSimilar={handleSimilar}
-          onSuggest={handleSuggest}
-          onSuggestArtist={(track) => handleSuggestArtist(track, "list")}
-          onClose={() => setCandidatesModal(null)}
-        />
-      )}
-
     </div>
-  );
-}
-
-// Portal-based lightbox (same structure as RouteMapLightbox) showing the
-// track pool the AI DJ mixer chose from for one workout segment, using the
-// same VirtualTrackList/TrackRow row UI and actions as the main track list
-// — so a candidate can be played, deleted, or used to search for similar/
-// suggested tracks directly from here.
-function CandidatesLightbox({ segmentLabel, tracks, loading, error, onDelete, onSimilar, onSuggest, onSuggestArtist, onClose }: {
-  segmentLabel: string;
-  tracks: TrackWithBPM[];
-  loading: boolean;
-  error: string | null;
-  onDelete: (track: TrackWithBPM) => void;
-  onSimilar: (track: TrackWithBPM) => void;
-  onSuggest: (track: TrackWithBPM, mode: "style" | "tempo") => void;
-  onSuggestArtist: (track: TrackWithBPM) => void;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-3xl h-[80vh] rounded-2xl bg-slate-900 border border-white/10 overflow-hidden shadow-2xl flex flex-col"
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
-          <div className="min-w-0">
-            <h3 className="font-semibold text-sm truncate">🎧 Candidate tracks</h3>
-            <p className="text-xs text-slate-500 truncate">{segmentLabel}</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="text-slate-500 hover:text-slate-200 text-xl leading-none transition-colors shrink-0"
-            title="Close (Esc)"
-          >
-            ×
-          </button>
-        </div>
-        <div className="flex-1 min-h-0">
-          {loading ? (
-            <div className="h-full flex items-center justify-center text-sm text-slate-400">
-              <Spinner /> <span className="ml-2">Loading candidates…</span>
-            </div>
-          ) : error ? (
-            <div className="h-full flex items-center justify-center text-sm text-red-400 px-8 text-center">{error}</div>
-          ) : tracks.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-sm text-slate-500 px-8 text-center">
-              None of this segment&apos;s candidate tracks are in the library anymore.
-            </div>
-          ) : (
-            <VirtualTrackList
-              tracks={tracks}
-              onDelete={onDelete}
-              onSimilar={onSimilar}
-              onSuggest={onSuggest}
-              onSuggestArtist={onSuggestArtist}
-            />
-          )}
-        </div>
-      </div>
-    </div>,
-    document.body,
   );
 }
 
