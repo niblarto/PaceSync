@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import fs from "fs";
 import path from "path";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
 
 const DEFAULT_PID = "m001j52w";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
@@ -211,14 +212,6 @@ async function getSegmentTracks(pid: string): Promise<{ artist: string; title: s
     .map(e => ({ artist: e.segment.artist!, title: e.segment.track_title! }));
 }
 
-function parseRetryAfter(raw: string): number {
-  const delta = parseInt(raw, 10);
-  if (!isNaN(delta)) return delta;
-  const date = new Date(raw).getTime();
-  if (!isNaN(date)) return Math.max(0, Math.ceil((date - Date.now()) / 1000));
-  return 30;
-}
-
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 export async function GET(req: NextRequest) {
@@ -266,6 +259,16 @@ export async function GET(req: NextRequest) {
 
         send({ type: "start", total: bbcTracks.length, programName, episodePid, airDate });
 
+        const preflightBlocked = await getSpotifyBlockedUntil();
+        if (preflightBlocked) {
+          const waitSec = Math.max(0, Math.ceil((new Date(preflightBlocked).getTime() - Date.now()) / 1000));
+          if (waitSec > 0) {
+            console.log(`[bbc/tracks] Spotify rate-limited, waiting ${waitSec}s before starting searches`);
+            send({ type: "rate-limited", waitSec });
+            await sleep(waitSec * 1000);
+          }
+        }
+
         const spotifyResults: CacheEntry[] = [];
         let retryAfter: number | null = null;
         const initialCacheSize = spotifyCache.size;
@@ -299,6 +302,7 @@ export async function GET(req: NextRequest) {
           if (res.status === 429) {
             retryAfter = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
             console.log(`[bbc/tracks] 429 on "${t.title}" by "${t.artist}" — retry-after ${retryAfter}s`);
+            await setSpotifyBlockedUntil(new Date(Date.now() + retryAfter * 1000).toISOString());
             spotifyResults.push(null);
             send({ type: "progress", current: i + 1, total: bbcTracks.length, skipped: true });
             continue;

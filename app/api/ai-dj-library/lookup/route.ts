@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import fs from "fs";
 import path from "path";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
 
 const CACHE_FILE = path.join(process.cwd(), "spotify-cache.json");
 
@@ -32,14 +33,6 @@ function saveCacheToDisk() {
 }
 
 loadCacheFromDisk();
-
-function parseRetryAfter(raw: string): number {
-  const delta = parseInt(raw, 10);
-  if (!isNaN(delta)) return delta;
-  const date = new Date(raw).getTime();
-  if (!isNaN(date)) return Math.max(0, Math.ceil((date - Date.now()) / 1000));
-  return 30;
-}
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -76,7 +69,9 @@ async function searchSpotify(token: string, title: string, artist: string): Prom
       { headers: { Authorization: `Bearer ${token}` } }
     );
     if (res.status === 429) {
-      return { result: null, rateLimited: parseRetryAfter(res.headers.get("Retry-After") ?? "30") };
+      const retryAfter = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
+      await setSpotifyBlockedUntil(new Date(Date.now() + retryAfter * 1000).toISOString());
+      return { result: null, rateLimited: retryAfter };
     }
     if (!res.ok) continue;
     const data = await res.json() as {
@@ -118,6 +113,16 @@ export async function POST(req: NextRequest) {
         controller.enqueue(encoder.encode(`: ${"x".repeat(1024)}\n\n`));
 
         send({ type: "start", total: inputTracks.length });
+
+        const preflightBlocked = await getSpotifyBlockedUntil();
+        if (preflightBlocked) {
+          const waitSec = Math.max(0, Math.ceil((new Date(preflightBlocked).getTime() - Date.now()) / 1000));
+          if (waitSec > 0) {
+            console.log(`[ai-dj-library/lookup] Spotify rate-limited, waiting ${waitSec}s before starting searches`);
+            send({ type: "rate-limited", waitSec });
+            await sleep(waitSec * 1000);
+          }
+        }
 
         const spotifyResults: CacheEntry[] = [];
         let retryAfter: number | null = null;
