@@ -280,7 +280,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // overrides), vs. sitting outside every kind's range — and how many
   // confirmed "Today's Run" mixes each track has actually featured in, so
   // unused-but-in-range tracks are visible too. ──
-  interface CoverageTrack { uri: string; name: string; artist: string; played: number; inRange: boolean }
+  interface CoverageTrack { uri: string; name: string; artist: string; played: number; inRange: boolean; effectiveBpm: number; rawBpm: number }
   interface CoverageBucket { bpm: number; count: number; inRange: boolean; played: number; tracks: CoverageTrack[] }
   const [coverage, setCoverage] = useState<{
     buckets: CoverageBucket[]; totalTracks: number; inRangeTracks: number; outOfRangeTracks: number;
@@ -3094,12 +3094,34 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
               {showNeverUsable && (
                 <div className="rounded-lg border border-red-500/20 divide-y divide-white/5 font-mono text-[11px] max-h-60 overflow-y-auto no-scrollbar">
-                  {coverage.buckets.flatMap(b => b.tracks.filter(t => !t.inRange).map(t => ({ ...t, bpm: b.bpm }))).map(t => (
-                    <div key={t.uri} className="px-3 py-1 flex items-center justify-between gap-3">
-                      <span className="text-slate-300 truncate">{t.name} — <span className="text-slate-500">{t.artist}</span></span>
-                      <span className="text-slate-600 shrink-0">{t.bpm} BPM</span>
-                    </div>
-                  ))}
+                  {coverage.buckets.flatMap(b => b.tracks.filter(t => !t.inRange)).map(t => {
+                    // Nearest-range-edge distance makes a near-miss (e.g.
+                    // 169.9 vs. a 170 floor) obvious at a glance, instead of
+                    // just saying "out of range" with no indication of how
+                    // close it actually came.
+                    const nearest = coverage.kindRanges.reduce((best, r) => {
+                      const below = t.effectiveBpm < r.min;
+                      const dist = below ? r.min - t.effectiveBpm
+                        : t.effectiveBpm > r.max ? t.effectiveBpm - r.max : 0;
+                      return best === null || dist < best.dist ? { dist, below, r } : best;
+                    }, null as { dist: number; below: boolean; r: { kind: string; min: number; max: number } } | null);
+                    const wasDoubled = Math.abs(t.effectiveBpm - t.rawBpm) > 0.01;
+                    return (
+                      <div key={t.uri} className="px-3 py-1.5 flex items-center justify-between gap-3">
+                        <span className="text-slate-300 truncate">{t.name} — <span className="text-slate-500">{t.artist}</span></span>
+                        <span className="text-right shrink-0">
+                          <span className="text-slate-400 block">
+                            {t.effectiveBpm.toFixed(1)} BPM{wasDoubled && <span className="text-slate-600"> (2× {t.rawBpm.toFixed(1)})</span>}
+                          </span>
+                          {nearest && nearest.dist > 0 && (
+                            <span className="text-red-400/80 text-[10px] block">
+                              {nearest.dist.toFixed(1)} {nearest.below ? "short of" : "over"} {nearest.r.kind} ({nearest.r.min}–{nearest.r.max})
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 

@@ -27,7 +27,11 @@ import { loadBpmOverrides, RUN_KINDS } from "@/lib/bpm-overrides";
 
 const DOUBLETIME_THRESHOLD = 95;
 
-interface BucketTrack { uri: string; name: string; artist: string; played: number; inRange: boolean }
+interface BucketTrack {
+  uri: string; name: string; artist: string; played: number; inRange: boolean;
+  effectiveBpm: number; // exact (unrounded) BPM actually checked against each kind's range
+  rawBpm: number;       // as stored in the CSV, before any half-time doubling
+}
 export interface CoverageBucket {
   bpm: number;       // effective (post-doubling) BPM, in 2-BPM-wide buckets
   count: number;      // tracks whose effective BPM falls in this bucket
@@ -94,6 +98,8 @@ export async function GET() {
         artist: idxArtist !== -1 ? (row[idxArtist]?.trim() || "Unknown") : "Unknown",
         played: playedCounts[uri] ?? 0,
         inRange: trackInRange,
+        effectiveBpm,
+        rawBpm,
       });
       bucketTracks.set(bucket, list);
 
