@@ -76,11 +76,12 @@ export async function GET(req: NextRequest) {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const date = req.nextUrl.searchParams.get("date") ?? "";
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    return NextResponse.json({ error: "date required (YYYY-MM-DD)" }, { status: 400 });
+  const title = req.nextUrl.searchParams.get("title") ?? "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !title) {
+    return NextResponse.json({ error: "date (YYYY-MM-DD) and title required" }, { status: 400 });
   }
 
-  const entry = getTodaysRunEntry(date);
+  const entry = getTodaysRunEntry(date, title);
   if (!entry) return NextResponse.json({ entry: null, tracks: [] });
 
   // Disputed — the user confirmed this mix wasn't actually run to. Return the

@@ -14,6 +14,7 @@ import { healActiveCsv } from "@/lib/csv-heal";
 import { getBbcBpmFilterEnabled } from "@/lib/bbc-bpm-filter-config";
 import { isWithinLibraryBpmRange } from "@/lib/bbc-bpm-filter";
 import { fetchFeatures } from "@/lib/track-enrich";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
 
 // Resolved per call so a playlist change in Settings applies immediately.
 const runningPlaylistId = () => loadRunningPlaylistConfig().id;
@@ -194,14 +195,6 @@ async function getSegments(pid: string): Promise<{ artist: string; title: string
     .map(e => ({ artist: e.segment.artist!, title: e.segment.track_title! }));
 }
 
-function parseRetryAfter(raw: string) {
-  const delta = parseInt(raw, 10);
-  if (!isNaN(delta)) return delta;
-  const date = new Date(raw).getTime();
-  if (!isNaN(date)) return Math.max(0, Math.ceil((date - Date.now()) / 1000));
-  return 30;
-}
-
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 // ── Load one BBC playlist and add to Running playlist ──────────────────────
@@ -249,6 +242,10 @@ async function processPlaylist(
 
     if (res.status === 429) {
       retryAfter = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
+      // Shared with csv-heal.ts and the dashboard's spotifyFetch proxy — so
+      // whichever of them hits a 429 next honors this same cooldown instead
+      // of each keeping its own clock and re-triggering a fresh 429.
+      await setSpotifyBlockedUntil(new Date(Date.now() + retryAfter * 1000).toISOString());
       continue;
     }
 
@@ -404,6 +401,29 @@ async function runUpdate(): Promise<{
   errors: number;
 }> {
   const bbcPlaylists = loadBbcProgrammes();
+
+  // Pre-flight: honor a rate limit already in effect from ANYTHING that hits
+  // Spotify (a previous BBC run, csv-heal, the dashboard) — shared via
+  // lib/spotify-rate-limit.ts's persisted sentinel. A short remaining wait is
+  // absorbed here rather than aborting the whole update over a few seconds;
+  // a longer one skips the run entirely instead of guaranteeing every
+  // programme's first search call eats the same still-active 429.
+  const SHORT_WAIT_MAX_SEC = 15;
+  const preflightBlocked = await getSpotifyBlockedUntil();
+  if (preflightBlocked) {
+    const waitSec = Math.max(0, Math.ceil((new Date(preflightBlocked).getTime() - Date.now()) / 1000));
+    if (waitSec > SHORT_WAIT_MAX_SEC) {
+      const msg = `Spotify is already rate-limited until ${new Date(preflightBlocked).toLocaleTimeString()} — skipping this run entirely.`;
+      await notify(msg, { title: "⏭ BBC Update Skipped — Rate Limited", tags: "hourglass" });
+      appendCronLog("BBC refresh", `Skipped — ${msg}`);
+      return { ok: true, programmeResults: [], dedupRemoved: 0, dedupRemaining: 0, totalMatched: 0, errors: 0 };
+    }
+    if (waitSec > 0) {
+      appendCronLog("BBC refresh", `Waiting ${waitSec}s for an existing Spotify rate limit to clear before starting`);
+      await sleep(waitSec * 1000);
+    }
+  }
+
   appendCronLog("BBC refresh", `Started — ${bbcPlaylists.length} programme${bbcPlaylists.length !== 1 ? "s" : ""}`);
 
   const programmeList = bbcPlaylists.map(p => `• ${p.name}`).join("\n");
@@ -431,6 +451,19 @@ async function runUpdate(): Promise<{
 
   for (let pi = 0; pi < bbcPlaylists.length; pi++) {
     if (pi > 0) await sleep(3000);
+    // A 429 from an earlier programme in THIS run is recorded in the shared
+    // sentinel by processPlaylist — wait it out before starting the next
+    // programme's own search calls, instead of immediately eating a fresh
+    // 429 for every remaining programme (what caused 4 separate rate-limit
+    // hits in a single run previously).
+    const blockedUntil = await getSpotifyBlockedUntil();
+    if (blockedUntil) {
+      const waitSec = Math.max(0, Math.ceil((new Date(blockedUntil).getTime() - Date.now()) / 1000));
+      if (waitSec > 0) {
+        appendCronLog("BBC refresh", `Waiting ${waitSec}s for Spotify's rate limit to clear before the next programme`);
+        await sleep(waitSec * 1000);
+      }
+    }
     const playlist = bbcPlaylists[pi];
     try {
       const r = await processPlaylist(playlist.pid, playlist.name, token, cache);
@@ -493,7 +526,7 @@ async function runUpdate(): Promise<{
   await notify(
     `${lines.join("\n")}\n\n${totalLine}\n${dedupLine}`,
     {
-      title: errors === 0 ? "✅ Weekly Update Complete" : "⚠️ Weekly Update Done With Errors",
+      title: errors === 0 ? "✅ BBC Playlist Update Complete" : "⚠️ BBC Playlist Update Done With Errors",
       tags: errors === 0 ? "white_check_mark" : "warning",
     }
   );

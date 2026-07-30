@@ -4180,6 +4180,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               { key: "garmin", label: "Garmin sync", desc: "Downloads new activities into GarminDB" },
               { key: "weekly", label: "BBC playlist refresh", desc: "Re-fetches BBC programme tracks and removes duplicates" },
               { key: "aidj", label: "AI DJ pre-build", desc: "Builds tomorrow's mix and saves it to “Today's Run”" },
+              { key: "aidjRetry", label: "AI DJ morning retry", desc: "Catches today's mix if the evening pre-build missed it" },
             ] as const).map(meta => {
               const job = cronJobs.find(j => j.key === meta.key);
               if (!job) return null;

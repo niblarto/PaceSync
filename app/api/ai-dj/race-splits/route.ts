@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { getPinnedRoute, setPinnedRoute, removePinnedRoute } from "@/lib/pinned-routes";
+import { getRaceSplits, setRaceSplits, removeRaceSplits, parsePastedSplits } from "@/lib/race-splits";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -13,35 +13,31 @@ export async function GET(req: NextRequest) {
   if (!DATE_RE.test(date) || !title) {
     return NextResponse.json({ error: "date (YYYY-MM-DD) and title required" }, { status: 400 });
   }
-  return NextResponse.json({ route: getPinnedRoute(date, title) });
+  return NextResponse.json({ splits: getRaceSplits(date, title) });
 }
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
-  const body = await req.json() as {
-    date?: string;
-    workoutTitle?: string;
-    activityId?: string | number;
-    name?: string;
-    distanceMi?: number;
-    runDate?: string;
-  };
-  if (!body.date || !DATE_RE.test(body.date) || !body.workoutTitle || !body.activityId) {
-    return NextResponse.json({ error: "date, workoutTitle, and activityId required" }, { status: 400 });
+  const body = await req.json() as { date?: string; workoutTitle?: string; rawText?: string };
+  if (!body.date || !DATE_RE.test(body.date) || !body.workoutTitle) {
+    return NextResponse.json({ error: "date and workoutTitle required" }, { status: 400 });
+  }
+  if (!body.rawText?.trim()) {
+    return NextResponse.json({ error: "rawText required" }, { status: 400 });
   }
 
-  setPinnedRoute({
+  const parsed = parsePastedSplits(body.rawText);
+  if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+
+  const entry = {
     date: body.date,
     workoutTitle: body.workoutTitle,
-    activityId: String(body.activityId),
-    name: body.name ?? "",
-    distanceMi: body.distanceMi ?? 0,
-    runDate: body.runDate ?? "",
-    pinnedAt: new Date().toISOString(),
-  });
-  return NextResponse.json({ ok: true });
+    splits: parsed.splits,
+    savedAt: new Date().toISOString(),
+  };
+  setRaceSplits(entry);
+  return NextResponse.json({ ok: true, splits: entry });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -51,6 +47,6 @@ export async function DELETE(req: NextRequest) {
   if (!date || !DATE_RE.test(date) || !title) {
     return NextResponse.json({ error: "date and title required" }, { status: 400 });
   }
-  removePinnedRoute(date, title);
+  removeRaceSplits(date, title);
   return NextResponse.json({ ok: true });
 }

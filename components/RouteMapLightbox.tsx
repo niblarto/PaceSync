@@ -19,8 +19,11 @@ interface Props {
       with a hover tooltip showing each section's target. */
   workoutSegments?: string[];
   /** When opened from a scheduled workout's "Runs at the distance" list,
-      these let the pin button attach this route to that workout date. */
+      these let the pin button attach this route to that workout (date+title
+      — see lib/workout-key.ts; date alone isn't unique across Runna's
+      recurring workout titles). */
   workoutDate?: string;
+  workoutTitle?: string;
   runDate?: string;
   distanceMi?: number;
   /** The pinned mix's tracklist, when this workout date has one — shown as
@@ -116,7 +119,7 @@ function sectionTooltip(s: WorkoutSection): string {
   }
 }
 
-export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDate, runDate, distanceMi, mixTracks, onClose }: Props) {
+export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDate, workoutTitle, runDate, distanceMi, mixTracks, onClose }: Props) {
   const { data: session } = useSession();
   const mapRef = useRef<HTMLDivElement>(null);
   const [name, setName] = useState<string | null>(null);
@@ -140,24 +143,24 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
   const [pinning, setPinning] = useState(false);
 
   useEffect(() => {
-    if (!workoutDate) return;
-    fetch(`/api/garmin/pin-route?date=${workoutDate}`)
+    if (!workoutDate || !workoutTitle) return;
+    fetch(`/api/garmin/pin-route?date=${workoutDate}&title=${encodeURIComponent(workoutTitle)}`)
       .then(r => r.json())
       .then((d: { route?: { activityId: string } | null }) => setPinnedActivityId(d.route?.activityId ?? null))
       .catch(() => setPinnedActivityId(null));
-  }, [workoutDate]);
+  }, [workoutDate, workoutTitle]);
 
   const isPinned = pinnedActivityId != null && String(pinnedActivityId) === String(activityId);
 
   async function togglePin() {
-    if (!workoutDate) return;
+    if (!workoutDate || !workoutTitle) return;
     setPinning(true);
     try {
       if (isPinned) {
         await fetch("/api/garmin/pin-route", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ date: workoutDate }),
+          body: JSON.stringify({ date: workoutDate, title: workoutTitle }),
         });
         setPinnedActivityId(null);
       } else {
@@ -166,6 +169,7 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             date: workoutDate,
+            workoutTitle,
             activityId,
             name: name ?? label,
             distanceMi: distanceMi ?? 0,
@@ -471,7 +475,7 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
             >
               Garmin Connect ↗
             </a>
-            {workoutDate && (
+            {workoutDate && workoutTitle && (
               <button
                 onClick={togglePin}
                 disabled={pinning || pinnedActivityId === undefined}

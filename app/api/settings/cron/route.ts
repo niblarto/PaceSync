@@ -6,7 +6,7 @@ import { getCronLog } from "@/lib/cron-log";
 
 export const dynamic = "force-dynamic";
 
-const VALID_KEYS = ["garmin", "weekly", "aidj"];
+const VALID_KEYS = ["garmin", "weekly", "aidj", "aidjRetry"];
 const TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 
 export async function GET() {

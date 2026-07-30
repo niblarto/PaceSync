@@ -1,10 +1,13 @@
 import fs from "fs";
 import path from "path";
 import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
+import { workoutKey } from "@/lib/workout-key";
 
 // Snapshot of what the "Today's Run" playlist held for each workout date, so
 // past runs can be reviewed song-by-song against the pace actually run
-// (via GarminDB). Keyed by workout date, pruned to the last 90 days.
+// (via GarminDB). Keyed by workout date+title (see lib/workout-key.ts — date
+// alone collides when Runna reuses a workout title on a different week, or a
+// day has more than one workout slot), pruned to the last 90 days.
 
 const FILE = path.join(process.cwd(), "todays-run-history.json");
 const RETAIN_DAYS = 90;
@@ -69,10 +72,10 @@ function loadAll(): Record<string, TodaysRunEntry> {
 export function saveTodaysRunEntry(entry: TodaysRunEntry): void {
   try {
     const all = loadAll();
-    all[entry.date] = entry;
+    all[workoutKey(entry.date, entry.workoutTitle)] = entry;
     const cutoff = Date.now() - RETAIN_DAYS * 24 * 60 * 60 * 1000;
-    Object.keys(all).forEach(date => {
-      if (new Date(date + "T12:00:00").getTime() < cutoff) delete all[date];
+    Object.entries(all).forEach(([key, e]) => {
+      if (new Date(e.date + "T12:00:00").getTime() < cutoff) delete all[key];
     });
     fs.writeFileSync(FILE, JSON.stringify(all), "utf-8");
   } catch (e) {
@@ -80,15 +83,16 @@ export function saveTodaysRunEntry(entry: TodaysRunEntry): void {
   }
 }
 
-export function getTodaysRunEntry(date: string): TodaysRunEntry | null {
-  return loadAll()[date] ?? null;
+export function getTodaysRunEntry(date: string, title: string): TodaysRunEntry | null {
+  return loadAll()[workoutKey(date, title)] ?? null;
 }
 
-export function removeTodaysRunEntry(date: string): void {
+export function removeTodaysRunEntry(date: string, title: string): void {
   try {
     const all = loadAll();
-    if (!(date in all)) return;
-    delete all[date];
+    const key = workoutKey(date, title);
+    if (!(key in all)) return;
+    delete all[key];
     fs.writeFileSync(FILE, JSON.stringify(all), "utf-8");
   } catch (e) {
     console.warn("[todays-run-history] remove failed:", e);
@@ -98,9 +102,10 @@ export function removeTodaysRunEntry(date: string): void {
 // Record whether the saved mix was actually what played that day. Doesn't
 // remove the entry — just marks it so pacing review and getPlayedTracks()
 // can exclude it without losing the record.
-export function setTodaysRunApproval(date: string, approved: boolean): TodaysRunEntry | null {
+export function setTodaysRunApproval(date: string, title: string, approved: boolean): TodaysRunEntry | null {
   const all = loadAll();
-  const entry = all[date];
+  const key = workoutKey(date, title);
+  const entry = all[key];
   if (!entry) return null;
   entry.approved = approved;
   fs.writeFileSync(FILE, JSON.stringify(all), "utf-8");

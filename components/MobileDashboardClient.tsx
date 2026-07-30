@@ -225,6 +225,18 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
 
   async function saveMix() {
     if (!aiDjMix || !aiDjMix.tracks.length) return;
+    // See DashboardClient.saveTodaysRun's comment — aiDjMix.date is set once
+    // when the mix was built/loaded and never refreshed, so a stale mix left
+    // over from an earlier day (Runna reuses workout titles week to week)
+    // would otherwise silently save under that old date instead of today's.
+    const today = new Date().toISOString().slice(0, 10);
+    if (aiDjMix.date !== today) {
+      const [y, m, d] = aiDjMix.date.split("-");
+      const proceed = window.confirm(
+        `This mix was built for ${d}-${m}-${y} ("${aiDjMix.workoutTitle}"), not today — save it as today's run anyway?`
+      );
+      if (!proceed) return;
+    }
     setSaving(true);
     setSaveError(null);
     try {

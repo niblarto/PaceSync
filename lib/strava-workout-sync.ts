@@ -43,10 +43,10 @@ async function waitForThirdPartyRename(token: string, activityId: number | strin
   return activity;
 }
 
-function trackLines(date: string): string[] {
-  const pinned = getPinnedMix(date);
+function trackLines(date: string, title: string): string[] {
+  const pinned = getPinnedMix(date, title);
   if (pinned) return timelineToHistoryTracks(pinned.timeline).map(t => `${t.name} — ${t.artist}`);
-  const history = getTodaysRunEntry(date);
+  const history = getTodaysRunEntry(date, title);
   if (!history || history.approved === false) return [];
   return history.tracks.map(t => `${t.name} — ${t.artist}`);
 }
@@ -198,12 +198,12 @@ async function findStravaActivityIdForDate(token: string, date: string): Promise
 // called when the user answers "Yes" on the pacing review's "Did you
 // actually listen to this playlist?" prompt, NOT at webhook time, so only
 // music that genuinely played ends up on Strava.
-export async function appendTracksToStravaActivity(date: string): Promise<SyncResult> {
+export async function appendTracksToStravaActivity(date: string, title: string): Promise<SyncResult> {
   const tokenResult = await getFreshStravaToken();
   if (!tokenResult.ok) return { ok: false, error: `Strava not connected (${tokenResult.reason})` };
   const token = tokenResult.token;
 
-  const tracks = trackLines(date);
+  const tracks = trackLines(date, title);
   if (!tracks.length) return { ok: true, updated: false, reason: `No confirmed mix tracks for ${date}` };
 
   try {

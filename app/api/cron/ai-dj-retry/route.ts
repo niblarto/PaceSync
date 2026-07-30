@@ -3,10 +3,12 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { buildAndSaveMixesFor } from "@/lib/ai-dj-prebuild";
 
-// Runs daily at 15:30 (Pi local time, installed by deploy.py): pre-builds
-// tomorrow's AI DJ mix and saves it to "Today's Run". See
-// app/api/cron/ai-dj-retry/route.ts (06:00) for the same-day backfill that
-// catches workouts this missed.
+// Runs daily at 06:00 (Pi local time, installed by deploy.py): re-checks
+// TODAY's workout and backfills a mix if the 15:30 pre-build (app/api/cron/
+// ai-dj/route.ts) missed it — e.g. Runna hadn't published or later reshuffled
+// the workout before 15:30 the day before. Only builds workouts that still
+// have nothing saved (see buildAndSaveMixesFor's "morning retry" branch) —
+// a no-op on a day the evening job already succeeded.
 
 export async function POST(req: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
@@ -16,10 +18,10 @@ export async function POST(req: NextRequest) {
     if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
 
   try {
-    const result = await buildAndSaveMixesFor(tomorrow, "pre-build");
+    const result = await buildAndSaveMixesFor(today, "morning retry");
     return NextResponse.json(result);
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);

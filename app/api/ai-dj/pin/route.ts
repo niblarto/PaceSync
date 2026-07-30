@@ -33,8 +33,11 @@ export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const date = req.nextUrl.searchParams.get("date") ?? "";
-  if (!DATE_RE.test(date)) return NextResponse.json({ error: "date required (YYYY-MM-DD)" }, { status: 400 });
-  const pin = getPinnedMix(date);
+  const title = req.nextUrl.searchParams.get("title") ?? "";
+  if (!DATE_RE.test(date) || !title) {
+    return NextResponse.json({ error: "date (YYYY-MM-DD) and title required" }, { status: 400 });
+  }
+  const pin = getPinnedMix(date, title);
   return NextResponse.json({ pinned: !!pin, workoutTitle: pin?.workoutTitle ?? null, pinnedAt: pin?.pinnedAt ?? null });
 }
 
@@ -45,45 +48,45 @@ export async function POST(req: NextRequest) {
     date?: string; workoutTitle?: string; totalSec?: number;
     timeline?: AiDjMixResponse["timeline"];
   };
-  if (!body.date || !DATE_RE.test(body.date)) {
-    return NextResponse.json({ error: "date required" }, { status: 400 });
+  if (!body.date || !DATE_RE.test(body.date) || !body.workoutTitle) {
+    return NextResponse.json({ error: "date and workoutTitle required" }, { status: 400 });
   }
 
   // No timeline given — re-pin: this is a saved (previously unpinned) mix
   // still on record in "Today's Run" history, being pinned again as-is.
   let timeline = body.timeline;
-  let workoutTitle = body.workoutTitle ?? "";
   let totalSec = body.totalSec ?? 0;
   if (!timeline?.length) {
-    const entry = getTodaysRunEntry(body.date);
+    const entry = getTodaysRunEntry(body.date, body.workoutTitle);
     if (!entry?.tracks.length) {
-      return NextResponse.json({ error: "date and timeline required" }, { status: 400 });
+      return NextResponse.json({ error: "date, workoutTitle, and timeline required" }, { status: 400 });
     }
     timeline = historyTracksToTimeline(entry.tracks);
-    workoutTitle = workoutTitle || entry.workoutTitle;
     totalSec = totalSec || entry.tracks.reduce((sum, t) => sum + t.durationSec, 0);
   }
 
   setPinnedMix({
     date: body.date,
-    workoutTitle,
+    workoutTitle: body.workoutTitle,
     totalSec,
     timeline,
     pinnedAt: new Date().toISOString(),
   });
-  console.log(`[ai-dj/pin] pinned mix for ${body.date} ("${workoutTitle}")`);
+  console.log(`[ai-dj/pin] pinned mix for ${body.date} ("${body.workoutTitle}")`);
   return NextResponse.json({ ok: true });
 }
 
 export async function DELETE(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const { date } = await req.json() as { date?: string };
-  if (!date || !DATE_RE.test(date)) return NextResponse.json({ error: "date required" }, { status: 400 });
-  removePinnedMix(date);
+  const { date, title } = await req.json() as { date?: string; title?: string };
+  if (!date || !DATE_RE.test(date) || !title) {
+    return NextResponse.json({ error: "date and title required" }, { status: 400 });
+  }
+  removePinnedMix(date, title);
   // Unpinning deletes the mix outright, not just the pin — otherwise the
   // "Today's Run" history snapshot would keep it around as a fallback and
   // the pinned-mix UI would just relabel it "saved" instead of removing it.
-  removeTodaysRunEntry(date);
+  removeTodaysRunEntry(date, title);
   return NextResponse.json({ ok: true });
 }

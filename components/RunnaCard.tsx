@@ -6,6 +6,7 @@ import { useSession } from "next-auth/react";
 import { freshSpotifyToken } from "@/lib/spotify-browser";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 import type { TrackWithBPM } from "@/types";
+import type { RaceSplitsEntry } from "@/lib/race-splits";
 import { RouteMapLightbox } from "./RouteMapLightbox";
 import { openInSpotify } from "./TrackRow";
 import { useRunningPlaylist } from "./useRunningPlaylist";
@@ -300,10 +301,10 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
     }).catch(() => {});
   }
 
-  function fetchPacing(date: string, force = false) {
+  function fetchPacing(date: string, title: string, force = false) {
     if (pacing[date] && !force) return;
     setPacing(p => ({ ...p, [date]: { loading: true, tracks: [], summary: null } }));
-    fetch(`/api/garmin/run-pacing?date=${date}`)
+    fetch(`/api/garmin/run-pacing?date=${date}&title=${encodeURIComponent(title)}`)
       .then(r => r.json())
       .then((d: { entry?: { workoutTitle?: string; approved?: boolean } | null; tracks?: PacingTrack[]; summary?: string | null; error?: string }) => {
         setPacing(p => ({
@@ -333,17 +334,17 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
   }
 
   const [approving, setApproving] = useState<string | null>(null);
-  function setApproval(date: string, approved: boolean) {
+  function setApproval(date: string, title: string, approved: boolean) {
     setApproving(date);
     fetch("/api/todays-run/history", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ date, approved }),
+      body: JSON.stringify({ date, title, approved }),
     })
       .then(r => r.json())
       .then((d: { error?: string }) => {
         if (d.error) return;
-        fetchPacing(date, true);
+        fetchPacing(date, title, true);
       })
       .finally(() => setApproving(a => (a === date ? null : a)));
   }
@@ -387,7 +388,7 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                   onClick={e => {
                     setExpanded(isOpen ? null : run.uid);
                     if (!isOpen) {
-                      fetchPacing(run.date); loadVotes(); fetchActivityLinks(run.date);
+                      fetchPacing(run.date, run.title); loadVotes(); fetchActivityLinks(run.date);
                       const row = e.currentTarget.parentElement as HTMLElement | null;
                       const container = scrollRef.current;
                       // Scroll only the card's own list container — never
@@ -531,7 +532,7 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                           <p className="text-xs text-slate-500 italic">
                             You said this wasn&apos;t the playlist you ran to — pacing not compared.{" "}
                             <button
-                              onClick={() => setApproval(run.date, true)}
+                              onClick={() => setApproval(run.date, run.title, true)}
                               disabled={approving === run.date}
                               className="not-italic text-sky-400 hover:text-sky-300 underline disabled:opacity-40"
                             >
@@ -549,14 +550,14 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                             <div className="flex items-center gap-2 text-xs bg-amber-500/10 border border-amber-500/30 text-amber-300 rounded px-2 py-1.5">
                               <span className="flex-1">Did you actually listen to this playlist on this run?</span>
                               <button
-                                onClick={() => setApproval(run.date, true)}
+                                onClick={() => setApproval(run.date, run.title, true)}
                                 disabled={approving === run.date}
                                 className="rounded bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 px-2 py-0.5 font-medium transition-colors"
                               >
                                 Yes
                               </button>
                               <button
-                                onClick={() => setApproval(run.date, false)}
+                                onClick={() => setApproval(run.date, run.title, false)}
                                 disabled={approving === run.date}
                                 className="rounded bg-slate-700/50 hover:bg-slate-700/80 disabled:opacity-40 px-2 py-0.5 font-medium transition-colors"
                               >
@@ -691,7 +692,17 @@ export interface RunnaScheduleHandle {
 // can't produce a runaway-length mix.
 const STRENGTH_MIN_SEC = 10 * 60;
 const STRENGTH_MAX_SEC = 90 * 60;
-function mixSegmentsFor(w: RunnaWorkout): string[] {
+// When a race has pasted Pace Pro splits saved for it, those replace the
+// Runna description's plain-text segments entirely — one "X.XXmi at
+// M:SS/mi" line per split, which ai_dj/workout.py's existing _PACE_RE/
+// _DIST_RE regexes already parse with no changes needed there (this is
+// exactly the same shape a normal "1.5mi at 8:35/mi" training line takes).
+// Opt-in per race: a race with no saved splits falls through to w.segments
+// unchanged, same as it always has.
+function mixSegmentsFor(w: RunnaWorkout, raceSplits?: RaceSplitsEntry | null): string[] {
+  if (w.type === "race" && raceSplits?.splits.length) {
+    return raceSplits.splits.map(s => `${s.splitMi}mi at ${fmtPaceSec(s.splitPaceSec)}/mi`);
+  }
   if (w.type !== "strength") return w.segments;
   const raw = w.durationSec;
   const clamped = Math.min(Math.max(raw || 45 * 60, STRENGTH_MIN_SEC), STRENGTH_MAX_SEC);
@@ -837,7 +848,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   interface RouteMixTrack { uri: string | null; name: string; artist: string; startsAtSec: number; durationSec?: number; tempo: number | null }
   const [routeMap, setRouteMap] = useState<{
     id: string | number; label: string; segments?: string[];
-    workoutDate?: string; runDate?: string; distanceMi?: number;
+    workoutDate?: string; workoutTitle?: string; runDate?: string; distanceMi?: number;
     mixTracks?: RouteMixTrack[];
   } | null>(null);
   const [courses, setCourses] = useState<GarminCourse[] | null>(null);
@@ -879,7 +890,15 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   interface PinnedRouteInfo { activityId: string; name: string; distanceMi: number; runDate: string }
   const [pinnedRoutes, setPinnedRoutes] = useState<Record<string, PinnedRouteInfo | null>>({});
 
-  async function unpinMix(date: string) {
+  // Pace Pro splits pasted in for a race workout — keyed by workout date,
+  // fetched on expand same as mixSnapshots/pinnedRoutes below.
+  const [raceSplits, setRaceSplits] = useState<Record<string, RaceSplitsEntry | null>>({});
+  const [splitsEditing, setSplitsEditing] = useState<string | null>(null); // workout date whose textarea is open
+  const [splitsText, setSplitsText] = useState("");
+  const [splitsSaving, setSplitsSaving] = useState(false);
+  const [splitsError, setSplitsError] = useState<string | null>(null);
+
+  async function unpinMix(date: string, title: string) {
     setUnpinningDate(date);
     try {
       // Server-side, unpinning deletes the mix outright (both the pin and
@@ -888,7 +907,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       await fetch("/api/ai-dj/pin", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date }),
+        body: JSON.stringify({ date, title }),
       });
       setMixSnapshots(s => ({ ...s, [date]: null }));
     } finally {
@@ -896,7 +915,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     }
   }
 
-  async function repinMix(date: string) {
+  async function repinMix(date: string, title: string) {
     setPinningDate(date);
     try {
       // No timeline in the body — the pin route re-pins from the existing
@@ -904,7 +923,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       await fetch("/api/ai-dj/pin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date }),
+        body: JSON.stringify({ date, workoutTitle: title }),
       });
       setMixSnapshots(s => (s[date] ? { ...s, [date]: { ...s[date]!, pinned: true } } : s));
     } finally {
@@ -912,13 +931,13 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     }
   }
 
-  async function deleteSavedMix(date: string) {
+  async function deleteSavedMix(date: string, title: string) {
     setDeletingDate(date);
     try {
       await fetch("/api/todays-run/history", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date }),
+        body: JSON.stringify({ date, title }),
       });
       setMixSnapshots(s => ({ ...s, [date]: null }));
     } finally {
@@ -937,7 +956,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     const w = workouts.find(x => x.uid === expanded);
     if (!w || w.type === "rest") return;
     if (mixSnapshots[w.date] !== undefined) return;
-    fetch(`/api/todays-run/history?date=${w.date}`)
+    fetch(`/api/todays-run/history?date=${w.date}&title=${encodeURIComponent(w.title)}`)
       .then(r => r.json())
       .then((d: { entry?: MixSnapshot | null }) => {
         setMixSnapshots(s => ({ ...s, [w.date]: d.entry ?? null }));
@@ -945,6 +964,51 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       .catch(() => setMixSnapshots(s => ({ ...s, [w.date]: null })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, aiDjEnabled, workouts, mixSnapshots]);
+
+  // On expand, fetch any saved Pace Pro splits for this race workout.
+  useEffect(() => {
+    if (!expanded) return;
+    const w = workouts.find(x => x.uid === expanded);
+    if (!w || w.type !== "race") return;
+    if (raceSplits[w.date] !== undefined) return;
+    fetch(`/api/ai-dj/race-splits?date=${w.date}&title=${encodeURIComponent(w.title)}`)
+      .then(r => r.json())
+      .then((d: { splits?: RaceSplitsEntry | null }) => {
+        setRaceSplits(s => ({ ...s, [w.date]: d.splits ?? null }));
+      })
+      .catch(() => setRaceSplits(s => ({ ...s, [w.date]: null })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, workouts, raceSplits]);
+
+  async function saveRaceSplits(w: RunnaWorkout) {
+    setSplitsSaving(true);
+    setSplitsError(null);
+    try {
+      const res = await fetch("/api/ai-dj/race-splits", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date: w.date, workoutTitle: w.title, rawText: splitsText }),
+      });
+      const d = await res.json() as { error?: string; splits?: RaceSplitsEntry };
+      if (!res.ok || d.error) throw new Error(d.error ?? "Failed to save splits");
+      setRaceSplits(s => ({ ...s, [w.date]: d.splits ?? null }));
+      setSplitsEditing(null);
+      setSplitsText("");
+    } catch (e) {
+      setSplitsError(e instanceof Error ? e.message : "Failed to save splits");
+    } finally {
+      setSplitsSaving(false);
+    }
+  }
+
+  async function removeRaceSplitsFor(date: string, title: string) {
+    setRaceSplits(s => ({ ...s, [date]: null }));
+    await fetch("/api/ai-dj/race-splits", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date, title }),
+    }).catch(() => {});
+  }
 
   // On expand, fetch past runs at (workout distance … +0.5mi) as route options
   useEffect(() => {
@@ -963,7 +1027,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     const w = workouts.find(x => x.uid === expanded);
     if (!w) return;
     if (pinnedRoutes[w.date] !== undefined && routeMap !== null) return;
-    fetch(`/api/garmin/pin-route?date=${w.date}`)
+    fetch(`/api/garmin/pin-route?date=${w.date}&title=${encodeURIComponent(w.title)}`)
       .then(r => r.json())
       .then((d: { route?: PinnedRouteInfo | null }) => {
         setPinnedRoutes(s => ({ ...s, [w.date]: d.route ?? null }));
@@ -1022,7 +1086,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     }));
     const last = snap.tracks[snap.tracks.length - 1];
     const totalSec = last ? last.startsAtSec + (last.durationSec ?? 0) : 0;
-    onAiDjMix(snap.workoutTitle || w.title, mixName(w), tracks, totalSec, mixSegmentsFor(w), w.date, segs);
+    onAiDjMix(snap.workoutTitle || w.title, mixName(w), tracks, totalSec, mixSegmentsFor(w, raceSplits[w.date]), w.date, segs);
   }
 
   async function buildMix(
@@ -1044,7 +1108,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       const mixRes = await fetch("/api/ai-dj/mix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w), avoidUris, date: w.date }),
+        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w, raceSplits[w.date]), avoidUris, date: w.date }),
       });
       if (!mixRes.ok || !mixRes.body) {
         const err = await mixRes.json().catch(() => ({})) as { error?: string };
@@ -1117,7 +1181,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
         // itself rather than replacing the whole mix via onAiDjMix.
         onResult(tracks, mix.totalSec, mix.timeline);
       } else {
-        onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w), w.date, mix.timeline, accumulatedUris);
+        onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w, raceSplits[w.date]), w.date, mix.timeline, accumulatedUris);
       }
       setMixState(s => ({
         ...s,
@@ -1355,7 +1419,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                                 <span className="flex items-center gap-2 shrink-0">
                                   {snap.pinned ? (
                                     <button
-                                      onClick={e => { e.stopPropagation(); unpinMix(w.date); }}
+                                      onClick={e => { e.stopPropagation(); unpinMix(w.date, w.title); }}
                                       disabled={unpinningDate === w.date}
                                       className="text-[11px] text-purple-300 hover:text-purple-200 underline disabled:opacity-50"
                                     >
@@ -1364,14 +1428,14 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                                   ) : (
                                     <>
                                       <button
-                                        onClick={e => { e.stopPropagation(); repinMix(w.date); }}
+                                        onClick={e => { e.stopPropagation(); repinMix(w.date, w.title); }}
                                         disabled={pinningDate === w.date}
                                         className="text-[11px] text-purple-300 hover:text-purple-200 underline disabled:opacity-50"
                                       >
                                         {pinningDate === w.date ? "Pinning…" : "Pin"}
                                       </button>
                                       <button
-                                        onClick={e => { e.stopPropagation(); deleteSavedMix(w.date); }}
+                                        onClick={e => { e.stopPropagation(); deleteSavedMix(w.date, w.title); }}
                                         disabled={deletingDate === w.date}
                                         className="text-[11px] text-red-400/80 hover:text-red-300 underline disabled:opacity-50"
                                       >
@@ -1423,6 +1487,80 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                         </>
                       );
                     })()}
+                    {w.type === "race" && (() => {
+                      const saved = raceSplits[w.date];
+                      const isEditing = splitsEditing === w.date;
+                      if (isEditing) {
+                        return (
+                          <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-2">
+                            <p className="text-xs text-purple-300/80 font-medium">Paste Pace Pro splits</p>
+                            <textarea
+                              value={splitsText}
+                              onChange={e => setSplitsText(e.target.value)}
+                              onClick={e => e.stopPropagation()}
+                              placeholder={"1\t1.72 mi\t7:57 /mi\t1.72 mi\t7:57 /mi\t- 2 m\n2\t1.62 mi\t8:14 /mi\t3.35 mi\t8:05 /mi\t+ 54 m\n..."}
+                              rows={6}
+                              className="w-full rounded-lg bg-slate-800 border border-slate-700 text-xs font-mono px-2 py-1.5 text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                            />
+                            {splitsError && <p className="text-xs text-red-400">{splitsError}</p>}
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={e => { e.stopPropagation(); saveRaceSplits(w); }}
+                                disabled={splitsSaving || !splitsText.trim()}
+                                className="text-xs px-2.5 py-1 rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 text-black font-semibold transition-colors"
+                              >
+                                {splitsSaving ? "Saving…" : "Save splits"}
+                              </button>
+                              <button
+                                onClick={e => { e.stopPropagation(); setSplitsEditing(null); setSplitsText(""); setSplitsError(null); }}
+                                className="text-xs text-slate-500 hover:text-slate-300"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      }
+                      if (saved && saved.splits.length > 0) {
+                        return (
+                          <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-1">
+                            <p className="text-xs text-purple-300/80 font-medium flex items-center justify-between gap-2">
+                              <span>🏁 Pace Pro splits — {saved.splits.length} miles</span>
+                              <span className="flex items-center gap-2 shrink-0">
+                                <button
+                                  onClick={e => { e.stopPropagation(); setSplitsEditing(w.date); setSplitsText(""); setSplitsError(null); }}
+                                  className="text-[11px] text-purple-300 hover:text-purple-200 underline"
+                                >
+                                  Replace
+                                </button>
+                                <button
+                                  onClick={e => { e.stopPropagation(); removeRaceSplitsFor(w.date, w.title); }}
+                                  className="text-[11px] text-red-400/80 hover:text-red-300 underline"
+                                >
+                                  Remove
+                                </button>
+                              </span>
+                            </p>
+                            <div className="max-h-32 overflow-y-auto no-scrollbar space-y-0.5">
+                              {saved.splits.map(s => (
+                                <p key={s.splitNum} className="text-[11px] text-slate-400 font-mono">
+                                  {s.splitNum}. {s.splitMi}mi @ {fmtPaceSec(s.splitPaceSec)}/mi
+                                  <span className="text-slate-600"> · cum {s.cumulativeMi}mi @ {fmtPaceSec(s.cumulativePaceSec)}/mi · {s.elevationChangeM >= 0 ? "+" : ""}{s.elevationChangeM}m</span>
+                                </p>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      }
+                      return (
+                        <button
+                          onClick={e => { e.stopPropagation(); setSplitsEditing(w.date); setSplitsText(""); setSplitsError(null); }}
+                          className="text-xs px-2.5 py-1 rounded-lg border bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25 transition-colors"
+                        >
+                          🏁 Paste Pace Pro splits
+                        </button>
+                      );
+                    })()}
                     {showRouteMaps && garminConfigured && pinnedRoutes[w.date] && (
                       <button
                         onClick={e => {
@@ -1431,8 +1569,9 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                           setRouteMap({
                             id: pr.activityId,
                             label: `${pr.runDate} · ${pr.distanceMi.toFixed(1)}mi`,
-                            segments: mixSegmentsFor(w),
+                            segments: mixSegmentsFor(w, raceSplits[w.date]),
                             workoutDate: w.date,
+                            workoutTitle: w.title,
                             runDate: pr.runDate,
                             distanceMi: pr.distanceMi,
                             mixTracks: mixSnapshots[w.date]?.tracks,
@@ -1473,8 +1612,9 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                                     setRouteMap({
                                       id: a.activity_id,
                                       label: `${routeDate(a)} · ${a.distance.toFixed(1)}mi`,
-                                      segments: mixSegmentsFor(w),
+                                      segments: mixSegmentsFor(w, raceSplits[w.date]),
                                       workoutDate: w.date,
+                                      workoutTitle: w.title,
                                       runDate: routeDate(a),
                                       distanceMi: a.distance,
                                       mixTracks: mixSnapshots[w.date]?.tracks,
@@ -1574,6 +1714,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
           label={routeMap.label}
           workoutSegments={routeMap.segments}
           workoutDate={routeMap.workoutDate}
+          workoutTitle={routeMap.workoutTitle}
           runDate={routeMap.runDate}
           distanceMi={routeMap.distanceMi}
           mixTracks={routeMap.mixTracks}

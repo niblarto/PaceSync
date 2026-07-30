@@ -203,7 +203,10 @@ FILES = [
     ('app/api/ai-dj/health/route.ts',             'app/api/ai-dj/health/route.ts'),
     ('app/api/ai-dj/wake/route.ts',               'app/api/ai-dj/wake/route.ts'),
     ('app/api/ai-dj/pin/route.ts',                'app/api/ai-dj/pin/route.ts'),
+    ('app/api/ai-dj/race-splits/route.ts',        'app/api/ai-dj/race-splits/route.ts'),
+    ('lib/race-splits.ts',                        'lib/race-splits.ts'),
     ('app/api/garmin/pin-route/route.ts',          'app/api/garmin/pin-route/route.ts'),
+    ('lib/workout-key.ts',                        'lib/workout-key.ts'),
     ('lib/pinned-routes.ts',                       'lib/pinned-routes.ts'),
     ('lib/pinned-mixes.ts',                       'lib/pinned-mixes.ts'),
     ('app/api/settings/bpm-overrides/route.ts',   'app/api/settings/bpm-overrides/route.ts'),
@@ -214,6 +217,7 @@ FILES = [
     ('app/api/settings/ai-dj/usage/route.ts',     'app/api/settings/ai-dj/usage/route.ts'),
     ('app/api/settings/ai-dj/llm-log/route.ts',   'app/api/settings/ai-dj/llm-log/route.ts'),
     ('app/api/cron/ai-dj/route.ts',               'app/api/cron/ai-dj/route.ts'),
+    ('app/api/cron/ai-dj-retry/route.ts',          'app/api/cron/ai-dj-retry/route.ts'),
     ('lib/cron-schedule.ts',                      'lib/cron-schedule.ts'),
     ('lib/cron-log.ts',                           'lib/cron-log.ts'),
     ('lib/todays-run-history.ts',                 'lib/todays-run-history.ts'),
@@ -245,6 +249,7 @@ FILES = [
     ('local-auth.json',                           'local-auth.json'),
     ('lib/ai-dj-config.ts',                       'lib/ai-dj-config.ts'),
     ('lib/ai-dj-mix.ts',                          'lib/ai-dj-mix.ts'),
+    ('lib/ai-dj-prebuild.ts',                      'lib/ai-dj-prebuild.ts'),
     ('lib/csv-heal.ts',                           'lib/csv-heal.ts'),
     ('lib/spotify-rate-limit.ts',                 'lib/spotify-rate-limit.ts'),
     ('lib/track-enrich.ts',                       'lib/track-enrich.ts'),
@@ -468,7 +473,20 @@ ai_dj_cron_line = (
     f'-X POST http://localhost:{PORT}/api/cron/ai-dj '
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
-run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/ai-dj' || {{ (crontab -l 2>/dev/null; echo '{ai_dj_cron_line}') | crontab -; }}""")
+# Match on the URL plus a trailing space so this never also matches the
+# ai-dj-retry job's own install-check below (both share the "/api/cron/ai-dj"
+# prefix) — a bare substring grep would make each check think the other job
+# already covers it and skip installing itself.
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/ai-dj ' || {{ (crontab -l 2>/dev/null; echo '{ai_dj_cron_line}') | crontab -; }}""")
+
+print('  Ensuring cron job (AI DJ morning retry, default daily 06:00)...')
+ai_dj_retry_cron_log = f'/home/{PI["user"]}/cron-ai-dj-retry.log'
+ai_dj_retry_cron_line = (
+    f'0 6 * * * curl -s -o {ai_dj_retry_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/ai-dj-retry '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/ai-dj-retry' || {{ (crontab -l 2>/dev/null; echo '{ai_dj_retry_cron_line}') | crontab -; }}""")
 
 # Garmin sync completion notification: sftp doesn't carry the exec bit (and a
 # Windows checkout may add CRLFs), so normalise the script, then append it to

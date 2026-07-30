@@ -1068,6 +1068,24 @@ export function DashboardClient({ spotifyUser }: Props) {
 
   async function saveTodaysRun() {
     if (!filteredTracks.length) return;
+    // aiDjMix.date is which workout the mix was built FOR, set once when the
+    // mix was built/loaded (handleAiDjMix) and never refreshed afterward — if
+    // the same recurring workout title was opened on an earlier date (Runna
+    // repeats titles like "Tempo 2 Miles" week to week) and that mix object
+    // is still sitting in state, saving "Today's Run" would silently land
+    // under that OLD date's history entry instead of today's, so the actual
+    // run just done has nothing saved for it at all. Catch the mismatch here
+    // rather than trust the possibly-stale date silently.
+    if (aiDjMix) {
+      const today = new Date().toISOString().slice(0, 10);
+      if (aiDjMix.date !== today) {
+        const [y, m, d] = aiDjMix.date.split("-");
+        const proceed = window.confirm(
+          `This mix was built for ${d}-${m}-${y} ("${aiDjMix.workoutTitle}"), not today — save it as today's run anyway?`
+        );
+        if (!proceed) return;
+      }
+    }
     setTodaysRunSaving(true);
     setTodaysRunError(null);
     try {
