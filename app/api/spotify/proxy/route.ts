@@ -47,6 +47,7 @@ export async function POST(req: NextRequest) {
     let retryAfterSec: number | undefined;
     if (res.status === 429) {
       retryAfterSec = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
+      console.warn(`[spotify/proxy] 429 on ${method ?? "GET"} ${path} — retry-after ${retryAfterSec}s`);
       await setSpotifyBlockedUntil(new Date(Date.now() + retryAfterSec * 1000).toISOString());
     }
 

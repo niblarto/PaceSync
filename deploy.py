@@ -227,6 +227,7 @@ FILES = [
     ('lib/cron-schedule.ts',                      'lib/cron-schedule.ts'),
     ('lib/cron-log.ts',                           'lib/cron-log.ts'),
     ('lib/todays-run-history.ts',                 'lib/todays-run-history.ts'),
+    ('lib/play-counts.ts',                        'lib/play-counts.ts'),
     ('lib/recent-mix-builds.ts',                   'lib/recent-mix-builds.ts'),
     ('lib/run-pace-bias.ts',                      'lib/run-pace-bias.ts'),
     ('lib/track-feedback.ts',                     'lib/track-feedback.ts'),

@@ -28,6 +28,7 @@ export async function replacePlaylistTracks(token: string, playlistId: string, u
   if (!putRes.ok) throw new Error(`Replace tracks ${putRes.status}: ${await putRes.text()}`);
 
   for (let i = 100; i < uris.length; i += 100) {
+    await new Promise(r => setTimeout(r, 150));
     const res = await fetch(`${BASE}/playlists/${playlistId}/items`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },

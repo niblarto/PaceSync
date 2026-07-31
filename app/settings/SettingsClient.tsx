@@ -772,6 +772,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setTracklist(prev => prev?.filter(t => !uris.includes(t.uri)) ?? prev);
 
     for (let i = 0; i < tracks.length; i++) {
+      if (i > 0) await new Promise(r => setTimeout(r, 150));
       const track = tracks[i];
       if (token && runningPlaylist.id) {
         try {

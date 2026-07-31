@@ -1376,6 +1376,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       const existing = new Set(allTracks.map(t => t.uri));
       const suggestions: Suggestion[] = [];
       const uriByIndex: string[] = [];
+      const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
       // Sequential, one request at a time (never Promise.all) to stay under
       // Spotify's rate limit; spotifyFetch auto-retries a short (<=4s) 429,
       // but returns the 429 as-is for a longer one — continuing this loop in
@@ -1384,8 +1385,13 @@ export function DashboardClient({ spotifyUser }: Props) {
       // also 429s (which is what "counting down like a retry but never
       // actually finding anything" looked like). Stop the whole search
       // instead and surface it as an error the user can retry manually once
-      // the banner's countdown clears.
+      // the banner's countdown clears. A polite gap between requests
+      // (matching every other per-track Spotify search loop in this app —
+      // BBC/ai-dj-library/csv-heal all sleep 120-400ms) is also required:
+      // "sequential" alone still bursts Spotify's short-window rate limit if
+      // each request fires immediately after the last resolves.
       for (let i = 0; i < topTracks.length; i++) {
+        if (i > 0) await sleep(200);
         const t = topTracks[i];
         setSuggest(s => s && { ...s, progress: `Matching on Spotify… ${i + 1}/${topTracks.length}` });
         if (!token) continue;

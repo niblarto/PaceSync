@@ -308,6 +308,7 @@ async function processPlaylist(
   // Add matched URIs to Running playlist in chunks of 100
   const uris = surviving.map(a => a.uri);
   for (let i = 0; i < uris.length; i += 100) {
+    if (i > 0) await new Promise(r => setTimeout(r, 150));
     const res = await fetch(`https://api.spotify.com/v1/playlists/${runningPlaylistId()}/items`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -369,6 +370,7 @@ async function dedup(token: string): Promise<{ removed: number; remaining: numbe
   if (!putRes.ok) throw new Error(`PUT ${putRes.status}: ${await putRes.text()}`);
 
   for (let i = 1; i < chunks.length; i++) {
+    await new Promise(r => setTimeout(r, 150));
     const postRes = await fetch(`https://api.spotify.com/v1/playlists/${runningPlaylistId()}/items`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },

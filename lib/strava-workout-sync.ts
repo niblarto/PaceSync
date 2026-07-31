@@ -194,6 +194,15 @@ async function findStravaActivityIdForDate(token: string, date: string): Promise
   return longest.id;
 }
 
+// A GarminDB-side sync (separate from the rename tool syncWorkoutToStrava-
+// Activity already waits out) can touch this same activity's description
+// independently of anything this app does — seen in practice hours after
+// the tracklist was appended, overwriting it entirely with no trace left
+// anywhere in this app's own stores to recover it from. Re-check at a few
+// points over several hours and re-append if the block is gone, rather
+// than trusting a single write to have stuck for good.
+const CLOBBER_CHECK_DELAYS_MS = [5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 6 * 60 * 60_000];
+
 // Appends the confirmed AI DJ tracklist to the day's Strava activity —
 // called when the user answers "Yes" on the pacing review's "Did you
 // actually listen to this playlist?" prompt, NOT at webhook time, so only
@@ -216,6 +225,31 @@ export async function appendTracksToStravaActivity(date: string, title: string):
       return { ok: true, updated: false, reason: "Tracks already appended" };
     }
     await updateActivity(token, activityId, { description: appendTracks(existingDesc, tracks) });
+
+    // Fire-and-forget: don't hold up the pacing-review confirmation on
+    // these checks, but do actually perform them so a later external
+    // overwrite (seen happening hours afterward) gets healed instead of
+    // silently losing the tracklist with nothing left to recover it from.
+    // Each check independently re-verifies and re-appends if needed, so an
+    // early clobber gets caught quickly and a late one still gets caught
+    // by a later check in the schedule.
+    for (const delay of CLOBBER_CHECK_DELAYS_MS) {
+      setTimeout(() => {
+        (async () => {
+          try {
+            const after = await getActivity(token, activityId);
+            const desc = (after.description ?? "").trim();
+            if (!desc.includes("🎧 Tracks played:")) {
+              console.warn(`[strava-sync] tracklist for ${date} was overwritten after appending — re-applying`);
+              await updateActivity(token, activityId, { description: appendTracks(desc, tracks) });
+            }
+          } catch (e) {
+            console.warn(`[strava-sync] post-append clobber check failed for ${date}:`, e);
+          }
+        })();
+      }, delay);
+    }
+
     return { ok: true, updated: true, workoutTitle: activity.name };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "Failed to append tracks" };

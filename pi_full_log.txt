@@ -1,0 +1,38 @@
+Jul 31 06:00:01 pi env[144528]: [cron/ai-dj] no runnable (uncovered) workout on 2026-07-31 — skipping (morning retry)
+Jul 31 13:17:25 pi env[144528]: [todays-run] appended tracks to Strava activity for 2026-07-31
+Jul 31 13:17:30 pi env[144528]: [strava/webhook] updated activity 19541602992 with "4mi Easy Run"
+Jul 31 16:35:59 pi systemd[1]: Stopping running-playlist.service - PaceSync Running Playlist...
+Jul 31 16:36:00 pi systemd[1]: running-playlist.service: Deactivated successfully.
+Jul 31 16:36:00 pi systemd[1]: Stopped running-playlist.service - PaceSync Running Playlist.
+Jul 31 16:36:00 pi systemd[1]: running-playlist.service: Consumed 2min 43.783s CPU time.
+Jul 31 16:36:00 pi systemd[1]: Started running-playlist.service - PaceSync Running Playlist.
+Jul 31 16:36:00 pi env[193298]: > running-playlist@0.1.0 start
+Jul 31 16:36:00 pi env[193298]: > next start
+Jul 31 16:36:00 pi env[193310]:   ▲ Next.js 14.2.5
+Jul 31 16:36:00 pi env[193310]:   - Local:        http://localhost:5005
+Jul 31 16:36:00 pi env[193310]:  ✓ Starting...
+Jul 31 16:36:00 pi env[193310]:  ✓ Ready in 365ms
+Jul 31 16:41:06 pi systemd[1]: Stopping running-playlist.service - PaceSync Running Playlist...
+Jul 31 16:41:06 pi systemd[1]: running-playlist.service: Killing process 193316 (node) with signal SIGKILL.
+Jul 31 16:41:06 pi systemd[1]: running-playlist.service: Deactivated successfully.
+Jul 31 16:41:06 pi systemd[1]: Stopped running-playlist.service - PaceSync Running Playlist.
+Jul 31 16:41:06 pi systemd[1]: running-playlist.service: Consumed 1.381s CPU time.
+Jul 31 16:41:06 pi systemd[1]: Started running-playlist.service - PaceSync Running Playlist.
+Jul 31 16:41:06 pi env[194253]: > running-playlist@0.1.0 start
+Jul 31 16:41:06 pi env[194253]: > next start
+Jul 31 16:41:06 pi env[194265]:   ▲ Next.js 14.2.5
+Jul 31 16:41:06 pi env[194265]:   - Local:        http://localhost:5005
+Jul 31 16:41:06 pi env[194265]:  ✓ Starting...
+Jul 31 16:41:06 pi env[194265]:  ✓ Ready in 363ms
+Jul 31 17:01:13 pi systemd[1]: Stopping running-playlist.service - PaceSync Running Playlist...
+Jul 31 17:01:13 pi systemd[1]: running-playlist.service: Killing process 194271 (node) with signal SIGKILL.
+Jul 31 17:01:13 pi systemd[1]: running-playlist.service: Deactivated successfully.
+Jul 31 17:01:13 pi systemd[1]: Stopped running-playlist.service - PaceSync Running Playlist.
+Jul 31 17:01:13 pi systemd[1]: running-playlist.service: Consumed 2.909s CPU time.
+Jul 31 17:01:13 pi systemd[1]: Started running-playlist.service - PaceSync Running Playlist.
+Jul 31 17:01:13 pi env[195715]: > running-playlist@0.1.0 start
+Jul 31 17:01:13 pi env[195715]: > next start
+Jul 31 17:01:14 pi env[195727]:   ▲ Next.js 14.2.5
+Jul 31 17:01:14 pi env[195727]:   - Local:        http://localhost:5005
+Jul 31 17:01:14 pi env[195727]:  ✓ Starting...
+Jul 31 17:01:14 pi env[195727]:  ✓ Ready in 362ms

@@ -56,7 +56,12 @@ export async function DELETE(req: NextRequest) {
       // pinned date's mix, not just whatever's currently on screen.
       try {
         const unpinned = await unpinMixesContaining(Array.from(fullUris), Date.now());
-        for (const { date, title } of unpinned) removeTodaysRunEntry(date, title);
+        // Only clears the saved-history snapshot for a run that's ALREADY
+        // outside the Runna summary card's window (unpinMixesContaining
+        // itself only ever unpins upcoming workouts, but a run still
+        // showing on the summary card should keep its tracklist regardless
+        // — protectRecentRuns is the guard for that).
+        for (const { date, title } of unpinned) removeTodaysRunEntry(date, title, { protectRecentRuns: true });
       } catch (e) { console.warn("[tracks/delete] pin invalidation failed:", e); }
       return NextResponse.json({ ok: true, csvRemoved: true, removed: removedRows.length });
     }

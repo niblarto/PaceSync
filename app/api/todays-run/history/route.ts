@@ -4,6 +4,7 @@ import { authOptions } from "@/lib/auth";
 import { saveTodaysRunEntry, timelineToHistoryTracks, getTodaysRunEntry, setTodaysRunApproval, removeTodaysRunEntry } from "@/lib/todays-run-history";
 import { getPinnedMix, setPinnedMix, removePinnedMix } from "@/lib/pinned-mixes";
 import { appendTracksToStravaActivity } from "@/lib/strava-workout-sync";
+import { creditConfirmedPlay } from "@/lib/play-counts";
 import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 
 // Records which mix "Today's Run" held for a workout date+title (see
@@ -104,12 +105,14 @@ export async function PATCH(req: NextRequest) {
   const entry = setTodaysRunApproval(body.date, body.title, body.approved);
   if (!entry) return NextResponse.json({ error: "No saved mix for that date" }, { status: 404 });
 
-  // Playlist confirmed — now (and only now) append the tracklist to the
-  // day's Strava activity. Fire-and-forget: the approval itself shouldn't
-  // block on (or fail because of) Strava.
+  // Playlist confirmed — now (and only now) credit each track's durable
+  // play count and append the tracklist to the day's Strava activity.
+  // Fire-and-forget for Strava: the approval itself shouldn't block on
+  // (or fail because of) Strava.
   if (body.approved === true) {
     const date = body.date;
     const title = body.title;
+    creditConfirmedPlay(date, title, entry.tracks.map(t => t.uri));
     appendTracksToStravaActivity(date, title)
       .then(result => {
         if (!result.ok) console.warn(`[todays-run] Strava track append failed for ${date}: ${result.error}`);

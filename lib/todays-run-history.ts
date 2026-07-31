@@ -87,8 +87,26 @@ export function getTodaysRunEntry(date: string, title: string): TodaysRunEntry |
   return loadAll()[workoutKey(date, title)] ?? null;
 }
 
-export function removeTodaysRunEntry(date: string, title: string): void {
+// Same trailing window the Runna summary card shows completed runs in
+// (lib/runna-schedule.ts's parseIcs: today back 8 days) — a run still
+// inside this window is still "on the card" and its saved tracklist is a
+// record of what actually played, not something an automatic cascade
+// should be able to silently wipe. Deliberate user actions (explicit
+// "unpin"/"delete saved mix" clicks) are NOT gated by this — only the
+// automatic track-delete cascade (app/api/tracks/delete) opts in via
+// protectRecentRuns, since that's the one path that can remove a run's
+// tracklist as an unintended side effect of an unrelated action.
+const SUMMARY_CARD_LOOKBACK_DAYS = 8;
+
+export function isWithinRunnaSummaryWindow(date: string): boolean {
+  const today = new Date().toISOString().slice(0, 10);
+  const lookback = new Date(Date.now() - SUMMARY_CARD_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return date >= lookback && date <= today;
+}
+
+export function removeTodaysRunEntry(date: string, title: string, opts?: { protectRecentRuns?: boolean }): void {
   try {
+    if (opts?.protectRecentRuns && isWithinRunnaSummaryWindow(date)) return;
     const all = loadAll();
     const key = workoutKey(date, title);
     if (!(key in all)) return;

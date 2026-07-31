@@ -117,6 +117,7 @@ export async function getAudioFeatures(
   const all: AudioFeatures[] = [];
 
   for (let i = 0; i < trackIds.length; i += 100) {
+    if (i > 0) await new Promise(r => setTimeout(r, 150));
     const batch = trackIds.slice(i, i + 100);
     const data = await spotifyFetch(
       `/audio-features?ids=${batch.join(",")}`,
@@ -149,6 +150,7 @@ export async function addTracksToPlaylist(
   uris: string[]
 ): Promise<void> {
   for (let i = 0; i < uris.length; i += 100) {
+    if (i > 0) await new Promise(r => setTimeout(r, 150));
     await spotifyFetch(`/playlists/${playlistId}/items`, token, {
       method: "POST",
       body: JSON.stringify({ uris: uris.slice(i, i + 100) }),

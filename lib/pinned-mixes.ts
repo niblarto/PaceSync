@@ -155,24 +155,29 @@ export async function removePinnedMix(date: string, title: string, atMs?: number
   });
 }
 
-// Unpins every pinned mix that contains any of the given track URIs — used
-// when a track is deleted from the library, so a pinned mix can never keep
-// pointing at a track that no longer exists, regardless of which mix (if
-// any) happens to be loaded in the browser at the time. Returns the
-// {date, title} pairs that were unpinned, so callers can also drop their
-// history snapshot via removeTodaysRunEntry(date, title) — both stores key
-// by the same workoutKey() format, so this pairing is required, not optional.
-// atMs stamps the same delete cursor removePinnedMix does, so a build that
-// was already in flight before this delete can't land afterward and
-// silently re-pin a mix containing the just-deleted track.
+// Unpins every UPCOMING (not-yet-run) pinned mix that contains any of the
+// given track URIs — used when a track is deleted from the library, so a
+// mix for a workout that hasn't happened yet can never keep pointing at a
+// track that no longer exists. Deliberately leaves PAST workouts' pins
+// alone: a pinned mix for a date before today is a historical record of
+// what actually played, not a still-changeable plan — deleting a track
+// from the library afterward shouldn't silently rewrite that history.
+// Returns the {date, title} pairs that were unpinned, so callers can also
+// drop their history snapshot via removeTodaysRunEntry(date, title) — both
+// stores key by the same workoutKey() format, so this pairing is required,
+// not optional. atMs stamps the same delete cursor removePinnedMix does, so
+// a build that was already in flight before this delete can't land
+// afterward and silently re-pin a mix containing the just-deleted track.
 export async function unpinMixesContaining(uris: string[], atMs?: number): Promise<{ date: string; title: string }[]> {
   if (uris.length === 0) return [];
+  const today = new Date().toISOString().slice(0, 10);
   return serialize(() => {
     const uriSet = new Set(uris);
     const all = loadAll();
     const affected: { date: string; title: string }[] = [];
     const affectedKeys: string[] = [];
     for (const [key, mix] of Object.entries(all)) {
+      if (mix.date < today) continue; // past workout — keep its historical pin as-is
       const hasMatch = mix.timeline.some(seg => seg.tracks.some(t => t.uri && uriSet.has(t.uri)));
       if (hasMatch) {
         affected.push({ date: mix.date, title: mix.workoutTitle });
