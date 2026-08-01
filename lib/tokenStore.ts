@@ -1,7 +1,6 @@
-import fs from "fs";
-import path from "path";
+import { getDb } from "@/lib/db";
 
-const TOKEN_FILE = path.join(process.cwd(), "spotify-tokens.json");
+const KEY = "spotify_tokens";
 
 interface StoredTokens {
   accessToken: string;
@@ -11,7 +10,8 @@ interface StoredTokens {
 
 export function saveTokens(tokens: StoredTokens) {
   try {
-    fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens), "utf-8");
+    getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
+      .run(KEY, JSON.stringify(tokens));
   } catch (e) {
     console.warn("[tokenStore] Failed to save tokens:", e);
   }
@@ -19,8 +19,9 @@ export function saveTokens(tokens: StoredTokens) {
 
 function loadTokens(): StoredTokens | null {
   try {
-    const raw = fs.readFileSync(TOKEN_FILE, "utf-8");
-    return JSON.parse(raw) as StoredTokens;
+    const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(KEY) as { value_json: string } | undefined;
+    if (!row) return null;
+    return JSON.parse(row.value_json) as StoredTokens;
   } catch {
     return null;
   }
