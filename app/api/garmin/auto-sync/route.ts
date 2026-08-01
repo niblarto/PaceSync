@@ -2,8 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { spawnSync, spawn } from "child_process";
-import fs from "fs";
-import path from "path";
+import { getDb } from "@/lib/db";
 
 // Triggers a GarminDB "--latest" sync the first time today's completed run
 // shows up in the Runna Summary — called by the dashboard whenever it sees a
@@ -14,7 +13,7 @@ import path from "path";
 
 const WRAPPER = process.env.GARMINDB_SYNC_WRAPPER || "/home/pi/garmin_run.py";
 const PYTHON = process.env.GARMINDB_PYTHON_BIN || "/home/pi/garmindb-venv/bin/python3";
-const MARKER_FILE = path.join(process.cwd(), "garmin-auto-sync-marker.json");
+const KEY = "garmin_auto_sync_marker";
 
 function isSyncRunning(): boolean {
   const r = spawnSync("pgrep", ["-f", "garmindb_cli.py"], { stdio: "pipe" });
@@ -23,7 +22,9 @@ function isSyncRunning(): boolean {
 
 function alreadyTriggeredToday(date: string): boolean {
   try {
-    const data = JSON.parse(fs.readFileSync(MARKER_FILE, "utf-8")) as { date?: string };
+    const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(KEY) as { value_json: string } | undefined;
+    if (!row) return false;
+    const data = JSON.parse(row.value_json) as { date?: string };
     return data.date === date;
   } catch {
     return false;
@@ -32,7 +33,8 @@ function alreadyTriggeredToday(date: string): boolean {
 
 function markTriggered(date: string): void {
   try {
-    fs.writeFileSync(MARKER_FILE, JSON.stringify({ date, at: new Date().toISOString() }), "utf-8");
+    getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
+      .run(KEY, JSON.stringify({ date, at: new Date().toISOString() }));
   } catch { /* best-effort */ }
 }
 

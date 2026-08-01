@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { readFile } from "fs/promises";
 import { listRunningPlaylists, loadRunningPlaylistConfig, setActiveRunningPlaylist, removeRunningPlaylist, csvPathFor } from "@/lib/running-playlist-config";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
 
 // Counts data rows in a playlist's CSV — same "is this a real row" rule as
 // the write side (save-default-playlist): non-blank lines after the header.
@@ -55,14 +56,22 @@ export async function DELETE(req: NextRequest) {
   let spotifyError: string | null = null;
   if (unfollowSpotify) {
     const token = session.accessToken;
+    const blockedUntil = await getSpotifyBlockedUntil();
     if (!token) {
       spotifyError = "Not signed in to Spotify";
+    } else if (blockedUntil) {
+      spotifyError = `Spotify rate-limited until ${blockedUntil}`;
     } else {
       try {
         const res = await fetch(`https://api.spotify.com/v1/playlists/${id}/followers`, {
           method: "DELETE",
           headers: { Authorization: `Bearer ${token}` },
         });
+        if (res.status === 429) {
+          const retryAfterSec = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
+          console.warn(`[settings/playlists] 429 on DELETE /playlists/${id}/followers — retry-after ${retryAfterSec}s`);
+          await setSpotifyBlockedUntil(new Date(Date.now() + retryAfterSec * 1000).toISOString());
+        }
         if (!res.ok) spotifyError = `Spotify ${res.status}: ${await res.text()}`;
       } catch (e) {
         spotifyError = e instanceof Error ? e.message : String(e);

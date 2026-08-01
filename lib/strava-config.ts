@@ -1,10 +1,9 @@
-import fs from "fs";
-import path from "path";
+import { getDb } from "@/lib/db";
 
 // Strava API app credentials — from https://www.strava.com/settings/api.
 // Independent of PaceSync's Spotify sign-in; configured in Settings or
-// .env.local, stored on the Pi like the other integration configs.
-const FILE = path.join(process.cwd(), "strava-config.json");
+// .env.local, stored in the app's DB like the other integration configs.
+const KEY = "strava_config";
 
 export interface StravaConfig {
   clientId: string;
@@ -15,8 +14,11 @@ export interface StravaConfig {
 
 export function loadStravaConfig(): StravaConfig | null {
   try {
-    const data = JSON.parse(fs.readFileSync(FILE, "utf-8")) as StravaConfig;
-    if (data?.clientId && data?.clientSecret) return data;
+    const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(KEY) as { value_json: string } | undefined;
+    if (row) {
+      const data = JSON.parse(row.value_json) as StravaConfig;
+      if (data?.clientId && data?.clientSecret) return data;
+    }
   } catch {}
   const clientId = process.env.STRAVA_CLIENT_ID;
   const clientSecret = process.env.STRAVA_CLIENT_SECRET;
@@ -25,7 +27,8 @@ export function loadStravaConfig(): StravaConfig | null {
 }
 
 export function saveStravaConfig(config: StravaConfig): void {
-  fs.writeFileSync(FILE, JSON.stringify(config), "utf-8");
+  getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
+    .run(KEY, JSON.stringify(config));
 }
 
 export function updateStravaConfig(patch: Partial<StravaConfig>): StravaConfig {

@@ -1,7 +1,6 @@
-import fs from "fs";
-import path from "path";
+import { getDb } from "@/lib/db";
 
-const FILE = path.join(process.cwd(), "ai-dj-config.json");
+const KEY = "ai_dj_config";
 
 // "local" calls the separate Ollama-backed AI DJ service (needs that PC on);
 // "claude"/"gemini" run scripts/ai_dj_bridge.py right here on the Pi against
@@ -26,7 +25,9 @@ export interface AiDjConfig {
 
 export function loadAiDjConfig(): AiDjConfig | null {
   try {
-    const data = JSON.parse(fs.readFileSync(FILE, "utf-8")) as AiDjConfig;
+    const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(KEY) as { value_json: string } | undefined;
+    if (!row) return null;
+    const data = JSON.parse(row.value_json) as AiDjConfig;
     if (data?.url) {
       return {
         url: data.url, enabled: !!data.enabled, autoPlaylist: data.autoPlaylist !== false, wolMac: data.wolMac ?? "",
@@ -41,5 +42,6 @@ export function loadAiDjConfig(): AiDjConfig | null {
 }
 
 export function saveAiDjConfig(config: AiDjConfig): void {
-  fs.writeFileSync(FILE, JSON.stringify(config), "utf-8");
+  getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
+    .run(KEY, JSON.stringify(config));
 }

@@ -1,10 +1,9 @@
-import fs from "fs";
-import path from "path";
+import { getDb } from "@/lib/db";
 
 // Met Office DataHub credentials + forecast location, configured in Settings.
 // Location defaults to the user's home postcode (NG12 4BD) geocoded via
 // postcodes.io; stored as lat/lon since that's what the API takes.
-const FILE = path.join(process.cwd(), "metoffice-config.json");
+const KEY = "metoffice_config";
 
 export interface MetOfficeConfig {
   apiKey: string;
@@ -17,12 +16,15 @@ export const DEFAULT_LOCATION = { postcode: "NG12 4BD", lat: 52.914856, lon: -1.
 
 export function loadMetOfficeConfig(): MetOfficeConfig | null {
   try {
-    const data = JSON.parse(fs.readFileSync(FILE, "utf-8")) as MetOfficeConfig;
+    const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(KEY) as { value_json: string } | undefined;
+    if (!row) return null;
+    const data = JSON.parse(row.value_json) as MetOfficeConfig;
     if (data?.apiKey) return data;
   } catch {}
   return null;
 }
 
 export function saveMetOfficeConfig(config: MetOfficeConfig): void {
-  fs.writeFileSync(FILE, JSON.stringify(config), "utf-8");
+  getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
+    .run(KEY, JSON.stringify(config));
 }

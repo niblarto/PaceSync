@@ -8,7 +8,8 @@ import type { RunningZone } from "@/types";
 import { BbcBrowserCard } from "@/components/BbcBrowserCard";
 import { DedupCard } from "@/components/DedupCard";
 import { invalidateRunningPlaylistCache } from "@/components/useRunningPlaylist";
-import { freshSpotifyToken } from "@/lib/spotify-browser";
+import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
+import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 import { DeletedTracksReview, type RejectedTrack } from "@/components/DeletedTracksReview";
 import { openInSpotify, TrackRow } from "@/components/TrackRow";
 import { useRunningPlaylist } from "@/components/useRunningPlaylist";
@@ -328,7 +329,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         // create-playlist path (lib/spotify-playlist.ts) already found the
         // user-id-scoped endpoint 403s unreliably; /me/playlists targets
         // "the current user" directly and works.
-        const createRes = await fetch("https://api.spotify.com/v1/me/playlists", {
+        const createRes = await spotifyFetch("https://api.spotify.com/v1/me/playlists", {
           method: "POST",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           body: JSON.stringify({ name: coverageNewPlaylistName.trim(), public: false, description: "Presentable tracks copied from Library Coverage" }),
@@ -402,8 +403,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setCoverageDeleteMsg(null);
     try {
       for (let i = 0; i < outOfRangeUris.length; i += 100) {
+        if (i > 0) await new Promise(r => setTimeout(r, 150));
         const chunk = outOfRangeUris.slice(i, i + 100);
-        const res = await fetch(`https://api.spotify.com/v1/playlists/${activePlaylistId}/items`, {
+        const res = await spotifyFetch(`https://api.spotify.com/v1/playlists/${activePlaylistId}/items`, {
           method: "DELETE",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           body: JSON.stringify({ items: chunk.map(uri => ({ uri })) }),
@@ -565,37 +567,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   async function deleteIncompleteTrack(track: IncompleteManagedTrack) {
     setIncompleteDeletingUris(prev => new Set(prev).add(track.uri));
     setIncompleteTracks(prev => prev?.filter(t => t.uri !== track.uri) ?? prev);
-    const token = await freshSpotifyToken();
-    if (token && runningPlaylist.id) {
-      fetch(`https://api.spotify.com/v1/playlists/${runningPlaylist.id}/items`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ items: [{ uri: track.uri }] }),
-      }).catch(() => {});
-    }
-    fetch("/api/tracks/delete", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ spotifyUri: track.uri }),
-    }).catch(() => {});
+    deleteTrackFromLibrary(track.uri, runningPlaylist.id);
   }
 
   async function deleteRecentTrack(track: TrackWithBPM) {
     setRecentDeletingUris(prev => new Set(prev).add(track.uri));
     setRecentTracks(prev => prev?.filter(t => t.uri !== track.uri) ?? prev);
-    const token = await freshSpotifyToken();
-    if (token && runningPlaylist.id) {
-      fetch(`https://api.spotify.com/v1/playlists/${runningPlaylist.id}/items`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ items: [{ uri: track.uri }] }),
-      }).catch(() => {});
-    }
-    fetch("/api/tracks/delete", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ spotifyUri: track.uri }),
-    }).catch(() => {});
+    deleteTrackFromLibrary(track.uri, runningPlaylist.id);
   }
 
   function parseTracklistCsv(text: string): ManagedTrack[] {
@@ -665,19 +643,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   async function deleteManagedTrack(track: ManagedTrack) {
     setTracklistDeletingUris(prev => new Set(prev).add(track.uri));
     setTracklist(prev => prev?.filter(t => t.uri !== track.uri) ?? prev);
-    const token = await freshSpotifyToken();
-    if (token && runningPlaylist.id) {
-      fetch(`https://api.spotify.com/v1/playlists/${runningPlaylist.id}/items`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ items: [{ uri: track.uri }] }),
-      }).catch(() => {});
-    }
-    fetch("/api/tracks/delete", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ spotifyUri: track.uri }),
-    }).catch(() => {});
+    deleteTrackFromLibrary(track.uri, runningPlaylist.id);
   }
 
   const allGenres = tracklist
@@ -776,7 +742,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       const track = tracks[i];
       if (token && runningPlaylist.id) {
         try {
-          await fetch(`https://api.spotify.com/v1/playlists/${runningPlaylist.id}/items`, {
+          await spotifyFetch(`https://api.spotify.com/v1/playlists/${runningPlaylist.id}/items`, {
             method: "DELETE",
             headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
             body: JSON.stringify({ items: [{ uri: track.uri }] }),
@@ -2289,6 +2255,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   async function addTracksBrowser(playlistId: string, uris: string[], token: string): Promise<void> {
     const totalChunks = Math.ceil(uris.length / 100);
     for (let i = 0; i < uris.length; i += 100) {
+      if (i > 0) await new Promise(r => setTimeout(r, 150));
       const chunkNum = i / 100 + 1;
       const body = JSON.stringify({ uris: uris.slice(i, i + 100) });
       // "Failed to fetch" (a network-level failure with no HTTP response at
@@ -2298,7 +2265,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       let lastErr: unknown;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          const res = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
+          const res = await spotifyFetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
             method: "POST",
             headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
             body,

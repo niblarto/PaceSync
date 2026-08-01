@@ -3,10 +3,9 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { buildRunningZones, getDefaultZones } from "@/lib/bpm-zones";
 import type { HRZone } from "@/types";
-import fs from "fs";
-import path from "path";
+import { getDb } from "@/lib/db";
 
-const ZONES_FILE = path.join(process.cwd(), "hr-zones.json");
+const KEY = "hr_zones";
 
 interface SavedData {
   zones: HRZone[];
@@ -18,7 +17,9 @@ interface SavedData {
 
 function loadSaved(): SavedData | null {
   try {
-    const data = JSON.parse(fs.readFileSync(ZONES_FILE, "utf-8")) as SavedData;
+    const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(KEY) as { value_json: string } | undefined;
+    if (!row) return null;
+    const data = JSON.parse(row.value_json) as SavedData;
     if (Array.isArray(data.zones) && data.zones.length === 5) return data;
   } catch {}
   return null;
@@ -62,6 +63,7 @@ export async function POST(req: NextRequest) {
   if (typeof lthr === "number")      data.lthr = lthr;
   if (source === "manual" || source === "lthr" || source === "garmin" || source === "strava") data.source = source;
 
-  fs.writeFileSync(ZONES_FILE, JSON.stringify(data), "utf-8");
+  getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
+    .run(KEY, JSON.stringify(data));
   return NextResponse.json({ ok: true });
 }

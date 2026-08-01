@@ -1,16 +1,14 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile } from "fs/promises";
-import path from "path";
+import { getDb } from "@/lib/db";
 
 // Claude/Gemini mixes run as a short-lived scripts/ai_dj_bridge.py subprocess
 // per mix (see lib/ai-dj-mix.ts), so there's no long-running process to hold
 // usage counters — ai_dj/llm.py persists them (keyed by model, across both
-// providers) to this file after every mix instead. Same directory
-// ai_dj/claude_config.py and gemini_config.py's key files live in (the app
-// root, one level up from the deployed ai_dj/ package).
-const USAGE_PATH = path.join(process.cwd(), "ai-dj-usage.json");
+// providers) to the same pacesync.db row this route reads (kv_config key
+// "ai_dj_usage") via Python's stdlib sqlite3 module.
+const KEY = "ai_dj_usage";
 
 // $/1M tokens — not billing-accurate (no cache/free-tier discount applied),
 // just a ballpark. Gemini free-tier calls are actually $0.
@@ -27,8 +25,9 @@ export async function GET() {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
-    const raw = await readFile(USAGE_PATH, "utf8");
-    const usage = JSON.parse(raw) as Record<string, { input_tokens: number; output_tokens: number; requests: number; errors?: number; last_error?: string }>;
+    const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(KEY) as { value_json: string } | undefined;
+    if (!row) return NextResponse.json({ models: {} });
+    const usage = JSON.parse(row.value_json) as Record<string, { input_tokens: number; output_tokens: number; requests: number; errors?: number; last_error?: string }>;
     const models: Record<string, { inputTokens: number; outputTokens: number; requests: number; estimatedCostUsd: number; errors: number; lastError: string | null }> = {};
     for (const [model, u] of Object.entries(usage)) {
       const [inPrice, outPrice] = PRICING[model] ?? [0, 0];

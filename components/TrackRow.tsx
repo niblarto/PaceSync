@@ -3,6 +3,7 @@
 import { useSession } from "next-auth/react";
 import type { SyntheticEvent } from "react";
 import type { TrackWithBPM } from "@/types";
+import { spotifyFetch } from "@/lib/spotify-browser";
 
 interface Props {
   track: TrackWithBPM;
@@ -47,10 +48,17 @@ function formatMs(ms: number) {
 // Start playback immediately on the user's active Spotify device (cuts off
 // whatever is playing). Falls back to opening the app/web player when there's
 // no active device, no premium, or the session lacks the playback scope.
+//
+// Goes through spotifyFetch (the shared proxy-backed client) rather than a
+// direct fetch() to api.spotify.com — this is the single most-called Spotify
+// action in the whole app (fires on every track click), so a direct call
+// here bypassing the shared rate-limit sentinel was the leading suspect for
+// unlogged Spotify traffic possibly contributing to an unexplained ~20hr
+// rate-limit block.
 export async function playInSpotify(uri: string, token?: string | null): Promise<void> {
   if (token) {
     try {
-      const res = await fetch("https://api.spotify.com/v1/me/player/play", {
+      const res = await spotifyFetch("https://api.spotify.com/v1/me/player/play", {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ uris: [uri] }),

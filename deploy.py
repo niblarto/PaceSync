@@ -136,6 +136,7 @@ FILES = [
     ('components/MixChartClient.tsx',             'components/MixChartClient.tsx'),
     ('app/mix/[date]/page.tsx',                   'app/mix/[date]/page.tsx'),
     ('lib/garmin-config.ts',                      'lib/garmin-config.ts'),
+    ('lib/db.ts',                                  'lib/db.ts'),
     ('app/api/runna/workouts/route.ts',           'app/api/runna/workouts/route.ts'),
     ('app/api/runna/workout-segments/route.ts',   'app/api/runna/workout-segments/route.ts'),
     ('components/RunnaCard.tsx',                  'components/RunnaCard.tsx'),

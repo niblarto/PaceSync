@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { useSession } from "next-auth/react";
-import { freshSpotifyToken } from "@/lib/spotify-browser";
+import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 import Link from "next/link";
 import {
   ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid,
@@ -392,24 +392,7 @@ export function GarminActivityClient({ id }: { id: string }) {
     if (!t.uri) return;
     const uri = t.uri;
     setDeletedUris(prev => { const next = new Set(Array.from(prev)); next.add(uri); return next; });
-
-    if (RUNNING_PLAYLIST_ID) {
-      freshSpotifyToken().then(token => {
-        if (!token) return;
-        return fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ items: [{ uri }] }),
-        }).then(async r => {
-          if (!r.ok) console.error(`[delete] Spotify ${r.status}: ${await r.text().catch(() => "")}`);
-        });
-      }).catch(err => console.error("[delete] Spotify fetch error:", err));
-    }
-    fetch("/api/tracks/delete", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ spotifyUri: uri }),
-    }).catch(() => {});
+    deleteTrackFromLibrary(uri, RUNNING_PLAYLIST_ID);
   }
 
   const a = data?.activity;

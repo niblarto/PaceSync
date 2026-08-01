@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useSession } from "next-auth/react";
-import { freshSpotifyToken } from "@/lib/spotify-browser";
+import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import Link from "next/link";
 import { FunnelIcon, SparklesIcon, MetronomeIcon, TrashIcon, MiniSpinner, handleArtError } from "./TrackRow";
 import { FloatingCard } from "./FloatingCard";
@@ -72,7 +72,7 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy, onDelete
     const token = await freshSpotifyToken();
     if (token) {
       try {
-        const res = await fetch("https://api.spotify.com/v1/me/player/play", {
+        const res = await spotifyFetch("https://api.spotify.com/v1/me/player/play", {
           method: "PUT",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           body: JSON.stringify({ uris: [`spotify:track:${trackId}`] }),
@@ -332,7 +332,8 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
     const token = await freshSpotifyToken();
     if (!token) throw new Error("No access token");
     for (let i = 0; i < uris.length; i += 100) {
-      const res = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
+      if (i > 0) await new Promise(r => setTimeout(r, 150));
+      const res = await spotifyFetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ uris: uris.slice(i, i + 100) }),

@@ -4,6 +4,7 @@ import { authOptions } from "@/lib/auth";
 import { getSpotifyUser } from "@/lib/spotify";
 import { findExistingPlaylist } from "@/lib/spotify-playlist";
 import { loadRunningPlaylistConfig, saveRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
 
 export async function GET() {
   const session = await getServerSession(authOptions);
@@ -21,6 +22,11 @@ export async function POST(req: NextRequest) {
   const trimmed = name?.trim();
   if (!trimmed) return NextResponse.json({ error: "name required" }, { status: 400 });
 
+  const blockedUntil = await getSpotifyBlockedUntil();
+  if (blockedUntil) {
+    return NextResponse.json({ error: `Spotify rate-limited until ${blockedUntil}` }, { status: 429 });
+  }
+
   const token = session.accessToken;
   try {
     const user = await getSpotifyUser(token);
@@ -32,6 +38,11 @@ export async function POST(req: NextRequest) {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ name: trimmed, description: "PaceSync library playlist", public: true }),
       });
+      if (res.status === 429) {
+        const retryAfterSec = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
+        console.warn(`[settings/playlist] 429 on POST /me/playlists — retry-after ${retryAfterSec}s`);
+        await setSpotifyBlockedUntil(new Date(Date.now() + retryAfterSec * 1000).toISOString());
+      }
       if (!res.ok) throw new Error(`Create playlist ${res.status}: ${await res.text()}`);
       id = ((await res.json()) as { id: string }).id;
       created = true;

@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import fs from "fs";
-import path from "path";
+import { getDb } from "@/lib/db";
 
 export interface BbcProgramme {
   pid: string;
@@ -10,7 +9,7 @@ export interface BbcProgramme {
   synopsis?: string;
 }
 
-const FILE = path.join(process.cwd(), "bbc-programmes.json");
+const KEY = "bbc_programmes";
 
 const DEFAULTS: BbcProgramme[] = [
   { pid: "m001j52w", name: "6 Music Playlist", synopsis: "" },
@@ -20,8 +19,11 @@ const DEFAULTS: BbcProgramme[] = [
 
 function load(): BbcProgramme[] {
   try {
-    const data = JSON.parse(fs.readFileSync(FILE, "utf-8")) as BbcProgramme[];
-    if (Array.isArray(data) && data.length > 0) return data;
+    const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(KEY) as { value_json: string } | undefined;
+    if (row) {
+      const data = JSON.parse(row.value_json) as BbcProgramme[];
+      if (Array.isArray(data) && data.length > 0) return data;
+    }
   } catch {}
   return DEFAULTS;
 }
@@ -41,6 +43,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid data" }, { status: 400 });
   }
 
-  fs.writeFileSync(FILE, JSON.stringify(body.programmes), "utf-8");
+  getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
+    .run(KEY, JSON.stringify(body.programmes));
   return NextResponse.json({ ok: true });
 }
