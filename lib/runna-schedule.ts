@@ -299,7 +299,11 @@ export async function fetchRunnaSchedule(): Promise<RunnaScheduleResult> {
   if (!url) return { ok: false, status: 503, error: "RUNNA_ICS_URL not configured" };
 
   try {
-    const res = await fetch(url, { next: { revalidate: 3600 } });
+    // 5 min, not the original 1hr — Runna can flip a workout from upcoming
+    // to completed (Summary card) at any time, and the client now polls on
+    // this same cadence (see useRunnaData in RunnaCard.tsx), so a long
+    // server-side cache would silently defeat that polling.
+    const res = await fetch(url, { next: { revalidate: 300 } });
     if (!res.ok) throw new Error(`ICS fetch ${res.status}`);
     // Force UTF-8 decoding — the ICS server's Content-Type omits a charset,
     // and res.text() falling back to Latin-1 mangles multi-byte characters

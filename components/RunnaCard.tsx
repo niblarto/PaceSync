@@ -169,25 +169,49 @@ interface RunnaData {
 let cached: RunnaData | null = null;
 let fetchPromise: Promise<void> | null = null;
 
+// Runna can flip a workout from "upcoming" (Schedule) to "completed"
+// (Summary) at any time once you finish a run — a module-level cache that
+// only ever fetched once per page load looked stale for the rest of the
+// session even after the underlying ical had genuinely updated. Poll on the
+// same 5-min cadence as the server's ical revalidate window (see
+// fetchRunnaSchedule in lib/runna-schedule.ts) and also refetch immediately
+// whenever the tab regains focus, so switching back after finishing a run
+// picks up the change right away instead of waiting out the interval.
+const POLL_MS = 5 * 60 * 1000;
+
+function refetchRunnaData(onDone: (d: RunnaData) => void) {
+  fetchPromise = fetch("/api/runna/workouts")
+    .then(r => r.json())
+    .then((d: { workouts?: RunnaWorkout[]; pastRuns?: RunnaPastRun[]; error?: string }) => {
+      if (d.error) throw new Error(d.error);
+      cached = { workouts: d.workouts ?? [], pastRuns: d.pastRuns ?? [], loading: false, error: null };
+    })
+    .catch(e => {
+      cached = { workouts: [], pastRuns: [], loading: false, error: e instanceof Error ? e.message : "Failed to load" };
+    })
+    .then(() => { if (cached) onDone(cached); });
+}
+
 function useRunnaData(): RunnaData {
   const [data, setData] = useState<RunnaData>(
     cached ?? { workouts: [], pastRuns: [], loading: true, error: null }
   );
 
   useEffect(() => {
-    if (cached) { setData(cached); return; }
-    if (!fetchPromise) {
-      fetchPromise = fetch("/api/runna/workouts")
-        .then(r => r.json())
-        .then((d: { workouts?: RunnaWorkout[]; pastRuns?: RunnaPastRun[]; error?: string }) => {
-          if (d.error) throw new Error(d.error);
-          cached = { workouts: d.workouts ?? [], pastRuns: d.pastRuns ?? [], loading: false, error: null };
-        })
-        .catch(e => {
-          cached = { workouts: [], pastRuns: [], loading: false, error: e instanceof Error ? e.message : "Failed to load" };
-        });
-    }
-    fetchPromise.then(() => { if (cached) setData(cached); });
+    if (cached) setData(cached);
+    if (!fetchPromise) refetchRunnaData(setData);
+    else fetchPromise.then(() => { if (cached) setData(cached); });
+
+    const interval = setInterval(() => refetchRunnaData(setData), POLL_MS);
+    const onFocus = () => refetchRunnaData(setData);
+    const onVisibility = () => { if (document.visibilityState === "visible") onFocus(); };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, []);
 
   return data;
