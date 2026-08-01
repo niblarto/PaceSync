@@ -4,6 +4,7 @@ import { computeEasyPaceBias } from "@/lib/run-pace-bias";
 import { getAllTrackVotes } from "@/lib/track-feedback";
 import { getPlayedTracks, getPlayedCounts, getLastEasyPaceSec } from "@/lib/todays-run-history";
 import { loadBpmOverrides } from "@/lib/bpm-overrides";
+import { applyBpmOverridesToCsvText } from "@/lib/bpm-track-overrides";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { spawn } from "child_process";
@@ -154,7 +155,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   // and warns about anything still incomplete.
   let csv: string;
   try {
-    csv = await readFile(activeCsvPath(), "utf8");
+    csv = applyBpmOverridesToCsvText(await readFile(activeCsvPath(), "utf8"));
   } catch {
     return { ok: false, error: "No library CSV - upload a playlist library in Settings first" };
   }
@@ -314,7 +315,7 @@ export async function buildAiDjFlowMix(title: string, trackUris: string[], onPro
 
   let csv: string;
   try {
-    csv = await readFile(activeCsvPath(), "utf8");
+    csv = applyBpmOverridesToCsvText(await readFile(activeCsvPath(), "utf8"));
   } catch {
     return { ok: false, error: "No library CSV - upload a playlist library in Settings first" };
   }

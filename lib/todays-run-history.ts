@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 import { workoutKey } from "@/lib/workout-key";
+import { applyBpmOverrides } from "@/lib/bpm-track-overrides";
 
 // Snapshot of what the "Today's Run" playlist held for each workout date, so
 // past runs can be reviewed song-by-song against the pace actually run
@@ -58,7 +59,12 @@ export function timelineToHistoryTracks(timeline: AiDjMixResponse["timeline"]): 
       });
     });
   });
-  return tracks;
+  // A saved snapshot should already reflect any persistent BPM correction
+  // (lib/bpm-track-overrides.ts) at the moment it's frozen, not just when
+  // displayed later — otherwise a mix saved before a nudge would show the
+  // stale tempo until something else (e.g. run-pacing's own override merge)
+  // corrected it on read.
+  return applyBpmOverrides(tracks);
 }
 
 function loadAll(): Record<string, TodaysRunEntry> {

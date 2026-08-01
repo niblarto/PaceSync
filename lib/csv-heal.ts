@@ -4,6 +4,7 @@ import { activeCsvPath } from "@/lib/running-playlist-config";
 import { parseCsvRow, csvEscape, isBlank } from "@/lib/csv-store";
 import { deezerDurationMs, deezerGenres, fetchFeatures, lastfmDurationMs, sleep, TrackFeatures } from "@/lib/track-enrich";
 import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
+import { getBpmOverride } from "@/lib/bpm-track-overrides";
 
 // Live progress for the Settings page to poll — a heal sweep on a large
 // library (thousands of rows) can run for a long time, and previously gave
@@ -522,7 +523,14 @@ async function doHealInner(): Promise<HealResult> {
       for (const g of featureGaps) {
         const f = features[g.id];
         if (!f) continue;
+        // A track with a persistent BPM override (lib/bpm-track-overrides.ts)
+        // never gets its Tempo cell touched by a heal — otherwise a future
+        // sweep could reintroduce the un-overridden value right next to
+        // (and read ahead of, on the next re-import) the correction.
+        const uri = g.row[idxUri]?.trim();
+        const override = uri ? getBpmOverride(uri) : null;
         for (const [header, key] of FEATURE_COLS) {
+          if (override && header === "Tempo") continue;
           const idx = col(header);
           if (idx !== -1 && isBlank(g.row[idx])) g.row[idx] = String(f[key]);
         }

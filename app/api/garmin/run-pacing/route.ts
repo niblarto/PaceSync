@@ -5,6 +5,7 @@ import { loadGarminConfig } from "@/lib/garmin-config";
 import { garminCacheGet, garminCacheSet } from "@/lib/garmin-cache";
 import { getTodaysRunEntry } from "@/lib/todays-run-history";
 import { activeCsvPath } from "@/lib/running-playlist-config";
+import { applyBpmOverrides } from "@/lib/bpm-track-overrides";
 import path from "path";
 import fs from "fs";
 
@@ -31,6 +32,17 @@ function withLibraryFlag<T extends { tracks?: { uri: string | null }[] }>(result
     ...result,
     tracks: result.tracks.map(t => ({ ...t, inLibrary: t.uri ? lib.has(t.uri) : true })),
   };
+}
+
+// Applies persistent per-track BPM overrides (lib/bpm-track-overrides.ts) as
+// the final step before every response, so a corrected BPM always wins over
+// whatever tempo value was frozen into todays-run-history.json at build
+// time — recomputed on every request (not cached alongside the rest of the
+// payload) for the same reason withLibraryFlag isn't cached: a nudge should
+// be reflected immediately, not only after the next cache-key change.
+function withBpmOverrides<T extends { tracks?: { uri: string | null; tempo: number | null }[] }>(result: T): T {
+  if (!result.tracks?.length) return result;
+  return { ...result, tracks: applyBpmOverrides(result.tracks) };
 }
 
 // Song-by-song pace review for a past run: overlays the "Today's Run" mix
@@ -69,6 +81,7 @@ export interface TrackPacing {
   verdict: "on" | "fast" | "slow" | "unknown";
   tempo: number | null;
   energy: number | null;
+  actualSpm: number | null; // steps/min averaged over the track's window, null if too few samples
 }
 
 export async function GET(req: NextRequest) {
@@ -125,27 +138,27 @@ export async function GET(req: NextRequest) {
 
     if (!activity) {
       db.close();
-      const tracks: TrackPacing[] = entry.tracks.map(t => ({ ...t, actualPaceSec: null, verdict: "unknown" as const }));
+      const tracks: TrackPacing[] = entry.tracks.map(t => ({ ...t, actualPaceSec: null, verdict: "unknown" as const, actualSpm: null }));
       const result = {
         entry: { workoutTitle: entry.workoutTitle, savedAt: entry.savedAt, approved: entry.approved },
         activityId: null,
         tracks,
       };
       garminCacheSet(cacheKey, config.dbPath, result);
-      return NextResponse.json(withLibraryFlag(result));
+      return NextResponse.json(withBpmOverrides(withLibraryFlag(result)));
     }
 
     const records = db.prepare(`
-      SELECT timestamp, speed FROM activity_records
+      SELECT timestamp, speed, cadence FROM activity_records
       WHERE activity_id = ? AND speed IS NOT NULL
       ORDER BY timestamp
-    `).all(activity.activity_id) as { timestamp: string; speed: number }[];
+    `).all(activity.activity_id) as { timestamp: string; speed: number; cadence: number | null }[];
     db.close();
 
     const startMs = new Date(activity.start_time.replace(" ", "T")).getTime();
-    // Offsets (sec from run start) paired with speed (mph); ignore standing still.
+    // Offsets (sec from run start) paired with speed (mph) and cadence; ignore standing still.
     const samples = records
-      .map(r => ({ t: (new Date(r.timestamp.replace(" ", "T")).getTime() - startMs) / 1000, mph: r.speed }))
+      .map(r => ({ t: (new Date(r.timestamp.replace(" ", "T")).getTime() - startMs) / 1000, mph: r.speed, cadence: r.cadence }))
       .filter(s => !isNaN(s.t) && s.t >= 0);
     const runEndSec = samples.length ? samples[samples.length - 1].t : 0;
 
@@ -153,12 +166,12 @@ export async function GET(req: NextRequest) {
       const end = t.startsAtSec + (t.durationSec || 0);
       // Song windows past the end of the run can't be judged.
       if (!t.durationSec || t.startsAtSec >= runEndSec - 15) {
-        return { ...t, actualPaceSec: null, verdict: "unknown" as const };
+        return { ...t, actualPaceSec: null, verdict: "unknown" as const, actualSpm: null };
       }
       const windowEnd = Math.min(end, runEndSec);
       const inWindow = samples.filter(s => s.t >= t.startsAtSec && s.t < windowEnd && s.mph > 0.5);
       if (inWindow.length < 5) {
-        return { ...t, actualPaceSec: null, verdict: "unknown" as const };
+        return { ...t, actualPaceSec: null, verdict: "unknown" as const, actualSpm: null };
       }
       const avgMph = inWindow.reduce((a, s) => a + s.mph, 0) / inWindow.length;
       const actualPaceSec = 3600 / avgMph;
@@ -167,7 +180,13 @@ export async function GET(req: NextRequest) {
         const diff = actualPaceSec - t.targetPaceSec;
         verdict = Math.abs(diff) <= TOLERANCE_SEC_PER_MI ? "on" : diff < 0 ? "fast" : "slow";
       }
-      return { ...t, actualPaceSec, verdict };
+      // Garmin stores raw cadence as one-foot strides/min — double it for
+      // SPM, same convention already used by app/api/garmin/pace-spm/route.ts.
+      const cadenceSamples = inWindow.filter(s => s.cadence != null && s.cadence > 10);
+      const actualSpm = cadenceSamples.length >= 5
+        ? Math.round(cadenceSamples.reduce((a, s) => a + s.cadence! * 2, 0) / cadenceSamples.length)
+        : null;
+      return { ...t, actualPaceSec, verdict, actualSpm };
     });
 
     // Overall read: of the judged songs, which way does the run lean? Only
@@ -204,7 +223,7 @@ export async function GET(req: NextRequest) {
       summary,
     };
     garminCacheSet(cacheKey, config.dbPath, result);
-    return NextResponse.json(withLibraryFlag(result));
+    return NextResponse.json(withBpmOverrides(withLibraryFlag(result)));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: msg }, { status: 500 });

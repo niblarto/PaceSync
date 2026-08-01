@@ -2,14 +2,11 @@
 
 import { useState, useEffect, useMemo, useRef, forwardRef, useImperativeHandle } from "react";
 import Link from "next/link";
-import { useSession } from "next-auth/react";
-import { freshSpotifyToken } from "@/lib/spotify-browser";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 import type { TrackWithBPM } from "@/types";
 import type { RaceSplitsEntry } from "@/lib/race-splits";
 import { RouteMapLightbox } from "./RouteMapLightbox";
 import { openInSpotify } from "./TrackRow";
-import { useRunningPlaylist } from "./useRunningPlaylist";
 
 interface PaceSpmRow { bucket: number; avg_spm: number; records: number; }
 
@@ -192,7 +189,7 @@ function refetchRunnaData(onDone: (d: RunnaData) => void) {
     .then(() => { if (cached) onDone(cached); });
 }
 
-function useRunnaData(): RunnaData {
+export function useRunnaData(): RunnaData {
   const [data, setData] = useState<RunnaData>(
     cached ?? { workouts: [], pastRuns: [], loading: true, error: null }
   );
@@ -238,13 +235,6 @@ interface PacingState {
   approved?: boolean; // undefined = not yet reviewed, false = disputed
 }
 
-const PACING_STYLE: Record<PacingTrack["verdict"], string> = {
-  on: "bg-green-500/10 border-green-500/30 text-green-300",
-  fast: "bg-red-500/10 border-red-500/30 text-red-300",
-  slow: "bg-sky-500/10 border-sky-500/30 text-sky-300",
-  unknown: "bg-slate-800/40 border-white/5 text-slate-500",
-};
-
 function fmtPaceSec(s: number | null): string {
   if (!s) return "—";
   return `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
@@ -256,11 +246,6 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pacing, setPacing] = useState<Record<string, PacingState>>({});
   const [activityLinks, setActivityLinks] = useState<Record<string, { garminId: string | number | null; stravaId: number | null } | null>>({});
-  const [votes, setVotes] = useState<{ uri: string; paceSec: number; vote: "up" | "down" }[]>([]);
-  const [votesLoaded, setVotesLoaded] = useState(false);
-  const [deletedUris, setDeletedUris] = useState<Set<string>>(new Set());
-  const { data: session } = useSession();
-  const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
   const [titleSync, setTitleSync] = useState<Record<string, { status: "syncing" | "done" | "error"; message?: string }>>({});
 
   function retrySyncTitle(stravaId: number) {
@@ -298,57 +283,6 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
       body: JSON.stringify({ date: today }),
     }).catch(() => {});
   }, [pastRuns, loading]);
-
-  function loadVotes() {
-    if (votesLoaded) return;
-    setVotesLoaded(true);
-    fetch("/api/track-feedback")
-      .then(r => r.json())
-      .then((d: { votes?: { uri: string; paceSec: number; vote: "up" | "down" }[] }) => setVotes(d.votes ?? []))
-      .catch(() => {});
-  }
-
-  function voteFor(t: PacingTrack): "up" | "down" | null {
-    if (!t.uri || t.targetPaceSec == null) return null;
-    const v = votes.find(v => v.uri === t.uri && Math.abs(v.paceSec - (t.targetPaceSec as number)) <= 10);
-    return v?.vote ?? null;
-  }
-
-  function castVote(t: PacingTrack, vote: "up" | "down") {
-    if (!t.uri || t.targetPaceSec == null) return;
-    const next = voteFor(t) === vote ? null : vote;
-    fetch("/api/track-feedback", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ uri: t.uri, paceSec: t.targetPaceSec, vote: next }),
-    })
-      .then(r => r.json())
-      .then((d: { votes?: { uri: string; paceSec: number; vote: "up" | "down" }[] }) => { if (d.votes) setVotes(d.votes); })
-      .catch(() => {});
-  }
-
-  // Same delete as the dashboard/activity page: Spotify Running playlist +
-  // library CSV; the row stays struck through as a record of what played.
-  function deleteTrack(t: PacingTrack) {
-    if (!t.uri) return;
-    const uri = t.uri;
-    setDeletedUris(prev => { const next = new Set(Array.from(prev)); next.add(uri); return next; });
-    if (RUNNING_PLAYLIST_ID) {
-      freshSpotifyToken().then(token => {
-        if (!token) return;
-        return fetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ items: [{ uri }] }),
-        });
-      }).catch(err => console.error("[delete] Spotify fetch error:", err));
-    }
-    fetch("/api/tracks/delete", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ spotifyUri: uri }),
-    }).catch(() => {});
-  }
 
   function fetchPacing(date: string, title: string, force = false) {
     if (pacing[date] && !force) return;
@@ -437,7 +371,7 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                   onClick={e => {
                     setExpanded(isOpen ? null : run.uid);
                     if (!isOpen) {
-                      fetchPacing(run.date, run.title); loadVotes(); fetchActivityLinks(run.date);
+                      fetchPacing(run.date, run.title); fetchActivityLinks(run.date);
                       const row = e.currentTarget.parentElement as HTMLElement | null;
                       const container = scrollRef.current;
                       // Scroll only the card's own list container — never
@@ -614,67 +548,20 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                               </button>
                             </div>
                           )}
-                          <p className="text-xs text-slate-500 font-medium mb-1">
-                            🎧 &quot;Today&apos;s Run&quot; mix vs actual pace
-                            <span className="ml-2 font-normal text-slate-600">
-                              green = on pace · red = too fast · blue = too slow
+                          <p className="text-xs text-slate-500 font-medium mb-1 flex items-center justify-between gap-2">
+                            <span>
+                              🎧 &quot;Today&apos;s Run&quot; mix vs actual pace
+                              <span className="ml-2 font-normal text-slate-600">
+                                green = on pace · red = too fast · blue = too slow
+                              </span>
                             </span>
+                            <Link
+                              href={`/run/${run.date}?title=${encodeURIComponent(run.title)}`}
+                              className="shrink-0 text-sky-400 hover:text-sky-300 underline font-normal"
+                            >
+                              View route + full track detail ↗
+                            </Link>
                           </p>
-                          <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
-                            {pd.tracks.map((t, i) => {
-                              const v = voteFor(t);
-                              const isDeleted = t.uri !== null && (deletedUris.has(t.uri) || t.inLibrary === false);
-                              return (
-                                <div
-                                  key={i}
-                                  className={`flex items-center gap-2 text-xs rounded border px-2 py-1 ${PACING_STYLE[t.verdict]} ${isDeleted ? "opacity-40 line-through" : ""}`}
-                                  title={t.segment}
-                                >
-                                  {t.uri ? (
-                                    <button
-                                      onClick={() => { openInSpotify(t.uri!); onTrackClick?.(t.uri!); }}
-                                      className="flex-1 min-w-0 truncate text-left hover:underline"
-                                      title={`${t.name} — open in Spotify`}
-                                    >
-                                      {t.name} — {t.artist}
-                                    </button>
-                                  ) : (
-                                    <span className="flex-1 min-w-0 truncate">{t.name} — {t.artist}</span>
-                                  )}
-                                  <span className="shrink-0 tabular-nums" title="actual / target pace per mile">
-                                    {fmtPaceSec(t.actualPaceSec)}
-                                    {t.targetPaceSec ? ` / ${fmtPaceSec(t.targetPaceSec)}` : ""}
-                                  </span>
-                                  {t.uri && t.targetPaceSec != null && !isDeleted && (
-                                    <span className="flex items-center gap-1 shrink-0 ml-1">
-                                      <button
-                                        onClick={() => castVote(t, "up")}
-                                        className={`px-1 rounded transition-all ${v === "up" ? "opacity-100 scale-110 bg-green-500/20" : "opacity-35 hover:opacity-80"}`}
-                                        title="Play this more often at this pace"
-                                      >
-                                        👍
-                                      </button>
-                                      <button
-                                        onClick={() => castVote(t, "down")}
-                                        className={`px-1 rounded transition-all ${v === "down" ? "opacity-100 scale-110 bg-red-500/20" : "opacity-35 hover:opacity-80"}`}
-                                        title="Exclude from runs at this pace"
-                                      >
-                                        👎
-                                      </button>
-                                      <button
-                                        onClick={() => deleteTrack(t)}
-                                        className="px-1 rounded opacity-35 hover:opacity-100 hover:text-red-400 transition-all"
-                                        title="Delete from the Running playlist and library"
-                                      >
-                                        🗑
-                                      </button>
-                                    </span>
-                                  )}
-                                  {isDeleted && <span className="shrink-0 ml-1 text-slate-500 no-underline">deleted</span>}
-                                </div>
-                              );
-                            })}
-                          </div>
                           {pd.summary && <p className="text-xs text-slate-400 mt-1">{pd.summary}</p>}
                         </div>
                       );
