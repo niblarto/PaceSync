@@ -1,5 +1,4 @@
-import fs from "fs";
-import path from "path";
+import { getDb } from "@/lib/db";
 
 // Every AI DJ mix build (remix or first build, saved or not) for a workout
 // date, so a remix — or a reload mid-remix-chain, or the overnight cron —
@@ -8,39 +7,38 @@ import path from "path";
 // only gets a row once a mix is actually saved/pinned): this fires on every
 // build attempt, whether saved or not, since the point is variety across
 // remixes, not tracking what actually got listened to.
+//
+// Deliberately keyed by date ALONE (no workout_title column) — unlike every
+// other workout-scoped store in this app, this one never adopted the
+// (date, workout_title) composite key, even in its JSON-era form.
 
-const FILE = path.join(process.cwd(), "recent-mix-builds.json");
 const RETAIN_DAYS = 3; // only recent remix history matters for freshness
-const MAX_BUILDS_PER_DATE = 8; // cap so a long remix session can't grow this file unbounded
-
-interface Store {
-  [date: string]: { builtAt: string; uris: string[] }[];
-}
-
-function loadAll(): Store {
-  try {
-    return JSON.parse(fs.readFileSync(FILE, "utf-8")) as Store;
-  } catch {
-    return {};
-  }
-}
+const MAX_BUILDS_PER_DATE = 8; // cap so a long remix session can't grow this unbounded
 
 // Records one build's track URIs against its workout date. Called after
 // every successful mix build (see app/api/ai-dj/mix/route.ts).
 export function recordMixBuild(date: string, uris: string[]): void {
   if (!date || uris.length === 0) return;
   try {
-    const all = loadAll();
-    const list = all[date] ?? [];
-    list.push({ builtAt: new Date().toISOString(), uris });
-    all[date] = list.slice(-MAX_BUILDS_PER_DATE);
+    const db = getDb();
+    const tx = db.transaction(() => {
+      db.prepare("INSERT INTO recent_mix_builds (date, built_at, uris_json) VALUES (?, ?, ?)")
+        .run(date, new Date().toISOString(), JSON.stringify(uris));
 
-    const cutoff = Date.now() - RETAIN_DAYS * 24 * 60 * 60 * 1000;
-    Object.keys(all).forEach(d => {
-      if (new Date(d + "T12:00:00").getTime() < cutoff) delete all[d];
+      // Cap to the most recent MAX_BUILDS_PER_DATE rows for this date —
+      // delete anything older than the Nth-most-recent by rowid.
+      const excess = db.prepare(
+        "SELECT rowid FROM recent_mix_builds WHERE date = ? ORDER BY rowid DESC LIMIT -1 OFFSET ?"
+      ).all(date, MAX_BUILDS_PER_DATE) as { rowid: number }[];
+      if (excess.length > 0) {
+        const del = db.prepare("DELETE FROM recent_mix_builds WHERE rowid = ?");
+        for (const row of excess) del.run(row.rowid);
+      }
+
+      const cutoffIso = new Date(Date.now() - RETAIN_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      db.prepare("DELETE FROM recent_mix_builds WHERE date < ?").run(cutoffIso);
     });
-
-    fs.writeFileSync(FILE, JSON.stringify(all), "utf-8");
+    tx();
   } catch (e) {
     console.warn("[recent-mix-builds] save failed:", e);
   }
@@ -52,6 +50,8 @@ export function recordMixBuild(date: string, uris: string[]): void {
 // all) still avoids repeating its own most recent attempt for the same date.
 export function getRecentBuildUris(date: string): string[] {
   if (!date) return [];
-  const list = loadAll()[date] ?? [];
-  return Array.from(new Set(list.flatMap(b => b.uris)));
+  const rows = getDb().prepare("SELECT uris_json FROM recent_mix_builds WHERE date = ?").all(date) as { uris_json: string }[];
+  const all = new Set<string>();
+  for (const row of rows) (JSON.parse(row.uris_json) as string[]).forEach(u => all.add(u));
+  return Array.from(all);
 }

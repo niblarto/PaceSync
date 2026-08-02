@@ -3,11 +3,11 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { garminCacheGet, garminCacheSet } from "@/lib/garmin-cache";
-import { getTodaysRunEntry } from "@/lib/todays-run-history";
-import { activeCsvPath } from "@/lib/running-playlist-config";
+import { getTodaysRunEntry, getTodaysRunEntriesForDate } from "@/lib/todays-run-history";
+import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { readAllTracks } from "@/lib/tracks-store";
 import { applyBpmOverrides } from "@/lib/bpm-track-overrides";
 import path from "path";
-import fs from "fs";
 
 // URIs currently in the library CSV — tracks deleted since the run played
 // are flagged so the UI can strike them through persistently. Computed on
@@ -15,11 +15,9 @@ import fs from "fs";
 function libraryUris(): Set<string> {
   const uris = new Set<string>();
   try {
-    const csv = fs.readFileSync(activeCsvPath(), "utf-8");
-    csv.split("\n").forEach(line => {
-      const uri = line.split(",")[0]?.trim();
-      if (uri?.startsWith("spotify:track:")) uris.add(uri);
-    });
+    for (const t of readAllTracks(loadRunningPlaylistConfig().csvFile)) {
+      if (t.uri?.startsWith("spotify:track:")) uris.add(t.uri);
+    }
   } catch { /* no library — leave empty, flag nothing as deleted */ }
   return uris;
 }
@@ -90,11 +88,16 @@ export async function GET(req: NextRequest) {
 
   const date = req.nextUrl.searchParams.get("date") ?? "";
   const title = req.nextUrl.searchParams.get("title") ?? "";
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !title) {
-    return NextResponse.json({ error: "date (YYYY-MM-DD) and title required" }, { status: 400 });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return NextResponse.json({ error: "date (YYYY-MM-DD) required" }, { status: 400 });
   }
 
-  const entry = getTodaysRunEntry(date, title);
+  // Title-less lookup (e.g. from a plain Garmin activity page with no
+  // Runna workout tied to it): auto-resolve whatever entry exists for this
+  // date. Most days have exactly one; the day's first entry wins on the
+  // rare day with two workout slots — same "not user-visible enough to
+  // need a picker" tradeoff already accepted elsewhere in this codebase.
+  const entry = title ? getTodaysRunEntry(date, title) : getTodaysRunEntriesForDate(date)[0] ?? null;
   if (!entry) return NextResponse.json({ entry: null, tracks: [] });
 
   // Disputed — the user confirmed this mix wasn't actually run to. Return the

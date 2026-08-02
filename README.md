@@ -33,6 +33,7 @@ A Next.js web app for managing a Spotify running playlist based on heart rate zo
 - Python 3 with `paramiko` installed on your **local machine** (for deployment)
 - A [Spotify Developer](https://developer.spotify.com/dashboard) app
 - Your running playlist exported from Spotify using [Exportify](https://exportify.net) as a CSV with BPM data
+- **Build tools on the Pi** (`build-essential`, `python3-dev`) — needed to compile [`better-sqlite3`](https://github.com/WiseLibs/better-sqlite3)'s native binding for the Pi's ARM architecture, since no prebuilt binary ships for it. `deploy.py` installs these automatically if missing on first deploy — nothing to do manually, but a fresh minimal/Lite Raspberry Pi OS image won't have them until then.
 
 ---
 
@@ -118,12 +119,15 @@ python deploy.py
 ```
 
 This will:
-1. Upload all source files to the Pi over SSH/SFTP
-2. Run `npm install` and `npm run build` on the Pi
-3. Install and start a `systemd` service (`running-playlist`)
-4. Set up a weekly cron job (Fridays at 14:00) to refresh the playlist
+1. Check for and install build tools (`build-essential`, `python3-dev`) if missing — needed to compile `better-sqlite3`'s native binding on the Pi's ARM architecture
+2. Upload all source files to the Pi over SSH/SFTP
+3. Run `npm install` and `npm run build` on the Pi
+4. Install and start a `systemd` service (`running-playlist`)
+5. Set up a weekly cron job (Fridays at 14:00) to refresh the playlist
 
 The app will be available at `http://<pi-ip>:5005`.
+
+On first run, the app creates **`pacesync.db`** (a SQLite database, in the same directory as the app) automatically — this is where all of PaceSync's own data lives (library tracks, workout history, settings, pins, BPM overrides, OAuth tokens, etc. — see [Data Storage](#data-storage) below). No setup step is needed for this; it's created lazily on first request. `deploy.py` never uploads or touches this file, so redeploying never resets your data.
 
 ---
 
@@ -489,7 +493,17 @@ python deploy.py
 
 `deploy.py` keeps a local hash manifest (`.deploy-manifest.json`, gitignored) of every file as of the last successful deploy, and only uploads files that actually changed — `npm install` is also skipped unless `package.json` changed, and the build/restart step is skipped entirely if nothing changed. Use `python deploy.py --all` (or delete the manifest) to force a full re-upload if you suspect drift.
 
-Your `Running.csv` (and any other playlist's CSV) on the Pi will not be overwritten.
+Your `Running.csv` (and any other playlist's CSV) on the Pi will not be overwritten. Neither will **`pacesync.db`** — it isn't part of the deploy manifest at all, so redeploying never touches your library, workout history, or settings.
+
+---
+
+## Data Storage
+
+PaceSync stores everything it manages itself — library tracks, workout history, pins, BPM overrides, settings, OAuth tokens — in a single SQLite database, **`pacesync.db`**, created automatically in the app's directory on first run (via [`better-sqlite3`](https://github.com/WiseLibs/better-sqlite3)). There's no setup step for this and nothing to configure.
+
+**Why this matters if you're upgrading an older deploy:** earlier versions of PaceSync stored this same data as ~30 individual flat JSON files plus playlist CSVs. That flat-file storage has since been fully migrated to `pacesync.db` — nothing to do manually, the migration runs itself the first time each store is touched. The playlist CSV files (`public/*.csv`) are still kept on disk too, regenerated automatically from the database after every write — this is what the local BPM matcher ([`bpm_matcher/`](bpm_matcher/)) and the on-Pi AI DJ fallback ([`scripts/ai_dj_bridge.py`](scripts/ai_dj_bridge.py)) read directly from `pacesync.db` (not the CSV) when running locally on the Pi; the CSV files remain purely for compatibility (manual export/inspection, and the still-supported CSV import/upload flow) and are safe to ignore otherwise.
+
+**Backing up your data:** back up `pacesync.db` (a single file) the same way you'd back up any other stateful app data — there's no separate export step required. Your 2FA secret is also stored in `pacesync.db` (auto-imported from a legacy `local-auth.json` the first time it's read, if that file is present and the database doesn't have it yet).
 
 ---
 

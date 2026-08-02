@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { activeCsvPath } from "@/lib/running-playlist-config";
-import { readCsv, writeCsv } from "@/lib/csv-store";
+import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { readTracksByUris, deleteTracksByUri, regenerateCsvFile } from "@/lib/tracks-store";
 import { recordDeletedTracks } from "@/lib/deleted-tracks";
 import { unpinMixesContaining } from "@/lib/pinned-mixes";
 import { removeTodaysRunEntry } from "@/lib/todays-run-history";
@@ -25,28 +25,17 @@ export async function DELETE(req: NextRequest) {
   // cell, which the old line.includes(id) check didn't guard against.
   const fullUris = new Set(uris.map(u => u.startsWith("spotify:track:") ? u : `spotify:track:${u}`));
 
-  const csvPath = activeCsvPath();
+  const csvFile = loadRunningPlaylistConfig().csvFile;
   try {
-    const { headers, rows, col } = await readCsv(csvPath);
-    const idxUri = col("Track URI");
-    const idxName = col("Track Name");
-    const idxArtist = col("Artist Name(s)");
-    const removedRows: { uri: string; name?: string; artist?: string }[] = [];
-    const kept: string[][] = [];
-    for (const row of rows) {
-      const uri = idxUri !== -1 ? row[idxUri]?.trim() : undefined;
-      if (uri && fullUris.has(uri)) {
-        removedRows.push({
-          uri,
-          name: idxName !== -1 ? row[idxName]?.trim() : undefined,
-          artist: idxArtist !== -1 ? row[idxArtist]?.trim() : undefined,
-        });
-      } else {
-        kept.push(row);
-      }
-    }
+    const matched = readTracksByUris(csvFile, Array.from(fullUris));
+    const removedRows: { uri: string; name?: string; artist?: string }[] = matched.map(t => ({
+      uri: t.uri,
+      name: t.trackName ?? undefined,
+      artist: t.artistNames ?? undefined,
+    }));
     if (removedRows.length > 0) {
-      await writeCsv(csvPath, headers, kept);
+      deleteTracksByUri(csvFile, removedRows.map(r => r.uri));
+      await regenerateCsvFile(csvFile, activeCsvPath());
       // Log deletions so import paths can flag/reject these tracks if they
       // ever come back via BBC episodes, CSV appends, or the weekly cron.
       try { recordDeletedTracks(removedRows); } catch (e) { console.warn("[tracks/delete] deletion log failed:", e); }
@@ -56,12 +45,10 @@ export async function DELETE(req: NextRequest) {
       // pinned date's mix, not just whatever's currently on screen.
       try {
         const unpinned = await unpinMixesContaining(Array.from(fullUris), Date.now());
-        // Only clears the saved-history snapshot for a run that's ALREADY
-        // outside the Runna summary card's window (unpinMixesContaining
-        // itself only ever unpins upcoming workouts, but a run still
-        // showing on the summary card should keep its tracklist regardless
-        // — protectRecentRuns is the guard for that).
-        for (const { date, title } of unpinned) removeTodaysRunEntry(date, title, { protectRecentRuns: true });
+        // removeTodaysRunEntry itself now unconditionally refuses to delete
+        // any past-or-today-dated row — a run's tracklist is a permanent
+        // record once it's happened, regardless of which caller asks.
+        for (const { date, title } of unpinned) removeTodaysRunEntry(date, title);
       } catch (e) { console.warn("[tracks/delete] pin invalidation failed:", e); }
       return NextResponse.json({ ok: true, csvRemoved: true, removed: removedRows.length });
     }

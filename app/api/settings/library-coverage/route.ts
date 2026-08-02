@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { activeCsvPath } from "@/lib/running-playlist-config";
-import { readCsv } from "@/lib/csv-store";
+import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { readAllTracks } from "@/lib/tracks-store";
 import { getPlayedCounts } from "@/lib/todays-run-history";
 import { loadBpmOverrides, RUN_KINDS } from "@/lib/bpm-overrides";
 
@@ -45,16 +45,8 @@ export async function GET() {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
-    const { rows, col } = await readCsv(activeCsvPath());
+    const rows = readAllTracks(loadRunningPlaylistConfig().csvFile);
     if (rows.length === 0) return NextResponse.json({ buckets: [], totalTracks: 0, inRangeTracks: 0, outOfRangeTracks: 0 });
-
-    const idxUri = col("Track URI", "Spotify URI", "Spotify ID", "uri", "id");
-    const idxBpm = col("BPM", "Tempo");
-    const idxName = col("Track Name", "Name", "Song", "Title");
-    const idxArtist = col("Artist Name(s)", "Artist", "Artists");
-    if (idxUri === -1 || idxBpm === -1) {
-      return NextResponse.json({ buckets: [], totalTracks: 0, inRangeTracks: 0, outOfRangeTracks: 0 });
-    }
 
     const overrides = loadBpmOverrides();
     // (min, max) per kind — no override falls back to no bound (0, Infinity),
@@ -77,9 +69,9 @@ export async function GET() {
     let inRangeTracks = 0;
 
     for (const row of rows) {
-      const uri = row[idxUri]?.trim();
-      const rawBpm = parseFloat(row[idxBpm]);
-      if (!uri?.startsWith("spotify:track:") || isNaN(rawBpm) || rawBpm <= 0) continue;
+      const uri = row.uri?.trim();
+      const rawBpm = row.tempo;
+      if (!uri?.startsWith("spotify:track:") || rawBpm == null || isNaN(rawBpm) || rawBpm <= 0) continue;
 
       totalTracks++;
       const effectiveBpm = rawBpm < DOUBLETIME_THRESHOLD ? rawBpm * 2 : rawBpm;
@@ -94,8 +86,8 @@ export async function GET() {
       const list = bucketTracks.get(bucket) ?? [];
       list.push({
         uri,
-        name: idxName !== -1 ? (row[idxName]?.trim() || "Unknown") : "Unknown",
-        artist: idxArtist !== -1 ? (row[idxArtist]?.trim() || "Unknown") : "Unknown",
+        name: row.trackName?.trim() || "Unknown",
+        artist: row.artistNames?.trim() || "Unknown",
         played: playedCounts[uri] ?? 0,
         inRange: trackInRange,
         effectiveBpm,

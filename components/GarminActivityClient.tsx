@@ -101,6 +101,7 @@ interface MixPacing {
   activityId: string | number | null;
   tracks: MixTrack[];
   summary: string | null;
+  entry?: { workoutTitle?: string } | null;
 }
 
 const MIX_ROW_STYLE: Record<MixTrack["verdict"], string> = {
@@ -800,7 +801,17 @@ export function GarminActivityClient({ id }: { id: string }) {
             {/* "Today's Run" mix vs pace */}
             {mix && mix.tracks.length > 0 && (
               <div className={CARD}>
-                <h2 className="font-semibold text-sm text-slate-300 mb-1">🎧 Mix vs Pace</h2>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <h2 className="font-semibold text-sm text-slate-300">🎧 Mix vs Pace</h2>
+                  {mix.entry?.workoutTitle && data?.activity?.start_time && (
+                    <Link
+                      href={`/run/${data.activity.start_time.slice(0, 10)}?title=${encodeURIComponent(mix.entry.workoutTitle)}`}
+                      className="text-xs text-sky-400 hover:text-sky-300 underline shrink-0"
+                    >
+                      View route + full track detail ↗
+                    </Link>
+                  )}
+                </div>
                 <p className="text-xs text-slate-500 mb-3">
                   Expected pace while each song played (±10 s/mi tolerance) —
                   <span className="text-green-400"> on pace</span> ·

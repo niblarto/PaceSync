@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { activeCsvPath } from "@/lib/running-playlist-config";
-import { readCsv } from "@/lib/csv-store";
+import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { readAllTracks } from "@/lib/tracks-store";
 
 // Lightweight parse of the active playlist's CSV for Settings-page features
 // (Sprint BPM table + copy-to-playlist) that need track/BPM data without
@@ -21,23 +21,18 @@ export async function GET() {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
-    const { rows, col } = await readCsv(activeCsvPath());
-    const idxUri = col("Track URI", "Spotify URI", "Spotify ID", "uri", "id");
-    const idxName = col("Track Name", "Name", "Song", "Title");
-    const idxArtist = col("Artist Name(s)", "Artist", "Artists");
-    const idxBpm = col("BPM", "Tempo");
-    if (idxUri === -1) return NextResponse.json({ tracks: [] });
+    const rows = readAllTracks(loadRunningPlaylistConfig().csvFile);
 
     const tracks: ActiveTrack[] = [];
     for (const row of rows) {
-      const uri = row[idxUri]?.trim();
+      const uri = row.uri?.trim();
       if (!uri?.startsWith("spotify:track:")) continue;
-      const bpm = idxBpm !== -1 ? parseFloat(row[idxBpm]) : NaN;
+      const bpm = row.tempo;
       tracks.push({
         uri,
-        name: row[idxName]?.trim() || "Unknown",
-        artist: row[idxArtist]?.trim() || "Unknown",
-        bpm: !isNaN(bpm) && bpm > 0 ? Math.round(bpm) : 0,
+        name: row.trackName?.trim() || "Unknown",
+        artist: row.artistNames?.trim() || "Unknown",
+        bpm: bpm != null && !isNaN(bpm) && bpm > 0 ? Math.round(bpm) : 0,
       });
     }
     return NextResponse.json({ tracks });

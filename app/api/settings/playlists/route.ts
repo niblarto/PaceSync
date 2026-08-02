@@ -1,19 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile } from "fs/promises";
-import { listRunningPlaylists, loadRunningPlaylistConfig, setActiveRunningPlaylist, removeRunningPlaylist, csvPathFor } from "@/lib/running-playlist-config";
+import { listRunningPlaylists, loadRunningPlaylistConfig, setActiveRunningPlaylist, removeRunningPlaylist } from "@/lib/running-playlist-config";
+import { countTracks } from "@/lib/tracks-store";
 import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
 
-// Counts data rows in a playlist's CSV — same "is this a real row" rule as
-// the write side (save-default-playlist): non-blank lines after the header.
+// Counts tracks in a playlist's DB-backed rows.
 async function trackCount(entry: { csvFile: string }): Promise<number | null> {
   try {
-    const csv = await readFile(csvPathFor({ name: "", id: "", csvFile: entry.csvFile }), "utf8");
-    const lines = csv.replace(/\r/g, "").split("\n").filter(l => l.trim());
-    return Math.max(0, lines.length - 1); // minus header
+    return countTracks(entry.csvFile);
   } catch {
-    return null; // file missing — e.g. a freshly-registered playlist with no CSV yet
+    return null;
   }
 }
 

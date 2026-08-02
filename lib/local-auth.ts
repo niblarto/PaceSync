@@ -2,14 +2,24 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { SignJWT, jwtVerify } from "jose";
+import { getDb } from "@/lib/db";
 
 // Local username/password + TOTP gate that sits in front of the Spotify
-// OAuth flow. Credentials live in local-auth.json (gitignored, uploaded by
-// deploy.py like .env.local). Passwords are scrypt-hashed; the TOTP secret
-// is standard RFC 6238 (SHA1/6 digits/30s) so LastPass Authenticator,
-// Google Authenticator etc. all work.
+// OAuth flow. Credentials live in pacesync.db's kv_config table (key
+// "local_auth"). Passwords are scrypt-hashed; the TOTP secret is standard
+// RFC 6238 (SHA1/6 digits/30s) so LastPass Authenticator, Google
+// Authenticator etc. all work.
+//
+// This is the one store deploy.py has always treated as sacred — it's
+// uploaded once on first deploy and never overwritten again, so a redeploy
+// can never silently reset 2FA/credentials. The migration preserves that
+// exact guarantee: loadLocalAuth() auto-imports the legacy local-auth.json
+// into the DB the first time it's read (if the DB has no row yet), then
+// never touches the file again — it's left in place, untouched, as a
+// standing safety net, not deleted.
 
 const FILE = path.join(process.cwd(), "local-auth.json");
+const KEY = "local_auth";
 
 export const AUTH_COOKIE = "pacesync_auth";
 export const AUTH_MAX_AGE_SEC = 30 * 24 * 60 * 60; // 30 days
@@ -23,16 +33,33 @@ export interface LocalAuthConfig {
   totpEnabled?: boolean; // true once the user has confirmed a code
 }
 
-export function loadLocalAuth(): LocalAuthConfig | null {
+function importLegacyFileIfPresent(): LocalAuthConfig | null {
   try {
     const data = JSON.parse(fs.readFileSync(FILE, "utf-8")) as LocalAuthConfig;
-    if (data?.username && data?.salt && data?.hash) return data;
+    if (data?.username && data?.salt && data?.hash) {
+      getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO NOTHING")
+        .run(KEY, JSON.stringify(data));
+      return data;
+    }
   } catch {}
   return null;
 }
 
+export function loadLocalAuth(): LocalAuthConfig | null {
+  try {
+    const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(KEY) as { value_json: string } | undefined;
+    if (row) {
+      const data = JSON.parse(row.value_json) as LocalAuthConfig;
+      if (data?.username && data?.salt && data?.hash) return data;
+    }
+  } catch {}
+  // No DB row yet — one-time import from the legacy file, if it exists.
+  return importLegacyFileIfPresent();
+}
+
 export function saveLocalAuth(config: LocalAuthConfig): void {
-  fs.writeFileSync(FILE, JSON.stringify(config, null, 2), "utf-8");
+  getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
+    .run(KEY, JSON.stringify(config));
 }
 
 // ── Password ────────────────────────────────────────────────────────────────

@@ -239,6 +239,8 @@ FILES = [
     ('lib/run-pace-bias.ts',                      'lib/run-pace-bias.ts'),
     ('lib/track-feedback.ts',                     'lib/track-feedback.ts'),
     ('lib/running-playlist-config.ts',            'lib/running-playlist-config.ts'),
+    ('lib/tracks-store.ts',                        'lib/tracks-store.ts'),
+    ('types/track.ts',                             'types/track.ts'),
     ('app/api/settings/playlist/route.ts',        'app/api/settings/playlist/route.ts'),
     ('app/api/settings/playlists/route.ts',       'app/api/settings/playlists/route.ts'),
     ('app/api/settings/playlists/download/route.ts', 'app/api/settings/playlists/download/route.ts'),
@@ -273,6 +275,7 @@ FILES = [
     ('bpm_matcher/__init__.py',                   'bpm_matcher/__init__.py'),
     ('bpm_matcher/camelot.py',                    'bpm_matcher/camelot.py'),
     ('bpm_matcher/features.py',                   'bpm_matcher/features.py'),
+    ('bpm_matcher/db_source.py',                  'bpm_matcher/db_source.py'),
     ('bpm_matcher/match.py',                      'bpm_matcher/match.py'),
     ('bpm_matcher/sources.py',                    'bpm_matcher/sources.py'),
     ('bpm_matcher/enrich.py',                     'bpm_matcher/enrich.py'),
@@ -347,6 +350,15 @@ ssh.connect(PI['host'], port=PI['port'],
 print('  Checking Node.js...')
 sudo_run(ssh, 'which node || (curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)')
 run(ssh, 'node --version && npm --version')
+
+# better-sqlite3 (pacesync.db) ships no prebuilt binary for the Pi's ARM
+# architecture, so npm install compiles its native binding from source —
+# needs make/g++/python3, which a minimal/Lite Raspberry Pi OS image doesn't
+# include by default (this Pi already had them, likely pulled in as a
+# dependency of an earlier apt step, but that's not guaranteed on a fresh
+# install). Idempotent, same pattern as the python3-pandas check below.
+print('  Checking build tools (needed to compile better-sqlite3 for this Pi)...')
+sudo_run(ssh, 'which make g++ python3 >/dev/null 2>&1 || apt-get install -y -qq build-essential python3-dev')
 
 # Create remote directory structure
 print('  Creating directories...')

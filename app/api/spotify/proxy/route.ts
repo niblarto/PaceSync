@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest, getBurstCooldownRemainingMs } from "@/lib/spotify-rate-limit";
 
 // Relays a single Spotify Web API request server-side and hands the response
 // back as JSON, including the real Retry-After value on a 429 — something a
@@ -34,7 +34,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ status: 429, ok: false, retryAfterSec, data: null });
   }
 
+  // Pre-emptive soft guard: a recent burst (e.g. a big BBC card match) may
+  // have deeply depleted Spotify's real quota without ever drawing a 429
+  // itself — firing straight through right after one risks the next
+  // request eating what's left and drawing a much harsher ban as a repeat
+  // offender. Space this out instead of letting it through immediately.
+  const burstWaitMs = getBurstCooldownRemainingMs();
+  if (burstWaitMs > 0) {
+    return NextResponse.json({ status: 429, ok: false, retryAfterSec: Math.ceil(burstWaitMs / 1000), data: null });
+  }
+
   try {
+    recordSpotifyRequest();
     const res = await fetch(`https://api.spotify.com${path}`, {
       method: method ?? "GET",
       headers: {

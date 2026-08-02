@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { activeCsvPath, csvPathFor, listRunningPlaylists, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
-import { mergeCsvIntoFile } from "@/lib/csv-merge";
-import { readCsv, csvEscape } from "@/lib/csv-store";
+import { csvPathFor, listRunningPlaylists, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { readTracksByUris, mergeTracksIntoPlaylist, regenerateCsvFile } from "@/lib/tracks-store";
 import { healActiveCsv } from "@/lib/csv-heal";
 
 // Copies the given track URIs (already in the active playlist's library)
@@ -25,23 +24,13 @@ export async function POST(req: NextRequest) {
   const target = listRunningPlaylists().find(p => p.id === targetPlaylistId);
   if (!target) return NextResponse.json({ error: "Unknown target playlist" }, { status: 404 });
 
-  const { headers: header, rows, col } = await readCsv(activeCsvPath()).catch(() => ({ headers: [], rows: [], col: () => -1 }));
-  if (header.length === 0) return NextResponse.json({ error: "Active playlist has no library CSV" }, { status: 400 });
-
-  const idxUri = col("Track URI", "Spotify URI", "Spotify ID", "uri", "id");
-  if (idxUri === -1) return NextResponse.json({ error: "Active library has no Track URI column" }, { status: 500 });
-
-  const uriSet = new Set(uris);
-  const matchedRows = rows.filter(row => uriSet.has(row[idxUri]?.trim()));
+  const activeCsvFile = loadRunningPlaylistConfig().csvFile;
+  const matchedRows = readTracksByUris(activeCsvFile, uris);
 
   if (matchedRows.length === 0) return NextResponse.json({ error: "None of the requested tracks were found in the active library" }, { status: 404 });
 
-  const csvBody = [
-    header.map(csvEscape).join(","),
-    ...matchedRows.map(r => r.map(csvEscape).join(",")),
-  ].join("\n") + "\n";
-  const dest = csvPathFor(target);
-  const result = await mergeCsvIntoFile(dest, csvBody);
+  const result = mergeTracksIntoPlaylist(target.csvFile, matchedRows);
+  await regenerateCsvFile(target.csvFile, csvPathFor(target));
   console.log(`[copy-to-playlist] copied into "${target.name}": appended ${result.appended}, merged ${result.merged}`);
 
   // Copied rows already carry whatever BPM/feature data existed in the

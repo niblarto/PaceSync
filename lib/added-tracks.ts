@@ -1,5 +1,4 @@
-import fs from "fs";
-import path from "path";
+import { getDb } from "@/lib/db";
 
 // Timestamps every track written to the active library CSV, so recently-
 // added tracks can be surfaced (e.g. the BBC page's "Added this week" list)
@@ -11,49 +10,34 @@ import path from "path";
 
 const RETAIN_DAYS = 14;
 
-function logPath(csvFile: string): string {
-  return path.join(process.cwd(), `added-tracks-${csvFile.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
-}
-
 export interface AddedTrack {
   addedAt: string; // ISO date
 }
 
-type AddedTrackLog = Record<string, AddedTrack>; // key: spotify:track:<id>
-
-function loadAll(csvFile: string): AddedTrackLog {
-  try {
-    return JSON.parse(fs.readFileSync(logPath(csvFile), "utf-8")) as AddedTrackLog;
-  } catch {
-    return {};
-  }
-}
-
-function saveAll(csvFile: string, log: AddedTrackLog): void {
-  const cutoff = Date.now() - RETAIN_DAYS * 24 * 60 * 60 * 1000;
-  for (const uri of Object.keys(log)) {
-    if (new Date(log[uri].addedAt).getTime() < cutoff) delete log[uri];
-  }
-  fs.writeFileSync(logPath(csvFile), JSON.stringify(log), "utf-8");
-}
-
 export function recordAddedTracks(csvFile: string, uris: string[]): void {
   if (uris.length === 0) return;
-  const log = loadAll(csvFile);
+  const db = getDb();
   const now = new Date().toISOString();
-  for (const uri of uris) {
-    if (!uri) continue;
-    log[uri] = { addedAt: now };
-  }
-  saveAll(csvFile, log);
+  const cutoffIso = new Date(Date.now() - RETAIN_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const tx = db.transaction(() => {
+    const upsert = db.prepare(
+      "INSERT INTO added_tracks (csv_file, uri, added_at) VALUES (?, ?, ?) " +
+      "ON CONFLICT(csv_file, uri) DO UPDATE SET added_at = excluded.added_at"
+    );
+    for (const uri of uris) {
+      if (!uri) continue;
+      upsert.run(csvFile, uri, now);
+    }
+    db.prepare("DELETE FROM added_tracks WHERE csv_file = ? AND added_at < ?").run(csvFile, cutoffIso);
+  });
+  tx();
 }
 
 // Every logged URI added within the last `days` days, newest first.
 export function getRecentlyAdded(csvFile: string, days = 7): { uri: string; addedAt: string }[] {
-  const log = loadAll(csvFile);
-  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-  return Object.entries(log)
-    .filter(([, v]) => new Date(v.addedAt).getTime() >= cutoff)
-    .map(([uri, v]) => ({ uri, addedAt: v.addedAt }))
-    .sort((a, b) => b.addedAt.localeCompare(a.addedAt));
+  const cutoffIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const rows = getDb().prepare(
+    "SELECT uri, added_at FROM added_tracks WHERE csv_file = ? AND added_at >= ? ORDER BY added_at DESC"
+  ).all(csvFile, cutoffIso) as { uri: string; added_at: string }[];
+  return rows.map(r => ({ uri: r.uri, addedAt: r.added_at }));
 }

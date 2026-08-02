@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
-import { readCsv } from "@/lib/csv-store";
+import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { readTracksByUris } from "@/lib/tracks-store";
 import { getRecentlyAdded } from "@/lib/added-tracks";
 
 // Tracks added to the active library in the last N days (default 7),
@@ -23,34 +23,21 @@ export async function GET(req: NextRequest) {
   const addedAtByUri = new Map(recent.map(r => [r.uri, r.addedAt]));
 
   try {
-    const { rows, col } = await readCsv(activeCsvPath());
-    if (rows.length === 0) return NextResponse.json({ tracks: [] });
-
-    const idxUri = col("Track URI", "Spotify URI", "uri");
-    const idxName = col("Track Name", "Name");
-    const idxArtist = col("Artist Name(s)", "Artist");
-    const idxTempo = col("Tempo", "BPM");
-    const idxEnergy = col("Energy");
-    const idxDuration = col("Duration (ms)", "Duration_ms", "Duration");
-    if (idxUri === -1) return NextResponse.json({ tracks: [] });
+    const matchedRows = readTracksByUris(csvFile, Array.from(addedAtByUri.keys()));
+    if (matchedRows.length === 0) return NextResponse.json({ tracks: [] });
 
     const tracks: {
       uri: string; name: string; artist: string; tempo: number | null;
       energy: number | null; durationMs: number; addedAt: string;
-    }[] = [];
-    for (const row of rows) {
-      const uri = row[idxUri]?.trim();
-      if (!uri || !addedAtByUri.has(uri)) continue;
-      tracks.push({
-        uri,
-        name: idxName !== -1 ? (row[idxName]?.trim() || "Unknown") : "Unknown",
-        artist: idxArtist !== -1 ? (row[idxArtist]?.trim() || "Unknown") : "Unknown",
-        tempo: idxTempo !== -1 ? (parseFloat(row[idxTempo]) || null) : null,
-        energy: idxEnergy !== -1 ? (parseFloat(row[idxEnergy]) || null) : null,
-        durationMs: idxDuration !== -1 ? (parseInt(row[idxDuration], 10) || 0) : 0,
-        addedAt: addedAtByUri.get(uri)!,
-      });
-    }
+    }[] = matchedRows.map(row => ({
+      uri: row.uri,
+      name: row.trackName?.trim() || "Unknown",
+      artist: row.artistNames?.trim() || "Unknown",
+      tempo: row.tempo ?? null,
+      energy: row.energy ?? null,
+      durationMs: row.durationMs ?? 0,
+      addedAt: addedAtByUri.get(row.uri)!,
+    }));
     tracks.sort((a, b) => b.addedAt.localeCompare(a.addedAt));
     return NextResponse.json({ tracks });
   } catch (e) {

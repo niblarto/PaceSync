@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { activeCsvPath } from "@/lib/running-playlist-config";
-import { readCsv, writeCsv } from "@/lib/csv-store";
+import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { readAllTracks, updateTrackFeatures, regenerateCsvFile } from "@/lib/tracks-store";
 import { healActiveCsv } from "@/lib/csv-heal";
 
 // Fills in audio features (Tempo/Key/Mode/Energy/Danceability/Valence) on
@@ -27,32 +27,24 @@ export async function POST(req: NextRequest) {
   if (!tracks?.length) return NextResponse.json({ error: "No tracks" }, { status: 400 });
 
   const byUri = new Map(tracks.map(t => [t.uri, t]));
-  const csvPath = activeCsvPath();
+  const csvFile = loadRunningPlaylistConfig().csvFile;
 
   try {
-    const { headers, rows, col } = await readCsv(csvPath);
-    const idxUri = col("Track URI");
-    const fields: Array<[string, keyof FeatureUpdate]> = [
-      ["Tempo", "tempo"], ["Key", "key"], ["Mode", "mode"],
-      ["Energy", "energy"], ["Danceability", "danceability"], ["Valence", "valence"],
-    ];
-    if (idxUri === -1 || col("Tempo") === -1) {
-      return NextResponse.json({ error: "CSV missing Track URI/Tempo columns" }, { status: 500 });
-    }
+    const rows = readAllTracks(csvFile);
 
     let updated = 0;
     for (const row of rows) {
-      const t = byUri.get(row[idxUri]?.trim() ?? "");
+      const t = byUri.get(row.uri?.trim() ?? "");
       if (!t) continue;
-      for (const [header, key] of fields) {
-        const idx = col(header);
-        if (idx !== -1) row[idx] = String(t[key]);
-      }
+      updateTrackFeatures(csvFile, row.uri, {
+        tempo: t.tempo, key: t.key, mode: t.mode,
+        energy: t.energy, danceability: t.danceability, valence: t.valence,
+      });
       updated++;
     }
 
     if (updated > 0) {
-      await writeCsv(csvPath, headers, rows);
+      await regenerateCsvFile(csvFile, activeCsvPath());
       // Sweep for anything still missing (e.g. Duration) in the background
       void healActiveCsv().catch(e => console.warn("[tracks/update-features] heal failed:", e));
     }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useSession } from "next-auth/react";
 import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import Link from "next/link";
@@ -16,6 +16,10 @@ interface Track {
   // undefined = not checked yet, null = looked up but no BPM match found,
   // number = found.
   tempo?: number | null;
+  // undefined = BPM filter off or not checked yet; false = outside the
+  // library's current BPM range (still shown, just greyed out and sorted
+  // below eligible tracks rather than hidden).
+  inRange?: boolean;
 }
 
 interface Props {
@@ -88,11 +92,17 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy, onDelete
     openInSpotify();
   }
 
+  // A track is only ever flagged ineligible once it has a confirmed-missing
+  // or out-of-range BPM (inRange === false) — a track never queried yet
+  // (inRange undefined) is NOT greyed out, it just hasn't been checked.
+  const ineligible = track.inRange === false;
+
   return (
-    <div className="flex items-center group">
+    <div className={`flex items-center group ${ineligible ? "opacity-70" : ""}`}>
       <button
         onClick={() => { playTrack().catch(() => {}); }}
         disabled={!trackId}
+        title={ineligible ? "Outside the library's current BPM range — won't be imported while the BPM filter is on" : undefined}
         className="flex-1 flex items-center gap-3 px-3 py-2 text-sm hover:bg-slate-800/60 transition-colors text-left disabled:cursor-default min-w-0"
       >
         <span className="text-slate-600 text-xs w-5 shrink-0">{index + 1}</span>
@@ -109,12 +119,27 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy, onDelete
           <p className="truncate text-slate-200 group-hover:text-green-400 transition-colors">{track.name}</p>
           <p className="truncate text-xs text-slate-500">{track.artistName}</p>
         </div>
+        {ineligible && (
+          <span className="text-[10px] uppercase tracking-wide font-semibold text-red-400/90 bg-red-500/10 rounded px-1.5 py-0.5 shrink-0">
+            Out of range
+          </span>
+        )}
         {track.tempo !== undefined && (
           <span
             className={`text-xs font-mono font-semibold rounded px-1.5 py-0.5 shrink-0 ${
-              track.tempo === null ? "text-slate-500 bg-slate-700/40" : "text-green-400 bg-green-500/10"
+              track.tempo === null
+                ? "text-slate-500 bg-slate-700/40"
+                : ineligible
+                  ? "text-amber-400/80 bg-amber-500/10"
+                  : "text-green-400 bg-green-500/10"
             }`}
-            title={track.tempo === null ? "No BPM match found on ReccoBeats/Deezer" : undefined}
+            title={
+              track.tempo === null
+                ? "No BPM match found on ReccoBeats/Deezer"
+                : ineligible
+                  ? "Outside the library's current BPM range"
+                  : undefined
+            }
           >
             {track.tempo === null ? "???" : Math.round(track.tempo)} BPM
           </span>
@@ -176,6 +201,13 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
   const { data: session } = useSession();
   const { id: RUNNING_PLAYLIST_ID, name: runningPlaylistName } = useRunningPlaylist();
   const [tracks, setTracks] = useState<Track[]>([]);
+  // Eligible (inRange !== false) tracks first, ineligible ones pushed to
+  // the bottom — a stable sort so within each group the original BBC
+  // playlist order is preserved, not a re-shuffle.
+  const sortedTracks = useMemo(
+    () => [...tracks].sort((a, b) => Number(a.inRange === false) - Number(b.inRange === false)),
+    [tracks],
+  );
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressTotal, setProgressTotal] = useState(0);
@@ -237,7 +269,7 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
   // Best-effort BPM lookup for the results list, run before Update is
   // clicked — failures are silent since the badge is optional and Update's
   // own enrichment (commitUpdate) still runs the authoritative pass. When
-  // the BPM range filter is enabled (Settings), also drops tracks outside
+  // the BPM range filter is enabled (Settings), also flags tracks outside
   // the library's usable range from the list here, so they're never shown
   // as importable in the first place rather than only being dropped later
   // at Update time.
@@ -294,18 +326,19 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
       });
       const rd = await rr.json() as { inRange?: Record<string, boolean> };
       const inRange = rd.inRange ?? {};
-      // With the filter on, only tracks with a found, in-range BPM stay —
-      // unlike the plain "keep unknowns" rule elsewhere, a track with no
-      // BPM match ("???") is also dropped here rather than shown as
-      // importable. This is a local, unlogged removal (not recordDeletedTracks)
-      // since it's just missing data, not a rejection — the track can
-      // reappear on a future load/Refresh once its BPM is found. Tracks with
-      // no Spotify match at all (no uri, so never queried for BPM) are a
-      // separate concern and untouched here.
-      setTracks(prev => prev.filter(t => {
-        if (!t.uri) return true;
+      // With the filter on, tracks with no found/in-range BPM stay in the
+      // list (not silently dropped — the user can still see and act on
+      // them) but are flagged ineligible: BbcTrackRow greys them out and
+      // the render sorts them below every eligible track. Unlike a real
+      // reject/delete, this is purely a display annotation — nothing is
+      // logged, and the track can move back to eligible on a future
+      // load/Refresh once its BPM is found or the range changes. Tracks
+      // with no Spotify match at all (no uri, never queried for BPM) are a
+      // separate concern and left with inRange undefined.
+      setTracks(prev => prev.map(t => {
+        if (!t.uri) return t;
         const id = t.uri.split(":").pop();
-        return !!id && inRange[id] === true;
+        return { ...t, inRange: !!id && inRange[id] === true };
       }));
     } catch { /* filter is best-effort — leave the list as loaded */ }
   }
@@ -413,8 +446,13 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
     setError(null);
     setDeletedReview(null);
     try {
-      const withUri = tracks.filter(t => t.uri);
-      const noUri = tracks.length - withUri.length;
+      // Tracks flagged ineligible by the BPM range filter stay visible in
+      // the list (greyed out) but are never actually imported — matches
+      // the filter's original behavior, which used to just remove them
+      // from the list outright before Update could ever see them.
+      const eligible = tracks.filter(t => t.inRange !== false);
+      const withUri = eligible.filter(t => t.uri);
+      const noUri = eligible.length - withUri.length;
 
       // Dedupe against the library before adding anywhere — the CSV write
       // below already dedupes on its own, but addTracksBrowser (Spotify)
@@ -731,9 +769,9 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
         />
       )}
 
-      {tracks.length > 0 && (
+      {sortedTracks.length > 0 && (
         <div className="divide-y divide-white/10 max-h-64 overflow-y-auto no-scrollbar rounded-lg border border-white/10 bg-slate-950/40">
-          {tracks.map((t, i) => (
+          {sortedTracks.map((t, i) => (
             <div
               key={`${t.uri}-${i}`}
               ref={inlineCard && t.uri?.split(":")?.[2] === inlineCard.trackId

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { activeCsvPath } from "@/lib/running-playlist-config";
-import { readCsv, writeCsv, parseCsv, isBlank } from "@/lib/csv-store";
+import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { parseCsv, isBlank } from "@/lib/csv-store";
+import { readAllTracks, backfillTrackFields, regenerateCsvFile } from "@/lib/tracks-store";
 import { healActiveCsv } from "@/lib/csv-heal";
 
 // Fills blank Tempo/Key/Mode/Energy/Danceability/Valence in the library CSV
@@ -43,35 +44,41 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No valid track rows found" }, { status: 400 });
   }
 
-  const csvPath = activeCsvPath();
-  const { headers, rows, col } = await readCsv(csvPath);
-  const idxUri = col("Track URI");
-  if (idxUri === -1) return NextResponse.json({ error: "Library CSV has no Track URI column" }, { status: 500 });
+  const csvFile = loadRunningPlaylistConfig().csvFile;
+  const rows = readAllTracks(csvFile);
+
+  const FEATURE_KEYS: Array<[string, "tempo" | "key" | "mode" | "energy" | "danceability" | "valence"]> = [
+    ["Tempo", "tempo"], ["Key", "key"], ["Mode", "mode"],
+    ["Energy", "energy"], ["Danceability", "danceability"], ["Valence", "valence"],
+  ];
 
   let filled = 0;
   let matched = 0;
   for (const row of rows) {
-    const uri = row[idxUri]?.trim();
+    const uri = row.uri?.trim();
     if (!uri) continue;
     const uploadRow = byUri.get(uri);
     if (!uploadRow) continue;
     matched++;
 
+    const fields: Record<string, string> = {};
     let rowChanged = false;
-    FEATURE_HEADERS.forEach((header, fi) => {
-      const idx = col(header);
+    FEATURE_KEYS.forEach(([header, key], fi) => {
       const uploadIdx = uploadFeatureIdx[fi];
-      if (idx === -1 || uploadIdx === -1) return;
-      if (!isBlank(row[idx])) return; // never overwrite existing data
+      if (uploadIdx === -1) return;
+      if (!isBlank(String(row[key] ?? ""))) return; // never overwrite existing data
       const value = uploadRow[uploadIdx]?.trim();
       if (isBlank(value)) return;
-      row[idx] = value;
+      fields[key] = value;
       rowChanged = true;
     });
-    if (rowChanged) filled++;
+    if (rowChanged) {
+      backfillTrackFields(csvFile, uri, fields);
+      filled++;
+    }
   }
 
-  if (filled > 0) await writeCsv(csvPath, headers, rows);
+  if (filled > 0) await regenerateCsvFile(csvFile, activeCsvPath());
   // Duration (ms) etc. still missing after the import can go through the
   // usual online-lookup heal sweep.
   const heal = await healActiveCsv().catch(() => null);

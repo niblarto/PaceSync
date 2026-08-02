@@ -3,7 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import fs from "fs";
 import path from "path";
-import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest, getBurstCooldownRemainingMs } from "@/lib/spotify-rate-limit";
 
 const CACHE_FILE = path.join(process.cwd(), "spotify-cache.json");
 
@@ -64,6 +64,7 @@ function searchVariants(title: string, artist: string): { title: string; artist:
 async function searchSpotify(token: string, title: string, artist: string): Promise<{ result: CacheEntry; rateLimited: number | null }> {
   for (const variant of searchVariants(title, artist)) {
     const q = encodeURIComponent(variant.artist ? `${variant.title} ${variant.artist}` : variant.title);
+    recordSpotifyRequest();
     const res = await fetch(
       `https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`,
       { headers: { Authorization: `Bearer ${token}` } }
@@ -122,6 +123,12 @@ export async function POST(req: NextRequest) {
             send({ type: "rate-limited", waitSec });
             await sleep(waitSec * 1000);
           }
+        }
+        const burstWaitMs = getBurstCooldownRemainingMs();
+        if (burstWaitMs > 0) {
+          console.log(`[ai-dj-library/lookup] Recent Spotify burst detected, waiting ${Math.ceil(burstWaitMs / 1000)}s before starting searches`);
+          send({ type: "rate-limited", waitSec: Math.ceil(burstWaitMs / 1000) });
+          await sleep(burstWaitMs);
         }
 
         const spotifyResults: CacheEntry[] = [];

@@ -1,6 +1,4 @@
-import fs from "fs";
-import path from "path";
-import { workoutKey } from "@/lib/workout-key";
+import { getDb } from "@/lib/db";
 
 // Tracks explicitly "removed from mix" (ejected, but kept in the library —
 // see components/DashboardClient.tsx's removeTrackFromMix) for a workout's
@@ -10,7 +8,6 @@ import { workoutKey } from "@/lib/workout-key";
 // straight back in. Cleared whenever a fresh build/remix starts (a new
 // session), same lifecycle as the in-memory state it backs.
 
-const FILE = path.join(process.cwd(), "removed-tracks.json");
 const RETAIN_DAYS = 30;
 
 export interface RemovedTracksEntry {
@@ -20,37 +17,38 @@ export interface RemovedTracksEntry {
   updatedAt: string;    // ISO timestamp
 }
 
-function loadAll(): Record<string, RemovedTracksEntry> {
-  try {
-    return JSON.parse(fs.readFileSync(FILE, "utf-8")) as Record<string, RemovedTracksEntry>;
-  } catch {
-    return {};
-  }
+interface Row {
+  date: string;
+  workout_title: string;
+  uris_json: string;
+  updated_at: string;
 }
 
-function saveAll(all: Record<string, RemovedTracksEntry>): void {
-  const cutoff = Date.now() - RETAIN_DAYS * 24 * 60 * 60 * 1000;
-  Object.entries(all).forEach(([key, e]) => {
-    if (new Date(e.date + "T12:00:00").getTime() < cutoff) delete all[key];
-  });
-  fs.writeFileSync(FILE, JSON.stringify(all), "utf-8");
+function rowToEntry(r: Row): RemovedTracksEntry {
+  return { date: r.date, workoutTitle: r.workout_title, uris: JSON.parse(r.uris_json) as string[], updatedAt: r.updated_at };
+}
+
+function pruneOld(): void {
+  const cutoffIso = new Date(Date.now() - RETAIN_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  getDb().prepare("DELETE FROM removed_tracks WHERE date < ?").run(cutoffIso);
 }
 
 export function getRemovedTracks(date: string, title: string): string[] {
-  return loadAll()[workoutKey(date, title)]?.uris ?? [];
+  const row = getDb().prepare("SELECT * FROM removed_tracks WHERE date = ? AND workout_title = ?").get(date, title) as Row | undefined;
+  return row ? rowToEntry(row).uris : [];
 }
 
 export function addRemovedTrack(date: string, title: string, uri: string): void {
-  const all = loadAll();
-  const key = workoutKey(date, title);
-  const existing = all[key];
-  const uris = existing ? Array.from(new Set([...existing.uris, uri])) : [uri];
-  all[key] = { date, workoutTitle: title, uris, updatedAt: new Date().toISOString() };
-  saveAll(all);
+  const db = getDb();
+  const existing = db.prepare("SELECT * FROM removed_tracks WHERE date = ? AND workout_title = ?").get(date, title) as Row | undefined;
+  const uris = existing ? Array.from(new Set([...(JSON.parse(existing.uris_json) as string[]), uri])) : [uri];
+  db.prepare(
+    "INSERT INTO removed_tracks (date, workout_title, uris_json, updated_at) VALUES (?, ?, ?, ?) " +
+    "ON CONFLICT(date, workout_title) DO UPDATE SET uris_json = excluded.uris_json, updated_at = excluded.updated_at"
+  ).run(date, title, JSON.stringify(uris), new Date().toISOString());
+  pruneOld();
 }
 
 export function clearRemovedTracks(date: string, title: string): void {
-  const all = loadAll();
-  delete all[workoutKey(date, title)];
-  saveAll(all);
+  getDb().prepare("DELETE FROM removed_tracks WHERE date = ? AND workout_title = ?").run(date, title);
 }

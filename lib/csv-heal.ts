@@ -1,10 +1,12 @@
 import { readFile, writeFile } from "fs/promises";
 import path from "path";
-import { activeCsvPath } from "@/lib/running-playlist-config";
-import { parseCsvRow, csvEscape, isBlank } from "@/lib/csv-store";
+import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { readAllTracks, backfillTrackFields, regenerateCsvFile } from "@/lib/tracks-store";
+import type { TrackRow } from "@/types/track";
 import { deezerDurationMs, deezerGenres, fetchFeatures, lastfmDurationMs, sleep, TrackFeatures } from "@/lib/track-enrich";
-import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest } from "@/lib/spotify-rate-limit";
 import { getBpmOverride } from "@/lib/bpm-track-overrides";
+import { getDb } from "@/lib/db";
 
 // Live progress for the Settings page to poll — a heal sweep on a large
 // library (thousands of rows) can run for a long time, and previously gave
@@ -130,6 +132,7 @@ function isRateLimited(v: unknown): v is SpotifyRateLimited {
 // live against this app's credentials) — Deezer's album-genre lookup
 // (lib/track-enrich.ts's deezerGenres) is the only working source.
 async function spotifyDurationMs(id: string, token: string): Promise<number | null | SpotifyRateLimited> {
+  recordSpotifyRequest();
   let res = await fetch(`https://api.spotify.com/v1/tracks/${id}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -139,6 +142,7 @@ async function spotifyDurationMs(id: string, token: string): Promise<number | nu
     console.log(`[csv-heal] Spotify 429 — retry-after ${wait}s`);
     if (wait > 10) return { kind: SPOTIFY_LONG_RATE_LIMIT, retryAt };
     await sleep(wait * 1000);
+    recordSpotifyRequest();
     res = await fetch(`https://api.spotify.com/v1/tracks/${id}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -155,6 +159,7 @@ async function spotifyDurationMs(id: string, token: string): Promise<number | nu
 // already makes.
 async function spotifySearchUri(name: string, artist: string, token: string): Promise<string | null | SpotifyRateLimited> {
   const q = encodeURIComponent(`track:${name} artist:${artist}`);
+  recordSpotifyRequest();
   let res = await fetch(`https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -164,6 +169,7 @@ async function spotifySearchUri(name: string, artist: string, token: string): Pr
     console.log(`[csv-heal] Spotify 429 (search) — retry-after ${wait}s`);
     if (wait > 10) return { kind: SPOTIFY_LONG_RATE_LIMIT, retryAt };
     await sleep(wait * 1000);
+    recordSpotifyRequest();
     res = await fetch(`https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -192,28 +198,41 @@ export interface IncompleteTrack {
 // ever expected rows that HAVE a uri, so that behavior is preserved by
 // default — scanActiveCsvAll opts in since it's meant to show every kind
 // of gap, URI included).
+// Maps the CSV header name used throughout this file's watched-column lists
+// to the matching TrackRow field, so the DB-backed scan can check the same
+// "is this watched column blank" question the old line-walking parser did.
+const HEADER_TO_FIELD: Record<string, keyof TrackRow> = {
+  "Duration (ms)": "durationMs",
+  "Genres": "genres",
+  "Tempo": "tempo",
+  "Key": "key",
+  "Mode": "mode",
+  "Energy": "energy",
+  "Danceability": "danceability",
+  "Valence": "valence",
+};
+
+function isFieldBlank(row: TrackRow, header: string): boolean {
+  const field = HEADER_TO_FIELD[header];
+  const v = field ? row[field] : undefined;
+  return v === null || v === undefined || v === "";
+}
+
 async function scanActiveCsvWith(watched: string[], includeMissingUri = false): Promise<{ checked: number; incomplete: IncompleteTrack[] }> {
-  const csv = await readFile(activeCsvPath(), "utf8");
-  const lines = csv.split("\n");
-  const headers = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim());
-  const col = (name: string) => headers.indexOf(name);
-  const idxUri = col("Track URI");
-  const idxName = col("Track Name");
-  const idxArtist = col("Artist Name(s)");
+  const csvFile = loadRunningPlaylistConfig().csvFile;
+  const rows = readAllTracks(csvFile);
   const incomplete: IncompleteTrack[] = [];
   let checked = 0;
-  if (idxUri === -1) return { checked, incomplete };
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
     checked++;
-    const row = parseCsvRow(lines[i]);
-    const hasUri = !!row[idxUri]?.trim();
+    const hasUri = !!row.uri?.trim();
     if (!hasUri) {
       if (includeMissingUri) {
         incomplete.push({
-          uri: `row-${i}`,
-          name: row[idxName]?.trim() || `Row ${i}`,
-          artist: row[idxArtist]?.trim() ?? "",
+          uri: `row-${row.rowNo}`,
+          name: row.trackName?.trim() || `Row ${row.rowNo}`,
+          artist: row.artistNames?.trim() ?? "",
           missing: ["Track URI"],
           fields: { "Track URI": false },
         });
@@ -223,16 +242,15 @@ async function scanActiveCsvWith(watched: string[], includeMissingUri = false): 
     const fields: Record<string, boolean> = { "Track URI": true };
     const missing: string[] = [];
     for (const h of watched) {
-      const idx = col(h);
-      const present = idx !== -1 && !isBlank(row[idx]);
+      const present = !isFieldBlank(row, h);
       fields[h] = present;
       if (!present) missing.push(h);
     }
     if (missing.length > 0) {
       incomplete.push({
-        uri: row[idxUri].trim(),
-        name: row[idxName]?.trim() || row[idxUri].trim(),
-        artist: row[idxArtist]?.trim() ?? "",
+        uri: row.uri.trim(),
+        name: row.trackName?.trim() || row.uri.trim(),
+        artist: row.artistNames?.trim() ?? "",
         missing,
         fields,
       });
@@ -271,28 +289,19 @@ export interface CsvStatus {
 // when "Check for missing data" is clicked, before the (slower) heal sweep
 // starts, so it's clear what's actually missing before waiting on fetches.
 export async function getCsvStatus(): Promise<CsvStatus> {
-  const csv = await readFile(activeCsvPath(), "utf8");
-  const lines = csv.split("\n");
-  const headers = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim());
-  const col = (name: string) => headers.indexOf(name);
-  const idxUri = col("Track URI");
-  const idxDuration = col("Duration (ms)");
-  const idxGenres = col("Genres");
+  const rows = readAllTracks(loadRunningPlaylistConfig().csvFile);
 
   const status: CsvStatus = {
     total: 0, missingUri: 0, missingDuration: 0, missingGenres: 0,
     missingFeatures: Object.fromEntries(FEATURE_COLS.map(([h]) => [h, 0])),
   };
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
+  for (const row of rows) {
     status.total++;
-    const row = parseCsvRow(lines[i]);
-    if (idxUri === -1 || isBlank(row[idxUri])) { status.missingUri++; continue; }
-    if (idxDuration !== -1 && isBlank(row[idxDuration])) status.missingDuration++;
-    if (idxGenres !== -1 && isBlank(row[idxGenres])) status.missingGenres++;
+    if (!row.uri?.trim()) { status.missingUri++; continue; }
+    if (isFieldBlank(row, "Duration (ms)")) status.missingDuration++;
+    if (isFieldBlank(row, "Genres")) status.missingGenres++;
     for (const [header] of FEATURE_COLS) {
-      const idx = col(header);
-      if (idx !== -1 && isBlank(row[idx])) status.missingFeatures[header]++;
+      if (isFieldBlank(row, header)) status.missingFeatures[header]++;
     }
   }
   return status;
@@ -340,59 +349,47 @@ async function doHeal(): Promise<HealResult> {
 }
 
 async function doHealInner(): Promise<HealResult> {
-  const csvPath = activeCsvPath();
-  const csv = await readFile(csvPath, "utf8");
-  const lines = csv.split("\n");
-  const headers = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim());
-  const col = (name: string) => headers.indexOf(name);
-  const idxUri = col("Track URI");
-  const idxName = col("Track Name");
-  const idxArtist = col("Artist Name(s)");
-  const idxDuration = col("Duration (ms)");
-  const idxGenres = col("Genres");
-  if (idxUri === -1) return { checked: 0, healed: 0, incomplete: 0 };
+  const csvFile = loadRunningPlaylistConfig().csvFile;
+  const destPath = activeCsvPath();
+  const allRows = readAllTracks(csvFile);
+  if (allRows.length === 0) return { checked: 0, healed: 0, incomplete: 0 };
 
   interface Gap {
-    line: number;
-    row: string[];
+    uri: string; // mutable — set once a uriGap gets promoted after a search hit
+    rowNo: number;
     id: string;
     name: string;
     artist: string;
     needsDuration: boolean;
     needsFeatures: boolean;
     needsGenres: boolean;
+    fields: Partial<TrackRow>; // accumulated backfill values, flushed via backfillTrackFields
   }
   interface UriGap {
-    line: number;
-    row: string[];
+    rowNo: number;
     name: string;
     artist: string;
   }
   const gaps: Gap[] = [];
   const uriGaps: UriGap[] = [];
   let checked = 0;
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
+  for (const row of allRows) {
     checked++;
-    const row = parseCsvRow(lines[i]);
-    const uri = row[idxUri]?.trim() ?? "";
+    const uri = row.uri?.trim() ?? "";
     if (!uri.startsWith("spotify:track:")) {
-      const name = row[idxName]?.trim() ?? "";
-      const artist = row[idxArtist]?.trim() ?? "";
-      if (name && artist) uriGaps.push({ line: i, row, name, artist });
+      const name = row.trackName?.trim() ?? "";
+      const artist = row.artistNames?.trim() ?? "";
+      if (name && artist) uriGaps.push({ rowNo: row.rowNo, name, artist });
       continue;
     }
-    const needsDuration = idxDuration !== -1 && isBlank(row[idxDuration]);
-    const needsFeatures = FEATURE_COLS.some(([h]) => {
-      const idx = col(h);
-      return idx !== -1 && isBlank(row[idx]);
-    });
-    const needsGenres = idxGenres !== -1 && isBlank(row[idxGenres]);
+    const needsDuration = isFieldBlank(row, "Duration (ms)");
+    const needsFeatures = FEATURE_COLS.some(([h]) => isFieldBlank(row, h));
+    const needsGenres = isFieldBlank(row, "Genres");
     if (!needsDuration && !needsFeatures && !needsGenres) continue;
     gaps.push({
-      line: i, row, id: uri.split(":").pop()!,
-      name: row[idxName]?.trim() ?? "", artist: row[idxArtist]?.trim() ?? "",
-      needsDuration, needsFeatures, needsGenres,
+      uri, rowNo: row.rowNo, id: uri.split(":").pop()!,
+      name: row.trackName?.trim() ?? "", artist: row.artistNames?.trim() ?? "",
+      needsDuration, needsFeatures, needsGenres, fields: {},
     });
   }
 
@@ -440,21 +437,22 @@ async function doHealInner(): Promise<HealResult> {
     await save({ phase: null, current: 0, total: 0, healedSoFar: 0, startedAt });
   }
 
-  // Write whatever's changed back into `lines` and flush to disk — called
-  // after each phase so a restart mid-sweep (e.g. a redeploy) only loses
-  // whatever hadn't been fetched yet, not the whole sweep's progress. Also
-  // covers uriGaps, so a newly-found URI survives a restart even before it
-  // reaches the later duration/feature/genre passes.
+  // Writes whatever's accumulated in each gap's `fields` bag into the DB
+  // (blank-only, via backfillTrackFields) — called after each phase so a
+  // restart mid-sweep (e.g. a redeploy) only loses whatever hadn't been
+  // fetched yet, not the whole sweep's progress. Deliberately does NOT
+  // regenerate the on-disk CSV file itself (that's batched to a single call
+  // at the very end of the whole sweep, for performance on a large
+  // library) — only the DB needs to be current between phases.
   const flush = async (): Promise<number> => {
     let healedNow = 0;
-    for (const g of [...gaps, ...uriGaps]) {
-      const rebuilt = g.row.map(csvEscape).join(",");
-      if (rebuilt !== lines[g.line]) {
-        lines[g.line] = rebuilt;
-        healedNow++;
-      }
+    for (const g of gaps) {
+      if (Object.keys(g.fields).length === 0) continue;
+      if (!g.uri) continue;
+      backfillTrackFields(csvFile, g.uri, g.fields);
+      g.fields = {};
+      healedNow++;
     }
-    if (healedNow > 0) await writeFile(csvPath, lines.join("\n"), "utf8");
     return healedNow;
   };
 
@@ -468,6 +466,8 @@ async function doHealInner(): Promise<HealResult> {
   // duration pass below.
   let uriToken: string | null | undefined = blockedUntil ? null : undefined;
   let urisHealed = 0;
+  const db = getDb();
+  const setUriStmt = db.prepare("UPDATE tracks SET uri = ? WHERE csv_file = ? AND row_no = ? AND (uri IS NULL OR uri = '')");
   if (uriGaps.length > 0) {
     addLog(`checking ${uriGaps.length} tracks with no Spotify URI (search)…`);
     await save({ phase: "uris", current: 0, total: uriGaps.length, healedSoFar: 0, startedAt });
@@ -486,15 +486,18 @@ async function doHealInner(): Promise<HealResult> {
         break;
       }
       if (result) {
-        g.row[idxUri] = result;
+        setUriStmt.run(result, csvFile, g.rowNo);
         const id = result.split(":").pop()!;
         // Promote into the normal gap list so duration/features/genres for
-        // this newly-found track get a chance in this same sweep.
+        // this newly-found track get a chance in this same sweep. The row's
+        // other fields are still blank (a fresh URI match), so every watched
+        // column needs (re-)checking.
         gaps.push({
-          line: g.line, row: g.row, id, name: g.name, artist: g.artist,
-          needsDuration: idxDuration !== -1 && isBlank(g.row[idxDuration]),
-          needsFeatures: FEATURE_COLS.some(([h]) => { const idx = col(h); return idx !== -1 && isBlank(g.row[idx]); }),
-          needsGenres: idxGenres !== -1 && isBlank(g.row[idxGenres]),
+          uri: result, rowNo: g.rowNo, id, name: g.name, artist: g.artist,
+          needsDuration: true,
+          needsFeatures: true,
+          needsGenres: true,
+          fields: {},
         });
         urisHealed++;
       }
@@ -527,12 +530,11 @@ async function doHealInner(): Promise<HealResult> {
         // never gets its Tempo cell touched by a heal — otherwise a future
         // sweep could reintroduce the un-overridden value right next to
         // (and read ahead of, on the next re-import) the correction.
-        const uri = g.row[idxUri]?.trim();
-        const override = uri ? getBpmOverride(uri) : null;
+        const override = g.uri ? getBpmOverride(g.uri) : null;
         for (const [header, key] of FEATURE_COLS) {
           if (override && header === "Tempo") continue;
-          const idx = col(header);
-          if (idx !== -1 && isBlank(g.row[idx])) g.row[idx] = String(f[key]);
+          const field = HEADER_TO_FIELD[header];
+          (g.fields as Record<string, number>)[field] = f[key];
         }
         g.needsFeatures = false;
       }
@@ -582,7 +584,7 @@ async function doHealInner(): Promise<HealResult> {
       await sleep(200); // Last.fm asks for <=5 req/s
     }
     if (ms != null) {
-      g.row[idxDuration] = String(Math.round(ms));
+      g.fields.durationMs = Math.round(ms);
       g.needsDuration = false;
       durationHealed++;
     }
@@ -608,8 +610,8 @@ async function doHealInner(): Promise<HealResult> {
       const g = genreGaps[i];
       try {
         const genres = await deezerGenres(g.name, g.artist);
-        if (genres && idxGenres !== -1 && isBlank(g.row[idxGenres])) {
-          g.row[idxGenres] = genres;
+        if (genres) {
+          g.fields.genres = genres;
           g.needsGenres = false;
           genresHealed++;
         }
@@ -628,6 +630,14 @@ async function doHealInner(): Promise<HealResult> {
   const stillNoUri = uriGaps.length - urisHealed;
   const incomplete = gaps.filter(g => g.needsDuration || g.needsFeatures || g.needsGenres).length + stillNoUri;
   addLog(`done — healed ${healed} row${healed === 1 ? "" : "s"}${incomplete ? `, ${incomplete} still incomplete` : ""}`);
+
+  // Batched to a single regen at the end of the whole sweep (not per-row/
+  // per-phase) — this function can touch thousands of rows, so materializing
+  // the CSV file after every intermediate flush() would be far too slow.
+  if (healed > 0) {
+    await regenerateCsvFile(csvFile, destPath);
+  }
+
   await writeProgress({
     running: false, phase: null, current: durationGaps.length, total: durationGaps.length,
     healedSoFar: healed, startedAt, finishedAt: new Date().toISOString(), spotifyRetryAt, log,

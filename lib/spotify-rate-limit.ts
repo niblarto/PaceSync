@@ -31,3 +31,39 @@ export function parseRetryAfter(raw: string): number {
   if (!isNaN(date)) return Math.max(0, Math.ceil((date - Date.now()) / 1000));
   return 30;
 }
+
+// Soft, pre-emptive burst guard — separate from the hard "blocked until"
+// sentinel above, which only ever gets set AFTER Spotify has already
+// returned a real 429. That reactive-only design has a real gap: a big
+// burst (e.g. one BBC card matching 27 new tracks in ~13s) can leave
+// Spotify's actual account-wide quota deeply depleted without ever
+// tripping a 429 itself, so the very next unrelated search (e.g. "search
+// more by this artist") fires straight through and eats what's left of
+// the quota, drawing a much harsher Retry-After as a repeat offender —
+// confirmed twice now with the same "Pepper — Butthole Surfers" query.
+// This counts recent successful Spotify requests server-side (in-memory,
+// per-process — good enough since this app runs single-instance) in a
+// short sliding window and imposes a brief cooldown once a burst crosses
+// a threshold, independent of whether Spotify has complained yet.
+const BURST_WINDOW_MS = 15_000;
+const BURST_THRESHOLD = 20; // requests within the window
+const BURST_COOLDOWN_MS = 90_000;
+let recentRequestTimestamps: number[] = [];
+let burstCooldownUntil = 0;
+
+export function recordSpotifyRequest(): void {
+  const now = Date.now();
+  recentRequestTimestamps.push(now);
+  recentRequestTimestamps = recentRequestTimestamps.filter(t => now - t < BURST_WINDOW_MS);
+  if (recentRequestTimestamps.length >= BURST_THRESHOLD) {
+    burstCooldownUntil = now + BURST_COOLDOWN_MS;
+    recentRequestTimestamps = [];
+  }
+}
+
+// Returns ms remaining in an active burst cooldown, or 0 if none — checked
+// before every proxied request so a burst's tail is spaced out rather than
+// let the very next request slam into whatever quota Spotify has left.
+export function getBurstCooldownRemainingMs(): number {
+  return Math.max(0, burstCooldownUntil - Date.now());
+}

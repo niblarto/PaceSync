@@ -1,15 +1,12 @@
-import fs from "fs";
-import path from "path";
-import { workoutKey } from "@/lib/workout-key";
+import { getDb } from "@/lib/db";
 
 // Per-segment candidate track pools the AI DJ mixer considered while
 // building a workout's mix, kept around so the Runna schedule card can
 // let the user browse (and act on, via the main tracklist UI) what the
 // mixer actually chose from — not just the final picks. Keyed by workout
-// date+title (see lib/workout-key.ts); a fresh mix build for the same
-// workout fully replaces the previous entry, it never merges.
+// date+title; a fresh mix build for the same workout fully replaces the
+// previous entry, it never merges.
 
-const FILE = path.join(process.cwd(), "mix-candidates.json");
 const RETAIN_DAYS = 30;
 
 export interface MixCandidatesEntry {
@@ -19,28 +16,31 @@ export interface MixCandidatesEntry {
   savedAt: string;       // ISO timestamp
 }
 
-function loadAll(): Record<string, MixCandidatesEntry> {
-  try {
-    return JSON.parse(fs.readFileSync(FILE, "utf-8")) as Record<string, MixCandidatesEntry>;
-  } catch {
-    return {};
-  }
+interface Row {
+  date: string;
+  workout_title: string;
+  segments_json: string;
+  saved_at: string;
 }
 
-function saveAll(all: Record<string, MixCandidatesEntry>): void {
-  const cutoff = Date.now() - RETAIN_DAYS * 24 * 60 * 60 * 1000;
-  Object.entries(all).forEach(([key, e]) => {
-    if (new Date(e.date + "T12:00:00").getTime() < cutoff) delete all[key];
-  });
-  fs.writeFileSync(FILE, JSON.stringify(all), "utf-8");
+function rowToEntry(r: Row): MixCandidatesEntry {
+  return { date: r.date, workoutTitle: r.workout_title, segments: JSON.parse(r.segments_json), savedAt: r.saved_at };
+}
+
+function pruneOld(): void {
+  const cutoffIso = new Date(Date.now() - RETAIN_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  getDb().prepare("DELETE FROM mix_candidates WHERE date < ?").run(cutoffIso);
 }
 
 export function getMixCandidates(date: string, title: string): MixCandidatesEntry | null {
-  return loadAll()[workoutKey(date, title)] ?? null;
+  const row = getDb().prepare("SELECT * FROM mix_candidates WHERE date = ? AND workout_title = ?").get(date, title) as Row | undefined;
+  return row ? rowToEntry(row) : null;
 }
 
 export function setMixCandidates(entry: MixCandidatesEntry): void {
-  const all = loadAll();
-  all[workoutKey(entry.date, entry.workoutTitle)] = entry;
-  saveAll(all);
+  getDb().prepare(
+    "INSERT INTO mix_candidates (date, workout_title, segments_json, saved_at) VALUES (?, ?, ?, ?) " +
+    "ON CONFLICT(date, workout_title) DO UPDATE SET segments_json = excluded.segments_json, saved_at = excluded.saved_at"
+  ).run(entry.date, entry.workoutTitle, JSON.stringify(entry.segments), entry.savedAt);
+  pruneOld();
 }

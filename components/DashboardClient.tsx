@@ -171,6 +171,10 @@ interface Suggestion {
   valence: number;
 }
 
+// Module-level (not component state) so it survives remounts within the tab
+// session — see searchArtistTopTracks for why this cache exists.
+let artistSearchCache: Map<string, { results: Suggestion[]; at: number }> | undefined;
+
 function spotifyIdFromUrl(url: string | null): string | null {
   const m = url?.match(/open\.spotify\.com\/track\/([A-Za-z0-9]+)/);
   return m ? m[1] : null;
@@ -1345,6 +1349,20 @@ export function DashboardClient({ spotifyUser }: Props) {
     return searchArtistTopTracks(track.artists[0]?.name ?? "", origin, track);
   }
 
+  // Caches the fully Spotify-matched, BPM-range-filtered result of a "more
+  // by this artist" search, keyed by lowercased artist name — module-level
+  // (survives re-renders/re-mounts of this component within the same tab
+  // session) rather than per-component state, since the whole point is to
+  // avoid re-burning Spotify search quota on a repeat click for the same
+  // artist. Confirmed root cause of a real ~24hr Spotify ban: re-clicking
+  // "Popular songs by X" re-issued a fresh sequential Spotify search per
+  // track every time, even when nothing about the artist's results could
+  // have changed since the last (still-fresh) lookup. 30min TTL — long
+  // enough to absorb repeat clicks in one session, short enough that a
+  // stale BPM-range filter (user just changed the range) doesn't linger.
+  const ARTIST_SEARCH_CACHE_TTL_MS = 30 * 60 * 1000;
+  artistSearchCache ??= new Map();
+
   // Shared by the per-track "more by this artist" button (has a real seed
   // track) and the free-text search box's "no matches — search Deezer"
   // fallback (no seed track at all, just typed-in text) — the latter passes
@@ -1352,6 +1370,16 @@ export function DashboardClient({ spotifyUser }: Props) {
   // its header ("Popular songs by <name>").
   async function searchArtistTopTracks(artistName: string, origin: "list" | "bbc", seedTrack?: TrackWithBPM) {
     suggestSourceRef.current?.close();
+    const cacheKey = artistName.trim().toLowerCase();
+    const cached = artistSearchCache!.get(cacheKey);
+    if (cached && Date.now() - cached.at < ARTIST_SEARCH_CACHE_TTL_MS) {
+      const seed: TrackWithBPM = seedTrack ?? {
+        id: `search:${artistName}`, name: artistName, artists: [{ name: artistName }],
+        album: { name: "", images: [] }, duration_ms: 0, uri: "", bpm: 0, energy: 0,
+      };
+      setSuggest({ seed, mode: "artist", origin, progress: "", results: cached.results, error: null });
+      return;
+    }
     const seed: TrackWithBPM = seedTrack ?? {
       id: `search:${artistName}`,
       name: artistName,
@@ -1478,6 +1506,7 @@ export function DashboardClient({ spotifyUser }: Props) {
         }
       } catch { /* BPM check is best-effort — fall through with everything kept */ }
 
+      artistSearchCache!.set(cacheKey, { results: filtered, at: Date.now() });
       setSuggest(s => s && { ...s, results: filtered });
     } catch (e) {
       setSuggest(s => s && { ...s, error: e instanceof Error ? e.message : "Search failed" });

@@ -31,6 +31,7 @@ if not os.path.isdir(os.path.join(_APP_ROOT, "ai_dj")):
 import pandas as pd  # noqa: E402
 
 from bpm_matcher.camelot import to_camelot  # noqa: E402
+from bpm_matcher.db_source import load_library_from_db  # noqa: E402
 from ai_dj.llm import is_claude_model, is_gemini_model  # noqa: E402
 from ai_dj.workout import (  # noqa: E402
     build_flow_mix,
@@ -40,9 +41,18 @@ from ai_dj.workout import (  # noqa: E402
     parse_workout,
 )
 
+# Same "db://<db_path>::<csv_file>" pseudo-path convention as
+# bpm_matcher.features.load_playlist, so app/api/bpm/*/route.ts and this
+# bridge's caller (lib/ai-dj-mix.ts) can pass the exact same string.
+_DB_PATH_PREFIX = "db://"
+
 
 def _load_library(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
+    if csv_path.startswith(_DB_PATH_PREFIX):
+        db_path, _, csv_file = csv_path[len(_DB_PATH_PREFIX):].partition("::")
+        df = load_library_from_db(db_path, csv_file)
+    else:
+        df = pd.read_csv(csv_path)
     df = df.dropna(subset=["Tempo"]).drop_duplicates(subset=["Track URI"]).reset_index(drop=True)
     df["Camelot"] = [to_camelot(k, m) for k, m in zip(df["Key"], df["Mode"])]
     return df

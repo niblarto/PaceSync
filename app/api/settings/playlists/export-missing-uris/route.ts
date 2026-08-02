@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { activeCsvPath } from "@/lib/running-playlist-config";
-import { readCsv, isBlank } from "@/lib/csv-store";
+import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { listMissingColumn } from "@/lib/tracks-store";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const XLSX = require("xlsx") as typeof import("xlsx");
 
@@ -16,24 +16,13 @@ export async function GET(_req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { rows: csvRows, col } = await readCsv(activeCsvPath());
-  const idxUri = col("Track URI");
-  const idxName = col("Track Name");
-  const idxArtist = col("Artist Name(s)");
-  const idxAlbum = col("Album Name");
-  if (idxUri === -1 || idxName === -1) {
-    return NextResponse.json({ error: "Library CSV is missing Track URI/Track Name columns" }, { status: 500 });
-  }
+  const csvRows = listMissingColumn(loadRunningPlaylistConfig().csvFile, "uri", { requireUri: false });
 
-  const rows: { name: string; artist: string; album: string }[] = [];
-  for (const row of csvRows) {
-    if (!isBlank(row[idxUri])) continue;
-    rows.push({
-      name: row[idxName]?.trim() ?? "",
-      artist: idxArtist !== -1 ? (row[idxArtist]?.trim() ?? "") : "",
-      album: idxAlbum !== -1 ? (row[idxAlbum]?.trim() ?? "") : "",
-    });
-  }
+  const rows: { name: string; artist: string; album: string }[] = csvRows.map(row => ({
+    name: row.trackName?.trim() ?? "",
+    artist: row.artistNames?.trim() ?? "",
+    album: row.albumName?.trim() ?? "",
+  }));
 
   const sheet = XLSX.utils.json_to_sheet(rows, { header: ["name", "artist", "album"] });
   const wb = XLSX.utils.book_new();

@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile } from "fs/promises";
-import { activeCsvPath, csvPathFor, saveRunningPlaylistConfig } from "@/lib/running-playlist-config";
-import { mergeCsvIntoFile, parseCsvRow, csvEscape } from "@/lib/csv-merge";
+import { csvPathFor, loadRunningPlaylistConfig, saveRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { readTracksByUris, appendTracks, regenerateCsvFile } from "@/lib/tracks-store";
 import { healActiveCsv } from "@/lib/csv-heal";
 
 // Registers a Spotify playlist (already created client-side) as a known
@@ -21,27 +20,14 @@ export async function POST(req: NextRequest) {
   if (!name || !id) return NextResponse.json({ error: "name and id required" }, { status: 400 });
   if (!uris?.length) return NextResponse.json({ error: "No tracks to copy" }, { status: 400 });
 
-  const sourceCsv = await readFile(activeCsvPath(), "utf8").catch(() => "");
-  if (!sourceCsv.trim()) return NextResponse.json({ error: "Active playlist has no library CSV" }, { status: 400 });
-
-  const lines = sourceCsv.replace(/\r/g, "").split("\n").filter(l => l.trim());
-  const header = parseCsvRow(lines[0].replace(/^﻿/, "")).map(h => h.trim());
-  const idxUri = header.findIndex(h => ["track uri", "spotify uri", "spotify id", "uri", "id"].includes(h.toLowerCase()));
-  if (idxUri === -1) return NextResponse.json({ error: "Active library has no Track URI column" }, { status: 500 });
-
-  const uriSet = new Set(uris);
-  const matchedRows = lines.slice(1)
-    .map(l => parseCsvRow(l))
-    .filter(row => uriSet.has(row[idxUri]?.trim()));
+  const activeCsvFile = loadRunningPlaylistConfig().csvFile;
+  const matchedRows = readTracksByUris(activeCsvFile, uris);
   if (matchedRows.length === 0) return NextResponse.json({ error: "None of the requested tracks were found in the active library" }, { status: 404 });
 
   const entry = saveRunningPlaylistConfig({ name, id }, { keepCurrentActive: true });
-  const csvBody = [
-    header.map(csvEscape).join(","),
-    ...matchedRows.map(r => r.map(csvEscape).join(",")),
-  ].join("\n") + "\n";
-  const result = await mergeCsvIntoFile(csvPathFor(entry), csvBody);
+  const appended = appendTracks(entry.csvFile, matchedRows);
+  await regenerateCsvFile(entry.csvFile, csvPathFor(entry));
   void healActiveCsv().catch(() => {}); // no-op unless this happens to be the active playlist
 
-  return NextResponse.json({ ok: true, entry, ...result });
+  return NextResponse.json({ ok: true, entry, appended, merged: 0, skipped: 0 });
 }

@@ -140,19 +140,47 @@ def bpm_filter(
     target_bpm: float,
     tolerance: float = 5.0,
     half_double_time: bool = True,
+    no_upper_limit: bool = False,
 ) -> pd.DataFrame:
     """Return tracks within +/- tolerance BPM of target_bpm, sorted by closeness.
 
     With half_double_time=True, a target of 174 also matches tracks around 87
     (and 348), since half-time/double-time tracks often mix well together.
+
+    no_upper_limit=True (hard-effort "work"/interval/tempo segments): a track
+    faster than target is never excluded for it, no matter how far past
+    `tolerance` - but ranking/bpm_diff still uses the normal symmetric
+    distance, so an on-target track still outranks an unnecessarily fast
+    one; only the slow side keeps a hard cutoff, since undershooting a hard
+    effort is the real mismatch.
     """
     bpm = df["Tempo"].to_numpy(dtype=float)
+
     diff = np.abs(bpm - target_bpm)
     if half_double_time:
         diff = np.minimum(diff, np.abs(bpm - 2 * target_bpm))
         diff = np.minimum(diff, np.abs(bpm - target_bpm / 2))
 
-    mask = diff <= tolerance
+    if no_upper_limit:
+        # Whichever of {tempo, half-time, double-time} is actually closest
+        # to target (i.e. the one that won the np.minimum chain above) is
+        # this track's effective pace-facing tempo - only that candidate is
+        # checked against target, so doubling a genuinely slow track doesn't
+        # let it through on a technicality (320 >= 170 is true for a
+        # legitimately slow 160 BPM track, but 160 itself never wins the
+        # min-distance comparison there, so it must not count).
+        eff = bpm.copy()
+        best = np.abs(bpm - target_bpm)
+        if half_double_time:
+            for cand in (bpm * 2, bpm / 2):
+                d = np.abs(cand - target_bpm)
+                better = d < best
+                eff = np.where(better, cand, eff)
+                best = np.where(better, d, best)
+        mask = (eff >= target_bpm) | (diff <= tolerance)
+    else:
+        mask = diff <= tolerance
+
     result = df.loc[mask].copy()
     result["bpm_diff"] = diff[mask]
     return result.sort_values("bpm_diff")

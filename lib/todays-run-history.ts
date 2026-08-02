@@ -1,17 +1,21 @@
-import fs from "fs";
-import path from "path";
+import { getDb } from "@/lib/db";
 import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
-import { workoutKey } from "@/lib/workout-key";
 import { applyBpmOverrides } from "@/lib/bpm-track-overrides";
 
 // Snapshot of what the "Today's Run" playlist held for each workout date, so
 // past runs can be reviewed song-by-song against the pace actually run
-// (via GarminDB). Keyed by workout date+title (see lib/workout-key.ts — date
-// alone collides when Runna reuses a workout title on a different week, or a
-// day has more than one workout slot), pruned to the last 90 days.
-
-const FILE = path.join(process.cwd(), "todays-run-history.json");
-const RETAIN_DAYS = 90;
+// (via GarminDB). Keyed by (date, workout_title) — date alone collides when
+// Runna reuses a workout title on a different week, or a day has more than
+// one workout slot.
+//
+// PERMANENT for any run that has already taken place — a tracklist is the
+// only record of what actually played on a given run, and once that run has
+// happened it can never be regenerated, so it must never be silently
+// deleted by an age-based sweep. The only thing pruneOld() is still allowed
+// to clean up is a stale row dated in the FUTURE relative to today (a
+// pre-built mix for a workout that, for whatever reason, was never run and
+// never will be — e.g. the workout was later rescheduled/cancelled) —
+// anything with date <= today is untouched, no matter how old.
 
 export interface HistoryTrack {
   uri: string | null;
@@ -35,6 +39,24 @@ export interface TodaysRunEntry {
   // reviewed. A disputed entry is excluded from pacing review and from
   // getPlayedTracks() so it can't demote tracks that never really played.
   approved?: boolean;
+}
+
+interface Row {
+  date: string;
+  workout_title: string;
+  saved_at: string;
+  tracks_json: string;
+  approved: number | null;
+}
+
+function rowToEntry(r: Row): TodaysRunEntry {
+  return {
+    date: r.date,
+    workoutTitle: r.workout_title,
+    savedAt: r.saved_at,
+    tracks: JSON.parse(r.tracks_json) as HistoryTrack[],
+    approved: r.approved === null ? undefined : !!r.approved,
+  };
 }
 
 function mmssToSec(v: string): number {
@@ -67,57 +89,50 @@ export function timelineToHistoryTracks(timeline: AiDjMixResponse["timeline"]): 
   return applyBpmOverrides(tracks);
 }
 
-function loadAll(): Record<string, TodaysRunEntry> {
-  try {
-    return JSON.parse(fs.readFileSync(FILE, "utf-8")) as Record<string, TodaysRunEntry>;
-  } catch {
-    return {};
-  }
-}
-
 export function saveTodaysRunEntry(entry: TodaysRunEntry): void {
   try {
-    const all = loadAll();
-    all[workoutKey(entry.date, entry.workoutTitle)] = entry;
-    const cutoff = Date.now() - RETAIN_DAYS * 24 * 60 * 60 * 1000;
-    Object.entries(all).forEach(([key, e]) => {
-      if (new Date(e.date + "T12:00:00").getTime() < cutoff) delete all[key];
-    });
-    fs.writeFileSync(FILE, JSON.stringify(all), "utf-8");
+    getDb().prepare(
+      "INSERT INTO todays_run_history (date, workout_title, saved_at, tracks_json, approved) VALUES (?, ?, ?, ?, ?) " +
+      "ON CONFLICT(date, workout_title) DO UPDATE SET saved_at = excluded.saved_at, tracks_json = excluded.tracks_json, approved = excluded.approved"
+    ).run(entry.date, entry.workoutTitle, entry.savedAt, JSON.stringify(entry.tracks), entry.approved == null ? null : (entry.approved ? 1 : 0));
   } catch (e) {
     console.warn("[todays-run-history] save failed:", e);
   }
 }
 
 export function getTodaysRunEntry(date: string, title: string): TodaysRunEntry | null {
-  return loadAll()[workoutKey(date, title)] ?? null;
+  const row = getDb().prepare("SELECT * FROM todays_run_history WHERE date = ? AND workout_title = ?").get(date, title) as Row | undefined;
+  return row ? rowToEntry(row) : null;
 }
 
-// Same trailing window the Runna summary card shows completed runs in
-// (lib/runna-schedule.ts's parseIcs: today back 8 days) — a run still
-// inside this window is still "on the card" and its saved tracklist is a
-// record of what actually played, not something an automatic cascade
-// should be able to silently wipe. Deliberate user actions (explicit
-// "unpin"/"delete saved mix" clicks) are NOT gated by this — only the
-// automatic track-delete cascade (app/api/tracks/delete) opts in via
-// protectRecentRuns, since that's the one path that can remove a run's
-// tracklist as an unintended side effect of an unrelated action.
-const SUMMARY_CARD_LOOKBACK_DAYS = 8;
+// Every saved entry for a given date, regardless of title — for callers
+// that only know a date (e.g. a plain Garmin activity with no Runna
+// workout title attached) and need to discover whatever tracklist(s) exist
+// for that day. Most days have exactly one; a day with two workout slots
+// (e.g. a run + a strength session) can have more than one.
+export function getTodaysRunEntriesForDate(date: string): TodaysRunEntry[] {
+  const rows = getDb().prepare("SELECT * FROM todays_run_history WHERE date = ?").all(date) as Row[];
+  return rows.map(rowToEntry);
+}
 
-export function isWithinRunnaSummaryWindow(date: string): boolean {
+// A tracklist for a run that has already happened is a permanent record —
+// it is the only surviving evidence of what actually played, and can never
+// be regenerated once gone. So removeTodaysRunEntry unconditionally refuses
+// to delete any row dated today or earlier, no matter which caller asks —
+// the automatic track-delete cascade (app/api/tracks/delete), the explicit
+// "Unpin" button (app/api/ai-dj/pin's DELETE handler), and the explicit
+// "Delete saved mix" button (app/api/todays-run/history's DELETE handler)
+// are all subject to this the same way. Only a row for an upcoming (still
+// just-planned) workout can ever be removed.
+export function isPastOrToday(date: string): boolean {
   const today = new Date().toISOString().slice(0, 10);
-  const lookback = new Date(Date.now() - SUMMARY_CARD_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  return date >= lookback && date <= today;
+  return date <= today;
 }
 
-export function removeTodaysRunEntry(date: string, title: string, opts?: { protectRecentRuns?: boolean }): void {
+export function removeTodaysRunEntry(date: string, title: string): void {
   try {
-    if (opts?.protectRecentRuns && isWithinRunnaSummaryWindow(date)) return;
-    const all = loadAll();
-    const key = workoutKey(date, title);
-    if (!(key in all)) return;
-    delete all[key];
-    fs.writeFileSync(FILE, JSON.stringify(all), "utf-8");
+    if (isPastOrToday(date)) return;
+    getDb().prepare("DELETE FROM todays_run_history WHERE date = ? AND workout_title = ?").run(date, title);
   } catch (e) {
     console.warn("[todays-run-history] remove failed:", e);
   }
@@ -127,17 +142,16 @@ export function removeTodaysRunEntry(date: string, title: string, opts?: { prote
 // remove the entry — just marks it so pacing review and getPlayedTracks()
 // can exclude it without losing the record.
 export function setTodaysRunApproval(date: string, title: string, approved: boolean): TodaysRunEntry | null {
-  const all = loadAll();
-  const key = workoutKey(date, title);
-  const entry = all[key];
-  if (!entry) return null;
-  entry.approved = approved;
-  fs.writeFileSync(FILE, JSON.stringify(all), "utf-8");
-  return entry;
+  const db = getDb();
+  const existing = db.prepare("SELECT * FROM todays_run_history WHERE date = ? AND workout_title = ?").get(date, title) as Row | undefined;
+  if (!existing) return null;
+  db.prepare("UPDATE todays_run_history SET approved = ? WHERE date = ? AND workout_title = ?").run(approved ? 1 : 0, date, title);
+  return rowToEntry({ ...existing, approved: approved ? 1 : 0 });
 }
 
 export function getAllTodaysRunEntries(): TodaysRunEntry[] {
-  return Object.values(loadAll()).sort((a, b) => b.date.localeCompare(a.date));
+  const rows = getDb().prepare("SELECT * FROM todays_run_history ORDER BY date DESC").all() as Row[];
+  return rows.map(rowToEntry);
 }
 
 // How many confirmed (not disputed) "Today's Run" mixes each track has
@@ -145,7 +159,7 @@ export function getAllTodaysRunEntries(): TodaysRunEntry[] {
 // repeated within the same day's mix still only counts once for that day.
 export function getPlayedCounts(): Record<string, number> {
   const counts: Record<string, number> = {};
-  Object.values(loadAll()).forEach(entry => {
+  getAllTodaysRunEntries().forEach(entry => {
     if (entry.approved === false) return; // disputed — didn't actually play
     const seenToday = new Set<string>();
     entry.tracks.forEach(t => {
@@ -188,7 +202,7 @@ export function getPlayedTracks(): { uri: string; paceSec: number | null }[] {
   const today = new Date().toISOString().slice(0, 10);
   const seen = new Set<string>();
   const played: { uri: string; paceSec: number | null }[] = [];
-  Object.values(loadAll()).forEach(entry => {
+  getAllTodaysRunEntries().forEach(entry => {
     if (entry.date > today) return;
     if (entry.approved === false) return; // disputed — didn't actually play
     entry.tracks.forEach(t => {

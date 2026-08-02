@@ -3,7 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import fs from "fs";
 import path from "path";
-import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest, getBurstCooldownRemainingMs } from "@/lib/spotify-rate-limit";
 
 const DEFAULT_PID = "m001j52w";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
@@ -269,8 +269,11 @@ export async function GET(req: NextRequest) {
         // event's retryAfter tell the UI exactly when to try again, instead
         // of the connection just hanging until it times out.
         const preflightBlocked = await getSpotifyBlockedUntil();
-        if (preflightBlocked) {
-          retryAfter = Math.max(0, Math.ceil((new Date(preflightBlocked).getTime() - Date.now()) / 1000));
+        const burstWaitMs = getBurstCooldownRemainingMs();
+        if (preflightBlocked || burstWaitMs > 0) {
+          retryAfter = preflightBlocked
+            ? Math.max(0, Math.ceil((new Date(preflightBlocked).getTime() - Date.now()) / 1000))
+            : Math.ceil(burstWaitMs / 1000);
           console.log(`[bbc/tracks] Spotify already rate-limited (${retryAfter}s left) — skipping searches`);
           send({ type: "rate-limited", waitSec: retryAfter });
         }
@@ -297,6 +300,7 @@ export async function GET(req: NextRequest) {
           }
 
           const q = encodeURIComponent(`${t.title} ${t.artist}`);
+          recordSpotifyRequest();
           const res = await fetch(
             `https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`,
             { headers: { Authorization: `Bearer ${token}` } }

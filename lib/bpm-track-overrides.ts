@@ -1,5 +1,4 @@
-import fs from "fs";
-import path from "path";
+import { getDb } from "@/lib/db";
 import { parseCsv } from "@/lib/csv-store";
 import { csvEscape } from "@/lib/csv-merge";
 
@@ -8,12 +7,11 @@ import { csvEscape } from "@/lib/csv-merge";
 // forever, until explicitly cleared — modeled on lib/deleted-tracks.ts's
 // "check it everywhere the underlying field is read/merged" pattern.
 //
-// NOT the same thing as lib/bpm-overrides.ts (bpm-overrides.json), which is
-// an unrelated global per-run-kind (warmup/work/easy/etc.) BPM ceiling/floor
-// config used by the mixer's selection rules — this store is about a single
-// track's own BPM value, not a zone-wide bound.
+// NOT the same thing as lib/bpm-overrides.ts (bpm_overrides config row),
+// which is an unrelated global per-run-kind (warmup/work/easy/etc.) BPM
+// ceiling/floor config used by the mixer's selection rules — this store is
+// about a single track's own BPM value, not a zone-wide bound.
 
-const FILE = path.join(process.cwd(), "bpm-track-overrides.json");
 const NUDGE = 1; // BPM per button press
 
 export interface BpmOverrideEntry {
@@ -24,19 +22,17 @@ export interface BpmOverrideEntry {
 export type BpmOverrideLog = Record<string, BpmOverrideEntry>; // key: spotify:track:<id>
 
 export function loadBpmTrackOverrides(): BpmOverrideLog {
-  try {
-    return JSON.parse(fs.readFileSync(FILE, "utf-8")) as BpmOverrideLog;
-  } catch {
-    return {};
-  }
-}
-
-function save(log: BpmOverrideLog): void {
-  fs.writeFileSync(FILE, JSON.stringify(log, null, 2), "utf-8");
+  const rows = getDb().prepare("SELECT uri, value, set_at FROM bpm_track_overrides").all() as
+    { uri: string; value: number; set_at: string }[];
+  const log: BpmOverrideLog = {};
+  for (const r of rows) log[r.uri] = { value: r.value, setAt: r.set_at };
+  return log;
 }
 
 export function getBpmOverride(uri: string): BpmOverrideEntry | null {
-  return loadBpmTrackOverrides()[uri] ?? null;
+  const row = getDb().prepare("SELECT value, set_at FROM bpm_track_overrides WHERE uri = ?").get(uri) as
+    { value: number; set_at: string } | undefined;
+  return row ? { value: row.value, setAt: row.set_at } : null;
 }
 
 // Applies a +/-1 BPM nudge. `baseline` is the track's current effective BPM
@@ -50,18 +46,20 @@ export function getBpmOverride(uri: string): BpmOverrideEntry | null {
 // suited for, so its BPM is corrected DOWN into a slower pool; "too fast"
 // corrects it UP into a faster pool.
 export function nudgeBpmOverride(uri: string, direction: "slower" | "faster", baseline: number): BpmOverrideEntry {
-  const log = loadBpmTrackOverrides();
-  const current = log[uri]?.value ?? baseline;
+  const db = getDb();
+  const existing = getBpmOverride(uri);
+  const current = existing?.value ?? baseline;
   const next = direction === "slower" ? current - NUDGE : current + NUDGE;
   const entry: BpmOverrideEntry = { value: Math.max(1, Math.round(next)), setAt: new Date().toISOString() };
-  log[uri] = entry;
-  save(log);
+  db.prepare(
+    "INSERT INTO bpm_track_overrides (uri, value, set_at) VALUES (?, ?, ?) " +
+    "ON CONFLICT(uri) DO UPDATE SET value = excluded.value, set_at = excluded.set_at"
+  ).run(uri, entry.value, entry.setAt);
   return entry;
 }
 
 export function clearBpmOverride(uri: string): void {
-  const log = loadBpmTrackOverrides();
-  if (uri in log) { delete log[uri]; save(log); }
+  getDb().prepare("DELETE FROM bpm_track_overrides WHERE uri = ?").run(uri);
 }
 
 // Merges overrides onto a set of {uri, tempo} — the one function every

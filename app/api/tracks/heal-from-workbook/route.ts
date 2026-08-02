@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { activeCsvPath } from "@/lib/running-playlist-config";
-import { readCsv, writeCsv, isBlank, matchKey } from "@/lib/csv-store";
+import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { matchKey } from "@/lib/csv-store";
+import { readAllTracks, backfillTrackFields, regenerateCsvFile } from "@/lib/tracks-store";
+import { getDb } from "@/lib/db";
 
 // Fills in Track URI, Duration, Popularity, Explicit, Genres, Album/Release
 // Date, and every audio feature (Tempo/Key/Mode/Energy/Danceability/
@@ -84,93 +86,81 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const csvPath = activeCsvPath();
-  const { headers, rows, col } = await readCsv(csvPath);
-  const idxUri = col("Track URI");
-  const idxName = col("Track Name");
-  const idxArtist = col("Artist Name(s)");
-  const idxAlbum = col("Album Name");
-  const idxReleaseDate = col("Release Date");
-  const idxDuration = col("Duration (ms)");
-  const idxPopularity = col("Popularity");
-  const idxExplicit = col("Explicit");
-  const idxGenres = col("Genres");
-  const idxDanceability = col("Danceability");
-  const idxEnergy = col("Energy");
-  const idxKey = col("Key");
-  const idxLoudness = col("Loudness");
-  const idxMode = col("Mode");
-  const idxSpeechiness = col("Speechiness");
-  const idxAcousticness = col("Acousticness");
-  const idxInstrumentalness = col("Instrumentalness");
-  const idxLiveness = col("Liveness");
-  const idxValence = col("Valence");
-  const idxTempo = col("Tempo");
-  const idxTimeSignature = col("Time Signature");
-  if (idxUri === -1 || idxName === -1) {
+  const csvFile = loadRunningPlaylistConfig().csvFile;
+  const rows = readAllTracks(csvFile);
+  if (rows.length === 0) {
     return NextResponse.json({ error: "Library CSV is missing Track URI/Track Name columns" }, { status: 500 });
   }
 
   let matched = 0;
   let checked = 0;
   let urisFilled = 0;
+  const db = getDb();
+  const setUriStmt = db.prepare("UPDATE tracks SET uri = ? WHERE csv_file = ? AND row_no = ? AND (uri IS NULL OR uri = '')");
   for (const row of rows) {
     checked++;
 
-    const uriVal = row[idxUri]?.trim() ?? "";
+    const uriVal = row.uri?.trim() ?? "";
     const existingId = uriVal.startsWith("spotify:track:") ? uriVal.split(":").pop()! : null;
     let source: ChosicRow | undefined = existingId ? byId.get(existingId) : undefined;
     if (!source) {
-      const name = row[idxName]?.trim() ?? "";
-      const artist = idxArtist !== -1 ? (row[idxArtist]?.trim() ?? "") : "";
+      const name = row.trackName?.trim() ?? "";
+      const artist = row.artistNames?.trim() ?? "";
       if (name && artist) source = byNameArtist.get(matchKey(name, artist));
     }
     if (!source) continue;
 
     let changed = false;
-    const setIfBlank = (idx: number, value: string | null) => {
-      if (idx === -1 || value === null || value === "") return;
-      if (isBlank(row[idx])) { row[idx] = value; changed = true; }
+    let newUri = row.uri;
+    const fields: Record<string, string | number | null> = {};
+    const setIfBlank = (key: string, current: unknown, value: string | number | null) => {
+      if (value === null || value === "") return;
+      if (current === null || current === undefined || current === "") { fields[key] = value; changed = true; }
     };
 
     if (!existingId && source.id) {
-      row[idxUri] = `spotify:track:${source.id.trim()}`;
+      newUri = `spotify:track:${source.id.trim()}`;
+      setUriStmt.run(newUri, csvFile, row.rowNo);
       changed = true;
       urisFilled++;
     }
 
-    setIfBlank(idxAlbum, source.album?.trim() ?? null);
-    setIfBlank(idxReleaseDate, source.albumDate?.trim() ?? null);
-    setIfBlank(idxGenres, source.genres?.trim() ?? null);
-    setIfBlank(idxPopularity, source.popularity != null ? String(num(source.popularity) ?? "") : null);
-    if (source.explicit) setIfBlank(idxExplicit, /^y/i.test(source.explicit) ? "True" : "False");
+    setIfBlank("albumName", row.albumName, source.album?.trim() ?? null);
+    setIfBlank("releaseDate", row.releaseDate, source.albumDate?.trim() ?? null);
+    setIfBlank("genres", row.genres, source.genres?.trim() ?? null);
+    setIfBlank("popularity", row.popularity, source.popularity != null ? num(source.popularity) : null);
+    if (source.explicit) setIfBlank("explicit", row.explicit, /^y/i.test(source.explicit) ? "True" : "False");
 
     const durationMs = source.duration ? parseChosicDuration(source.duration) : null;
-    setIfBlank(idxDuration, durationMs != null ? String(durationMs) : null);
+    setIfBlank("durationMs", row.durationMs, durationMs);
 
-    setIfBlank(idxTempo, source.bpm != null ? String(num(source.bpm) ?? "") : null);
-    setIfBlank(idxEnergy, pct(source.energy) != null ? String(pct(source.energy)) : null);
-    setIfBlank(idxDanceability, pct(source.dance) != null ? String(pct(source.dance)) : null);
-    setIfBlank(idxAcousticness, pct(source.acoustic) != null ? String(pct(source.acoustic)) : null);
-    setIfBlank(idxInstrumentalness, pct(source.instrumental) != null ? String(pct(source.instrumental)) : null);
-    setIfBlank(idxValence, pct(source.valence) != null ? String(pct(source.valence)) : null);
-    setIfBlank(idxSpeechiness, pct(source.speech) != null ? String(pct(source.speech)) : null);
-    setIfBlank(idxLiveness, pct(source.live) != null ? String(pct(source.live)) : null);
-    setIfBlank(idxLoudness, source.loudness != null ? String(num(source.loudness) ?? "") : null);
-    setIfBlank(idxTimeSignature, source.timeSignature != null ? String(num(source.timeSignature) ?? "") : null);
+    setIfBlank("tempo", row.tempo, source.bpm != null ? num(source.bpm) : null);
+    setIfBlank("energy", row.energy, pct(source.energy));
+    setIfBlank("danceability", row.danceability, pct(source.dance));
+    setIfBlank("acousticness", row.acousticness, pct(source.acoustic));
+    setIfBlank("instrumentalness", row.instrumentalness, pct(source.instrumental));
+    setIfBlank("valence", row.valence, pct(source.valence));
+    setIfBlank("speechiness", row.speechiness, pct(source.speech));
+    setIfBlank("liveness", row.liveness, pct(source.live));
+    setIfBlank("loudness", row.loudness, source.loudness != null ? num(source.loudness) : null);
+    setIfBlank("timeSignature", row.timeSignature, source.timeSignature != null ? num(source.timeSignature) : null);
 
     if (source.key) {
       const parsed = parseChosicKey(source.key);
       if (parsed) {
-        setIfBlank(idxKey, String(parsed.key));
-        setIfBlank(idxMode, String(parsed.mode));
+        setIfBlank("key", row.key, parsed.key);
+        setIfBlank("mode", row.mode, parsed.mode);
       }
+    }
+
+    if (Object.keys(fields).length > 0 && newUri) {
+      backfillTrackFields(csvFile, newUri, fields);
     }
 
     if (changed) matched++;
   }
 
-  if (matched > 0) await writeCsv(csvPath, headers, rows);
+  if (matched > 0) await regenerateCsvFile(csvFile, activeCsvPath());
 
   return NextResponse.json({ checked, matched, urisFilled, workbookRows: workbookRows.length });
 }

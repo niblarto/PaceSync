@@ -3,7 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { spawn } from "child_process";
 import path from "path";
-import { activeCsvPath } from "@/lib/running-playlist-config";
+import { dbSourcePath } from "@/lib/running-playlist-config";
 
 // Suggestion search hits Last.fm/Deezer/ReccoBeats and takes 1–2 minutes, so
 // this is an SSE stream (progress lines forwarded from the matcher's stderr)
@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
       }
 
       const script = path.join(process.cwd(), "scripts", "bpm_bridge.py");
-      const csv = activeCsvPath();
+      const csv = dbSourcePath();
       const args = [script, "suggest", csv, uri, mode, "20"];
       if (seed) args.push(seed);
       const proc = spawn(PYTHON, args);

@@ -4,11 +4,10 @@ import { computeEasyPaceBias } from "@/lib/run-pace-bias";
 import { getAllTrackVotes } from "@/lib/track-feedback";
 import { getPlayedTracks, getPlayedCounts, getLastEasyPaceSec } from "@/lib/todays-run-history";
 import { loadBpmOverrides } from "@/lib/bpm-overrides";
-import { applyBpmOverridesToCsvText } from "@/lib/bpm-track-overrides";
-import { readFile } from "fs/promises";
 import { join } from "path";
 import { spawn } from "child_process";
-import { activeCsvPath } from "@/lib/running-playlist-config";
+import { dbSourcePath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { csvTextForPlaylist } from "@/lib/tracks-store";
 
 // The AI DJ service may run a local LLM per workout segment — allow it time.
 const MIX_TIMEOUT_MS = 180_000;
@@ -155,7 +154,8 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   // and warns about anything still incomplete.
   let csv: string;
   try {
-    csv = applyBpmOverridesToCsvText(await readFile(activeCsvPath(), "utf8"));
+    csv = csvTextForPlaylist(loadRunningPlaylistConfig().csvFile);
+    if (!csv.trim()) throw new Error("empty library");
   } catch {
     return { ok: false, error: "No library CSV - upload a playlist library in Settings first" };
   }
@@ -222,7 +222,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
 // they write to stdin.
 function runBridge(stdinPayload: object, onProgress?: AiDjProgress): Promise<AiDjMixResult> {
   const script = join(process.cwd(), "scripts", "ai_dj_bridge.py");
-  const csvPath = activeCsvPath();
+  const csvPath = dbSourcePath();
 
   return new Promise((resolve) => {
     const proc = spawn(PYTHON, [script, csvPath]);
@@ -315,7 +315,8 @@ export async function buildAiDjFlowMix(title: string, trackUris: string[], onPro
 
   let csv: string;
   try {
-    csv = applyBpmOverridesToCsvText(await readFile(activeCsvPath(), "utf8"));
+    csv = csvTextForPlaylist(loadRunningPlaylistConfig().csvFile);
+    if (!csv.trim()) throw new Error("empty library");
   } catch {
     return { ok: false, error: "No library CSV - upload a playlist library in Settings first" };
   }

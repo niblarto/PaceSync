@@ -141,6 +141,52 @@ CREATE TABLE IF NOT EXISTS cron_log (
   job TEXT NOT NULL,
   message TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS running_playlists (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  csv_file TEXT NOT NULL UNIQUE,
+  is_active INTEGER NOT NULL DEFAULT 0
+);
+
+-- One row per track library entry, scoped per playlist (csv_file) — a
+-- track can legitimately exist in more than one playlist's library with
+-- independently-healed data, so the key is (csv_file, uri), not uri alone.
+-- row_no additionally disambiguates the rare rows with no URI at all
+-- (a real, currently-tolerated on-disk state — some CSV rows have a blank
+-- Track URI cell). Numeric columns stay nullable (not defaulted to 0) so
+-- "missing" and "present-but-zero" remain distinguishable, matching the
+-- CSV-heal sweep's existing isBlank-based semantics.
+CREATE TABLE IF NOT EXISTS tracks (
+  csv_file TEXT NOT NULL,
+  uri TEXT NOT NULL,
+  row_no INTEGER NOT NULL,
+  track_name TEXT,
+  album_name TEXT,
+  artist_names TEXT,
+  release_date TEXT,
+  duration_ms INTEGER,
+  popularity INTEGER,
+  explicit TEXT,
+  added_by TEXT,
+  added_at TEXT,
+  genres TEXT,
+  record_label TEXT,
+  danceability REAL,
+  energy REAL,
+  key INTEGER,
+  loudness REAL,
+  mode INTEGER,
+  speechiness REAL,
+  acousticness REAL,
+  instrumentalness REAL,
+  liveness REAL,
+  valence REAL,
+  tempo REAL,
+  time_signature INTEGER,
+  PRIMARY KEY (csv_file, uri, row_no)
+);
+CREATE INDEX IF NOT EXISTS idx_tracks_csv_file ON tracks(csv_file);
 `;
 
 let db: Database.Database | null = null;

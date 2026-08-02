@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile } from "fs/promises";
-import { listRunningPlaylists, csvPathFor } from "@/lib/running-playlist-config";
+import { listRunningPlaylists } from "@/lib/running-playlist-config";
+import { csvTextForPlaylist } from "@/lib/tracks-store";
 
 // Downloads a known playlist's raw library CSV — the same file shown as
 // "csvFile" in the Select Playlist list, for inspecting/backing up outside
@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
   if (!entry) return NextResponse.json({ error: "Unknown playlist id" }, { status: 404 });
 
   try {
-    const csv = await readFile(csvPathFor(entry), "utf8");
+    const csv = csvTextForPlaylist(entry.csvFile);
     return new NextResponse(csv, {
       headers: {
         "Content-Type": "text/csv; charset=utf-8",

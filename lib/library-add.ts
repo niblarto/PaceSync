@@ -1,5 +1,5 @@
 import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
-import { readCsv, writeCsv, rowFrom } from "@/lib/csv-store";
+import { readAllTracks, mergeTracksIntoPlaylist, regenerateCsvFile } from "@/lib/tracks-store";
 import { findPreviouslyDeleted, removeFromDeletedLog, type DeletedTrack } from "@/lib/deleted-tracks";
 import { recordAddedTracks } from "@/lib/added-tracks";
 
@@ -41,29 +41,29 @@ export async function addTracksToLibrary(tracks: LibraryAddTrack[], allowDeleted
     try { removeFromDeletedLog(overridden); } catch (e) { console.warn("[library-add] deletion log update failed:", e); }
   }
 
-  const csvPath = activeCsvPath();
-  const { headers, rows, col } = await readCsv(csvPath);
-  const idxUri = col("Track URI", "Spotify URI", "uri", "id");
-  const existingUris = new Set(idxUri !== -1 ? rows.map(r => r[idxUri]?.trim()).filter(Boolean) : []);
+  const config = loadRunningPlaylistConfig();
+  const csvFile = config.csvFile;
+  const existingUris = new Set(readAllTracks(csvFile).map(t => t.uri).filter(Boolean));
 
   const fresh = tracks.filter(t => t.uri && !rejectedUris.has(t.uri) && !existingUris.has(t.uri));
 
-  const newRows = fresh.map(t => rowFrom(headers, {
-    "Track URI": t.uri,
-    "Track Name": t.name,
-    "Artist Name(s)": t.artist,
-    "Tempo": t.tempo,
-    "Key": t.key,
-    "Mode": t.mode,
-    "Energy": t.energy,
-    "Danceability": t.danceability,
-    "Valence": t.valence,
+  const newRows = fresh.map(t => ({
+    uri: t.uri,
+    trackName: t.name,
+    artistNames: t.artist,
+    tempo: t.tempo,
+    key: t.key,
+    mode: t.mode,
+    energy: t.energy,
+    danceability: t.danceability,
+    valence: t.valence,
   }));
 
   if (newRows.length > 0) {
-    await writeCsv(csvPath, headers, [...rows, ...newRows]);
+    mergeTracksIntoPlaylist(csvFile, newRows);
+    await regenerateCsvFile(csvFile, activeCsvPath());
     try {
-      recordAddedTracks(loadRunningPlaylistConfig().csvFile, fresh.map(t => t.uri));
+      recordAddedTracks(csvFile, fresh.map(t => t.uri));
     } catch (e) { console.warn("[library-add] added-tracks log failed:", e); }
   }
 

@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { readFile } from "fs/promises";
-import { activeCsvPath } from "@/lib/running-playlist-config";
+import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
+import { readAllTracks } from "@/lib/tracks-store";
 
 // Lightweight URI-only listing of the active playlist's CSV — used to dedupe
 // before adding tracks (e.g. from BBC), so the same track never gets added
@@ -12,12 +12,11 @@ export async function GET() {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
-    const csv = await readFile(activeCsvPath(), "utf8");
-    const uris = new Set<string>();
-    csv.split("\n").forEach(line => {
-      const uri = line.split(",")[0]?.trim();
-      if (uri?.startsWith("spotify:track:")) uris.add(uri);
-    });
+    const uris = new Set(
+      readAllTracks(loadRunningPlaylistConfig().csvFile)
+        .map(t => t.uri)
+        .filter(uri => uri?.startsWith("spotify:track:")),
+    );
     return NextResponse.json({ uris: Array.from(uris) });
   } catch {
     return NextResponse.json({ uris: [] });
