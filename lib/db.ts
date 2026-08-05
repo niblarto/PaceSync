@@ -184,6 +184,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   valence REAL,
   tempo REAL,
   time_signature INTEGER,
+  isrc TEXT,
   PRIMARY KEY (csv_file, uri, row_no)
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_csv_file ON tracks(csv_file);
@@ -191,11 +192,25 @@ CREATE INDEX IF NOT EXISTS idx_tracks_csv_file ON tracks(csv_file);
 
 let db: Database.Database | null = null;
 
+// One-off column additions for tables that already existed in production
+// before the column was added — CREATE TABLE IF NOT EXISTS above only
+// covers a table that doesn't exist yet at all, so a genuinely new column
+// on an existing table needs its own idempotent ALTER TABLE here. Each
+// entry checks pragma table_info first since SQLite has no
+// "ADD COLUMN IF NOT EXISTS" of its own.
+function runColumnMigrations(conn: Database.Database): void {
+  const trackCols = conn.prepare("PRAGMA table_info(tracks)").all() as { name: string }[];
+  if (!trackCols.some(c => c.name === "isrc")) {
+    conn.exec("ALTER TABLE tracks ADD COLUMN isrc TEXT");
+  }
+}
+
 export function getDb(): Database.Database {
   if (db) return db;
   db = new Database(DB_PATH);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.exec(SCHEMA_SQL);
+  runColumnMigrations(db);
   return db;
 }

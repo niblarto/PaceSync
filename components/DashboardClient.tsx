@@ -169,6 +169,10 @@ interface Suggestion {
   energy: number;
   danceability: number;
   valence: number;
+  // Set for an artist-search result added via Deezer's ISRC rather than a
+  // Spotify search (see searchArtistTopTracks) — spotifyUrl stays null for
+  // these until a heal sweep resolves the real URI via an isrc: search.
+  isrc?: string | null;
 }
 
 // Module-level (not component state) so it survives remounts within the tab
@@ -1394,106 +1398,72 @@ export function DashboardClient({ spotifyUser }: Props) {
 
     try {
       // Deezer has no CORS headers, so this goes through our own server route.
+      // Each returned track already carries an ISRC (Deezer /track/{id}).
       const dr = await fetch(`/api/bpm/artist-top?artist=${encodeURIComponent(artistName)}`);
-      const dd = await dr.json() as { tracks?: { title: string; artist: string }[]; error?: string };
+      const dd = await dr.json() as { tracks?: { title: string; artist: string; isrc: string | null }[]; error?: string };
       if (!dr.ok || dd.error) throw new Error(dd.error ?? `Lookup failed (${dr.status})`);
       const topTracks = dd.tracks ?? [];
       if (topTracks.length === 0) throw new Error(`No top tracks found for "${artistName}" on Deezer`);
 
-      const token = await freshSpotifyToken();
+      // Resolve each track's Spotify URI + audio features directly from its
+      // ISRC via ReccoBeats (/api/bpm/enrich's isrcs mode) — no Spotify API
+      // call anywhere in this path. This replaced a per-track Spotify
+      // Search match, which was the confirmed trigger of repeated real,
+      // hours-long Spotify rate-limit bans (same "Pepper — Butthole
+      // Surfers"/"Teardrop — Massive Attack" query recurring across
+      // sessions each time this feature was used).
+      setSuggest(s => s && { ...s, progress: "Matching on ReccoBeats…" });
+      const withIsrc = topTracks.filter((t): t is typeof t & { isrc: string } => !!t.isrc);
       const existing = new Set(allTracks.map(t => t.uri));
       const suggestions: Suggestion[] = [];
-      const uriByIndex: string[] = [];
-      const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-      // Sequential, one request at a time (never Promise.all) to stay under
-      // Spotify's rate limit; spotifyFetch auto-retries a short (<=4s) 429,
-      // but returns the 429 as-is for a longer one — continuing this loop in
-      // that case would immediately fire the next track's request too,
-      // hammering Spotify further and guaranteeing every remaining track
-      // also 429s (which is what "counting down like a retry but never
-      // actually finding anything" looked like). Stop the whole search
-      // instead and surface it as an error the user can retry manually once
-      // the banner's countdown clears. A polite gap between requests
-      // (matching every other per-track Spotify search loop in this app —
-      // BBC/ai-dj-library/csv-heal all sleep 120-400ms) is also required:
-      // "sequential" alone still bursts Spotify's short-window rate limit if
-      // each request fires immediately after the last resolves.
-      for (let i = 0; i < topTracks.length; i++) {
-        if (i > 0) await sleep(200);
-        const t = topTracks[i];
-        setSuggest(s => s && { ...s, progress: `Matching on Spotify… ${i + 1}/${topTracks.length}` });
-        if (!token) continue;
-        const q = encodeURIComponent(`${t.title} ${t.artist}`);
-        type SpotifySearchHit = { uri: string; name: string; artists: { name: string }[]; external_urls?: { spotify?: string } };
-        let hit: SpotifySearchHit | undefined;
-        const sr = await spotifyFetch(
-          `https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`,
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-        if (sr.status === 429) {
-          throw new Error("Rate limited by Spotify — wait for the banner to clear, then try again.");
-        }
-        if (sr.ok) {
-          const sd = await sr.json() as { tracks?: { items?: SpotifySearchHit[] } };
-          hit = sd.tracks?.items?.[0];
-        }
-        if (!hit || existing.has(hit.uri)) continue;
-        if (suggestions.some(s => s.spotifyUrl === (hit!.external_urls?.spotify ?? null))) continue;
-        suggestions.push({
-          name: hit.name,
-          artist: hit.artists.map(a => a.name).join(", "),
-          bpm: 0,
-          camelot: "",
-          spotifyUrl: hit.external_urls?.spotify ?? null,
-          distance: 0,
-          tempo: 0,
-          key: 0,
-          mode: 0,
-          energy: 0,
-          danceability: 0,
-          valence: 0,
-        });
-        uriByIndex.push(hit.uri);
-      }
 
-      // Now that the list is populated, fetch BPM for each match and — if
-      // the BBC-import BPM-range filter switch is enabled (same setting used
-      // for BBC card imports, see lib/bbc-bpm-filter.ts) — drop any track
-      // outside the library's usable range. Tracks with no BPM match are
-      // dropped too, same "can't judge range" rule as the BBC filter.
-      setSuggest(s => s && { ...s, progress: "Checking BPM range…" });
-      let filtered = suggestions;
-      try {
+      if (withIsrc.length > 0) {
         const er = await fetch("/api/bpm/enrich", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            tracks: suggestions.map((s, i) => ({
-              id: uriByIndex[i].split(":").pop()!,
-              name: s.name,
-              artist: s.artist,
-            })),
-          }),
+          body: JSON.stringify({ isrcs: withIsrc.map(t => t.isrc) }),
         });
-        const ed = await er.json() as { features?: Record<string, { tempo: number }> };
-        const features = ed.features ?? {};
+        const ed = await er.json() as {
+          resolved?: Record<string, { uri: string; tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number } | null>;
+        };
+        const resolved = ed.resolved ?? {};
 
-        for (let i = 0; i < suggestions.length; i++) {
-          const id = uriByIndex[i].split(":").pop()!;
-          const tempo = features[id]?.tempo;
-          if (tempo != null) {
-            suggestions[i] = { ...suggestions[i], bpm: Math.round(tempo), tempo };
-          }
+        for (const t of withIsrc) {
+          const r = resolved[t.isrc];
+          if (!r || existing.has(r.uri)) continue;
+          if (suggestions.some(s => s.spotifyUrl === `https://open.spotify.com/track/${r.uri.split(":").pop()}`)) continue;
+          suggestions.push({
+            name: t.title,
+            artist: t.artist,
+            bpm: Math.round(r.tempo),
+            camelot: "",
+            spotifyUrl: `https://open.spotify.com/track/${r.uri.split(":").pop()}`,
+            distance: 0,
+            tempo: r.tempo,
+            key: r.key,
+            mode: r.mode,
+            energy: r.energy,
+            danceability: r.danceability,
+            valence: r.valence,
+            isrc: t.isrc,
+          });
         }
+      }
 
+      // If the BBC-import BPM-range filter switch is enabled (same setting
+      // used for BBC card imports, see lib/bbc-bpm-filter.ts), drop any
+      // track outside the library's usable range. Tracks with no BPM match
+      // are dropped too, same "can't judge range" rule as the BBC filter.
+      setSuggest(s => s && { ...s, progress: "Checking BPM range…" });
+      let filtered = suggestions;
+      try {
         const fr = await fetch("/api/settings/bbc-bpm-filter");
         const fd = await fr.json() as { enabled?: boolean };
         if (fd.enabled) {
           const tempos: Record<string, number> = {};
-          for (let i = 0; i < suggestions.length; i++) {
-            const id = uriByIndex[i].split(":").pop()!;
-            const tempo = features[id]?.tempo;
-            if (tempo != null) tempos[id] = tempo;
+          for (const s of suggestions) {
+            const id = s.spotifyUrl?.split("/").pop();
+            if (id) tempos[id] = s.tempo;
           }
           const rr = await fetch("/api/bbc/bpm-range", {
             method: "POST",
@@ -1502,7 +1472,7 @@ export function DashboardClient({ spotifyUser }: Props) {
           });
           const rd = await rr.json() as { inRange?: Record<string, boolean> };
           const inRange = rd.inRange ?? {};
-          filtered = suggestions.filter((_, i) => inRange[uriByIndex[i].split(":").pop()!] === true);
+          filtered = suggestions.filter(s => inRange[s.spotifyUrl?.split("/").pop() ?? ""] === true);
         }
       } catch { /* BPM check is best-effort — fall through with everything kept */ }
 

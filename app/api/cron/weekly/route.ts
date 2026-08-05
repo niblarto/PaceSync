@@ -15,6 +15,7 @@ import { getBbcBpmFilterEnabled } from "@/lib/bbc-bpm-filter-config";
 import { isWithinLibraryBpmRange } from "@/lib/bbc-bpm-filter";
 import { fetchFeatures } from "@/lib/track-enrich";
 import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
+import { getDb } from "@/lib/db";
 
 // Resolved per call so a playlist change in Settings applies immediately.
 const runningPlaylistId = () => loadRunningPlaylistConfig().id;
@@ -335,7 +336,41 @@ async function processPlaylist(
 
 // ── Dedup ──────────────────────────────────────────────────────────────────
 
-async function dedup(token: string): Promise<{ removed: number; remaining: number }> {
+// Skips the full paginated playlist read + rewrite when nothing has
+// actually changed since the last dedup — Spotify's rate limit is per-app,
+// shared across every endpoint in one rolling 30s window, so an
+// unconditional full-playlist read on every scheduled cron run (even one
+// that just added zero new tracks) is wasted quota. snapshot_id changes on
+// any playlist mutation (add/remove/reorder), so comparing it is a cheap,
+// reliable "did anything change" check — one GET instead of a full
+// paginated /items read when it hasn't.
+const SNAPSHOT_KV_KEY = "dedup_last_snapshot_id";
+
+function getLastDedupSnapshot(): string | null {
+  const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(SNAPSHOT_KV_KEY) as { value_json: string } | undefined;
+  if (!row) return null;
+  try { return (JSON.parse(row.value_json) as { snapshotId?: string }).snapshotId ?? null; } catch { return null; }
+}
+
+function setLastDedupSnapshot(snapshotId: string): void {
+  getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
+    .run(SNAPSHOT_KV_KEY, JSON.stringify({ snapshotId }));
+}
+
+async function dedup(token: string): Promise<{ removed: number; remaining: number; skipped?: boolean }> {
+  const playlistId = runningPlaylistId();
+  const snapRes = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}?fields=snapshot_id,tracks.total`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  let preSnapshotId: string | null = null;
+  if (snapRes.ok) {
+    const snap = await snapRes.json() as { snapshot_id?: string; tracks?: { total?: number } };
+    preSnapshotId = snap.snapshot_id ?? null;
+    if (preSnapshotId && preSnapshotId === getLastDedupSnapshot()) {
+      return { removed: 0, remaining: snap.tracks?.total ?? 0, skipped: true };
+    }
+  }
+
   const uris: string[] = [];
   let url: string | null = `https://api.spotify.com/v1/playlists/${runningPlaylistId()}/items?limit=100`;
 
@@ -357,7 +392,15 @@ async function dedup(token: string): Promise<{ removed: number; remaining: numbe
   }
 
   const removed = uris.length - deduped.length;
-  if (removed === 0) return { removed: 0, remaining: uris.length };
+  // No duplicates found and nothing else changed the playlist between the
+  // snapshot check above and this read — safe to cache preSnapshotId so the
+  // next run can skip both reads entirely if it's still current. A
+  // successful rewrite below produces a NEW snapshot_id this function never
+  // observes, so that path deliberately does not cache anything here.
+  if (removed === 0) {
+    if (preSnapshotId) setLastDedupSnapshot(preSnapshotId);
+    return { removed: 0, remaining: uris.length };
+  }
 
   const chunks: string[][] = [];
   for (let i = 0; i < deduped.length; i += 100) chunks.push(deduped.slice(i, i + 100));

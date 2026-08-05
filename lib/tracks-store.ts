@@ -15,7 +15,7 @@ const ROW_COLUMNS = `
   csv_file, uri, row_no, track_name, album_name, artist_names, release_date,
   duration_ms, popularity, explicit, added_by, added_at, genres, record_label,
   danceability, energy, key, loudness, mode, speechiness, acousticness,
-  instrumentalness, liveness, valence, tempo, time_signature
+  instrumentalness, liveness, valence, tempo, time_signature, isrc
 `;
 
 interface DbRow {
@@ -27,7 +27,7 @@ interface DbRow {
   energy: number | null; key: number | null; loudness: number | null; mode: number | null;
   speechiness: number | null; acousticness: number | null; instrumentalness: number | null;
   liveness: number | null; valence: number | null; tempo: number | null;
-  time_signature: number | null;
+  time_signature: number | null; isrc: string | null;
 }
 
 function rowToTrackRow(r: DbRow): TrackRow {
@@ -40,6 +40,7 @@ function rowToTrackRow(r: DbRow): TrackRow {
     energy: r.energy, key: r.key, loudness: r.loudness, mode: r.mode,
     speechiness: r.speechiness, acousticness: r.acousticness, instrumentalness: r.instrumentalness,
     liveness: r.liveness, valence: r.valence, tempo: r.tempo, timeSignature: r.time_signature,
+    isrc: r.isrc,
   };
 }
 
@@ -66,7 +67,7 @@ const COLUMN_MAP: Record<keyof TrackRow, string> = {
   danceability: "danceability", energy: "energy", key: "key", loudness: "loudness",
   mode: "mode", speechiness: "speechiness", acousticness: "acousticness",
   instrumentalness: "instrumentalness", liveness: "liveness", valence: "valence",
-  tempo: "tempo", timeSignature: "time_signature",
+  tempo: "tempo", timeSignature: "time_signature", isrc: "isrc",
 };
 
 export function listMissingColumn(csvFile: string, column: keyof TrackRow, opts?: { requireUri?: boolean }): TrackRow[] {
@@ -96,7 +97,7 @@ const WRITABLE_COLUMNS: (keyof TrackRow)[] = [
   "trackName", "albumName", "artistNames", "releaseDate", "durationMs", "popularity",
   "explicit", "addedBy", "addedAt", "genres", "recordLabel", "danceability", "energy",
   "key", "loudness", "mode", "speechiness", "acousticness", "instrumentalness",
-  "liveness", "valence", "tempo", "timeSignature",
+  "liveness", "valence", "tempo", "timeSignature", "isrc",
 ];
 
 function isBlankValue(v: unknown): boolean {

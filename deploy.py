@@ -270,6 +270,7 @@ FILES = [
     ('lib/spotify-rate-limit.ts',                 'lib/spotify-rate-limit.ts'),
     ('lib/track-enrich.ts',                       'lib/track-enrich.ts'),
     ('lib/spotify-playlist.ts',                   'lib/spotify-playlist.ts'),
+    ('lib/playlist-id-cache.ts',                   'lib/playlist-id-cache.ts'),
     ('lib/runna-schedule.ts',                     'lib/runna-schedule.ts'),
     ('scripts/bpm_bridge.py',                     'scripts/bpm_bridge.py'),
     ('bpm_matcher/__init__.py',                   'bpm_matcher/__init__.py'),

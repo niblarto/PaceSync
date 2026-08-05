@@ -69,7 +69,10 @@ async function reccoBatch(ids: string[]): Promise<ReccoFeature[]> {
   return out;
 }
 
-async function deezerIsrc(name: string, artist: string): Promise<string | null> {
+// Exported for callers that need just the ISRC lookup on its own (e.g.
+// app/api/bbc/tracks's Spotify-free matching path) rather than going
+// through fetchFeatures' Spotify-ID-keyed flow.
+export async function deezerIsrc(name: string, artist: string): Promise<string | null> {
   const tryQuery = async (q: string): Promise<number | null> => {
     const res = await fetch(`https://api.deezer.com/search?q=${q}&limit=1`, {
       headers: { "User-Agent": UA }, signal: AbortSignal.timeout(10000),
@@ -164,6 +167,37 @@ export async function lastfmDurationMs(name: string, artist: string): Promise<nu
   const d = await res.json() as { track?: { duration?: string } };
   const ms = parseInt(d.track?.duration ?? "", 10);
   return !isNaN(ms) && ms > 0 ? ms : null;
+}
+
+export interface IsrcResolution extends TrackFeatures {
+  uri: string; // spotify:track:{id}, taken from ReccoBeats' href — see note below
+}
+
+// Resolves BOTH a playable Spotify URI and audio features directly from an
+// ISRC via ReccoBeats — no Spotify API call at all. Querying ReccoBeats by
+// ISRC returns one entry per Spotify track sharing that ISRC (different
+// releases/reissues of the same recording carry the same ISRC); audio
+// features are effectively identical across entries (same actual
+// recording), so the first entry's href is used as "the" URI. This is a
+// deliberate trade-off: the picked release might occasionally differ from
+// whichever one Spotify's own text search would surface, but it's always
+// the same song, and it means this path never touches Spotify's Search API
+// at all — used by "search more by this artist" (components/
+// DashboardClient.tsx's searchArtistTopTracks) specifically because that
+// feature's old per-track Spotify search was the confirmed trigger of
+// repeated real rate-limit bans.
+export async function resolveByIsrc(isrc: string): Promise<IsrcResolution | null> {
+  const res = await fetch(`https://api.reccobeats.com/v1/audio-features?ids=${encodeURIComponent(isrc)}`, {
+    headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20000),
+  });
+  if (!res.ok) return null;
+  const data = await res.json() as { content?: ReccoFeature[] };
+  const first = data.content?.[0];
+  if (!first) return null;
+  const trackId = spotifyIdFromHref(first.href);
+  const feat = toFeatures(first);
+  if (!trackId || !feat) return null;
+  return { ...feat, uri: `spotify:track:${trackId}` };
 }
 
 // Resolves audio features for the given Spotify track IDs, keyed by ID.

@@ -6,8 +6,18 @@ import { authOptions } from "@/lib/auth";
 // this proxies artist search + top-tracks for the dashboard's "more by this
 // artist" button. Spotify's own artists/{id}/top-tracks was removed for apps
 // without Extended Access (Nov 2024), same restriction as the deprecated
-// /tracks endpoint elsewhere in this app, so Deezer (keyless) stands in;
-// results get matched onto Spotify client-side afterward.
+// /tracks endpoint elsewhere in this app, so Deezer (keyless) stands in.
+//
+// Each track's ISRC is fetched too (one extra Deezer GET per track — /top
+// and the plain-search fallback both omit it) so the client can add a
+// track without ever calling Spotify's Search API: an ISRC uniquely
+// identifies the recording across platforms, so it's used as the track's
+// identity until the heal sweep resolves the real Spotify URI via an
+// `isrc:` search later. This replaced an earlier per-track Spotify Search
+// match here, which repeatedly triggered real, hours-long Spotify rate
+// limits (the exact same query recurring across sessions was a strong
+// signal it was this feature) — Deezer's ISRC lookup is keyless and
+// carries no such risk.
 
 export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -36,7 +46,7 @@ export async function GET(req: NextRequest) {
 
     const tr = await fetch(`https://api.deezer.com/artist/${artist.id}/top?limit=15`);
     if (!tr.ok) return NextResponse.json({ error: `Deezer top tracks failed (${tr.status})` }, { status: 502 });
-    const td = await tr.json() as { data?: { title: string; artist: { name: string } }[] };
+    const td = await tr.json() as { data?: { id: number; title: string; artist: { name: string } }[] };
     let tracks = td.data ?? [];
 
     // Some artists resolve to a Deezer id whose /top is empty (sparse
@@ -47,7 +57,7 @@ export async function GET(req: NextRequest) {
     if (tracks.length === 0) {
       const sr = await fetch(`https://api.deezer.com/search?q=artist:"${encodeURIComponent(artist.name)}"&limit=25`);
       if (sr.ok) {
-        const sd = await sr.json() as { data?: { title: string; artist: { name: string }; rank?: number }[] };
+        const sd = await sr.json() as { data?: { id: number; title: string; artist: { name: string }; rank?: number }[] };
         tracks = (sd.data ?? [])
           .filter(t => t.artist.name.trim().toLowerCase() === wanted)
           .sort((a, b) => (b.rank ?? 0) - (a.rank ?? 0));
@@ -58,7 +68,27 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: `No top tracks found for "${artistName}" on Deezer` }, { status: 404 });
     }
 
-    return NextResponse.json({ tracks: tracks.map(t => ({ title: t.title, artist: t.artist.name })) });
+    // Sequential + a small gap, same politeness convention as every other
+    // Deezer loop in this app (lib/track-enrich.ts sleeps 150ms between
+    // Deezer calls) — Deezer's own rate limit is 50 req/5s, generous, but
+    // there's no reason to burst it.
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+    const withIsrc: { title: string; artist: string; isrc: string | null }[] = [];
+    for (let i = 0; i < tracks.length; i++) {
+      if (i > 0) await sleep(120);
+      const t = tracks[i];
+      let isrc: string | null = null;
+      try {
+        const dr = await fetch(`https://api.deezer.com/track/${t.id}`);
+        if (dr.ok) {
+          const dd = await dr.json() as { isrc?: string };
+          isrc = dd.isrc ?? null;
+        }
+      } catch { /* best-effort — track still usable without an ISRC below */ }
+      withIsrc.push({ title: t.title, artist: t.artist.name, isrc });
+    }
+
+    return NextResponse.json({ tracks: withIsrc });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : "Deezer lookup failed" }, { status: 502 });
   }

@@ -1,6 +1,11 @@
+import { getCachedPlaylistId, setCachedPlaylistId, clearCachedPlaylistId } from "@/lib/playlist-id-cache";
+
 const BASE = "https://api.spotify.com/v1";
 
-export async function findExistingPlaylist(token: string, userId: string, name: string): Promise<string | null> {
+// Full GET /me/playlists scan (paginated) — the actual Spotify-calling
+// implementation, kept separate from findExistingPlaylist's cache check
+// below so a stale cache hit can fall back to this without duplicating it.
+async function scanForPlaylist(token: string, userId: string, name: string): Promise<string | null> {
   let url: string | null = `${BASE}/me/playlists?limit=50`;
   while (url) {
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -16,6 +21,35 @@ export async function findExistingPlaylist(token: string, userId: string, name: 
     url = data.next;
   }
   return null;
+}
+
+// Checks a persisted id-cache before ever scanning the user's whole
+// playlist library — the standing "Today's Run" playlist this backs almost
+// never changes id, but the two daily AI DJ cron jobs call this
+// unconditionally every run, so an uncached lookup here is guaranteed
+// wasted Spotify quota on every no-op day. A cache hit is verified with a
+// single GET /playlists/{id} (cheap, one request) rather than trusted
+// blindly, so a deleted/renamed playlist is detected and the cache
+// self-heals via a fresh scan instead of upsertPlaylist silently creating
+// a duplicate playlist against a dead id.
+export async function findExistingPlaylist(token: string, userId: string, name: string): Promise<string | null> {
+  const cached = getCachedPlaylistId(name);
+  if (cached) {
+    try {
+      const res = await fetch(`${BASE}/playlists/${cached}?fields=id,name,owner.id`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const p = await res.json() as { id: string; name: string; owner: { id: string } };
+        if (p.name.toLowerCase() === name.toLowerCase() && p.owner.id === userId) return cached;
+      }
+    } catch { /* fall through to a fresh scan */ }
+    clearCachedPlaylistId(name);
+  }
+
+  const found = await scanForPlaylist(token, userId, name);
+  if (found) setCachedPlaylistId(name, found);
+  return found;
 }
 
 export async function replacePlaylistTracks(token: string, playlistId: string, uris: string[]): Promise<void> {

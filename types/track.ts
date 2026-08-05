@@ -31,4 +31,9 @@ export interface TrackRow {
   valence: number | null;
   tempo: number | null;
   timeSignature: number | null;
+  // Set only for a track added via ISRC before its real Spotify URI is
+  // known (e.g. "search more by this artist" results, resolved from Deezer
+  // rather than a Spotify search) — the heal sweep uses this to resolve the
+  // URI later via `isrc:{isrc}` search. Null for every normally-added track.
+  isrc: string | null;
 }

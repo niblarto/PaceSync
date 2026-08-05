@@ -3,7 +3,8 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import fs from "fs";
 import path from "path";
-import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest, getBurstCooldownRemainingMs } from "@/lib/spotify-rate-limit";
+import { getSpotifyBlockedUntil, getBurstCooldownRemainingMs } from "@/lib/spotify-rate-limit";
+import { deezerIsrc, resolveByIsrc } from "@/lib/track-enrich";
 
 const DEFAULT_PID = "m001j52w";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
@@ -215,15 +216,17 @@ async function getSegmentTracks(pid: string): Promise<{ artist: string; title: s
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 export async function GET(req: NextRequest) {
+  // No longer needs a Spotify token — matching moved off Spotify's Search
+  // API onto Deezer+ReccoBeats (see the loop below) — but the route still
+  // requires a real signed-in session, same as every other API route here.
   const authHeader = req.headers.get("Authorization");
-  const spotifyToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!spotifyToken) {
+  const hasBearerAuth = authHeader?.startsWith("Bearer ") ?? false;
+  if (!hasBearerAuth) {
     const session = await getServerSession(authOptions);
     if (!session?.accessToken) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
     }
   }
-  const token = spotifyToken ?? (await getServerSession(authOptions))?.accessToken!;
   const brandPid = req.nextUrl.searchParams.get("pid") ?? DEFAULT_PID;
 
   const encoder = new TextEncoder();
@@ -259,23 +262,25 @@ export async function GET(req: NextRequest) {
 
         send({ type: "start", total: bbcTracks.length, programName, episodePid, airDate });
 
+        // Matching moved off Spotify's Search API entirely: Deezer resolves
+        // each BBC segment's ISRC (keyless), then ReccoBeats resolves a
+        // playable Spotify URI + audio features directly from that ISRC
+        // (also no Spotify call) — see lib/track-enrich.ts's deezerIsrc/
+        // resolveByIsrc. This route's own repeated per-track Spotify search
+        // was the confirmed, repeated trigger of real ~20-24hr Spotify
+        // rate-limit bans (same query recurring verbatim across sessions
+        // each time a BBC card was loaded) — retained here only as a
+        // preflight check so a still-active ban from some other call site
+        // is at least visible in the response, not because this loop can
+        // trigger one itself anymore.
         const spotifyResults: CacheEntry[] = [];
         let retryAfter: number | null = null;
-
-        // Already rate-limited from an earlier request — this can be a very
-        // long wait (Spotify's app-level throttle can run 20+ hours), so
-        // don't block this request on it: skip every uncached track
-        // immediately (same as a 429 hit mid-run below) and let the "done"
-        // event's retryAfter tell the UI exactly when to try again, instead
-        // of the connection just hanging until it times out.
         const preflightBlocked = await getSpotifyBlockedUntil();
         const burstWaitMs = getBurstCooldownRemainingMs();
         if (preflightBlocked || burstWaitMs > 0) {
           retryAfter = preflightBlocked
             ? Math.max(0, Math.ceil((new Date(preflightBlocked).getTime() - Date.now()) / 1000))
             : Math.ceil(burstWaitMs / 1000);
-          console.log(`[bbc/tracks] Spotify already rate-limited (${retryAfter}s left) — skipping searches`);
-          send({ type: "rate-limited", waitSec: retryAfter });
         }
         const initialCacheSize = spotifyCache.size;
         let cacheHits = 0;
@@ -293,52 +298,28 @@ export async function GET(req: NextRequest) {
             continue;
           }
 
-          if (retryAfter !== null) {
-            spotifyResults.push(null);
-            send({ type: "progress", current: i + 1, total: bbcTracks.length, skipped: true });
-            continue;
-          }
+          let result: CacheEntry = null;
+          try {
+            const isrc = await deezerIsrc(t.title, t.artist);
+            if (isrc) {
+              const resolved = await resolveByIsrc(isrc);
+              if (resolved) {
+                result = { uri: resolved.uri, name: t.title, artistName: t.artist };
+              }
+            }
+          } catch { /* leave result null — same as a miss below */ }
 
-          const q = encodeURIComponent(`${t.title} ${t.artist}`);
-          recordSpotifyRequest();
-          const res = await fetch(
-            `https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`,
-            { headers: { Authorization: `Bearer ${token}` } }
-          );
-
-          if (res.status === 429) {
-            retryAfter = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
-            console.log(`[bbc/tracks] 429 on "${t.title}" by "${t.artist}" — retry-after ${retryAfter}s`);
-            await setSpotifyBlockedUntil(new Date(Date.now() + retryAfter * 1000).toISOString());
-            spotifyResults.push(null);
-            send({ type: "progress", current: i + 1, total: bbcTracks.length, skipped: true });
-            continue;
-          }
-
-          if (!res.ok) {
-            console.log(`[bbc/tracks] search HTTP ${res.status} for "${t.title}" by "${t.artist}"`);
-            spotifyResults.push(null);
+          if (!result) {
+            console.log(`[bbc/tracks] no Deezer/ReccoBeats match for "${t.title}" by "${t.artist}"`);
             misses++;
           } else {
-            const data = await res.json() as {
-              tracks?: { items?: { uri: string; name: string; artists: { name: string }[] }[] };
-            };
-            const item = data.tracks?.items?.[0];
-            const result: CacheEntry = item
-              ? { uri: item.uri, name: item.name, artistName: item.artists[0]?.name ?? t.artist }
-              : null;
-            if (!result) {
-              console.log(`[bbc/tracks] no match for "${t.title}" by "${t.artist}"`);
-              misses++;
-            } else {
-              newHits++;
-            }
-            spotifyCache.set(cacheKey, result);
-            spotifyResults.push(result);
+            newHits++;
           }
+          spotifyCache.set(cacheKey, result);
+          spotifyResults.push(result);
 
           send({ type: "progress", current: i + 1, total: bbcTracks.length });
-          await sleep(120);
+          await sleep(120); // polite gap for Deezer's own rate limit (50 req/5s)
         }
 
         // Persist any new entries to disk (including null/not-found to avoid re-searching)
@@ -348,7 +329,7 @@ export async function GET(req: NextRequest) {
         console.log(
           `[bbc/tracks] matched ${matched}/${bbcTracks.length} ` +
           `(${cacheHits} cached, ${newHits} new, ${misses} misses)` +
-          (retryAfter !== null ? ` rate-limited retry-after ${retryAfter}s` : "")
+          (retryAfter !== null ? ` (an unrelated Spotify rate-limit is active, retry-after ${retryAfter}s)` : "")
         );
 
         const tracks = bbcTracks.map((t, i) => ({

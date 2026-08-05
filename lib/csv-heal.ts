@@ -152,13 +152,15 @@ async function spotifyDurationMs(id: string, token: string): Promise<number | nu
   return typeof t.duration_ms === "number" ? t.duration_ms : null;
 }
 
-// Finds a Spotify track URI for a row that has none (e.g. imported from a
-// non-Spotify CSV) by searching name + artist. Same rate-limit handling as
-// spotifyDurationMs. Only the top result is used — good enough for the
-// common case (exact title/artist), same trade-off the BBC cron's search
-// already makes.
-async function spotifySearchUri(name: string, artist: string, token: string): Promise<string | null | SpotifyRateLimited> {
-  const q = encodeURIComponent(`track:${name} artist:${artist}`);
+// Finds a Spotify track URI for a row that has none. Prefers an exact ISRC
+// search (`isrc:{isrc}`) when the row has one — a precise single-recording
+// match, no fuzzy title/artist guessing — falling back to name + artist
+// otherwise (e.g. a row imported from a non-Spotify CSV with no ISRC at
+// all). Same rate-limit handling as spotifyDurationMs. Only the top result
+// is used — good enough for the common case, same trade-off the BBC cron's
+// search already makes.
+async function spotifySearchUri(name: string, artist: string, token: string, isrc?: string | null): Promise<string | null | SpotifyRateLimited> {
+  const q = encodeURIComponent(isrc ? `isrc:${isrc}` : `track:${name} artist:${artist}`);
   recordSpotifyRequest();
   let res = await fetch(`https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -369,6 +371,7 @@ async function doHealInner(): Promise<HealResult> {
     rowNo: number;
     name: string;
     artist: string;
+    isrc: string | null;
   }
   const gaps: Gap[] = [];
   const uriGaps: UriGap[] = [];
@@ -379,7 +382,10 @@ async function doHealInner(): Promise<HealResult> {
     if (!uri.startsWith("spotify:track:")) {
       const name = row.trackName?.trim() ?? "";
       const artist = row.artistNames?.trim() ?? "";
-      if (name && artist) uriGaps.push({ rowNo: row.rowNo, name, artist });
+      // A row can have an ISRC with no name/artist yet on rare malformed
+      // input, but in practice "search more by this artist" always supplies
+      // both — require name+artist same as before, ISRC is additive.
+      if (name && artist) uriGaps.push({ rowNo: row.rowNo, name, artist, isrc: row.isrc });
       continue;
     }
     const needsDuration = isFieldBlank(row, "Duration (ms)");
@@ -477,7 +483,7 @@ async function doHealInner(): Promise<HealResult> {
       if (uriToken === null) break; // rate-limited (this sweep or an earlier one) — stop searching
       if (uriToken === undefined) uriToken = await spotifyAppToken();
       if (!uriToken) break; // no client-credentials configured
-      const result = await spotifySearchUri(g.name, g.artist, uriToken);
+      const result = await spotifySearchUri(g.name, g.artist, uriToken, g.isrc);
       if (isRateLimited(result)) {
         uriToken = null;
         spotifyRetryAt = result.retryAt;
