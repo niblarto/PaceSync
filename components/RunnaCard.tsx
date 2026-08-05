@@ -820,6 +820,21 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   const [courses, setCourses] = useState<GarminCourse[] | null>(null);
   const [courseOffsets, setCourseOffsets] = useState<Record<string, number>>({});
   const [weather, setWeather] = useState<Record<string, DayWeather>>({});
+  // Which AI DJ provider is configured — only known here so the "N segments
+  // fell back to basic BPM matching" warning can point at the right place
+  // to investigate. Claude/Gemini calls run on the Pi and log to Settings'
+  // Usage panel; Local (Ollama) calls run entirely on the separate AI DJ
+  // service PC and are never surfaced in this app's Settings at all.
+  const [aiDjProvider, setAiDjProvider] = useState<"local" | "claude" | "gemini">("local");
+
+  useEffect(() => {
+    fetch("/api/settings/ai-dj")
+      .then(r => r.json())
+      .then((d: { provider?: string }) => {
+        if (d.provider === "claude" || d.provider === "gemini" || d.provider === "local") setAiDjProvider(d.provider);
+      })
+      .catch(() => {});
+  }, []);
 
   // Run-time weather for the week ahead — one fetch covers every card.
   useEffect(() => {
@@ -1114,7 +1129,16 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
             // network) and fell back to the deterministic distance-chain —
             // the mix still built, but with less curated track selection.
             const n = msg.llmFailures.length;
-            const warning = `⚠ ${n} segment${n === 1 ? "" : "s"} fell back to basic BPM matching (model call failed) — check Settings usage`;
+            // Claude/Gemini calls run on the Pi and their failure reason
+            // (rate limit, quota, network) is logged in Settings' AI DJ
+            // Usage panel. Local (Ollama) calls run entirely on the
+            // separate AI DJ service PC — that panel doesn't exist for
+            // this provider, so point at the actual place to look instead
+            // of a Settings section that isn't there.
+            const whereToCheck = aiDjProvider === "local"
+              ? "check the AI DJ service's own logs on its host PC"
+              : "check Settings → AI DJ → Usage";
+            const warning = `⚠ ${n} segment${n === 1 ? "" : "s"} fell back to basic BPM matching (model call failed) — ${whereToCheck}`;
             setMixState(s => ({ ...s, [w.uid]: { ...s[w.uid], status: "building", warning } }));
           } else if (msg.type === "warning") {
             // Library tracks missing data (duration/BPM/…) that couldn't be
