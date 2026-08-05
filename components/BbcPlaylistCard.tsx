@@ -641,7 +641,14 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
         (csvError ? ` · ⚠️ local library not updated: ${csvError}` : "")
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update");
+      // A 429 from addTracksBrowser already published the real retry time to
+      // the shared spotifyFetch rate-limit state (see lib/spotify-browser.ts)
+      // — the page-level <SpotifyRateLimitBanner /> shows a live countdown
+      // for that, so this card's own error just needs to say what happened,
+      // not repeat a raw "Spotify 429: {}" (the body really is empty on a
+      // long rate limit — nothing more specific to show here anyway).
+      const msg = e instanceof Error ? e.message : "Failed to update";
+      setError(/^Spotify 429\b/.test(msg) ? "Rate limited by Spotify — see the banner above for when it clears." : msg);
     } finally {
       setUpdating(false);
     }

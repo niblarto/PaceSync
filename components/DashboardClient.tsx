@@ -2638,7 +2638,14 @@ function SuggestionsCard({ suggest, onClose, onAdd }: {
           : `Added ${addedCount} track${addedCount === 1 ? "" : "s"}`
       );
     } catch (e) {
-      setAddError(e instanceof Error ? e.message : "Failed to add tracks");
+      // A 429 from addTracksBrowser already published the real retry time to
+      // the shared spotifyFetch rate-limit state (see lib/spotify-browser.ts)
+      // — the page's <SpotifyRateLimitBanner /> shows a live countdown for
+      // that, so this card's own error just needs to say what happened, not
+      // repeat a raw "Spotify 429: {}" (the body really is empty on a long
+      // rate limit — nothing more specific to show here anyway).
+      const msg = e instanceof Error ? e.message : "Failed to add tracks";
+      setAddError(/^Spotify 429\b/.test(msg) ? "Rate limited by Spotify — see the banner above for when it clears." : msg);
       setRowStatus(prev => {
         const next = new Map(prev);
         for (const i of indices) if (next.get(i) === "adding") next.set(i, "failed");

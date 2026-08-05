@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { BbcPlaylistCard } from "./BbcPlaylistCard";
+import { SpotifyRateLimitBanner } from "./SpotifyRateLimitBanner";
 
 const BBC_DEFAULTS = [
   { pid: "m001j52w", name: "6 Music Playlist" },
@@ -45,6 +46,8 @@ export function BbcRadioClient() {
           </Link>
         </div>
       </header>
+
+      <SpotifyRateLimitBanner />
 
       <main className="max-w-[1600px] mx-auto px-4 py-6 space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 items-start">
