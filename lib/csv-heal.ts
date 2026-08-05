@@ -88,6 +88,12 @@ export interface HealResult {
   checked: number;   // rows examined
   healed: number;    // rows that gained at least one value
   incomplete: number; // rows still missing something after the sweep
+  // Set if this sweep hit a real Spotify rate limit (both apps, if a
+  // second one is configured) and had to fall back to Deezer/Last.fm —
+  // surfaced by callers (e.g. app/api/tracks/add, the BBC card's "Update"
+  // flow) so a rate-limit-caused miss reads differently from a genuine
+  // "couldn't find this track anywhere" miss.
+  spotifyRetryAt: string | null;
 }
 
 const FEATURE_COLS: Array<[string, keyof TrackFeatures]> = [
@@ -95,10 +101,17 @@ const FEATURE_COLS: Array<[string, keyof TrackFeatures]> = [
   ["Energy", "energy"], ["Danceability", "danceability"], ["Valence", "valence"],
 ];
 
-async function spotifyAppToken(): Promise<string | null> {
-  const id = process.env.SPOTIFY_CLIENT_ID;
-  const secret = process.env.SPOTIFY_CLIENT_SECRET;
-  if (!id || !secret) return null;
+// Two independent Spotify apps can be configured for query-only lookups
+// (never playlist writes, which are tied to the user's own OAuth session
+// under whichever single app they signed in with — this is strictly a
+// client-credentials thing). Spotify's rate limit is per-app, so a second
+// app has its own separate 30s rolling budget: when the primary app's
+// client-credentials token gets rate-limited mid-sweep, falling over to
+// the second app's token lets the sweep keep using Spotify instead of
+// giving up on it entirely for the rest of the run. SPOTIFY_CLIENT_ID_2/
+// SPOTIFY_CLIENT_SECRET_2 are optional — everything degrades to
+// single-app behavior (today's behavior) if they're unset.
+async function fetchAppToken(id: string, secret: string): Promise<string | null> {
   try {
     const res = await fetch("https://accounts.spotify.com/api/token", {
       method: "POST",
@@ -112,6 +125,68 @@ async function spotifyAppToken(): Promise<string | null> {
     return ((await res.json()) as { access_token: string }).access_token;
   } catch {
     return null;
+  }
+}
+
+async function spotifyAppToken(): Promise<string | null> {
+  const id = process.env.SPOTIFY_CLIENT_ID;
+  const secret = process.env.SPOTIFY_CLIENT_SECRET;
+  if (!id || !secret) return null;
+  return fetchAppToken(id, secret);
+}
+
+// Second app's token, or null if not configured.
+async function spotifyAppToken2(): Promise<string | null> {
+  const id = process.env.SPOTIFY_CLIENT_ID_2;
+  const secret = process.env.SPOTIFY_CLIENT_SECRET_2;
+  if (!id || !secret) return null;
+  return fetchAppToken(id, secret);
+}
+
+// Query-only lookups (duration/URI search — never a playlist write, which
+// stays on the user's own OAuth session under whichever single app they
+// signed in with) prefer the SECOND app first when one is configured, so
+// this sweep's search volume never touches the main app's own 30s rolling
+// budget at all — playlist adds/plays/deletes (a completely different,
+// user-scoped token) are the only thing that should ever draw on that
+// budget. Only falls back to the primary app if the second one isn't
+// configured, or itself gets rate-limited mid-sweep.
+class SearchTokenSource {
+  private primary: string | null | undefined;
+  private secondary: string | null | undefined;
+  usingPrimary = false;
+
+  constructor(private readonly alreadyBlocked: boolean) {}
+
+  // Returns the token to use right now, or null if nothing usable is
+  // available at all (neither app configured, or both rate-limited).
+  async current(): Promise<string | null> {
+    if (this.usingPrimary) {
+      if (this.alreadyBlocked) return null;
+      if (this.primary === undefined) this.primary = await spotifyAppToken();
+      return this.primary;
+    }
+    if (this.secondary === undefined) this.secondary = await spotifyAppToken2();
+    if (this.secondary) return this.secondary;
+    // No second app configured at all — fall back to the primary immediately.
+    this.usingPrimary = true;
+    if (this.alreadyBlocked) return null;
+    if (this.primary === undefined) this.primary = await spotifyAppToken();
+    return this.primary;
+  }
+
+  // Called after a 429 on whichever token `current()` just returned.
+  // Returns true if there's another app left to retry with (caller should
+  // retry the same request), false if Spotify is exhausted entirely.
+  async onRateLimited(): Promise<boolean> {
+    if (!this.usingPrimary) {
+      this.usingPrimary = true;
+      if (this.alreadyBlocked) return false;
+      if (this.primary === undefined) this.primary = await spotifyAppToken();
+      return !!this.primary;
+    }
+    this.primary = null; // primary also rate-limited — nothing left to try
+    return false;
   }
 }
 
@@ -345,7 +420,7 @@ async function doHeal(): Promise<HealResult> {
   try {
     return await doHealInner();
   } catch (e) {
-    if (e === HEAL_CANCELLED) return { checked: 0, healed: 0, incomplete: 0 };
+    if (e === HEAL_CANCELLED) return { checked: 0, healed: 0, incomplete: 0, spotifyRetryAt: null };
     throw e;
   }
 }
@@ -354,7 +429,7 @@ async function doHealInner(): Promise<HealResult> {
   const csvFile = loadRunningPlaylistConfig().csvFile;
   const destPath = activeCsvPath();
   const allRows = readAllTracks(csvFile);
-  if (allRows.length === 0) return { checked: 0, healed: 0, incomplete: 0 };
+  if (allRows.length === 0) return { checked: 0, healed: 0, incomplete: 0, spotifyRetryAt: null };
 
   interface Gap {
     uri: string; // mutable — set once a uriGap gets promoted after a search hit
@@ -422,7 +497,7 @@ async function doHealInner(): Promise<HealResult> {
   if (gaps.length === 0 && uriGaps.length === 0) {
     addLog(`${checked} tracks checked — nothing missing`);
     await writeProgress({ running: false, phase: null, current: 0, total: 0, healedSoFar: 0, startedAt: null, finishedAt: new Date().toISOString(), spotifyRetryAt: null, log });
-    return { checked, healed: 0, incomplete: 0 };
+    return { checked, healed: 0, incomplete: 0, spotifyRetryAt: null };
   }
 
   addLog(`${gaps.length + uriGaps.length}/${checked} tracks missing data — starting`);
@@ -470,7 +545,7 @@ async function doHealInner(): Promise<HealResult> {
   // before every call — search is a heavier-weight endpoint than the
   // per-track lookup, so this is throttled more conservatively than the
   // duration pass below.
-  let uriToken: string | null | undefined = blockedUntil ? null : undefined;
+  const uriTokens = new SearchTokenSource(!!blockedUntil);
   let urisHealed = 0;
   const db = getDb();
   const setUriStmt = db.prepare("UPDATE tracks SET uri = ? WHERE csv_file = ? AND row_no = ? AND (uri IS NULL OR uri = '')");
@@ -480,12 +555,17 @@ async function doHealInner(): Promise<HealResult> {
     for (let i = 0; i < uriGaps.length; i++) {
       checkCancelled();
       const g = uriGaps[i];
-      if (uriToken === null) break; // rate-limited (this sweep or an earlier one) — stop searching
-      if (uriToken === undefined) uriToken = await spotifyAppToken();
-      if (!uriToken) break; // no client-credentials configured
-      const result = await spotifySearchUri(g.name, g.artist, uriToken, g.isrc);
+      const activeUriToken = await uriTokens.current();
+      if (!activeUriToken) break; // nothing usable — no apps configured, or both rate-limited
+      const result = await spotifySearchUri(g.name, g.artist, activeUriToken, g.isrc);
       if (isRateLimited(result)) {
-        uriToken = null;
+        const wasUsingPrimary = uriTokens.usingPrimary;
+        const hasAnotherApp = await uriTokens.onRateLimited();
+        if (hasAnotherApp) {
+          addLog(`Spotify rate-limited on the ${wasUsingPrimary ? "primary" : "second"} app during URI search — switching apps`);
+          i--; // retry this same track on the other app instead of skipping it
+          continue;
+        }
         spotifyRetryAt = result.retryAt;
         await setSpotifyBlockedUntil(result.retryAt);
         addLog(`Spotify rate-limited during URI search — pausing until ${new Date(result.retryAt).toLocaleTimeString()}, ${uriGaps.length - i} tracks left unsearched this sweep`);
@@ -558,7 +638,7 @@ async function doHealInner(): Promise<HealResult> {
   // request/row) — flushed incrementally every 25 rows so a restart
   // doesn't lose an hour of progress on a large library, with a progress
   // line every 50 rows.
-  let token: string | null | undefined = blockedUntil ? null : undefined; // lazy — only fetch if needed
+  const durationTokens = new SearchTokenSource(!!blockedUntil);
   const durationGaps = gaps.filter(g => g.needsDuration);
   let durationHealed = 0;
   if (durationGaps.length > 0) addLog(`checking ${durationGaps.length} tracks for missing durations (Spotify → Deezer → Last.fm)…`);
@@ -566,20 +646,23 @@ async function doHealInner(): Promise<HealResult> {
     checkCancelled();
     const g = durationGaps[i];
     let ms: number | null = null;
-    if (token !== null) {
-      if (token === undefined) token = await spotifyAppToken();
-      if (token) {
-        const result = await spotifyDurationMs(g.id, token);
-        if (isRateLimited(result)) {
-          token = null; // stop using Spotify for the rest of this sweep
+    const activeToken = await durationTokens.current();
+    if (activeToken) {
+      const result = await spotifyDurationMs(g.id, activeToken);
+      if (isRateLimited(result)) {
+        const wasUsingPrimary = durationTokens.usingPrimary;
+        const hasAnotherApp = await durationTokens.onRateLimited();
+        if (hasAnotherApp) {
+          addLog(`Spotify rate-limited on the ${wasUsingPrimary ? "primary" : "second"} app — switching apps for duration lookups`);
+        } else {
           spotifyRetryAt = result.retryAt;
           await setSpotifyBlockedUntil(result.retryAt);
           addLog(`Spotify rate-limited — pausing Spotify lookups until ${new Date(result.retryAt).toLocaleTimeString()}, continuing with Deezer/Last.fm only`);
-        } else {
-          ms = result;
         }
-        await sleep(120);
+      } else {
+        ms = result;
       }
+      await sleep(120);
     }
     if (ms == null && g.name && g.artist) {
       try { ms = await deezerDurationMs(g.name, g.artist); } catch { ms = null; }
@@ -648,5 +731,5 @@ async function doHealInner(): Promise<HealResult> {
     running: false, phase: null, current: durationGaps.length, total: durationGaps.length,
     healedSoFar: healed, startedAt, finishedAt: new Date().toISOString(), spotifyRetryAt, log,
   });
-  return { checked, healed, incomplete };
+  return { checked, healed, incomplete, spotifyRetryAt };
 }

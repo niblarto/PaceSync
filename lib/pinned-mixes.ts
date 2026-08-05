@@ -125,6 +125,32 @@ export async function setPinnedMix(entry: PinnedMix): Promise<boolean> {
   return result;
 }
 
+// Removes any pinned mix dated today-or-later whose (date, title) no
+// longer matches a workout in the live Runna schedule — the ICS feed is
+// the source of truth, so a pin surviving an edit that renamed/removed its
+// slot (e.g. "3.75mi Easy Run" swapped for "4.5mi Easy Run" on the same
+// day) is stale and must go, not linger until manually noticed. Deliberately
+// scoped to future (>= today) dates only: a PAST date's pin is a permanent
+// record of what a completed run actually used (same invariant
+// lib/todays-run-history.ts enforces for its own store) and must never be
+// swept just because the calendar later changed — only an unplayed,
+// still-upcoming pin can be considered stale relative to the current feed.
+export function pruneStalePinsAgainstSchedule(liveWorkouts: { date: string; title: string }[]): void {
+  const db = getDb();
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = db.prepare("SELECT date, workout_title FROM pinned_mixes WHERE date >= ?").all(today) as { date: string; workout_title: string }[];
+  if (rows.length === 0) return;
+
+  const live = new Set(liveWorkouts.map(w => `${w.date}|||${w.title}`));
+  const del = db.prepare("DELETE FROM pinned_mixes WHERE date = ? AND workout_title = ?");
+  const tx = db.transaction(() => {
+    for (const r of rows) {
+      if (!live.has(`${r.date}|||${r.workout_title}`)) del.run(r.date, r.workout_title);
+    }
+  });
+  tx();
+}
+
 export async function removePinnedMix(date: string, title: string, atMs?: number): Promise<void> {
   const db = getDb();
   const tx = db.transaction(() => {

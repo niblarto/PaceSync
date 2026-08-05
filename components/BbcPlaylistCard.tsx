@@ -419,7 +419,6 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
           } else if (msg.type === "done") {
             const loaded = (msg.tracks as Track[]) ?? [];
             setTracks(loaded);
-            setRetryAfter((msg.retryAfter as number | null) ?? null);
             if (msg.programName) {
               setProgramName(msg.programName as string);
             }
@@ -612,9 +611,17 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ tracks: rows, allowDeletedUris }),
         });
-        const ad = await ar.json() as { added?: number; error?: string };
+        const ad = await ar.json() as { added?: number; error?: string; spotifyRetryAt?: string | null };
         if (!ar.ok || ad.error) throw new Error(ad.error ?? `HTTP ${ar.status}`);
         added = ad.added ?? rows.length;
+        // The background heal sweep this triggers can hit a genuine Spotify
+        // rate limit (its own duration/URI-search lookups) — surfaces here,
+        // after Update, rather than at load time where no Spotify call is
+        // ever made anymore.
+        if (ad.spotifyRetryAt) {
+          const waitSec = Math.max(0, Math.round((new Date(ad.spotifyRetryAt).getTime() - Date.now()) / 1000));
+          if (waitSec > 0) setRetryAfter(waitSec);
+        }
       } catch (e) {
         // Spotify add already succeeded — surface this distinctly from "0
         // new, already in library" so tracks aren't silently lost from the
@@ -714,7 +721,7 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
       {loading && progressTotal > 0 && (
         <div className="space-y-1">
           <div className="flex justify-between text-xs text-slate-500">
-            <span>Matching tracks on Spotify…</span>
+            <span>Matching tracks (Deezer/ReccoBeats)…</span>
             <span>{progress}/{progressTotal} · {pct}%</span>
           </div>
           <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
@@ -735,13 +742,13 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
       {error && <p className="text-xs text-red-400">{error}</p>}
       {retryAfter !== null && (
         <p className="text-xs text-amber-400">
-          Spotify rate limited — wait{" "}
+          Spotify rate limited during the background library backfill — clears in{" "}
           {retryAfter >= 3600
             ? `${Math.floor(retryAfter / 3600)}h ${Math.ceil((retryAfter % 3600) / 60)}min`
             : retryAfter >= 60
               ? `${Math.ceil(retryAfter / 60)}min`
-              : `${retryAfter}s`}{" "}
-          before refreshing
+              : `${retryAfter}s`}
+          {" "}— some added tracks may be missing BPM data until then
         </p>
       )}
       {updateMsg && <p className="text-xs text-green-400">{updateMsg}</p>}

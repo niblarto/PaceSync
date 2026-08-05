@@ -194,6 +194,16 @@ function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPast
   const pastRuns: RunnaPastRun[] = [];
 
   for (const block of blocks) {
+    // Runna's feed doesn't delete a superseded/edited workout's VEVENT
+    // outright — it leaves the old block in place (same DTSTART, a
+    // different UID suffix) and flags it X-SHOULD-REMOVE:true instead.
+    // Confirmed against a real edited workout: after changing a "3.75mi
+    // Easy Run" to "4.5mi Easy Run" in the Runna app, the feed kept BOTH
+    // VEVENTs for that date, with only the old one carrying this flag —
+    // ignoring it meant the stale workout kept showing as a real second
+    // entry (and any mix pinned to it never got cleaned up).
+    if (extractField(block, "X-SHOULD-REMOVE").toLowerCase() === "true") continue;
+
     const uid        = extractField(block, "UID");
     const rawDate    = extractField(block, "DTSTART");
     const rawSummary = unescapeIcs(extractField(block, "SUMMARY"));

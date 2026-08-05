@@ -27,7 +27,10 @@ export async function POST(req: NextRequest) {
       // Backfill Duration (ms) and any missing features before responding,
       // so a mix built right after the add sees complete rows.
       const heal = await healActiveCsv().catch(() => null);
-      return NextResponse.json({ ok: true, added, rejected, healed: heal?.healed ?? 0, incomplete: heal?.incomplete ?? 0 });
+      return NextResponse.json({
+        ok: true, added, rejected, healed: heal?.healed ?? 0, incomplete: heal?.incomplete ?? 0,
+        spotifyRetryAt: heal?.spotifyRetryAt ?? null,
+      });
     }
     return NextResponse.json({ ok: true, added, rejected });
   } catch (e) {

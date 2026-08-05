@@ -338,7 +338,13 @@ export async function GET(req: NextRequest) {
           artistName: spotifyResults[i]?.artistName ?? t.artist,
         }));
 
-        send({ type: "done", tracks, programName, airDate, retryAfter });
+        // No retryAfter in this payload — this route makes zero Spotify
+        // calls now (Deezer+ReccoBeats only), so a Spotify rate limit here
+        // would be misleading noise on the card. A real Spotify-search
+        // rate limit can still occur later, in the background heal sweep
+        // that runs after "Update" adds tracks — see handleUpdate's own
+        // spotifyRetryAt handling from /api/tracks/add's response instead.
+        send({ type: "done", tracks, programName, airDate });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
         console.error(`[bbc/tracks] pid=${brandPid} error: ${message}`);
