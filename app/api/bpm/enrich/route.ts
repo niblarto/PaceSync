@@ -11,21 +11,30 @@ import { fetchFeatures, resolveByIsrc, TrackQuery, sleep } from "@/lib/track-enr
 // an ISRC (no Spotify API call) — used by "search more by this artist"
 // (components/DashboardClient.tsx), whose Deezer results carry an ISRC but
 // no Spotify ID at all yet.
+//
+// A Spotify Search fallback for ReccoBeats misses was tried and removed —
+// even routed through the second configured app first, it still drew a
+// real ~19hr Spotify rate-limit ban. ReccoBeats' coverage gaps (confirmed
+// real: Deezer resolves an ISRC fine, ReccoBeats has nothing for it, yet
+// the track is trivially findable on Spotify) are left as unmatched
+// results instead — a track failing to resolve here shows as "no match"
+// rather than risking another ban.
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json() as { ids?: string[]; tracks?: TrackQuery[]; isrcs?: string[] };
+  const body = await req.json() as { ids?: string[]; tracks?: TrackQuery[]; isrcs?: (string | { isrc: string })[] };
 
   if (body.isrcs?.length) {
+    const isrcs = body.isrcs.map(v => typeof v === "string" ? v : v.isrc);
     const results: Record<string, { uri: string; tempo: number; key: number; mode: number; energy: number; danceability: number; valence: number } | null> = {};
-    for (let i = 0; i < body.isrcs.length; i++) {
+    for (let i = 0; i < isrcs.length; i++) {
       if (i > 0) await sleep(120);
       try {
-        results[body.isrcs[i]] = await resolveByIsrc(body.isrcs[i]);
+        results[isrcs[i]] = await resolveByIsrc(isrcs[i]);
       } catch {
-        results[body.isrcs[i]] = null;
+        results[isrcs[i]] = null;
       }
     }
     return NextResponse.json({ resolved: results });

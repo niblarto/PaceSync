@@ -14,7 +14,12 @@ import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 // 429 if it gets one), which is exactly the kind of invisible-to-every-log
 // Spotify traffic that was found to still exist here after a prior
 // investigation into an unexplained ~20hr rate-limit block.
-export function deleteTrackFromLibrary(uri: string, playlistId: string | null): void {
+// skipDeletedLog: for a duplicate-cleanup delete (Settings' "Possible
+// duplicates" card) — removing a redundant copy of a song the library
+// still legitimately has under its other URI isn't a "never bring this
+// track back" decision, so it shouldn't blacklist the deleted URI the way
+// every other delete path in this app deliberately does.
+export function deleteTrackFromLibrary(uri: string, playlistId: string | null, skipDeletedLog?: boolean): void {
   if (playlistId) {
     freshSpotifyToken().then(token => {
       if (!token) return;
@@ -28,6 +33,6 @@ export function deleteTrackFromLibrary(uri: string, playlistId: string | null): 
   fetch("/api/tracks/delete", {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ spotifyUri: uri }),
+    body: JSON.stringify({ spotifyUri: uri, skipDeletedLog }),
   }).catch(() => {});
 }

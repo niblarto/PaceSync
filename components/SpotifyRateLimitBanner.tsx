@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { subscribeSpotifyRateLimit } from "@/lib/spotify-browser";
+import { subscribeSpotifyRateLimit, seedSpotifyRateLimitFromServer } from "@/lib/spotify-browser";
 
 // "1h 2m 3s" / "2m 3s" / "3s", trimming leading zero units so a 4-second wait
 // just shows "4s" instead of "0h 0m 4s".
@@ -34,6 +34,19 @@ export function SpotifyRateLimitBanner() {
   const [dismissedAtMs, setDismissedAtMs] = useState<number | null>(null);
 
   useEffect(() => subscribeSpotifyRateLimit(setRetryAtMs), []);
+
+  // Check the persisted server-side sentinel once on mount, so a page
+  // load/refresh that lands right in the middle of an already-active ban
+  // shows the banner immediately instead of staying silent until the next
+  // live Spotify call in this session happens to fail again.
+  useEffect(() => {
+    fetch("/api/spotify/rate-limit-status")
+      .then(r => r.json())
+      .then((d: { until?: string | null }) => {
+        if (d.until) seedSpotifyRateLimitFromServer(new Date(d.until).getTime());
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (retryAtMs == null) return;

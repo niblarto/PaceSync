@@ -1,12 +1,13 @@
 ﻿"use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { FloatingCard } from "./FloatingCard";
 import { signOut, useSession } from "next-auth/react";
 import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import { SpotifyRateLimitBanner } from "./SpotifyRateLimitBanner";
 import { MissingDataBanner } from "./MissingDataBanner";
+import { DuplicateTracksBanner } from "./DuplicateTracksBanner";
 import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
@@ -173,6 +174,11 @@ interface Suggestion {
   // Spotify search (see searchArtistTopTracks) — spotifyUrl stays null for
   // these until a heal sweep resolves the real URI via an isrc: search.
   isrc?: string | null;
+  // Set (only by the artist-search path) when this track can't be added —
+  // shown greyed out with the reason, instead of silently dropped from the
+  // results list, so a "why isn't Track X here" question has a visible
+  // answer right in the list. undefined/null = eligible.
+  ineligibleReason?: string | null;
 }
 
 // Module-level (not component state) so it survives remounts within the tab
@@ -1415,7 +1421,12 @@ export function DashboardClient({ spotifyUser }: Props) {
       setSuggest(s => s && { ...s, progress: "Matching on ReccoBeats…" });
       const withIsrc = topTracks.filter((t): t is typeof t & { isrc: string } => !!t.isrc);
       const existing = new Set(allTracks.map(t => t.uri));
+      // Every Deezer result is kept (never silently dropped) — a track that
+      // can't be added gets ineligibleReason set instead, so the results
+      // list can show it greyed out with why, matching the BBC card's
+      // "leave ineligible tracks visible, grey out with a reason" pattern.
       const suggestions: Suggestion[] = [];
+      const seenSpotifyUrls = new Set<string>();
 
       if (withIsrc.length > 0) {
         const er = await fetch("/api/bpm/enrich", {
@@ -1430,14 +1441,23 @@ export function DashboardClient({ spotifyUser }: Props) {
 
         for (const t of withIsrc) {
           const r = resolved[t.isrc];
-          if (!r || existing.has(r.uri)) continue;
-          if (suggestions.some(s => s.spotifyUrl === `https://open.spotify.com/track/${r.uri.split(":").pop()}`)) continue;
+          if (!r) {
+            suggestions.push({
+              name: t.title, artist: t.artist, bpm: 0, camelot: "", spotifyUrl: null,
+              distance: 0, tempo: 0, key: 0, mode: 0, energy: 0, danceability: 0, valence: 0,
+              isrc: t.isrc, ineligibleReason: "No Spotify match found",
+            });
+            continue;
+          }
+          const spotifyUrl = `https://open.spotify.com/track/${r.uri.split(":").pop()}`;
+          if (seenSpotifyUrls.has(spotifyUrl)) continue; // true duplicate Deezer entry — not worth showing twice
+          seenSpotifyUrls.add(spotifyUrl);
           suggestions.push({
             name: t.title,
             artist: t.artist,
             bpm: Math.round(r.tempo),
             camelot: "",
-            spotifyUrl: `https://open.spotify.com/track/${r.uri.split(":").pop()}`,
+            spotifyUrl,
             distance: 0,
             tempo: r.tempo,
             key: r.key,
@@ -1446,38 +1466,55 @@ export function DashboardClient({ spotifyUser }: Props) {
             danceability: r.danceability,
             valence: r.valence,
             isrc: t.isrc,
+            ineligibleReason: existing.has(r.uri) ? "Already in playlist" : null,
           });
         }
       }
+      // Deezer results with no ISRC at all can't be matched to Spotify by
+      // this path — surfaced too, rather than silently vanishing.
+      for (const t of topTracks) {
+        if (t.isrc) continue;
+        suggestions.push({
+          name: t.title, artist: t.artist, bpm: 0, camelot: "", spotifyUrl: null,
+          distance: 0, tempo: 0, key: 0, mode: 0, energy: 0, danceability: 0, valence: 0,
+          isrc: null, ineligibleReason: "No Spotify match found",
+        });
+      }
 
       // If the BBC-import BPM-range filter switch is enabled (same setting
-      // used for BBC card imports, see lib/bbc-bpm-filter.ts), drop any
-      // track outside the library's usable range. Tracks with no BPM match
-      // are dropped too, same "can't judge range" rule as the BBC filter.
+      // used for BBC card imports, see lib/bbc-bpm-filter.ts), annotate any
+      // track outside the library's usable range instead of dropping it —
+      // same greyed-out treatment as everything else ineligible here.
       setSuggest(s => s && { ...s, progress: "Checking BPM range…" });
-      let filtered = suggestions;
       try {
         const fr = await fetch("/api/settings/bbc-bpm-filter");
         const fd = await fr.json() as { enabled?: boolean };
         if (fd.enabled) {
           const tempos: Record<string, number> = {};
           for (const s of suggestions) {
+            if (s.ineligibleReason) continue; // already ineligible for another reason — no BPM to check anyway if unmatched
             const id = s.spotifyUrl?.split("/").pop();
             if (id) tempos[id] = s.tempo;
           }
-          const rr = await fetch("/api/bbc/bpm-range", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tempos }),
-          });
-          const rd = await rr.json() as { inRange?: Record<string, boolean> };
-          const inRange = rd.inRange ?? {};
-          filtered = suggestions.filter(s => inRange[s.spotifyUrl?.split("/").pop() ?? ""] === true);
+          if (Object.keys(tempos).length > 0) {
+            const rr = await fetch("/api/bbc/bpm-range", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ tempos }),
+            });
+            const rd = await rr.json() as { inRange?: Record<string, boolean> };
+            const inRange = rd.inRange ?? {};
+            for (const s of suggestions) {
+              if (s.ineligibleReason) continue;
+              const id = s.spotifyUrl?.split("/").pop();
+              if (id && inRange[id] === false) s.ineligibleReason = `${s.bpm} BPM outside usable range`;
+            }
+          }
         }
-      } catch { /* BPM check is best-effort — fall through with everything kept */ }
+      } catch { /* BPM check is best-effort — leave everything eligible on failure */ }
 
-      artistSearchCache!.set(cacheKey, { results: filtered, at: Date.now() });
-      setSuggest(s => s && { ...s, results: filtered });
+      artistSearchCache!.set(cacheKey, { results: suggestions, at: Date.now() });
+      setSuggest(s => s && { ...s, results: suggestions });
     } catch (e) {
       setSuggest(s => s && { ...s, error: e instanceof Error ? e.message : "Search failed" });
     }
@@ -1829,6 +1866,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
 
       <SpotifyRateLimitBanner />
       <MissingDataBanner />
+      <DuplicateTracksBanner />
 
       <div className="max-w-[1800px] mx-auto px-4 py-8 flex-1 w-full">
         <div className={`grid grid-cols-1 gap-6 items-stretch ${
@@ -2584,6 +2622,18 @@ function SuggestionsCard({ suggest, onClose, onAdd }: {
   const [summary, setSummary] = useState<string | null>(null);
 
   const results = suggest.results;
+  // Eligible tracks first, ineligible ones (grey-out + reason, never
+  // silently dropped) after — stable within each group so unrelated
+  // re-renders don't reshuffle rows the user is looking at. Indices used
+  // elsewhere (selection, add status) are into the ORIGINAL results array,
+  // not this sorted view, so they still line up correctly after a resort.
+  const sortedIndices = useMemo(() => {
+    if (!results) return [];
+    return results
+      .map((s, i) => ({ s, i }))
+      .sort((a, b) => (!!a.s.ineligibleReason === !!b.s.ineligibleReason ? 0 : a.s.ineligibleReason ? 1 : -1))
+      .map(({ i }) => i);
+  }, [results]);
 
   function toggle(i: number) {
     setSelected(prev => {
@@ -2595,7 +2645,7 @@ function SuggestionsCard({ suggest, onClose, onAdd }: {
 
   const selectableIndices = (results ?? [])
     .map((s, i) => ({ s, i }))
-    .filter(({ s, i }) => spotifyIdFromUrl(s.spotifyUrl) !== null && !added.has(i))
+    .filter(({ s, i }) => spotifyIdFromUrl(s.spotifyUrl) !== null && !added.has(i) && !s.ineligibleReason)
     .map(({ i }) => i);
   const allSelected = selectableIndices.length > 0 && selectableIndices.every(i => selected.has(i));
 
@@ -2749,15 +2799,17 @@ function SuggestionsCard({ suggest, onClose, onAdd }: {
 
       {results !== null && results.length > 0 && (
         <div className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto no-scrollbar">
-          {results.map((s, i) => {
+          {sortedIndices.map(i => {
+            const s = results[i];
             const isAdded = added.has(i);
             const status = rowStatus.get(i);
-            const canAdd = spotifyIdFromUrl(s.spotifyUrl) !== null && !isAdded;
+            const ineligible = !!s.ineligibleReason;
+            const canAdd = spotifyIdFromUrl(s.spotifyUrl) !== null && !isAdded && !ineligible;
             return (
-              <div key={`${s.artist}-${s.name}`} className="flex items-center group/sug">
+              <div key={`${s.artist}-${s.name}`} className={`flex items-center group/sug ${ineligible ? "opacity-60" : ""}`}>
                 <label
                   className={`pl-3 pr-1 py-2 shrink-0 ${canAdd ? "cursor-pointer" : "cursor-default"}`}
-                  title={isAdded ? "Added" : canAdd ? "Select to add to playlist" : "No Spotify ID — can't add automatically"}
+                  title={isAdded ? "Added" : ineligible ? s.ineligibleReason! : canAdd ? "Select to add to playlist" : "No Spotify ID — can't add automatically"}
                 >
                   {status === "adding" ? (
                     <span className="w-4 h-4 flex items-center justify-center text-green-400"><MiniSpinner /></span>
@@ -2800,6 +2852,7 @@ function SuggestionsCard({ suggest, onClose, onAdd }: {
                       {s.artist}
                       {status === "exists" && <span className="text-slate-600"> · already in library</span>}
                       {status === "failed" && <span className="text-red-400"> · failed to add</span>}
+                      {!status && ineligible && <span className="text-red-400"> · {s.ineligibleReason}</span>}
                     </p>
                   </div>
                   <div className="flex items-center gap-3 shrink-0">

@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { useSession } from "next-auth/react";
 import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import Link from "next/link";
-import { FunnelIcon, SparklesIcon, MetronomeIcon, TrashIcon, MiniSpinner, handleArtError } from "./TrackRow";
+import { FunnelIcon, SparklesIcon, MetronomeIcon, TrashIcon, MiniSpinner, handleArtError, openSpotifyAppFirst } from "./TrackRow";
 import { FloatingCard } from "./FloatingCard";
 import { useRunningPlaylist } from "./useRunningPlaylist";
 import { DeletedTracksReview, type RejectedTrack } from "./DeletedTracksReview";
@@ -58,17 +58,7 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy, onDelete
 
   function openInSpotify() {
     if (!trackId) return;
-    window.location.href = `spotify:track:${trackId}`;
-    const timer = setTimeout(() => {
-      window.open(`https://open.spotify.com/track/${trackId}`, "_blank");
-    }, 1000);
-    const onVisibility = () => {
-      if (document.hidden) {
-        clearTimeout(timer);
-        document.removeEventListener("visibilitychange", onVisibility);
-      }
-    };
-    document.addEventListener("visibilitychange", onVisibility);
+    openSpotifyAppFirst(`spotify:track:${trackId}`, `https://open.spotify.com/track/${trackId}`);
   }
 
   async function playTrack() {

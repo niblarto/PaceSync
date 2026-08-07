@@ -34,6 +34,17 @@ export function subscribeSpotifyRateLimit(listener: RateLimitListener): () => vo
   return () => { listeners.delete(listener); };
 }
 
+// Seeds the banner from the persisted server-side sentinel (GET
+// /api/spotify/rate-limit-status) on a fresh page load/refresh — this
+// module's own retryAtMs starts null every time, so without this a ban
+// that's already active server-side stayed invisible until the next live
+// spotifyFetch() call in THIS session happened to hit the same 429 again.
+// Only applies a later retryAtMs than whatever's already known, so this
+// can never clobber a fresher/longer 429 a live call just recorded.
+export function seedSpotifyRateLimitFromServer(ms: number | null): void {
+  if (ms != null && (retryAtMs == null || ms > retryAtMs)) setRetryAt(ms);
+}
+
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 // Auto-retry only kicks in for a short wait — matches the CSV heal sweep's

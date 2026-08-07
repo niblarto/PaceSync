@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
 import type { RunningZone } from "@/types";
@@ -132,6 +132,7 @@ interface SettingsClientProps {
 
 export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: SettingsClientProps = {}) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { data: session } = useSession();
   const runningPlaylist = useRunningPlaylist();
 
@@ -640,10 +641,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }, []);
 
-  async function deleteManagedTrack(track: ManagedTrack) {
+  async function deleteManagedTrack(track: ManagedTrack, skipDeletedLog?: boolean) {
     setTracklistDeletingUris(prev => new Set(prev).add(track.uri));
     setTracklist(prev => prev?.filter(t => t.uri !== track.uri) ?? prev);
-    deleteTrackFromLibrary(track.uri, runningPlaylist.id);
+    deleteTrackFromLibrary(track.uri, runningPlaylist.id, skipDeletedLog);
   }
 
   const allGenres = tracklist
@@ -2330,6 +2331,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   ] as const;
   type TabKey = typeof TABS[number]["key"];
   const [activeTab, setActiveTab] = useState<TabKey>("heart-rate");
+
+  // Deep-link support (e.g. the dashboard's duplicate-tracks banner links
+  // to ?tab=tracklist) — read once on mount, same as bbcMode/bbcReplacePid's
+  // prop-driven initial state above.
+  useEffect(() => {
+    const tab = searchParams.get("tab");
+    if (tab && TABS.some(t => t.key === tab)) setActiveTab(tab as TabKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     // Always refetch on switching to this tab (not just the first time) —
@@ -4672,7 +4682,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                         </p>
                       </div>
                       <button
-                        onClick={() => deleteManagedTrack(t)}
+                        onClick={() => deleteManagedTrack(t, true)}
                         disabled={tracklistDeletingUris.has(t.uri)}
                         className="shrink-0 text-xs text-red-400 hover:text-red-300 border border-red-500/30 hover:border-red-500/50 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
                       >

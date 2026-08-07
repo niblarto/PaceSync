@@ -16,7 +16,7 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { spotifyUri, spotifyUris } = await req.json() as { spotifyUri?: string; spotifyUris?: string[] };
+  const { spotifyUri, spotifyUris, skipDeletedLog } = await req.json() as { spotifyUri?: string; spotifyUris?: string[]; skipDeletedLog?: boolean };
   const uris = spotifyUris?.length ? spotifyUris : (spotifyUri ? [spotifyUri] : []);
   if (uris.length === 0) return NextResponse.json({ error: "Missing spotifyUri(s)" }, { status: 400 });
 
@@ -37,8 +37,14 @@ export async function DELETE(req: NextRequest) {
       deleteTracksByUri(csvFile, removedRows.map(r => r.uri));
       await regenerateCsvFile(csvFile, activeCsvPath());
       // Log deletions so import paths can flag/reject these tracks if they
-      // ever come back via BBC episodes, CSV appends, or the weekly cron.
-      try { recordDeletedTracks(removedRows); } catch (e) { console.warn("[tracks/delete] deletion log failed:", e); }
+      // ever come back via BBC episodes, CSV appends, or the weekly cron —
+      // skipped for a duplicate-cleanup delete (Settings' "Possible
+      // duplicates" card): that's just removing a redundant copy of a song
+      // the library still legitimately has under its other URI, not a "never
+      // bring this track back" decision, so it shouldn't get blacklisted.
+      if (!skipDeletedLog) {
+        try { recordDeletedTracks(removedRows); } catch (e) { console.warn("[tracks/delete] deletion log failed:", e); }
+      }
       // A pinned mix containing a just-deleted track no longer matches
       // reality — unpin it regardless of which mix (if any) happens to be
       // loaded client-side, since the deleted track could belong to ANY

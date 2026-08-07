@@ -75,21 +75,33 @@ export async function playInSpotify(uri: string, token?: string | null): Promise
   openInSpotify(uri);
 }
 
-// Navigate to a spotify: URI (opens the desktop/mobile app); if the page is
-// still visible after a second the app didn't take over, so fall back to the
-// web player.
+// Navigate to a spotify: URI (opens the desktop/mobile app); if the page
+// hasn't lost focus after this wait, the app didn't take over, so fall
+// back to the web player. Confirmed (via a 7s test) that visibilitychange/
+// document.hidden alone doesn't reliably fire when Windows hands focus to
+// the Spotify desktop app from Chrome/Edge — the tab can stay "visible" in
+// the tab-strip sense even though it's no longer the focused window, so
+// document.hidden never flips true and the fallback always fired regardless
+// of wait time. window.blur is the more reliable signal for this exact
+// handoff (fires on focus loss, independent of tab visibility), checked
+// alongside visibilitychange rather than replacing it — some browsers fire
+// one but not the other, so either one cancels the fallback. 3s wait —
+// generous headroom for a slower/cold-start app launch, confirmed working
+// with blur as the detection signal.
 export function openSpotifyAppFirst(uri: string, webUrl: string) {
   window.location.href = uri;
   const timer = setTimeout(() => {
     window.open(webUrl, "_blank");
-  }, 1000);
-  const onVisibility = () => {
-    if (document.hidden) {
-      clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onVisibility);
-    }
+  }, 3000);
+  const cancel = () => {
+    clearTimeout(timer);
+    document.removeEventListener("visibilitychange", onVisibility);
+    window.removeEventListener("blur", onBlur);
   };
+  const onVisibility = () => { if (document.hidden) cancel(); };
+  const onBlur = () => cancel();
   document.addEventListener("visibilitychange", onVisibility);
+  window.addEventListener("blur", onBlur);
 }
 
 export function openInSpotify(uri: string) {

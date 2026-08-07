@@ -4,7 +4,7 @@ import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist
 import { readAllTracks, backfillTrackFields, regenerateCsvFile } from "@/lib/tracks-store";
 import type { TrackRow } from "@/types/track";
 import { deezerDurationMs, deezerGenres, fetchFeatures, lastfmDurationMs, sleep, TrackFeatures } from "@/lib/track-enrich";
-import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest } from "@/lib/spotify-rate-limit";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest, SearchTokenSource } from "@/lib/spotify-rate-limit";
 import { getBpmOverride } from "@/lib/bpm-track-overrides";
 import { getDb } from "@/lib/db";
 
@@ -100,95 +100,6 @@ const FEATURE_COLS: Array<[string, keyof TrackFeatures]> = [
   ["Tempo", "tempo"], ["Key", "key"], ["Mode", "mode"],
   ["Energy", "energy"], ["Danceability", "danceability"], ["Valence", "valence"],
 ];
-
-// Two independent Spotify apps can be configured for query-only lookups
-// (never playlist writes, which are tied to the user's own OAuth session
-// under whichever single app they signed in with — this is strictly a
-// client-credentials thing). Spotify's rate limit is per-app, so a second
-// app has its own separate 30s rolling budget: when the primary app's
-// client-credentials token gets rate-limited mid-sweep, falling over to
-// the second app's token lets the sweep keep using Spotify instead of
-// giving up on it entirely for the rest of the run. SPOTIFY_CLIENT_ID_2/
-// SPOTIFY_CLIENT_SECRET_2 are optional — everything degrades to
-// single-app behavior (today's behavior) if they're unset.
-async function fetchAppToken(id: string, secret: string): Promise<string | null> {
-  try {
-    const res = await fetch("https://accounts.spotify.com/api/token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Authorization: `Basic ${Buffer.from(`${id}:${secret}`).toString("base64")}`,
-      },
-      body: "grant_type=client_credentials",
-    });
-    if (!res.ok) return null;
-    return ((await res.json()) as { access_token: string }).access_token;
-  } catch {
-    return null;
-  }
-}
-
-async function spotifyAppToken(): Promise<string | null> {
-  const id = process.env.SPOTIFY_CLIENT_ID;
-  const secret = process.env.SPOTIFY_CLIENT_SECRET;
-  if (!id || !secret) return null;
-  return fetchAppToken(id, secret);
-}
-
-// Second app's token, or null if not configured.
-async function spotifyAppToken2(): Promise<string | null> {
-  const id = process.env.SPOTIFY_CLIENT_ID_2;
-  const secret = process.env.SPOTIFY_CLIENT_SECRET_2;
-  if (!id || !secret) return null;
-  return fetchAppToken(id, secret);
-}
-
-// Query-only lookups (duration/URI search — never a playlist write, which
-// stays on the user's own OAuth session under whichever single app they
-// signed in with) prefer the SECOND app first when one is configured, so
-// this sweep's search volume never touches the main app's own 30s rolling
-// budget at all — playlist adds/plays/deletes (a completely different,
-// user-scoped token) are the only thing that should ever draw on that
-// budget. Only falls back to the primary app if the second one isn't
-// configured, or itself gets rate-limited mid-sweep.
-class SearchTokenSource {
-  private primary: string | null | undefined;
-  private secondary: string | null | undefined;
-  usingPrimary = false;
-
-  constructor(private readonly alreadyBlocked: boolean) {}
-
-  // Returns the token to use right now, or null if nothing usable is
-  // available at all (neither app configured, or both rate-limited).
-  async current(): Promise<string | null> {
-    if (this.usingPrimary) {
-      if (this.alreadyBlocked) return null;
-      if (this.primary === undefined) this.primary = await spotifyAppToken();
-      return this.primary;
-    }
-    if (this.secondary === undefined) this.secondary = await spotifyAppToken2();
-    if (this.secondary) return this.secondary;
-    // No second app configured at all — fall back to the primary immediately.
-    this.usingPrimary = true;
-    if (this.alreadyBlocked) return null;
-    if (this.primary === undefined) this.primary = await spotifyAppToken();
-    return this.primary;
-  }
-
-  // Called after a 429 on whichever token `current()` just returned.
-  // Returns true if there's another app left to retry with (caller should
-  // retry the same request), false if Spotify is exhausted entirely.
-  async onRateLimited(): Promise<boolean> {
-    if (!this.usingPrimary) {
-      this.usingPrimary = true;
-      if (this.alreadyBlocked) return false;
-      if (this.primary === undefined) this.primary = await spotifyAppToken();
-      return !!this.primary;
-    }
-    this.primary = null; // primary also rate-limited — nothing left to try
-    return false;
-  }
-}
 
 // Sentinel returned by any Spotify call in this file on a long (>10s)
 // rate limit, so the caller can stop using Spotify for the rest of the
