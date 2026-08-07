@@ -13,8 +13,8 @@ import { addTracksToLibrary } from "@/lib/library-add";
 import { healActiveCsv } from "@/lib/csv-heal";
 import { getBbcBpmFilterEnabled } from "@/lib/bbc-bpm-filter-config";
 import { isWithinLibraryBpmRange } from "@/lib/bbc-bpm-filter";
-import { fetchFeatures } from "@/lib/track-enrich";
-import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
+import { fetchFeatures, deezerIsrc, resolveByIsrc } from "@/lib/track-enrich";
+import { getSpotifyBlockedUntil } from "@/lib/spotify-rate-limit";
 import { getDb } from "@/lib/db";
 
 // Resolved per call so a playlist change in Settings applies immediately.
@@ -221,7 +221,18 @@ async function processPlaylist(
   if (tracks === null) throw new Error("No segments data");
 
   const added: { uri: string; name: string; artist: string }[] = [];
-  let retryAfter: number | null = null;
+  // Matching moved off Spotify's Search API entirely, same as app/api/bbc/
+  // tracks/route.ts: Deezer resolves each BBC segment's ISRC (keyless), then
+  // ReccoBeats resolves a playable Spotify URI + audio features directly
+  // from that ISRC (also no Spotify call). This route's own repeated
+  // per-track Spotify search was an unmigrated leftover from before that
+  // fix and the confirmed, repeated trigger of real ~20hr Spotify
+  // rate-limit bans on the weekly cron specifically (2026-08-07: 3 BBC
+  // playlists in one run, 21hr ban). retryAfter is always null now — the
+  // field is kept only so downstream logging/ntfy code (which still cares
+  // about a still-active ban from the later playlist-add call) doesn't need
+  // to change shape.
+  const retryAfter: number | null = null;
   let newCacheEntries = 0;
 
   for (let i = 0; i < tracks.length; i++) {
@@ -234,36 +245,20 @@ async function processPlaylist(
       continue;
     }
 
-    if (retryAfter !== null) continue;
+    let entry: CacheEntry = null;
+    try {
+      const isrc = await deezerIsrc(t.title, t.artist);
+      if (isrc) {
+        const resolved = await resolveByIsrc(isrc);
+        if (resolved) entry = { uri: resolved.uri, name: t.title, artistName: t.artist };
+      }
+    } catch { /* leave entry null — same as a miss below */ }
 
-    const q = encodeURIComponent(`${t.title} ${t.artist}`);
-    const res = await fetch(`https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    cache.set(key, entry);
+    newCacheEntries++;
+    if (entry?.uri) added.push({ uri: entry.uri, name: entry.name, artist: entry.artistName });
 
-    if (res.status === 429) {
-      retryAfter = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
-      // Shared with csv-heal.ts and the dashboard's spotifyFetch proxy — so
-      // whichever of them hits a 429 next honors this same cooldown instead
-      // of each keeping its own clock and re-triggering a fresh 429.
-      await setSpotifyBlockedUntil(new Date(Date.now() + retryAfter * 1000).toISOString());
-      continue;
-    }
-
-    if (res.ok) {
-      const data = await res.json() as {
-        tracks?: { items?: { uri: string; name: string; artists: { name: string }[] }[] };
-      };
-      const item = data.tracks?.items?.[0];
-      const entry: CacheEntry = item
-        ? { uri: item.uri, name: item.name, artistName: item.artists[0]?.name ?? t.artist }
-        : null;
-      cache.set(key, entry);
-      newCacheEntries++;
-      if (entry?.uri) added.push({ uri: entry.uri, name: entry.name, artist: entry.artistName });
-    }
-
-    await sleep(150);
+    await sleep(120); // polite gap for Deezer's own rate limit (50 req/5s)
   }
 
   if (newCacheEntries > 0) saveCache(cache);
