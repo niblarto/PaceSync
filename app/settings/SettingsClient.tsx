@@ -557,6 +557,42 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [incompleteTracks, setIncompleteTracks] = useState<IncompleteManagedTrack[] | null>(null);
   const [incompleteTracksOpen, setIncompleteTracksOpen] = useState(false);
   const [incompleteDeletingUris, setIncompleteDeletingUris] = useState<Set<string>>(new Set());
+  // Manual single-field edit for a "Tracks with errors" row — keyed by
+  // "uri::field" so each track's badges can be edited independently.
+  const EDITABLE_FIELDS: Record<string, boolean> = {
+    "Tempo": true, "Key": true, "Mode": true, "Energy": true, "Danceability": true, "Valence": true, "Genres": true,
+  };
+  const FIELD_TO_KEY: Record<string, string> = {
+    "Tempo": "tempo", "Key": "key", "Mode": "mode", "Energy": "energy",
+    "Danceability": "danceability", "Valence": "valence", "Genres": "genres",
+  };
+  const [editingField, setEditingField] = useState<string | null>(null);
+  const [editingValue, setEditingValue] = useState("");
+  const [editingSaving, setEditingSaving] = useState(false);
+  const [editingError, setEditingError] = useState<string | null>(null);
+
+  async function saveFieldEdit(uri: string, header: string) {
+    const key = FIELD_TO_KEY[header];
+    if (!key) return;
+    setEditingSaving(true);
+    setEditingError(null);
+    try {
+      const res = await fetch("/api/tracks/update-field", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uri, field: key, value: editingValue }),
+      });
+      const d = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to save");
+      setEditingField(null);
+      setEditingValue("");
+      loadIncompleteTracks();
+    } catch (e) {
+      setEditingError(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setEditingSaving(false);
+    }
+  }
 
   function loadIncompleteTracks() {
     fetch("/api/settings/incomplete-tracks")
@@ -4884,11 +4920,52 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                       onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=tempo`)}
                     />
                     <div className="flex flex-wrap gap-x-4 gap-y-1 pl-3 -mt-1 pb-2">
-                      {Object.entries(track.fields).map(([field, ok]) => (
-                        <span key={field} className={`text-xs flex items-center gap-1 ${ok ? "text-green-400/80" : "text-red-400"}`}>
-                          {ok ? "✓" : "✗"} {field}
-                        </span>
-                      ))}
+                      {Object.entries(track.fields).map(([field, ok]) => {
+                        const editKey = `${track.uri}::${field}`;
+                        const editable = !ok && EDITABLE_FIELDS[field];
+                        if (editable && editingField === editKey) {
+                          return (
+                            <span key={field} className="text-xs flex items-center gap-1.5">
+                              <input
+                                autoFocus
+                                type={field === "Genres" ? "text" : "number"}
+                                value={editingValue}
+                                onChange={e => setEditingValue(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === "Enter") saveFieldEdit(track.uri, field);
+                                  if (e.key === "Escape") { setEditingField(null); setEditingError(null); }
+                                }}
+                                placeholder={field}
+                                className="w-20 rounded bg-slate-800/80 border border-white/20 text-xs px-1.5 py-0.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+                              />
+                              <button
+                                onClick={() => saveFieldEdit(track.uri, field)}
+                                disabled={editingSaving || !editingValue.trim()}
+                                className="text-green-400 hover:text-green-300 disabled:opacity-40"
+                              >
+                                ✓
+                              </button>
+                              <button
+                                onClick={() => { setEditingField(null); setEditingError(null); }}
+                                className="text-slate-500 hover:text-slate-400"
+                              >
+                                ✗
+                              </button>
+                              {editingError && <span className="text-red-400">{editingError}</span>}
+                            </span>
+                          );
+                        }
+                        return (
+                          <span
+                            key={field}
+                            onClick={editable ? () => { setEditingField(editKey); setEditingValue(""); setEditingError(null); } : undefined}
+                            title={editable ? `Click to set ${field} manually` : undefined}
+                            className={`text-xs flex items-center gap-1 ${ok ? "text-green-400/80" : "text-red-400"} ${editable ? "cursor-pointer hover:underline" : ""}`}
+                          >
+                            {ok ? "✓" : "✗"} {field}
+                          </span>
+                        );
+                      })}
                     </div>
                   </div>
                 ))}

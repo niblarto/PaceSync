@@ -84,6 +84,7 @@ FILES = [
     ('app/api/tracks/uris/route.ts',               'app/api/tracks/uris/route.ts'),
     ('app/api/tracks/played-counts/route.ts',      'app/api/tracks/played-counts/route.ts'),
     ('app/api/tracks/update-features/route.ts',   'app/api/tracks/update-features/route.ts'),
+    ('app/api/tracks/update-field/route.ts',      'app/api/tracks/update-field/route.ts'),
     ('app/api/tracks/import-bpm-csv/route.ts',    'app/api/tracks/import-bpm-csv/route.ts'),
     ('app/api/settings/heal-status/route.ts',     'app/api/settings/heal-status/route.ts'),
     ('app/api/settings/heal-now/route.ts',        'app/api/settings/heal-now/route.ts'),
