@@ -65,6 +65,12 @@ const ZONE_DETAILS = [
 
 interface ZoneRow { min: number; max: number }
 
+// Local mirror of lib/ai-dj-mix.ts's AiDjMixResponse shape (server-only
+// module — not imported client-side) for parsing the simulate-mix SSE stream.
+interface AiDjSimTrack { name: string; artist: string; tempo: number }
+interface AiDjSimTimelineSegment { tracks: AiDjSimTrack[] }
+interface AiDjMixResponse { trackUris: string[]; totalSec: number; timeline: AiDjSimTimelineSegment[] }
+
 function calcZones(maxHR: number, restingHR: number): ZoneRow[] {
   const hrr = maxHR - restingHR;
   const pcts = [0.60, 0.70, 0.80, 0.90, 1.00];
@@ -229,13 +235,21 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [aiDjUsageError, setAiDjUsageError] = useState<string | null>(null);
   const [llmLog, setLlmLog] = useState<{ ts: string; model: string; system: string; prompt: string; ok: boolean; error?: string; durationMs?: number; source?: "pi" | "service" }[] | null>(null);
   // ── Run-type BPM override state (blank = no override) ─────────────────────
-  const [bpmOv, setBpmOv] = useState<Record<string, { min: string; max: string }>>({
-    warmup: { min: "", max: "" }, work: { min: "", max: "" }, easy: { min: "", max: "" },
-    cooldown: { min: "", max: "" }, rest: { min: "", max: "" },
+  const [bpmOv, setBpmOv] = useState<Record<string, { min: string; max: string; sweet: string }>>({
+    warmup: { min: "", max: "", sweet: "" }, work: { min: "", max: "", sweet: "" }, easy: { min: "", max: "", sweet: "" },
+    cooldown: { min: "", max: "", sweet: "" }, rest: { min: "", max: "", sweet: "" },
   });
   const [bpmOvSaving, setBpmOvSaving] = useState(false);
   const [bpmOvSaved, setBpmOvSaved] = useState(false);
   const [bpmOvError, setBpmOvError] = useState<string | null>(null);
+
+  // ── "Simulate a mix" diagnostic state — never persisted, log clears on refresh ──
+  const [simKind, setSimKind] = useState<"warmup" | "work" | "easy" | "cooldown" | "rest">("easy");
+  const [simMiles, setSimMiles] = useState("5");
+  const [simPace, setSimPace] = useState("");
+  const [simRunning, setSimRunning] = useState(false);
+  const [simLog, setSimLog] = useState<{ type: "progress" | "llm" | "error"; text: string; ok?: boolean; response?: string; error?: string }[]>([]);
+  const [simResult, setSimResult] = useState<{ name: string; artist: string; tempo: number }[] | null>(null);
   const [waking, setWaking] = useState(false);
   const [wakeMsg, setWakeMsg] = useState<string | null>(null);
   const wakePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1045,13 +1059,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   useEffect(() => {
     fetch("/api/settings/bpm-overrides")
       .then(r => r.json())
-      .then((d: { overrides?: Record<string, { min?: number; max?: number }> }) => {
+      .then((d: { overrides?: Record<string, { min?: number; max?: number; sweet?: number }> }) => {
         if (!d.overrides) return;
         setBpmOv(prev => {
           const next = { ...prev };
           Object.keys(next).forEach(kind => {
             const o = d.overrides![kind];
-            if (o) next[kind] = { min: o.min ? String(o.min) : "", max: o.max ? String(o.max) : "" };
+            if (o) next[kind] = { min: o.min ? String(o.min) : "", max: o.max ? String(o.max) : "", sweet: o.sweet ? String(o.sweet) : "" };
           });
           return next;
         });
@@ -1077,6 +1091,56 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setBpmOvError(e instanceof Error ? e.message : "Failed to save — try again.");
     } finally {
       setBpmOvSaving(false);
+    }
+  }
+
+  async function runMixSimulation() {
+    setSimRunning(true);
+    setSimLog([]);
+    setSimResult(null);
+    try {
+      const res = await fetch("/api/ai-dj/simulate-mix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: simKind, miles: Number(simMiles), pace: simPace.trim() || undefined }),
+      });
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `Simulation failed (${res.status})`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const msg = JSON.parse(dataLine.slice(6)) as
+            & Partial<AiDjMixResponse>
+            & { type: string; current?: number; total?: number; segment?: string; detail?: string;
+                system?: string; user?: string; ok?: boolean; response?: string; error?: string };
+          if (msg.type === "progress") {
+            setSimLog(l => [...l, { type: "progress", text: `[${msg.current}/${msg.total}] ${msg.segment}${msg.detail ? `: ${msg.detail}` : ""}` }]);
+          } else if (msg.type === "llm") {
+            setSimLog(l => [...l, { type: "llm", text: `${msg.system ?? ""}\n\n${msg.user ?? ""}`, ok: msg.ok, response: msg.response, error: msg.error }]);
+          } else if (msg.type === "error") {
+            setSimLog(l => [...l, { type: "error", text: msg.error ?? "Simulation failed" }]);
+          } else if (msg.type === "done") {
+            const tracks = (msg.timeline ?? []).flatMap(s => s.tracks);
+            setSimResult(tracks.map(t => ({ name: t.name, artist: t.artist, tempo: t.tempo })));
+          }
+        }
+      }
+    } catch (e) {
+      setSimLog(l => [...l, { type: "error", text: e instanceof Error ? e.message : "Simulation failed" }]);
+    } finally {
+      setSimRunning(false);
     }
   }
 
@@ -2323,9 +2387,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
   const TABS = [
     { key: "heart-rate", label: "Heart Rate & Zones" },
-    { key: "playlist", label: "Playlist & BPM" },
-    { key: "integrations", label: "Integrations & BBC" },
-    { key: "notifications", label: "Notifications & 2FA" },
+    { key: "playlist", label: "Playlist" },
+    { key: "bpm", label: "BPM" },
+    { key: "bbc", label: "BBC" },
+    { key: "integrations", label: "Integrations" },
+    { key: "notifications", label: "Notifications" },
+    { key: "scheduled-jobs", label: "Scheduled Jobs" },
+    { key: "security", label: "Security" },
     { key: "deleted-tracks", label: "Deleted Tracks" },
     { key: "tracklist", label: "Tracklist" },
   ] as const;
@@ -2404,7 +2472,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       ))}
     </div>
 
-    {/* ── Tab 1: Heart Rate & Zones ── */}
+    {/* ── Tab: Heart Rate & Zones ── */}
     <div className={activeTab === "heart-rate" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
@@ -2603,8 +2671,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     </div>
     </div>
 
-    {/* ── Tab 2: Playlist & BPM ── */}
-    <div className={activeTab === "playlist" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
+    {/* ── Tab: Playlist ── */}
+    <div className={activeTab === "playlist" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
       {/* Playlist Management */}
@@ -2972,12 +3040,19 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
       </div>
 
+      <DedupCard />
+
     </div>
+    </div>
+
+    {/* ── Tab: BPM ── */}
+    <div className={activeTab === "bpm" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
       {/* Run-type BPM limits — feeds the AI DJ mixer's per-segment LLM
-          prompts (ai_dj/workout.py's _kind_bpm_bounds) and the Library
-          Coverage report below, so it lives alongside both on this tab. */}
+          prompts (ai_dj/workout.py's _kind_bpm_bounds/_kind_bpm_sweet) and
+          the Library Coverage report below, so it lives alongside both on
+          this tab. */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
         <div>
           <h3 className="font-semibold text-slate-200">Run BPM limits</h3>
@@ -2985,9 +3060,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             Min/max music BPM per run type for AI DJ mixes. Leave blank for automatic
             cadence matching — anything set here becomes a hard limit.
             Half-time tracks count at double tempo (an 87 BPM track counts as 174).
+            Sweet spot is the preferred target within that range — tracks nearest it
+            are offered to the mixer first, but it never excludes anything (unlike min/max).
           </p>
         </div>
         <div className="space-y-2">
+          <div className="flex items-center text-xs text-slate-500 pl-[11.75rem]">
+            <span className="w-[calc(6rem+0.75rem+0.75rem+6rem)] text-center">Min – Max</span>
+            <span className="w-24 ml-6 text-center">Sweet spot</span>
+          </div>
           {([
             ["warmup", "Warm up"],
             ["work", "Work / intervals"],
@@ -2997,23 +3078,46 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           ] as [string, string][]).map(([kind, label]) => {
             const minVal = bpmOv[kind].min.trim();
             const maxVal = bpmOv[kind].max.trim();
+            const sweetVal = bpmOv[kind].sweet.trim();
             const min = minVal ? Number(minVal) : null;
             const max = maxVal ? Number(maxVal) : null;
+            const sweet = sweetVal ? Number(sweetVal) : null;
             // A range this narrow (or inverted) will silently exclude
             // almost every track — the segment just gets skipped with no
             // error, which is exactly how a min===max typo went unnoticed
             // before (a cooldown segment vanished from a mix entirely).
             const isExact = min !== null && max !== null && min === max;
             const isInverted = min !== null && max !== null && min > max;
+            // Sweet spot outside the typed range would anchor the mixer's
+            // ranking on a value no surviving candidate can ever reach —
+            // shown before save, same as the min/max warnings above, so the
+            // eventual 400 from the API isn't the first the user hears of it.
+            const sweetOutOfRange = sweet !== null && (
+              (min !== null && sweet < min) || (max !== null && sweet > max)
+            );
             // How many library tracks actually fall in this range right
             // now — same doubletime convention as everywhere else (a
             // sub-95 BPM track counts at double), computed live as the
             // fields are edited so a bad range's impact is visible before
-            // saving, not just after a mix silently comes up short.
+            // saving, not just after a mix silently comes up short. Anchored
+            // on min/max only — sweet spot never excludes a track, so it
+            // must not affect this count.
             const matchCount = !isInverted && activeTracksLoaded
               ? activeTracks.filter(t => {
                   const eff = t.bpm < 95 ? t.bpm * 2 : t.bpm;
                   return (min === null || eff >= min) && (max === null || eff <= max);
+                }).length
+              : null;
+            // Of the min/max matches, how many round to the same whole BPM
+            // as the sweet spot — the algorithm itself has no discrete
+            // "hit" threshold (it just ranks continuously by distance), so
+            // this is a UI-only approximation, matching the app's existing
+            // rounding convention for displaying a track's BPM.
+            const sweetMatchCount = sweet !== null && !isInverted && !sweetOutOfRange && activeTracksLoaded
+              ? activeTracks.filter(t => {
+                  const eff = t.bpm < 95 ? t.bpm * 2 : t.bpm;
+                  if (!((min === null || eff >= min) && (max === null || eff <= max))) return false;
+                  return Math.round(eff) === Math.round(sweet);
                 }).length
               : null;
             return (
@@ -3041,9 +3145,20 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                       isExact || isInverted ? "border-amber-500/50" : "border-white/10"
                     }`}
                   />
+                  <input
+                    type="number"
+                    min={0}
+                    value={bpmOv[kind].sweet}
+                    onChange={e => { setBpmOv(o => ({ ...o, [kind]: { ...o[kind], sweet: e.target.value } })); setBpmOvSaved(false); }}
+                    placeholder="172"
+                    className={`w-24 ml-6 rounded-lg bg-slate-800/60 border text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 ${
+                      sweetOutOfRange ? "border-amber-500/50" : "border-white/10"
+                    }`}
+                  />
                   <span className="text-xs text-slate-600">BPM</span>
                   <span className={`text-xs ml-1 ${matchCount === 0 ? "text-amber-400/90" : "text-slate-500"}`}>
                     {matchCount === null ? "" : `${matchCount} track${matchCount === 1 ? "" : "s"}`}
+                    {sweetMatchCount !== null && ` (${sweetMatchCount} Sweet)`}
                   </span>
                 </div>
                 {isInverted && (
@@ -3055,6 +3170,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   <p className="text-xs text-amber-400/90 pl-1 mt-0.5">
                     ⚠ Min equals max — only a track at exactly {min} BPM qualifies. If none exist in the
                     library, this segment gets silently skipped. Use a real range instead.
+                  </p>
+                )}
+                {sweetOutOfRange && (
+                  <p className="text-xs text-amber-400/90 pl-1 mt-0.5">
+                    ⚠ Sweet spot is outside the min–max range — it won't be reachable by any candidate.
                   </p>
                 )}
               </div>
@@ -3070,6 +3190,131 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           {bpmOvSaving ? "Saving…" : bpmOvSaved ? "Saved!" : "Save BPM limits"}
         </button>
       </div>
+
+      {/* Diagnostic: runs one synthetic segment through the real mix
+          pipeline and shows the candidate pool, exact LLM prompt/response,
+          and final track listing. Nothing here is persisted — no DB writes,
+          gone on refresh — except that a real Claude/Gemini call still
+          updates the usage/cost counters below, same as any real mix. */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h3 className="font-semibold text-slate-200">Simulate a mix</h3>
+          <p className="text-sm text-slate-400 mt-1">
+            Runs one segment through the real AI DJ pipeline and logs everything: the
+            candidate pool, the exact prompt sent to the LLM, its raw response, and the
+            final track listing. Nothing here is saved — the log clears on refresh.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-xs text-slate-500 space-y-1">
+            <span className="block">Segment type</span>
+            <select
+              value={simKind}
+              onChange={e => setSimKind(e.target.value as typeof simKind)}
+              className="rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+            >
+              <option value="warmup">Warm up</option>
+              <option value="work">Work / intervals</option>
+              <option value="easy">Easy / conversational</option>
+              <option value="cooldown">Cool down</option>
+              <option value="rest">Rest / recovery</option>
+            </select>
+          </label>
+          <label className="text-xs text-slate-500 space-y-1">
+            <span className="block">Miles</span>
+            <input
+              type="number"
+              min={0.1}
+              step={0.1}
+              value={simMiles}
+              onChange={e => setSimMiles(e.target.value)}
+              className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+            />
+          </label>
+          {simKind === "work" && (
+            <label className="text-xs text-slate-500 space-y-1">
+              <span className="block">Pace (min:sec/mi)</span>
+              <input
+                type="text"
+                placeholder="7:30"
+                value={simPace}
+                onChange={e => setSimPace(e.target.value)}
+                className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+              />
+            </label>
+          )}
+          <button
+            onClick={runMixSimulation}
+            disabled={simRunning || (simKind === "work" && !simPace.trim())}
+            className="rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-sm px-4 py-1.5 transition-colors"
+          >
+            {simRunning ? "Running…" : "Run simulation"}
+          </button>
+          {simLog.length > 0 && (
+            <button
+              onClick={() => { setSimLog([]); setSimResult(null); }}
+              disabled={simRunning}
+              className="rounded-lg bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 text-slate-300 text-sm px-4 py-1.5 transition-colors"
+            >
+              Clear log
+            </button>
+          )}
+        </div>
+
+        {simLog.length > 0 && (
+          <div className="rounded-lg border border-white/10 bg-black/30 divide-y divide-white/5 font-mono text-[11px] max-h-96 overflow-y-auto no-scrollbar">
+            {simLog.map((entry, i) => (
+              <div key={i} className="px-3 py-2">
+                {entry.type === "progress" && (
+                  <p className="text-slate-400">{entry.text}</p>
+                )}
+                {entry.type === "llm" && (
+                  <details>
+                    <summary className={`cursor-pointer ${entry.ok ? "text-purple-300" : "text-red-400"}`}>
+                      LLM call {entry.ok ? "completed" : "failed"}
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      <div>
+                        <p className="text-slate-500 uppercase text-[10px] tracking-wide">System + prompt</p>
+                        <pre className="whitespace-pre-wrap text-slate-300 mt-1">{entry.text}</pre>
+                      </div>
+                      {entry.response && (
+                        <div>
+                          <p className="text-slate-500 uppercase text-[10px] tracking-wide">Response</p>
+                          <pre className="whitespace-pre-wrap text-green-300/90 mt-1">{entry.response}</pre>
+                        </div>
+                      )}
+                      {entry.error && (
+                        <div>
+                          <p className="text-slate-500 uppercase text-[10px] tracking-wide">Error</p>
+                          <pre className="whitespace-pre-wrap text-red-400 mt-1">{entry.error}</pre>
+                        </div>
+                      )}
+                    </div>
+                  </details>
+                )}
+                {entry.type === "error" && (
+                  <p className="text-red-400">{entry.text}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {simResult && (
+          <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs max-h-80 overflow-y-auto no-scrollbar">
+            {simResult.map((t, i) => (
+              <div key={i} className="px-3 py-1.5 flex items-center justify-between gap-3">
+                <span className="text-slate-300 truncate">{t.name} — <span className="text-slate-500">{t.artist}</span></span>
+                <span className="text-slate-400 shrink-0">{t.tempo.toFixed(1)} BPM</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+    </div>
+    <div className="space-y-6">
 
       {/* Library coverage: tracks the AI DJ mixer could actually be
           presented with (per-kind BPM ceilings from Settings), vs. tracks
@@ -3257,13 +3502,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
       </div>
 
-      <DedupCard />
-
     </div>
     </div>
 
-    {/* ── Tab 3: Integrations & BBC ── */}
-    <div className={activeTab === "integrations" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
+    {/* ── Tab: BBC ── */}
+    <div className={activeTab === "bbc" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
       {/* BBC Programme list */}
@@ -3424,6 +3667,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         )}
         </div>
       </div>
+
+    </div>
+    </div>
+
+    {/* ── Tab: Integrations ── */}
+    <div className={activeTab === "integrations" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
+    <div className="space-y-6">
 
       {/* AI DJ */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
@@ -4192,8 +4442,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     </div>
     </div>
 
-    {/* ── Tab 4: Notifications & 2FA ── */}
-    <div className={activeTab === "notifications" ? "grid grid-cols-1 lg:grid-cols-2 gap-6 items-start" : "hidden"}>
+    {/* ── Tab: Notifications ── */}
+    <div className={activeTab === "notifications" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
       {/* ntfy Notifications */}
@@ -4245,6 +4495,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </button>
         </div>
       </div>
+
+    </div>
+    </div>
+
+    {/* ── Tab: Scheduled Jobs ── */}
+    <div className={activeTab === "scheduled-jobs" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
+    <div className="space-y-6">
 
       {/* Scheduled jobs */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
@@ -4358,6 +4615,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       </div>
 
     </div>
+    </div>
+
+    {/* ── Tab: Security ── */}
+    <div className={activeTab === "security" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
       {/* Two-factor authentication */}
@@ -4457,7 +4718,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     </div>
     </div>
 
-    {/* ── Tab 5: Deleted Tracks ── */}
+    {/* ── Tab: Deleted Tracks ── */}
     <div className={activeTab === "deleted-tracks" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
@@ -4541,7 +4802,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     </div>
     </div>
 
-    {/* ── Tab 6: Tracklist ── */}
+    {/* ── Tab: Tracklist ── */}
     <div className={activeTab === "tracklist" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 

@@ -40,6 +40,12 @@ export type AiDjMixResult =
 // tracks returned, fallback) when the builder reports one.
 export type AiDjProgress = (current: number, total: number, segment: string, detail?: string, candidateUris?: string[]) => void;
 
+// Fired once per LLM call during a "simulate a mix" run (Settings -> BPM),
+// carrying the full untruncated prompt/response — never sent for a real mix
+// build (only wired when the underlying Python payload sets `simulate: true`).
+export type AiDjLlmEvent = { system: string; user: string; ok: boolean; response?: string; error?: string };
+export type AiDjLlmCallback = (event: AiDjLlmEvent) => void;
+
 // Real cadence per 5s pace bucket from GarminDB (sec/mi -> SPM), sent to the
 // remote AI DJ service so its pace->BPM uses measured turnover instead of a
 // linear guess — the service host has no Garmin data of its own.
@@ -78,7 +84,7 @@ function loadCadenceBuckets(): Record<string, number> | null {
 // Parses the SSE stream from the AI DJ service's /mix/stream endpoint.
 // Returns null when the endpoint doesn't exist (service not yet restarted on
 // the new code) so the caller can fall back to the plain /mix endpoint.
-async function fetchMixStream(url: string, body: string, onProgress: AiDjProgress, endpoint = "/mix/stream"): Promise<AiDjMixResult | null> {
+async function fetchMixStream(url: string, body: string, onProgress: AiDjProgress, endpoint = "/mix/stream", onLlm?: AiDjLlmCallback): Promise<AiDjMixResult | null> {
   const res = await fetch(`${url}${endpoint}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -110,9 +116,12 @@ async function fetchMixStream(url: string, body: string, onProgress: AiDjProgres
       if (!dataLine) continue; // padding/comment frame
       const msg = JSON.parse(dataLine.slice(6)) as
         & Partial<AiDjMixResponse>
+        & Partial<AiDjLlmEvent>
         & { type: string; current?: number; total?: number; segment?: string; detail?: string; error?: string; candidateUris?: string[] };
       if (msg.type === "progress") {
         onProgress(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "", msg.detail, msg.candidateUris);
+      } else if (msg.type === "llm") {
+        onLlm?.({ system: msg.system ?? "", user: msg.user ?? "", ok: msg.ok ?? false, response: msg.response, error: msg.error });
       } else if (msg.type === "done") {
         return { ok: true, mix: { trackUris: msg.trackUris!, totalSec: msg.totalSec!, timeline: msg.timeline!, llmFailures: msg.llmFailures } };
       } else if (msg.type === "error") {
@@ -220,7 +229,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
 // progress lines + final mix/error JSON line — shared by the segment-based
 // mix and the flow-mix (fixed track pool) modes, which differ only in what
 // they write to stdin.
-function runBridge(stdinPayload: object, onProgress?: AiDjProgress): Promise<AiDjMixResult> {
+function runBridge(stdinPayload: object, onProgress?: AiDjProgress, onLlm?: AiDjLlmCallback): Promise<AiDjMixResult> {
   const script = join(process.cwd(), "scripts", "ai_dj_bridge.py");
   const csvPath = dbSourcePath();
 
@@ -234,9 +243,13 @@ function runBridge(stdinPayload: object, onProgress?: AiDjProgress): Promise<AiD
     const takeLine = (line: string) => {
       if (!line.trim()) return;
       try {
-        const msg = JSON.parse(line) as { type?: string; current?: number; total?: number; segment?: string; detail?: string; candidateUris?: string[] };
+        const msg = JSON.parse(line) as AiDjLlmEvent & { type?: string; current?: number; total?: number; segment?: string; detail?: string; candidateUris?: string[] };
         if (msg.type === "progress") {
           onProgress?.(msg.current ?? 0, msg.total ?? 1, msg.segment ?? "", msg.detail, msg.candidateUris);
+          return;
+        }
+        if (msg.type === "llm") {
+          onLlm?.({ system: msg.system, user: msg.user, ok: msg.ok, response: msg.response, error: msg.error });
           return;
         }
       } catch { /* partial or non-JSON line — treat as payload candidate */ }
@@ -274,6 +287,51 @@ function runBridge(stdinPayload: object, onProgress?: AiDjProgress): Promise<AiD
     proc.stdin.write(JSON.stringify(stdinPayload));
     proc.stdin.end();
   });
+}
+
+// Runs one synthetic single-segment mix through the exact same pipeline as
+// a real mix build (Settings -> BPM -> "Simulate a mix"), surfacing every
+// LLM prompt/response via onLlm. Never persists anything — no
+// recordMixBuild/setMixCandidates call, unlike the real /api/ai-dj/mix route.
+export async function simulateAiDjMix(segment: string, onProgress?: AiDjProgress, onLlm?: AiDjLlmCallback): Promise<AiDjMixResult> {
+  const config = loadAiDjConfig();
+  if (!config?.enabled) {
+    return { ok: false, error: "AI DJ is not enabled in Settings" };
+  }
+
+  let csv: string;
+  try {
+    csv = csvTextForPlaylist(loadRunningPlaylistConfig().csvFile);
+    if (!csv.trim()) throw new Error("empty library");
+  } catch {
+    return { ok: false, error: "No library CSV - upload a playlist library in Settings first" };
+  }
+
+  const easyBias = computeEasyPaceBias();
+  const trackFeedback = getAllTrackVotes();
+  const playCounts = getPlayedCounts();
+  const easyPaceSec = getLastEasyPaceSec() ?? undefined;
+  const bpmOverrides = loadBpmOverrides();
+
+  if (config.provider === "claude" || config.provider === "gemini") {
+    const model = config.provider === "claude" ? config.claudeModel : config.geminiModel;
+    const effort = config.provider === "claude" ? config.claudeEffort : undefined;
+    return runBridge({
+      title: "Simulation", segments: [segment], easyBias, trackFeedback,
+      playedTracks: getPlayedTracks(), playCounts, bpmOverrides,
+      easyPaceSec, model, effort, simulate: true,
+    }, onProgress, onLlm);
+  }
+
+  const body = JSON.stringify({
+    title: "Simulation", segments: [segment], csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback,
+    playedTracks: getPlayedTracks(), playCounts, bpmOverrides,
+    easyPace: easyPaceSec != null ? `${Math.floor(easyPaceSec / 60)}:${String(Math.round(easyPaceSec % 60)).padStart(2, "0")}` : undefined,
+    simulate: true,
+  });
+  const streamed = await fetchMixStream(config.url, body, onProgress ?? (() => {}), "/mix/stream", onLlm);
+  if (streamed) return streamed;
+  return { ok: false, error: `AI DJ service unreachable at ${config.url}` };
 }
 
 function buildMixLocally(

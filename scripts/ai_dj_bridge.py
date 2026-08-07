@@ -79,6 +79,10 @@ def _progress(done, total, label, detail=None, candidate_uris=None):
     print(json.dumps(msg), flush=True)
 
 
+def _on_llm(data):
+    print(json.dumps({"type": "llm", **data}), flush=True)
+
+
 def _run_flow_mix(payload: dict, csv_path: str, track_uris: list):
     """Sequences a fixed track pool (e.g. every track in a selected HR zone)
     for smooth transitions instead of fitting workout segments — see
@@ -209,6 +213,7 @@ def main():
             track_feedback=feedback, played_tracks=played, play_counts=play_counts,
             bpm_overrides=bpm_overrides, avoid_tracks=avoid, effort=effort,
             min_total_sec=max_projected_duration(segments_text), progress=_progress,
+            on_llm=_on_llm if payload.get("simulate") else None,
         )
     except ValueError as e:
         print(json.dumps({"error": str(e)}))

@@ -209,6 +209,7 @@ FILES = [
     ('app/api/bpm/enrich/route.ts',               'app/api/bpm/enrich/route.ts'),
     ('app/api/bpm/artist-top/route.ts',           'app/api/bpm/artist-top/route.ts'),
     ('app/api/ai-dj/mix/route.ts',                'app/api/ai-dj/mix/route.ts'),
+    ('app/api/ai-dj/simulate-mix/route.ts',       'app/api/ai-dj/simulate-mix/route.ts'),
     ('app/api/ai-dj/flow-mix/route.ts',           'app/api/ai-dj/flow-mix/route.ts'),
     ('app/api/ai-dj/health/route.ts',             'app/api/ai-dj/health/route.ts'),
     ('app/api/ai-dj/wake/route.ts',               'app/api/ai-dj/wake/route.ts'),
