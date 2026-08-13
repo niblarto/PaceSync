@@ -48,6 +48,23 @@ def main():
         is_walking_rest = seg.kind == "rest" and "walk" in seg.label.lower()
         if seg.kind == "rest" and not is_walking_rest:
             seg_mi = 0.0
+        elif seg.folded_rest_sec:
+            # A short rest was folded into this segment's duration_sec by
+            # parse_workout's merge pass - that folded time ran at the
+            # rest's own (much slower, or stationary) pace, not this
+            # segment's run pace, so it must be split out and converted
+            # separately. Using duration_sec/pace_sec unmodified here
+            # over-counted a work interval's distance by treating its
+            # walking-rest tail as if it were run at interval pace too
+            # (e.g. 5x0.62mi @ 7:25/mi + 90s walk each read as 5.56mi
+            # total instead of the actual ~4.5mi).
+            run_sec = seg.duration_sec - seg.folded_rest_sec
+            run_mi = (run_sec / seg.pace_sec) if seg.pace_sec else 0.0
+            rest_mi = (
+                (seg.folded_rest_sec / seg.folded_rest_pace_sec)
+                if ("walk" in seg.label.lower() and seg.folded_rest_pace_sec) else 0.0
+            )
+            seg_mi = run_mi + rest_mi
         else:
             seg_mi = (seg.duration_sec / seg.pace_sec) if seg.pace_sec else 0.0
         mi_start, mi_end = mi_cursor, mi_cursor + seg_mi
