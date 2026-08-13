@@ -10,6 +10,7 @@ import { MissingDataBanner } from "./MissingDataBanner";
 import { DuplicateTracksBanner } from "./DuplicateTracksBanner";
 import { TrackRow } from "./TrackRow";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
+import { NextRunPinned } from "./NextRunPinned";
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
 import { useRunningPlaylist } from "./useRunningPlaylist";
 
@@ -461,7 +462,7 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
         </div>
 
         <div className={tab === "runna" ? "flex-1 min-h-0 overflow-y-auto no-scrollbar p-2 space-y-4" : "hidden"}>
-          <RunnaSummaryCard />
+          <NextRunPinned />
           <RunnaScheduleCard
             ref={scheduleRef}
             garminConfigured={garminConfigured}
@@ -469,6 +470,7 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
             onAiDjMix={handleAiDjMix}
             showRouteMaps={false}
           />
+          <RunnaSummaryCard />
         </div>
       </div>
 

@@ -431,7 +431,7 @@ export interface CronResult {
   retryAfter?: number;
 }
 
-async function runUpdate(): Promise<{
+async function runUpdate(onProgress?: (current: number, total: number, name: string) => void): Promise<{
   ok: boolean;
   programmeResults: CronResult[];
   dedupRemoved: number;
@@ -505,6 +505,7 @@ async function runUpdate(): Promise<{
       }
     }
     const playlist = bbcPlaylists[pi];
+    onProgress?.(pi, bbcPlaylists.length, playlist.name);
     try {
       const r = await processPlaylist(playlist.pid, playlist.name, token, cache);
       const rateLimitNote = r.retryAfter !== null
@@ -533,6 +534,8 @@ async function runUpdate(): Promise<{
       appendCronLog("BBC refresh", `✗ ${playlist.name}: ${err}`);
     }
   }
+
+  onProgress?.(bbcPlaylists.length, bbcPlaylists.length, "Deduplicating…");
 
   const totalMatched = programmeResults.reduce((sum, r) => sum + r.matched, 0);
 
@@ -590,6 +593,50 @@ export async function POST(req: NextRequest) {
   if (!hasCronSecret) {
     const session = await getServerSession(authOptions);
     if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // The real cron secret caller (no browser, no proxy/tunnel in the middle)
+  // gets the original plain blocking JSON response, unchanged. The Settings
+  // "Run playlist update now" button goes through a tunnel that has its own
+  // idle/gateway timeout — 12 programmes run sequentially and can take well
+  // over a minute, so that request came back with an HTML timeout page
+  // instead of JSON ("Unexpected token '<'..."). Stream progress + a final
+  // heartbeat-backed SSE frame instead, same padding/heartbeat pattern as
+  // the other long-running routes (e.g. /api/ai-dj/mix), so the connection
+  // never sits idle long enough to trip that timeout.
+  if (!hasCronSecret) {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        const send = (data: object) => {
+          try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { /* stream closed */ }
+        };
+        const heartbeat = setInterval(() => {
+          try { controller.enqueue(encoder.encode(`: hb\n\n`)); } catch { /* stream closed */ }
+        }, 15000);
+        try {
+          controller.enqueue(encoder.encode(`: ${"x".repeat(1024)}\n\n`));
+          const result = await runUpdate((current, total, name) => {
+            send({ type: "progress", current, total, name });
+          });
+          send({ type: "done", ...result });
+        } catch (e) {
+          send({ type: "error", error: e instanceof Error ? e.message : String(e) });
+        } finally {
+          clearInterval(heartbeat);
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+        "Content-Encoding": "none",
+      },
+    });
   }
 
   try {

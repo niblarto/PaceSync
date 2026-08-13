@@ -79,6 +79,60 @@ function sectionTooltip(s: WorkoutSection): string {
   }
 }
 
+// Bearing in degrees (0 = north, clockwise) from point a to point b, standard
+// great-circle formula — used to orient each direction-arrow marker.
+function bearingDeg(a: [number, number], b: [number, number]): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const [lat1, lon1] = [toRad(a[0]), toRad(a[1])];
+  const [lat2, lon2] = [toRad(b[0]), toRad(b[1])];
+  const dLon = lon2 - lon1;
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+// Green (#22c55e) -> red (#ef4444) lerp by route progress (0 = start, 1 =
+// finish) — reuses the exact two hex colors the start/finish circle markers
+// below already use, so the arrow gradient matches the app's existing
+// start/finish color convention instead of inventing a new palette.
+const ARROW_START_RGB = [34, 197, 94] as const;
+const ARROW_END_RGB = [239, 68, 68] as const;
+function lerpArrowColor(t: number): string {
+  const clamped = Math.max(0, Math.min(1, t));
+  const [r, g, b] = ARROW_START_RGB.map((c, i) => Math.round(c + (ARROW_END_RGB[i] - c) * clamped));
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+// Places a small rotated triangle marker every ~4% of total route distance
+// (~25 arrows across a typical run) along `points`, colored by progress and
+// pointed in the direction of travel — pure Leaflet divIcon, no plugin, so
+// rotation is done via a CSS transform on the icon's inner SVG rather than a
+// marker-rotation library.
+function addDirectionArrows(L: typeof import("leaflet"), map: import("leaflet").Map, points: RoutePoint[]): void {
+  if (points.length < 2) return;
+  const totalMi = points[points.length - 1][4] || 1;
+  const STEP_FRACTION = 0.04;
+  let nextMi = 0;
+  for (let i = 0; i < points.length - 1; i++) {
+    if (points[i][4] < nextMi) continue;
+    const a: [number, number] = [points[i][0], points[i][1]];
+    const b: [number, number] = [points[i + 1][0], points[i + 1][1]];
+    if (a[0] === b[0] && a[1] === b[1]) continue; // duplicate point (paused GPS) — bearing undefined
+    const heading = bearingDeg(a, b);
+    const color = lerpArrowColor(points[i][4] / totalMi);
+    const icon = L.divIcon({
+      className: "",
+      html: `<svg width="16" height="16" viewBox="0 0 16 16" style="transform: rotate(${heading}deg)">
+               <polygon points="8,1 14,14 8,10.5 2,14" fill="${color}" stroke="#fff" stroke-width="1" />
+             </svg>`,
+      iconSize: [16, 16],
+      iconAnchor: [8, 8],
+    });
+    L.marker(a, { icon, interactive: false }).addTo(map);
+    nextMi += totalMi * STEP_FRACTION;
+  }
+}
+
 interface UseRouteMapArgs {
   mapContainer: React.RefObject<HTMLDivElement>;
   activityId: string | number | null;
@@ -249,6 +303,8 @@ export function useRouteMap({ mapContainer, activityId, workoutSections, tracks,
             }
           }
         }
+
+        addDirectionArrows(L, map, points);
 
         L.circleMarker([points[0][0], points[0][1]], {
           radius: 7, color: "#fff", weight: 2, fillColor: "#22c55e", fillOpacity: 1,

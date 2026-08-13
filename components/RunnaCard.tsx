@@ -176,8 +176,10 @@ let fetchPromise: Promise<void> | null = null;
 // picks up the change right away instead of waiting out the interval.
 const POLL_MS = 5 * 60 * 1000;
 
-function refetchRunnaData(onDone: (d: RunnaData) => void) {
-  fetchPromise = fetch("/api/runna/workouts")
+const subscribers = new Set<(d: RunnaData) => void>();
+
+function refetchRunnaData(onDone: (d: RunnaData) => void, force = false) {
+  fetchPromise = fetch(`/api/runna/workouts${force ? "?force=1" : ""}`)
     .then(r => r.json())
     .then((d: { workouts?: RunnaWorkout[]; pastRuns?: RunnaPastRun[]; error?: string }) => {
       if (d.error) throw new Error(d.error);
@@ -186,7 +188,23 @@ function refetchRunnaData(onDone: (d: RunnaData) => void) {
     .catch(e => {
       cached = { workouts: [], pastRuns: [], loading: false, error: e instanceof Error ? e.message : "Failed to load" };
     })
-    .then(() => { if (cached) onDone(cached); });
+    .then(() => {
+      if (!cached) return;
+      onDone(cached);
+      // Every other useRunnaData() consumer (e.g. RunnaSummaryCard mounted
+      // alongside RunnaScheduleCard) needs the fresh data too, not just
+      // whichever component triggered this particular refetch.
+      subscribers.forEach(sub => { if (sub !== onDone) sub(cached!); });
+    });
+}
+
+// Bypasses both the client 5-min poll and the server's 5-min ICS cache — for
+// a manual "refresh schedule now" action (e.g. after editing/reordering
+// workouts in the Runna app itself, where the normal polling cadence would
+// otherwise leave the page showing the old schedule for up to 5 more
+// minutes). Exported so the Schedule card's refresh button can drive it.
+export function refreshRunnaData(): Promise<RunnaData> {
+  return new Promise(resolve => refetchRunnaData(resolve, true));
 }
 
 export function useRunnaData(): RunnaData {
@@ -199,12 +217,14 @@ export function useRunnaData(): RunnaData {
     if (!fetchPromise) refetchRunnaData(setData);
     else fetchPromise.then(() => { if (cached) setData(cached); });
 
+    subscribers.add(setData);
     const interval = setInterval(() => refetchRunnaData(setData), POLL_MS);
     const onFocus = () => refetchRunnaData(setData);
     const onVisibility = () => { if (document.visibilityState === "visible") onFocus(); };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      subscribers.delete(setData);
       clearInterval(interval);
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
@@ -798,6 +818,11 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   ref,
 ) {
   const { workouts: allWorkouts, pastRuns, loading, error } = useRunnaData();
+  const [refreshing, setRefreshing] = useState(false);
+  async function forceRefreshSchedule() {
+    setRefreshing(true);
+    try { await refreshRunnaData(); } finally { setRefreshing(false); }
+  }
   // Once a workout is completed, Runna surfaces it on the Summary card
   // (pastRuns) instead — drop it here so the same day's run isn't shown as
   // both upcoming (Schedule) and completed (Summary) at once.
@@ -1210,11 +1235,22 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
 
   return (
     <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
-      <div className="px-5 py-4 border-b border-white/10">
-        <h2 className="font-semibold flex items-center gap-2">
-          <span className="text-base">🏃</span> Runna Schedule
-        </h2>
-        <p className="text-xs text-slate-500 mt-0.5">Next 4 weeks</p>
+      <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between gap-3">
+        <div>
+          <h2 className="font-semibold flex items-center gap-2">
+            <span className="text-base">🏃</span> Runna Schedule
+          </h2>
+          <p className="text-xs text-slate-500 mt-0.5">Next 4 weeks</p>
+        </div>
+        <button
+          onClick={forceRefreshSchedule}
+          disabled={refreshing || loading}
+          title="Re-fetch the Runna schedule now — bypasses the usual few-minute cache, for when you've just edited/reordered workouts in the Runna app"
+          className="shrink-0 inline-flex items-center gap-1.5 rounded-lg bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 border border-white/10 text-xs text-slate-300 px-2.5 py-1.5 transition-colors"
+        >
+          <span className={refreshing ? "animate-spin" : ""}>🔄</span>
+          {refreshing ? "Refreshing…" : "Refresh"}
+        </button>
       </div>
 
       {loading && (

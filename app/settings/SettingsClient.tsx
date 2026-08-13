@@ -594,6 +594,39 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }
 
+  // Saves incomplete-but-has-a-Spotify-URI tracks to the same "No BPM"
+  // playlist the dashboard's saveNoBpmPlaylist() uses — /api/spotify/
+  // create-playlist finds-or-creates by name and REPLACES its tracks
+  // entirely, so re-running this always leaves only the current set of
+  // still-broken tracks in there, not an accumulating pile.
+  const [savingErrorsToSpotify, setSavingErrorsToSpotify] = useState(false);
+  const [saveErrorsToSpotifyMsg, setSaveErrorsToSpotifyMsg] = useState<string | null>(null);
+
+  async function saveErrorTracksToSpotify() {
+    const withUri = (incompleteTracks ?? []).filter(t => t.fields["Track URI"] && t.uri);
+    if (withUri.length === 0) return;
+    setSavingErrorsToSpotify(true);
+    setSaveErrorsToSpotifyMsg(null);
+    try {
+      const res = await fetch("/api/spotify/create-playlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "No BPM",
+          description: "Tracks missing BPM/audio-feature data in the Running library — run through a BPM tool, export via Exportify, then import back on the dashboard.",
+          trackUris: withUri.map(t => t.uri),
+        }),
+      });
+      const data = await res.json() as { error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `Save failed (${res.status})`);
+      setSaveErrorsToSpotifyMsg(`Saved ${withUri.length} track${withUri.length !== 1 ? "s" : ""} to "No BPM" on Spotify`);
+    } catch (e) {
+      setSaveErrorsToSpotifyMsg(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setSavingErrorsToSpotify(false);
+    }
+  }
+
   function loadIncompleteTracks() {
     fetch("/api/settings/incomplete-tracks")
       .then(r => r.json())
@@ -845,6 +878,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [cronResults, setCronResults] = useState<{ name: string; matched: number; found: number; error?: string }[] | null>(null);
   const [cronSummary, setCronSummary] = useState<{ totalMatched: number; dedupRemoved: number; dedupRemaining: number } | null>(null);
   const [cronError, setCronError] = useState<string | null>(null);
+  const [cronProgress, setCronProgress] = useState<{ current: number; total: number; name: string } | null>(null);
 
   useEffect(() => {
     fetch("/api/settings/hr-zones")
@@ -2391,30 +2425,54 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setCronResults(null);
     setCronSummary(null);
     setCronError(null);
+    setCronProgress(null);
     try {
       const res = await fetch("/api/cron/weekly", { method: "POST" });
-      const data = await res.json() as {
-        ok?: boolean;
-        error?: string;
-        programmeResults?: { name: string; matched: number; found: number; error?: string }[];
-        totalMatched?: number;
-        dedupRemoved?: number;
-        dedupRemaining?: number;
-      };
-      if (!res.ok) {
-        setCronError(data.error ?? "Unknown error");
-      } else {
-        setCronResults(data.programmeResults ?? []);
-        setCronSummary({
-          totalMatched: data.totalMatched ?? 0,
-          dedupRemoved: data.dedupRemoved ?? 0,
-          dedupRemaining: data.dedupRemaining ?? 0,
-        });
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `Update failed (${res.status})`);
+      }
+      // SSE: a progress event per programme, then a final done/error event —
+      // keeps the connection active through the whole multi-minute run so a
+      // tunnel/proxy in front of this app doesn't idle-timeout the request
+      // and hand back an HTML error page instead of JSON.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const msg = JSON.parse(dataLine.slice(6)) as {
+            type: string; current?: number; total?: number; name?: string; error?: string;
+            programmeResults?: { name: string; matched: number; found: number; error?: string }[];
+            totalMatched?: number; dedupRemoved?: number; dedupRemaining?: number;
+          };
+          if (msg.type === "progress") {
+            setCronProgress({ current: msg.current ?? 0, total: msg.total ?? 1, name: msg.name ?? "" });
+          } else if (msg.type === "error") {
+            throw new Error(msg.error ?? "Unknown error");
+          } else if (msg.type === "done") {
+            setCronResults(msg.programmeResults ?? []);
+            setCronSummary({
+              totalMatched: msg.totalMatched ?? 0,
+              dedupRemoved: msg.dedupRemoved ?? 0,
+              dedupRemaining: msg.dedupRemaining ?? 0,
+            });
+          }
+        }
       }
     } catch (e) {
       setCronError(e instanceof Error ? e.message : "Network error");
     } finally {
       setCronRunning(false);
+      setCronProgress(null);
     }
   }
 
@@ -3640,7 +3698,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
                   </svg>
-                  Running… this may take a minute
+                  {cronProgress ? `Running… ${cronProgress.name} (${cronProgress.current + 1}/${cronProgress.total})` : "Running… this may take a minute"}
                 </>
               ) : (
                 <>
@@ -4894,20 +4952,35 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </button>
           {incompleteTracksOpen && (
             <div className="border-t border-white/10">
-              <div className="px-5 py-3 flex items-center justify-between gap-3 border-b border-white/10">
+              <div className="px-5 py-3 flex items-center justify-between gap-3 border-b border-white/10 flex-wrap">
                 <p className="text-xs text-slate-500">
                   {healProgress?.running
                     ? `Healing… ${healProgress.current}/${healProgress.total}`
                     : "Backfills BPM/duration/genres from Spotify/Deezer/Last.fm where possible."}
                 </p>
-                <button
-                  onClick={healNow}
-                  disabled={!!healProgress?.running}
-                  className="shrink-0 inline-flex items-center gap-2 rounded-lg bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 text-amber-300 font-medium text-xs px-3 py-1.5 transition-colors disabled:opacity-40"
-                >
-                  {healProgress?.running ? "Healing…" : `Heal all ${incompleteTracks.length} tracks`}
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  {incompleteTracks.some(t => t.fields["Track URI"]) && (
+                    <button
+                      onClick={saveErrorTracksToSpotify}
+                      disabled={savingErrorsToSpotify}
+                      title='Save these tracks to a Spotify playlist named "No BPM", replacing its current contents — run through an external BPM tool, export via Exportify, then import the CSV back on the dashboard'
+                      className="inline-flex items-center gap-2 rounded-lg bg-green-500/15 border border-green-500/40 hover:bg-green-500/25 text-green-300 font-medium text-xs px-3 py-1.5 transition-colors disabled:opacity-40"
+                    >
+                      {savingErrorsToSpotify ? "Saving…" : 'Save to Spotify ("No BPM")'}
+                    </button>
+                  )}
+                  <button
+                    onClick={healNow}
+                    disabled={!!healProgress?.running}
+                    className="inline-flex items-center gap-2 rounded-lg bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 text-amber-300 font-medium text-xs px-3 py-1.5 transition-colors disabled:opacity-40"
+                  >
+                    {healProgress?.running ? "Healing…" : `Heal all ${incompleteTracks.length} tracks`}
+                  </button>
+                </div>
               </div>
+              {saveErrorsToSpotifyMsg && (
+                <p className="text-xs text-slate-400 px-5 pt-2">{saveErrorsToSpotifyMsg}</p>
+              )}
               <div className="divide-y divide-slate-800/50 px-5">
                 {incompleteTracks.map((track, i) => (
                   <div key={track.uri} className="py-1.5">

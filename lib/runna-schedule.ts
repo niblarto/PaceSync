@@ -304,7 +304,7 @@ export type RunnaScheduleResult =
   | { ok: true; workouts: RunnaWorkout[]; pastRuns: RunnaPastRun[] }
   | { ok: false; status: 503 | 500; error: string };
 
-export async function fetchRunnaSchedule(): Promise<RunnaScheduleResult> {
+export async function fetchRunnaSchedule(force = false): Promise<RunnaScheduleResult> {
   const url = loadRunnaUrl() ?? process.env.RUNNA_ICS_URL;
   if (!url) return { ok: false, status: 503, error: "RUNNA_ICS_URL not configured" };
 
@@ -312,8 +312,12 @@ export async function fetchRunnaSchedule(): Promise<RunnaScheduleResult> {
     // 5 min, not the original 1hr — Runna can flip a workout from upcoming
     // to completed (Summary card) at any time, and the client now polls on
     // this same cadence (see useRunnaData in RunnaCard.tsx), so a long
-    // server-side cache would silently defeat that polling.
-    const res = await fetch(url, { next: { revalidate: 300 } });
+    // server-side cache would silently defeat that polling. force=true
+    // (the Schedule card's manual refresh button) bypasses this cache
+    // entirely — a user who just reordered/edited workouts in the Runna app
+    // wants the change reflected immediately, not after up to 5 more
+    // minutes of a stale cached ICS response.
+    const res = await fetch(url, force ? { cache: "no-store" } : { next: { revalidate: 300 } });
     if (!res.ok) throw new Error(`ICS fetch ${res.status}`);
     // Force UTF-8 decoding — the ICS server's Content-Type omits a charset,
     // and res.text() falling back to Latin-1 mangles multi-byte characters

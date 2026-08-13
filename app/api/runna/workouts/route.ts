@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { fetchRunnaSchedule } from "@/lib/runna-schedule";
@@ -6,11 +6,12 @@ import { pruneStalePinsAgainstSchedule } from "@/lib/pinned-mixes";
 
 export type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/lib/runna-schedule";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const result = await fetchRunnaSchedule();
+  const force = req.nextUrl.searchParams.get("force") === "1";
+  const result = await fetchRunnaSchedule(force);
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
 
   // The ICS feed is the source of truth — a future-dated pinned mix whose
