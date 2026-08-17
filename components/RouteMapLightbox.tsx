@@ -139,6 +139,15 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
   const highlightLayerRef = useRef<import("leaflet").Polyline | null>(null);
   const [hoveredTrackIdx, setHoveredTrackIdx] = useState<number | null>(null);
 
+  // Workout-section list — lifted out of the draw effect below into state so
+  // a left-hand sidebar (mirroring the pinned-mix panel on the right) can
+  // render it and drive the same walking-ants highlight the map's own
+  // section-line hover already triggers.
+  const [sectionList, setSectionList] = useState<WorkoutSection[]>([]);
+  const [hoveredSectionIdx, setHoveredSectionIdx] = useState<number | null>(null);
+  const sectionColorsRef = useRef<string[]>([]);
+  const sectionLayersRef = useRef<Map<number, import("leaflet").Polyline[]>>(new Map());
+
   const [pinnedActivityId, setPinnedActivityId] = useState<string | null | undefined>(undefined); // undefined = not checked yet
   const [pinning, setPinning] = useState(false);
 
@@ -262,9 +271,11 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
 
         const points = data.points;
         pointsRef.current = points;
+        sectionLayersRef.current.clear();
 
         if (sections.length > 0) {
           setShowingWorkoutOverlay(true);
+          setSectionList(sections);
 
           // Warn when the route's actual distance falls short of the
           // workout's total planned mileage — the last section(s) would
@@ -295,15 +306,41 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
           };
 
           const sectionColors = assignSectionColors(sections);
+          sectionColorsRef.current = sectionColors;
+
+          const setSectionAnts = (idx: number, on: boolean) => {
+            for (const layer of sectionLayersRef.current.get(idx) ?? []) {
+              layer.setStyle({ dashArray: on ? "1,14" : undefined });
+              const el = layer.getElement();
+              if (on) el?.classList.add("route-highlight-flash");
+              else el?.classList.remove("route-highlight-flash");
+            }
+          };
 
           let batch: [number, number][] = [[points[0][0], points[0][1]]];
           let batchSection = sectionFor(points[0][4], 0);
           const flush = (pts: [number, number][], idx: number) => {
             if (pts.length < 2 || idx < 0) return;
             const section = sections[idx];
-            L.polyline(pts, { color: sectionColors[idx], weight: 5, opacity: 0.9 })
+            const layer = L.polyline(pts, { color: sectionColors[idx], weight: 5, opacity: 0.9 })
               .addTo(map!)
-              .bindTooltip(sectionTooltip(section), { sticky: true });
+              // offset nudges the tooltip clear of the cursor — sticky mode
+              // otherwise centers it right under the pointer, where it stole
+              // hover/click focus from the line and nearby map controls.
+              .bindTooltip(sectionTooltip(section), { sticky: true, offset: [16, 0] });
+            // Walking-ants dash animation while hovered — same marching-ants
+            // CSS (app/globals.css) already used for the mix-track hover
+            // highlight, applied directly to this section's own polyline
+            // element instead of a separate overlay layer, and reset on
+            // mouseout since setStyle's dashArray persists otherwise. Shared
+            // with the left-hand section list below, which drives the same
+            // effect via hoveredSectionIdx for whichever layers belong to
+            // that section (a section's route can be non-contiguous).
+            layer.on("mouseover", () => setSectionAnts(idx, true));
+            layer.on("mouseout", () => setSectionAnts(idx, false));
+            const existing = sectionLayersRef.current.get(idx) ?? [];
+            existing.push(layer);
+            sectionLayersRef.current.set(idx, existing);
           };
           for (let i = 1; i < points.length; i++) {
             const idx = sectionFor(points[i][4], batchSection);
@@ -329,7 +366,7 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
             const pt = points[nearest];
             L.circleMarker([pt[0], pt[1]], {
               radius: 6, color: "#fff", weight: 2, fillColor: sectionColors[idx], fillOpacity: 1,
-            }).addTo(map!).bindTooltip(sectionTooltip(s), { sticky: true });
+            }).addTo(map!).bindTooltip(sectionTooltip(s), { sticky: true, offset: [16, 0] });
           });
         } else {
           // Pace quartiles over the recorded speeds → colour buckets
@@ -430,6 +467,27 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
     });
   }, [hoveredTrackIdx, mixTracks]);
 
+  // Left-hand section list hover drives the same ants effect the map's own
+  // section-line hover triggers directly — toggle off whichever section
+  // previously had it, on for the new one.
+  const prevHoveredSectionRef = useRef<number | null>(null);
+  useEffect(() => {
+    const prev = prevHoveredSectionRef.current;
+    if (prev !== null) {
+      for (const layer of sectionLayersRef.current.get(prev) ?? []) {
+        layer.setStyle({ dashArray: undefined });
+        layer.getElement()?.classList.remove("route-highlight-flash");
+      }
+    }
+    if (hoveredSectionIdx !== null) {
+      for (const layer of sectionLayersRef.current.get(hoveredSectionIdx) ?? []) {
+        layer.setStyle({ dashArray: "1,14" });
+        layer.getElement()?.classList.add("route-highlight-flash");
+      }
+    }
+    prevHoveredSectionRef.current = hoveredSectionIdx;
+  }, [hoveredSectionIdx]);
+
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
@@ -499,6 +557,32 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
           </div>
         </div>
         <div className="flex-1 min-h-0 flex">
+          {sectionList.length > 0 && (
+            <div className="w-64 shrink-0 border-r border-white/10 bg-slate-950/60 overflow-y-auto no-scrollbar">
+              <p className="sticky top-0 px-3 py-2 text-xs font-medium text-slate-400 bg-slate-950/90 backdrop-blur-sm border-b border-white/10">
+                🏃 Segments — hover to see on map
+              </p>
+              <div className="divide-y divide-white/5">
+                {sectionList.map((s, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onMouseEnter={() => setHoveredSectionIdx(i)}
+                    onMouseLeave={() => setHoveredSectionIdx(prev => (prev === i ? null : prev))}
+                    className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2 ${
+                      hoveredSectionIdx === i ? "bg-cyan-500/15" : "hover:bg-white/5"
+                    }`}
+                  >
+                    <span
+                      className="w-2.5 h-2.5 rounded-full shrink-0"
+                      style={{ backgroundColor: sectionColorsRef.current[i] }}
+                    />
+                    <span className="text-sm text-slate-200">{sectionTooltip(s)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="relative flex-1 bg-slate-800">
             <div ref={mapRef} className="absolute inset-0" />
             {loading && !error && (

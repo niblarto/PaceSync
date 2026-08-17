@@ -139,6 +139,11 @@ interface UseRouteMapArgs {
   workoutSections: WorkoutSection[];
   tracks: RouteMapTrack[];
   hoveredTrackIdx: number | null;
+  // Index into workoutSections currently hovered in an external sidebar
+  // list (see MobileRouteClient.tsx) — drives the same walking-ants
+  // highlight the map's own section-line hover already triggers, so hovering
+  // the list does the identical thing as hovering the line on the map.
+  hoveredSectionIdx?: number | null;
 }
 
 interface UseRouteMapResult {
@@ -152,7 +157,7 @@ interface UseRouteMapResult {
   setView: (v: "street" | "satellite") => void;
 }
 
-export function useRouteMap({ mapContainer, activityId, workoutSections, tracks, hoveredTrackIdx }: UseRouteMapArgs): UseRouteMapResult {
+export function useRouteMap({ mapContainer, activityId, workoutSections, tracks, hoveredTrackIdx, hoveredSectionIdx = null }: UseRouteMapArgs): UseRouteMapResult {
   const [name, setName] = useState<string | null>(null);
   const [stats, setStats] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -165,6 +170,11 @@ export function useRouteMap({ mapContainer, activityId, workoutSections, tracks,
 
   const pointsRef = useRef<RoutePoint[] | null>(null);
   const highlightLayerRef = useRef<import("leaflet").Polyline | null>(null);
+  // Every polyline batch belonging to each section index — a section's
+  // route can be non-contiguous (e.g. reps that revisit an earlier street),
+  // so one section maps to 1+ layers, all of which need the ants effect
+  // toggled together for the list-hover to visually match hovering the line.
+  const sectionLayersRef = useRef<Map<number, import("leaflet").Polyline[]>>(new Map());
   const layersRef = useRef<{
     map: import("leaflet").Map;
     street: import("leaflet").TileLayer;
@@ -228,6 +238,7 @@ export function useRouteMap({ mapContainer, activityId, workoutSections, tracks,
 
         const points = data.points;
         pointsRef.current = points;
+        sectionLayersRef.current.clear();
 
         if (workoutSections.length > 0) {
           setShowingWorkoutOverlay(true);
@@ -248,14 +259,36 @@ export function useRouteMap({ mapContainer, activityId, workoutSections, tracks,
 
           const sectionColors = assignSectionColors(workoutSections);
 
+          const setSectionAnts = (idx: number, on: boolean) => {
+            for (const layer of sectionLayersRef.current.get(idx) ?? []) {
+              layer.setStyle({ dashArray: on ? "1,14" : undefined });
+              const el = layer.getElement();
+              if (on) el?.classList.add("route-highlight-flash");
+              else el?.classList.remove("route-highlight-flash");
+            }
+          };
+
           let batch: [number, number][] = [[points[0][0], points[0][1]]];
           let batchSection = sectionFor(points[0][4], 0);
           const flush = (pts: [number, number][], idx: number) => {
             if (pts.length < 2 || idx < 0) return;
             const section = workoutSections[idx];
-            L.polyline(pts, { color: sectionColors[idx], weight: 5, opacity: 0.9 })
+            const layer = L.polyline(pts, { color: sectionColors[idx], weight: 5, opacity: 0.9 })
               .addTo(map!)
-              .bindTooltip(sectionTooltip(section), { sticky: true });
+              // offset nudges the tooltip clear of the cursor — sticky mode
+              // otherwise centers it right under the pointer, where it stole
+              // hover/click focus from the line and nearby map controls.
+              .bindTooltip(sectionTooltip(section), { sticky: true, offset: [16, 0] });
+            // Walking-ants dash animation while hovered — same marching-ants
+            // CSS (app/globals.css) already used for the mix-track hover
+            // highlight, applied directly to this section's own polyline
+            // element instead of a separate overlay layer, and reset on
+            // mouseout since setStyle's dashArray persists otherwise.
+            layer.on("mouseover", () => setSectionAnts(idx, true));
+            layer.on("mouseout", () => setSectionAnts(idx, false));
+            const existing = sectionLayersRef.current.get(idx) ?? [];
+            existing.push(layer);
+            sectionLayersRef.current.set(idx, existing);
           };
           for (let i = 1; i < points.length; i++) {
             const idx = sectionFor(points[i][4], batchSection);
@@ -277,7 +310,7 @@ export function useRouteMap({ mapContainer, activityId, workoutSections, tracks,
             const pt = points[nearest];
             L.circleMarker([pt[0], pt[1]], {
               radius: 6, color: "#fff", weight: 2, fillColor: sectionColors[idx], fillOpacity: 1,
-            }).addTo(map!).bindTooltip(sectionTooltip(s), { sticky: true });
+            }).addTo(map!).bindTooltip(sectionTooltip(s), { sticky: true, offset: [16, 0] });
           });
         } else {
           const speeds = points.map(p => p[2]).filter((s): s is number => s !== null && s > 0.5).sort((a, b) => a - b);
@@ -370,6 +403,27 @@ export function useRouteMap({ mapContainer, activityId, workoutSections, tracks,
       highlightLayerRef.current = layer;
     });
   }, [hoveredTrackIdx, tracks]);
+
+  // External sidebar-list hover (see MobileRouteClient.tsx) drives the same
+  // ants effect the map's own section-line hover already triggers directly —
+  // toggle off whichever section previously had it, on for the new one.
+  const prevHoveredSectionRef = useRef<number | null>(null);
+  useEffect(() => {
+    const prev = prevHoveredSectionRef.current;
+    if (prev !== null) {
+      for (const layer of sectionLayersRef.current.get(prev) ?? []) {
+        layer.setStyle({ dashArray: undefined });
+        layer.getElement()?.classList.remove("route-highlight-flash");
+      }
+    }
+    if (hoveredSectionIdx !== null) {
+      for (const layer of sectionLayersRef.current.get(hoveredSectionIdx) ?? []) {
+        layer.setStyle({ dashArray: "1,14" });
+        layer.getElement()?.classList.add("route-highlight-flash");
+      }
+    }
+    prevHoveredSectionRef.current = hoveredSectionIdx;
+  }, [hoveredSectionIdx]);
 
   return { loading, error, name, stats, showingWorkoutOverlay, distanceMismatch, view, setView };
 }

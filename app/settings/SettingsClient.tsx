@@ -4940,7 +4940,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                 ⚠ Tracks with errors <span className="text-slate-500 font-normal">({incompleteTracks.length})</span>
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Missing BPM, duration, or genre data — excluded from AI DJ mixes until fixed.
+                Missing BPM, duration, or genre data. Missing BPM or duration excludes a track
+                from AI DJ mixes until fixed — a genre-only gap doesn&apos;t affect mixes.
               </p>
               {spotifyBlockedUntil && new Date(spotifyBlockedUntil).getTime() > Date.now() && (
                 <p className="text-xs text-amber-400 mt-0.5">
