@@ -2,7 +2,8 @@ import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { computeEasyPaceBias } from "@/lib/run-pace-bias";
 import { getAllTrackVotes } from "@/lib/track-feedback";
-import { getPlayedTracks, getPlayedCounts, getLastEasyPaceSec } from "@/lib/todays-run-history";
+import { getPlayedTracks, getLastEasyPaceSec } from "@/lib/todays-run-history";
+import { getPlayCounts } from "@/lib/play-counts";
 import { loadBpmOverrides } from "@/lib/bpm-overrides";
 import { join } from "path";
 import { spawn } from "child_process";
@@ -172,7 +173,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   const easyBias = computeEasyPaceBias();
   if (easyBias > 0) console.log(`[ai-dj] recent easy runs ran ~${easyBias}s/mi fast — easing easy segments`);
   const trackFeedback = getAllTrackVotes();
-  const playCounts = mergePlayCounts(getPlayedCounts(), extraPlayCounts);
+  const playCounts = mergePlayCounts(getPlayCounts(), extraPlayCounts);
 
   // Claude/Gemini run right here on the Pi via the on-Pi bridge — no
   // dependency on the separate Ollama service PC being on. Ollama-backed
@@ -309,7 +310,7 @@ export async function simulateAiDjMix(segment: string, onProgress?: AiDjProgress
 
   const easyBias = computeEasyPaceBias();
   const trackFeedback = getAllTrackVotes();
-  const playCounts = getPlayedCounts();
+  const playCounts = getPlayCounts();
   const easyPaceSec = getLastEasyPaceSec() ?? undefined;
   const bpmOverrides = loadBpmOverrides();
 
@@ -352,7 +353,7 @@ function buildFlowMixLocally(
   model?: string, effort?: string, durationSec?: number,
 ): Promise<AiDjMixResult> {
   return runBridge({
-    title, trackUris, trackFeedback, playCounts: getPlayedCounts(), model, effort, durationSec,
+    title, trackUris, trackFeedback, playCounts: getPlayCounts(), model, effort, durationSec,
   }, onProgress);
 }
 
@@ -389,7 +390,7 @@ export async function buildAiDjFlowMix(title: string, trackUris: string[], onPro
   }
 
   const body = JSON.stringify({
-    title, trackUris, csv, trackFeedback, playCounts: getPlayedCounts(), durationSec,
+    title, trackUris, csv, trackFeedback, playCounts: getPlayCounts(), durationSec,
   });
   try {
     if (onProgress) {

@@ -250,6 +250,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [simRunning, setSimRunning] = useState(false);
   const [simLog, setSimLog] = useState<{ type: "progress" | "llm" | "error"; text: string; ok?: boolean; response?: string; error?: string }[]>([]);
   const [simResult, setSimResult] = useState<{ name: string; artist: string; tempo: number }[] | null>(null);
+  const [simTrackUris, setSimTrackUris] = useState<string[]>([]);
+  const [simSaving, setSimSaving] = useState(false);
+  const [simSaveMsg, setSimSaveMsg] = useState<string | null>(null);
   const [waking, setWaking] = useState(false);
   const [wakeMsg, setWakeMsg] = useState<string | null>(null);
   const wakePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1168,6 +1171,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setSimRunning(true);
     setSimLog([]);
     setSimResult(null);
+    setSimTrackUris([]);
+    setSimSaveMsg(null);
     try {
       const res = await fetch("/api/ai-dj/simulate-mix", {
         method: "POST",
@@ -1204,6 +1209,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           } else if (msg.type === "done") {
             const tracks = (msg.timeline ?? []).flatMap(s => s.tracks);
             setSimResult(tracks.map(t => ({ name: t.name, artist: t.artist, tempo: t.tempo })));
+            setSimTrackUris(msg.trackUris ?? []);
           }
         }
       }
@@ -1211,6 +1217,35 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setSimLog(l => [...l, { type: "error", text: e instanceof Error ? e.message : "Simulation failed" }]);
     } finally {
       setSimRunning(false);
+    }
+  }
+
+  // Saves the simulated mix's tracks to the same "Today's Run" Spotify
+  // playlist the dashboard's real mix-save flow uses — /api/spotify/
+  // create-playlist finds-or-creates by name and replaces its tracks, so
+  // this behaves identically to saving a real mix, just sourced from a
+  // simulation run instead of an actual scheduled workout.
+  async function saveSimResultToSpotify() {
+    if (!simTrackUris.length) return;
+    setSimSaving(true);
+    setSimSaveMsg(null);
+    try {
+      const res = await fetch("/api/spotify/create-playlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Today's Run",
+          description: `Simulated ${simKind} mix (${simMiles}mi) from Settings → BPM → Simulate a mix`,
+          trackUris: simTrackUris,
+        }),
+      });
+      const data = await res.json() as { error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `Save failed (${res.status})`);
+      setSimSaveMsg(`Saved ${simTrackUris.length} track${simTrackUris.length !== 1 ? "s" : ""} to "Today's Run" on Spotify`);
+    } catch (e) {
+      setSimSaveMsg(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setSimSaving(false);
     }
   }
 
@@ -3396,14 +3431,29 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         )}
 
         {simResult && (
-          <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs max-h-80 overflow-y-auto no-scrollbar">
-            {simResult.map((t, i) => (
-              <div key={i} className="px-3 py-1.5 flex items-center justify-between gap-3">
-                <span className="text-slate-300 truncate">{t.name} — <span className="text-slate-500">{t.artist}</span></span>
-                <span className="text-slate-400 shrink-0">{t.tempo.toFixed(1)} BPM</span>
+          <>
+            <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs max-h-80 overflow-y-auto no-scrollbar">
+              {simResult.map((t, i) => (
+                <div key={i} className="px-3 py-1.5 flex items-center justify-between gap-3">
+                  <span className="text-slate-300 truncate">{t.name} — <span className="text-slate-500">{t.artist}</span></span>
+                  <span className="text-slate-400 shrink-0">{t.tempo.toFixed(1)} BPM</span>
+                </div>
+              ))}
+            </div>
+            {simTrackUris.length > 0 && (
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={saveSimResultToSpotify}
+                  disabled={simSaving}
+                  title={`Saves these tracks to a Spotify playlist named "Today's Run", replacing its current contents — same playlist a real mix save uses`}
+                  className="inline-flex items-center gap-2 rounded-lg bg-green-500/15 border border-green-500/40 hover:bg-green-500/25 text-green-300 font-medium text-xs px-3 py-1.5 transition-colors disabled:opacity-40"
+                >
+                  {simSaving ? "Saving…" : `Save to Spotify ("Today's Run")`}
+                </button>
+                {simSaveMsg && <p className="text-xs text-slate-400">{simSaveMsg}</p>}
               </div>
-            ))}
-          </div>
+            )}
+          </>
         )}
       </div>
 
