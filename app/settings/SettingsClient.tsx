@@ -71,6 +71,20 @@ interface AiDjSimTrack { name: string; artist: string; tempo: number }
 interface AiDjSimTimelineSegment { tracks: AiDjSimTrack[] }
 interface AiDjMixResponse { trackUris: string[]; totalSec: number; timeline: AiDjSimTimelineSegment[] }
 
+// Mirrors lib/ai-dj-mix.ts's OllamaModelInfo / ModelCompareResult for the
+// LLM Testing tab.
+interface OllamaModelInfo { name: string; sizeBytes: number | null }
+interface OllamaModelStatus { name: string; sizeBytes: number; gpuPercent: number; cpuPercent: number }
+interface ModelCompareTrack { uri: string; name: string; artist: string; tempo: number }
+interface ModelCompareTimelineSegment { segment: string; tracks: ModelCompareTrack[] }
+interface ModelCompareResult {
+  model: string;
+  ok: boolean;
+  error?: string;
+  tookMs?: number;
+  mix?: { trackUris: string[]; totalSec: number; timeline: ModelCompareTimelineSegment[]; llmFailures?: string[] };
+}
+
 function calcZones(maxHR: number, restingHR: number): ZoneRow[] {
   const hrr = maxHR - restingHR;
   const pcts = [0.60, 0.70, 0.80, 0.90, 1.00];
@@ -253,6 +267,20 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [simTrackUris, setSimTrackUris] = useState<string[]>([]);
   const [simSaving, setSimSaving] = useState(false);
   const [simSaveMsg, setSimSaveMsg] = useState<string | null>(null);
+
+  // ── LLM Testing tab state — never persisted ──
+  const [llmModels, setLlmModels] = useState<OllamaModelInfo[]>([]);
+  const [llmModelsLoading, setLlmModelsLoading] = useState(false);
+  const [llmModelsError, setLlmModelsError] = useState<string | null>(null);
+  const [llmSelectedModels, setLlmSelectedModels] = useState<Set<string>>(new Set());
+  const [llmSegmentsText, setLlmSegmentsText] = useState("6mi easy run at a conversational pace (no faster than 9:10/mi)");
+  const [llmRunning, setLlmRunning] = useState(false);
+  const [llmProgress, setLlmProgress] = useState<{ model: string; index: number; total: number; detail?: string } | null>(null);
+  const [llmResults, setLlmResults] = useState<ModelCompareResult[] | null>(null);
+  const [llmError, setLlmError] = useState<string | null>(null);
+  const [llmLiveStatus, setLlmLiveStatus] = useState<OllamaModelStatus[]>([]);
+  const llmStatusPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const [waking, setWaking] = useState(false);
   const [wakeMsg, setWakeMsg] = useState<string | null>(null);
   const wakePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1247,6 +1275,132 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     } finally {
       setSimSaving(false);
     }
+  }
+
+  // ── LLM Testing tab ──────────────────────────────────────────────────
+
+  function loadOllamaModels() {
+    setLlmModelsLoading(true);
+    setLlmModelsError(null);
+    fetch("/api/settings/llm-test/models")
+      .then(r => r.json())
+      .then((d: { models?: OllamaModelInfo[]; error?: string }) => {
+        if (d.error) throw new Error(d.error);
+        setLlmModels(d.models ?? []);
+        // Default-select the currently-configured Ollama model (if it's in
+        // the list) so a first visit shows something meaningful selected
+        // rather than an empty checklist.
+        setLlmSelectedModels(prev => {
+          if (prev.size > 0) return prev;
+          const names = (d.models ?? []).map(m => m.name);
+          return new Set(names.slice(0, Math.min(3, names.length)));
+        });
+      })
+      .catch(e => setLlmModelsError(e instanceof Error ? e.message : "Could not load models"))
+      .finally(() => setLlmModelsLoading(false));
+  }
+
+  function toggleLlmModel(name: string) {
+    setLlmSelectedModels(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  }
+
+  function startLlmStatusPolling() {
+    stopLlmStatusPolling();
+    llmStatusPollRef.current = setInterval(() => {
+      fetch("/api/settings/llm-test/status")
+        .then(r => r.json())
+        .then((d: { models?: OllamaModelStatus[] }) => setLlmLiveStatus(d.models ?? []))
+        .catch(() => {});
+    }, 3000);
+  }
+
+  function stopLlmStatusPolling() {
+    if (llmStatusPollRef.current) {
+      clearInterval(llmStatusPollRef.current);
+      llmStatusPollRef.current = null;
+    }
+    setLlmLiveStatus([]);
+  }
+
+  useEffect(() => {
+    return () => { if (llmStatusPollRef.current) clearInterval(llmStatusPollRef.current); };
+  }, []);
+
+  async function runModelComparison() {
+    const models = Array.from(llmSelectedModels);
+    const segments = llmSegmentsText.split("\n").map(l => l.trim()).filter(Boolean);
+    if (!models.length || !segments.length) return;
+
+    setLlmRunning(true);
+    setLlmResults(null);
+    setLlmError(null);
+    setLlmProgress(null);
+    startLlmStatusPolling();
+    try {
+      const res = await fetch("/api/settings/llm-test/compare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ segments, models }),
+      });
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `Comparison failed (${res.status})`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const msg = JSON.parse(dataLine.slice(6)) as
+            & { type: string; model?: string; index?: number; total?: number; segment?: string; detail?: string; error?: string; results?: ModelCompareResult[] };
+          if (msg.type === "model-start") {
+            setLlmProgress({ model: msg.model ?? "", index: msg.index ?? 0, total: msg.total ?? 1 });
+          } else if (msg.type === "progress") {
+            setLlmProgress(p => p ? { ...p, detail: `${msg.segment}${msg.detail ? `: ${msg.detail}` : ""}` } : p);
+          } else if (msg.type === "error") {
+            setLlmError(msg.error ?? "Comparison failed");
+          } else if (msg.type === "done") {
+            setLlmResults(msg.results ?? []);
+          }
+        }
+      }
+    } catch (e) {
+      setLlmError(e instanceof Error ? e.message : "Comparison failed");
+    } finally {
+      setLlmRunning(false);
+      setLlmProgress(null);
+      stopLlmStatusPolling();
+    }
+  }
+
+  function effectiveBpm(bpm: number): number {
+    return bpm < 95 ? bpm * 2 : bpm;
+  }
+
+  function orderingViolations(tracks: ModelCompareTrack[]): { decreases: number; steps: number } {
+    const effs = tracks.map(t => effectiveBpm(t.tempo));
+    let decreases = 0;
+    for (let i = 1; i < effs.length; i++) {
+      if (effs[i] < effs[i - 1] - 1e-6) decreases++;
+    }
+    return { decreases, steps: Math.max(effs.length - 1, 0) };
+  }
+
+  function fmtBytes(bytes: number | null): string {
+    if (!bytes) return "";
+    return `${(bytes / 1e9).toFixed(1)} GB`;
   }
 
   useEffect(() => {
@@ -2525,6 +2679,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     { key: "security", label: "Security" },
     { key: "deleted-tracks", label: "Deleted Tracks" },
     { key: "tracklist", label: "Tracklist" },
+    { key: "llm-testing", label: "LLM Testing" },
   ] as const;
   type TabKey = typeof TABS[number]["key"];
   const [activeTab, setActiveTab] = useState<TabKey>("heart-rate");
@@ -2554,6 +2709,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       void loadTracklist();
       loadRecentTracks();
       loadIncompleteTracks();
+    }
+    // Model list can change any time (a fresh `ollama pull` on the service
+    // host) — refetch on every visit rather than caching across tab switches.
+    if (activeTab === "llm-testing" && !llmModelsLoading) {
+      void loadOllamaModels();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
@@ -5354,6 +5514,181 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </div>
         )}
       </div>
+
+    </div>
+    </div>
+
+    {/* ── Tab: LLM Testing ── */}
+    <div className={activeTab === "llm-testing" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
+    <div className="space-y-6">
+
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h2 className="font-semibold text-base">LLM Testing</h2>
+          <p className="text-sm text-slate-400 mt-1">
+            Runs the same workout through the real AI DJ pipeline once per selected Ollama
+            model, sequentially, so timing and GPU offload are meaningful. Nothing here is
+            saved — no mix history, no play credits.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-slate-300">Workout segments (one per line)</label>
+          <textarea
+            value={llmSegmentsText}
+            onChange={e => setLlmSegmentsText(e.target.value)}
+            rows={4}
+            placeholder={"1mi warm up at a conversational pace\n1mi at 8:30/mi\n0.5mi cool down at a conversational pace"}
+            className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono"
+          />
+          <p className="text-xs text-slate-500">
+            Same phrasing the Runna cards use, e.g. &ldquo;6mi easy run at a conversational pace (no faster than 9:10/mi)&rdquo;
+            or &ldquo;1mi at 8:30/mi&rdquo;. Paste a real workout&rsquo;s plan steps to reproduce it exactly.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <label className="block text-sm font-medium text-slate-300">Models to compare</label>
+            {llmModelsLoading && <span className="text-xs text-slate-500">Loading…</span>}
+          </div>
+          {llmModelsError && <p className="text-sm text-red-400">{llmModelsError}</p>}
+          {!llmModelsLoading && !llmModelsError && llmModels.length === 0 && (
+            <p className="text-sm text-slate-500">No models found — is the AI DJ service reachable and Ollama running?</p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {llmModels.map(m => {
+              const selected = llmSelectedModels.has(m.name);
+              return (
+                <button
+                  key={m.name}
+                  onClick={() => toggleLlmModel(m.name)}
+                  disabled={llmRunning}
+                  className={`rounded-lg border px-3 py-1.5 text-xs font-mono transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                    selected
+                      ? "bg-green-500/15 border-green-500/40 text-green-300"
+                      : "bg-slate-800/60 border-white/10 text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  {m.name}
+                  {m.sizeBytes != null && <span className="text-slate-500 ml-1.5">{fmtBytes(m.sizeBytes)}</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={runModelComparison}
+            disabled={llmRunning || llmSelectedModels.size === 0 || !llmSegmentsText.trim()}
+            className="rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-sm px-4 py-1.5 transition-colors"
+          >
+            {llmRunning ? "Running…" : `Compare ${llmSelectedModels.size || ""} model${llmSelectedModels.size === 1 ? "" : "s"}`}
+          </button>
+          {llmResults && (
+            <button
+              onClick={() => { setLlmResults(null); setLlmError(null); }}
+              disabled={llmRunning}
+              className="rounded-lg bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 text-slate-300 text-sm px-4 py-1.5 transition-colors"
+            >
+              Clear results
+            </button>
+          )}
+        </div>
+
+        {llmRunning && llmProgress && (
+          <div className="rounded-lg bg-slate-800/50 border border-white/5 p-3 space-y-1.5 text-xs">
+            <p className="text-slate-300">
+              Model {llmProgress.index + 1} of {llmProgress.total}: <span className="font-mono text-green-300">{llmProgress.model}</span>
+            </p>
+            {llmProgress.detail && <p className="text-slate-500 truncate">{llmProgress.detail}</p>}
+            {llmLiveStatus.length > 0 && llmLiveStatus.map(s => (
+              <div key={s.name} className="flex items-center gap-2">
+                <span className="font-mono text-slate-400 w-40 truncate">{s.name}</span>
+                <div className="flex-1 h-1.5 rounded-full bg-slate-700 overflow-hidden flex">
+                  <div className="h-full bg-green-500" style={{ width: `${s.gpuPercent}%` }} />
+                  <div className="h-full bg-amber-500" style={{ width: `${s.cpuPercent}%` }} />
+                </div>
+                <span className="text-slate-500 shrink-0">{s.gpuPercent}% GPU</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {llmError && <p className="text-sm text-red-400">{llmError}</p>}
+      </div>
+
+      {llmResults && llmResults.length > 0 && (
+        <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+          <h3 className="font-semibold text-slate-200">Results</h3>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-slate-500 uppercase tracking-wide">
+                  <th className="pb-2 pr-4">Model</th>
+                  <th className="pb-2 pr-4 text-right">Time</th>
+                  <th className="pb-2 pr-4 text-right">Tracks</th>
+                  <th className="pb-2 pr-4 text-right">Never-played</th>
+                  <th className="pb-2 pr-4 text-right">BPM order</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5 font-mono">
+                {llmResults.map(r => {
+                  if (!r.ok || !r.mix) {
+                    return (
+                      <tr key={r.model}>
+                        <td className="py-2 pr-4">{r.model}</td>
+                        <td className="py-2 pr-4 text-right text-slate-500" colSpan={3}>—</td>
+                        <td className="py-2 pr-4 text-right text-red-400 text-xs">{r.error ?? "failed"}</td>
+                      </tr>
+                    );
+                  }
+                  const allTracks = r.mix.timeline.flatMap(s => s.tracks);
+                  const { decreases, steps } = orderingViolations(allTracks);
+                  return (
+                    <tr key={r.model}>
+                      <td className="py-2 pr-4 text-slate-200">{r.model}</td>
+                      <td className="py-2 pr-4 text-right text-slate-300">{r.tookMs != null ? `${(r.tookMs / 1000).toFixed(1)}s` : "—"}</td>
+                      <td className="py-2 pr-4 text-right text-slate-300">{allTracks.length}</td>
+                      <td className="py-2 pr-4 text-right text-slate-300">{allTracks.length ? "100%" : "—"}</td>
+                      <td className="py-2 pr-4 text-right">
+                        <span className={decreases === 0 ? "text-green-400" : "text-slate-300"}>{decreases}/{steps}</span>
+                        {decreases === 0 && steps > 0 && (
+                          <span className="ml-1.5 text-[10px] uppercase tracking-wide text-green-400 bg-green-500/10 border border-green-500/30 rounded px-1 py-0.5">perfect</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+            {llmResults.filter(r => r.ok && r.mix).map(r => {
+              const allTracks = r.mix!.timeline.flatMap(s => s.tracks);
+              return (
+                <div key={r.model} className="rounded-lg border border-white/10 bg-slate-800/30 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-sm text-green-300">{r.model}</span>
+                    <span className="text-xs text-slate-500">{r.tookMs != null ? `${(r.tookMs / 1000).toFixed(1)}s` : ""}</span>
+                  </div>
+                  <div className="divide-y divide-white/5 max-h-64 overflow-y-auto no-scrollbar">
+                    {allTracks.map((t, i) => (
+                      <div key={`${t.uri}-${i}`} className="py-1 flex items-center gap-2 text-xs">
+                        <span className="font-mono text-green-400/90 w-9 text-right shrink-0">{Math.round(t.tempo)}</span>
+                        <span className="text-slate-300 truncate">{t.name} <span className="text-slate-500">— {t.artist}</span></span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
     </div>
     </div>

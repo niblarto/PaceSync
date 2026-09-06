@@ -335,6 +335,116 @@ export async function simulateAiDjMix(segment: string, onProgress?: AiDjProgress
   return { ok: false, error: `AI DJ service unreachable at ${config.url}` };
 }
 
+export interface OllamaModelInfo {
+  name: string;
+  sizeBytes: number | null;
+}
+
+// Lists installed Ollama models on the remote AI DJ service host (the
+// Windows PC — Ollama doesn't run on the Pi this app lives on), for the
+// Settings -> LLM Testing tab's model picker.
+export async function listOllamaModels(): Promise<{ ok: true; models: OllamaModelInfo[] } | { ok: false; error: string }> {
+  const config = loadAiDjConfig();
+  if (!config?.url) return { ok: false, error: "AI DJ service URL not configured in Settings" };
+  try {
+    const res = await fetch(`${config.url}/models`, { signal: AbortSignal.timeout(10_000) });
+    const data = await res.json() as { models?: OllamaModelInfo[]; error?: string };
+    if (data.error) return { ok: false, error: data.error };
+    return { ok: true, models: data.models ?? [] };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Could not reach AI DJ service" };
+  }
+}
+
+export interface OllamaModelStatus {
+  name: string;
+  sizeBytes: number;
+  gpuPercent: number;
+  cpuPercent: number;
+}
+
+// Live GPU/CPU offload for whatever model Ollama currently has loaded on the
+// remote service host — polled by the LLM Testing tab while a comparison
+// run is in flight, same numbers `ollama ps` reports.
+export async function getOllamaModelStatus(): Promise<{ ok: true; models: OllamaModelStatus[] } | { ok: false; error: string }> {
+  const config = loadAiDjConfig();
+  if (!config?.url) return { ok: false, error: "AI DJ service URL not configured in Settings" };
+  try {
+    const res = await fetch(`${config.url}/model-status`, { signal: AbortSignal.timeout(10_000) });
+    const data = await res.json() as { models?: OllamaModelStatus[]; error?: string };
+    if (data.error) return { ok: false, error: data.error };
+    return { ok: true, models: data.models ?? [] };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Could not reach AI DJ service" };
+  }
+}
+
+export interface ModelCompareResult {
+  model: string;
+  ok: boolean;
+  error?: string;
+  tookMs?: number;
+  mix?: AiDjMixResponse;
+}
+
+// Runs the SAME workout through the real production pipeline once per
+// model in `models`, sequentially (so each gets an uncontended GPU and the
+// per-call timing is meaningful) — the Settings -> LLM Testing tab's
+// side-by-side comparison. Only ever targets the remote Ollama service
+// (config.provider === "local"'s codepath): Claude/Gemini already have
+// their own model pickers elsewhere in Settings and don't need this
+// multi-model sweep. Never persists anything, same as simulateAiDjMix.
+export async function compareAiDjModels(
+  segments: string[], models: string[],
+  onModelStart?: (model: string, index: number, total: number) => void,
+  onProgress?: AiDjProgress,
+): Promise<ModelCompareResult[]> {
+  const config = loadAiDjConfig();
+  if (!config?.url) {
+    return models.map(model => ({ model, ok: false, error: "AI DJ service URL not configured in Settings" }));
+  }
+
+  let csv: string;
+  try {
+    csv = csvTextForPlaylist(loadRunningPlaylistConfig().csvFile);
+    if (!csv.trim()) throw new Error("empty library");
+  } catch {
+    return models.map(model => ({ model, ok: false, error: "No library CSV - upload a playlist library in Settings first" }));
+  }
+
+  const easyBias = computeEasyPaceBias();
+  const trackFeedback = getAllTrackVotes();
+  const playCounts = getPlayCounts();
+  const easyPaceSec = getLastEasyPaceSec() ?? undefined;
+  const bpmOverrides = loadBpmOverrides();
+  const cadenceBuckets = loadCadenceBuckets();
+  const playedTracks = getPlayedTracks();
+  const easyPace = easyPaceSec != null ? `${Math.floor(easyPaceSec / 60)}:${String(Math.round(easyPaceSec % 60)).padStart(2, "0")}` : undefined;
+
+  const results: ModelCompareResult[] = [];
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+    onModelStart?.(model, i, models.length);
+    const body = JSON.stringify({
+      title: "Model comparison", segments, csv, cadenceBuckets, easyBias, trackFeedback,
+      playedTracks, playCounts, bpmOverrides, easyPace, model,
+    });
+    const start = Date.now();
+    try {
+      const streamed = await fetchMixStream(config.url, body, onProgress ?? (() => {}), "/mix/stream");
+      const tookMs = Date.now() - start;
+      if (streamed?.ok) {
+        results.push({ model, ok: true, tookMs, mix: streamed.mix });
+      } else {
+        results.push({ model, ok: false, tookMs, error: streamed?.ok === false ? streamed.error : "AI DJ service unreachable" });
+      }
+    } catch (err) {
+      results.push({ model, ok: false, tookMs: Date.now() - start, error: err instanceof Error ? err.message : "Comparison failed" });
+    }
+  }
+  return results;
+}
+
 function buildMixLocally(
   segments: string[], easyBias = 0, trackFeedback: object[] = [], playCounts: Record<string, number> = {}, onProgress?: AiDjProgress, avoidUris?: string[],
   model?: string, effort?: string,
