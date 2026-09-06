@@ -193,6 +193,9 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
     avoidTracks: avoidUris?.length ? avoidUris : undefined,
     // Remote AI DJ service (ai_dj/server.py) expects "MM:SS", not seconds.
     easyPace: lastEasyPaceSec != null ? `${Math.floor(lastEasyPaceSec / 60)}:${String(Math.round(lastEasyPaceSec % 60)).padStart(2, "0")}` : undefined,
+    // Omitted -> the service falls back to its own --model startup default
+    // (see ai_dj/server.py's _build_mix_payload).
+    model: config.ollamaModel || undefined,
   });
   try {
     if (onProgress) {
@@ -329,6 +332,7 @@ export async function simulateAiDjMix(segment: string, onProgress?: AiDjProgress
     playedTracks: getPlayedTracks(), playCounts, bpmOverrides,
     easyPace: easyPaceSec != null ? `${Math.floor(easyPaceSec / 60)}:${String(Math.round(easyPaceSec % 60)).padStart(2, "0")}` : undefined,
     simulate: true,
+    model: config.ollamaModel || undefined,
   });
   const streamed = await fetchMixStream(config.url, body, onProgress ?? (() => {}), "/mix/stream", onLlm);
   if (streamed) return streamed;
@@ -501,6 +505,7 @@ export async function buildAiDjFlowMix(title: string, trackUris: string[], onPro
 
   const body = JSON.stringify({
     title, trackUris, csv, trackFeedback, playCounts: getPlayCounts(), durationSec,
+    model: config.ollamaModel || undefined,
   });
   try {
     if (onProgress) {

@@ -235,6 +235,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [aiDjClaudeModel, setAiDjClaudeModel] = useState("claude-sonnet-5");
   const [aiDjClaudeEffort, setAiDjClaudeEffort] = useState("medium");
   const [aiDjGeminiModel, setAiDjGeminiModel] = useState("gemini-2.5-flash");
+  // "" = use the AI DJ service's own --model startup default.
+  const [aiDjOllamaModel, setAiDjOllamaModel] = useState("");
+  const [ollamaModelOptions, setOllamaModelOptions] = useState<OllamaModelInfo[]>([]);
+  const [ollamaModelOptionsLoading, setOllamaModelOptionsLoading] = useState(false);
+  const [ollamaModelOptionsError, setOllamaModelOptionsError] = useState<string | null>(null);
   const [claudeApiKey, setClaudeApiKey] = useState("");
   const [claudeKeySaving, setClaudeKeySaving] = useState(false);
   const [claudeKeySaved, setClaudeKeySaved] = useState(false);
@@ -1061,7 +1066,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   useEffect(() => {
     fetch("/api/settings/ai-dj")
       .then(r => r.json())
-      .then((d: { url?: string; enabled?: boolean; autoPlaylist?: boolean; wolMac?: string; provider?: string; claudeModel?: string; claudeEffort?: string; geminiModel?: string }) => {
+      .then((d: { url?: string; enabled?: boolean; autoPlaylist?: boolean; wolMac?: string; provider?: string; claudeModel?: string; claudeEffort?: string; geminiModel?: string; ollamaModel?: string }) => {
         if (d.url) setAiDjUrl(d.url);
         setAiDjEnabled(d.enabled ?? false);
         setAiDjAutoPlaylist(d.autoPlaylist ?? true);
@@ -1070,6 +1075,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         if (d.claudeModel) setAiDjClaudeModel(d.claudeModel);
         if (d.claudeEffort) setAiDjClaudeEffort(d.claudeEffort);
         if (d.geminiModel) setAiDjGeminiModel(d.geminiModel);
+        setAiDjOllamaModel(d.ollamaModel ?? "");
       })
       .catch(() => {});
   }, []);
@@ -2432,7 +2438,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     enabled: boolean, autoPlaylist: boolean = aiDjAutoPlaylist,
     provider: "local" | "claude" | "gemini" = aiDjProvider,
     claudeModel: string = aiDjClaudeModel, claudeEffort: string = aiDjClaudeEffort,
-    geminiModel: string = aiDjGeminiModel,
+    geminiModel: string = aiDjGeminiModel, ollamaModel: string = aiDjOllamaModel,
   ) {
     setAiDjSaving(true);
     setAiDjSaved(false);
@@ -2441,7 +2447,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       const res = await fetch("/api/settings/ai-dj", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: aiDjUrl.trim(), enabled, autoPlaylist, wolMac: aiDjWolMac.trim(), provider, claudeModel, claudeEffort, geminiModel }),
+        body: JSON.stringify({ url: aiDjUrl.trim(), enabled, autoPlaylist, wolMac: aiDjWolMac.trim(), provider, claudeModel, claudeEffort, geminiModel, ollamaModel }),
       });
       if (!res.ok) throw new Error();
       setAiDjEnabled(enabled);
@@ -2450,6 +2456,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setAiDjClaudeModel(claudeModel);
       setAiDjClaudeEffort(claudeEffort);
       setAiDjGeminiModel(geminiModel);
+      setAiDjOllamaModel(ollamaModel);
       setAiDjSaved(true);
     } catch {
       setAiDjError("Failed to save — try again.");
@@ -2754,6 +2761,22 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     // host) — refetch on every visit rather than caching across tab switches.
     if (activeTab === "llm-testing" && !llmModelsLoading) {
       void loadOllamaModels();
+    }
+    // Same model list, reused for the "Local LLM" provider picker on the
+    // Integrations tab — fetched lazily (only once, not re-fetched on every
+    // visit like the LLM Testing tab above) since it's just populating a
+    // <select>, not a live comparison surface.
+    if (activeTab === "integrations" && ollamaModelOptions.length === 0 && !ollamaModelOptionsLoading) {
+      setOllamaModelOptionsLoading(true);
+      setOllamaModelOptionsError(null);
+      fetch("/api/settings/llm-test/models")
+        .then(r => r.json())
+        .then((d: { models?: OllamaModelInfo[]; error?: string }) => {
+          if (d.error) throw new Error(d.error);
+          setOllamaModelOptions(d.models ?? []);
+        })
+        .catch(e => setOllamaModelOptionsError(e instanceof Error ? e.message : "Could not load models"))
+        .finally(() => setOllamaModelOptionsLoading(false));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
@@ -4125,6 +4148,38 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                 </button>
               ))}
             </div>
+
+            {aiDjProvider === "local" && (
+              <div className="space-y-3 pt-1">
+                <div className="space-y-1.5">
+                  <label className="text-xs text-slate-400">Model</label>
+                  <select
+                    value={aiDjOllamaModel}
+                    onChange={e => saveAiDj(aiDjEnabled, aiDjAutoPlaylist, "local", aiDjClaudeModel, aiDjClaudeEffort, aiDjGeminiModel, e.target.value)}
+                    disabled={aiDjSaving || ollamaModelOptionsLoading}
+                    className="w-full rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-2 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                  >
+                    <option value="">Service default{ollamaModelOptions.length === 0 ? "" : " (see below)"}</option>
+                    {ollamaModelOptions.map(m => (
+                      <option key={m.name} value={m.name}>
+                        {m.name}{m.sizeBytes != null ? ` — ${(m.sizeBytes / 1e9).toFixed(1)} GB` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-slate-500">
+                    Installed Ollama models on the AI DJ service host. &ldquo;Service default&rdquo; uses whatever{" "}
+                    <code className="text-slate-400">--model</code> that service was started with (currently{" "}
+                    <code className="text-slate-400">qwen3.5:9b</code> unless changed).{" "}
+                    <button type="button" onClick={() => setActiveTab("llm-testing")} className="text-purple-300 hover:text-purple-200 underline">
+                      Compare models
+                    </button>{" "}
+                    on the LLM Testing tab first if you&apos;re not sure which to pick.
+                  </p>
+                  {ollamaModelOptionsLoading && <p className="text-xs text-slate-600">Loading installed models…</p>}
+                  {ollamaModelOptionsError && <p className="text-xs text-red-400">{ollamaModelOptionsError}</p>}
+                </div>
+              </div>
+            )}
 
             {aiDjProvider === "claude" && (
               <div className="space-y-3 pt-1">

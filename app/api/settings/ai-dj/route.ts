@@ -14,15 +14,16 @@ export async function GET() {
     claudeModel: config?.claudeModel ?? DEFAULT_CLAUDE_MODEL,
     claudeEffort: config?.claudeEffort ?? DEFAULT_CLAUDE_EFFORT,
     geminiModel: config?.geminiModel ?? DEFAULT_GEMINI_MODEL,
+    ollamaModel: config?.ollamaModel ?? "",
   });
 }
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const { url, enabled, autoPlaylist, wolMac, provider, claudeModel, claudeEffort, geminiModel } = await req.json() as {
+  const { url, enabled, autoPlaylist, wolMac, provider, claudeModel, claudeEffort, geminiModel, ollamaModel } = await req.json() as {
     url: string; enabled: boolean; autoPlaylist?: boolean; wolMac?: string;
-    provider?: string; claudeModel?: string; claudeEffort?: string; geminiModel?: string;
+    provider?: string; claudeModel?: string; claudeEffort?: string; geminiModel?: string; ollamaModel?: string;
   };
   saveAiDjConfig({
     url: url.trim().replace(/\/+$/, ""), enabled: !!enabled, autoPlaylist: autoPlaylist !== false, wolMac: (wolMac ?? "").trim(),
@@ -30,6 +31,7 @@ export async function POST(req: NextRequest) {
     claudeModel: (claudeModel ?? DEFAULT_CLAUDE_MODEL).trim() || DEFAULT_CLAUDE_MODEL,
     claudeEffort: (claudeEffort ?? DEFAULT_CLAUDE_EFFORT).trim() || DEFAULT_CLAUDE_EFFORT,
     geminiModel: (geminiModel ?? DEFAULT_GEMINI_MODEL).trim() || DEFAULT_GEMINI_MODEL,
+    ollamaModel: (ollamaModel ?? "").trim() || undefined,
   });
   return NextResponse.json({ ok: true });
 }

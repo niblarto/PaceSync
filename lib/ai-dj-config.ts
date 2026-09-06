@@ -21,6 +21,10 @@ export interface AiDjConfig {
   claudeModel: string;   // e.g. "claude-sonnet-5" — see ai_dj/llm.py CLAUDE_MODELS
   claudeEffort: string;  // low | medium | high | xhigh | max
   geminiModel: string;   // e.g. "gemini-2.5-flash" — see ai_dj/llm.py GEMINI_MODELS
+  // Ollama model tag on the AI DJ service host (e.g. "qwen3.5:9b") for the
+  // "local" provider — empty/unset means fall back to whatever that
+  // service's own --model startup flag says (DEFAULT_MODEL in ai_dj/llm.py).
+  ollamaModel?: string;
 }
 
 export function loadAiDjConfig(): AiDjConfig | null {
@@ -35,6 +39,7 @@ export function loadAiDjConfig(): AiDjConfig | null {
         claudeModel: data.claudeModel || DEFAULT_CLAUDE_MODEL,
         claudeEffort: data.claudeEffort || DEFAULT_CLAUDE_EFFORT,
         geminiModel: data.geminiModel || DEFAULT_GEMINI_MODEL,
+        ollamaModel: data.ollamaModel || undefined,
       };
     }
   } catch {}
