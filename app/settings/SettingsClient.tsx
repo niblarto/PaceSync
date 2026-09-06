@@ -13,6 +13,7 @@ import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 import { DeletedTracksReview, type RejectedTrack } from "@/components/DeletedTracksReview";
 import { openInSpotify, TrackRow } from "@/components/TrackRow";
 import { useRunningPlaylist } from "@/components/useRunningPlaylist";
+import { MixPaceChart, timelineToChartTracks } from "@/components/MixPaceChart";
 import type { TrackWithBPM } from "@/types";
 
 const ZONE_DETAILS = [
@@ -75,8 +76,8 @@ interface AiDjMixResponse { trackUris: string[]; totalSec: number; timeline: AiD
 // LLM Testing tab.
 interface OllamaModelInfo { name: string; sizeBytes: number | null }
 interface OllamaModelStatus { name: string; sizeBytes: number; gpuPercent: number; cpuPercent: number }
-interface ModelCompareTrack { uri: string; name: string; artist: string; tempo: number }
-interface ModelCompareTimelineSegment { segment: string; tracks: ModelCompareTrack[] }
+interface ModelCompareTrack { uri: string; name: string; artist: string; startsAt: string; durationSec?: number; tempo: number }
+interface ModelCompareTimelineSegment { segment: string; targetPaceSec?: number | null; tracks: ModelCompareTrack[] }
 interface ModelCompareResult {
   model: string;
   ok: boolean;
@@ -268,7 +269,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [simSaving, setSimSaving] = useState(false);
   const [simSaveMsg, setSimSaveMsg] = useState<string | null>(null);
 
-  // ── LLM Testing tab state — never persisted ──
+  // ── LLM Testing tab state — the last run's segments/models/results persist
+  // in localStorage (see the load/save effects near loadOllamaModels below)
+  // so they survive a page reload, not just a tab switch within the page. ──
   const [llmModels, setLlmModels] = useState<OllamaModelInfo[]>([]);
   const [llmModelsLoading, setLlmModelsLoading] = useState(false);
   const [llmModelsError, setLlmModelsError] = useState<string | null>(null);
@@ -280,6 +283,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [llmError, setLlmError] = useState<string | null>(null);
   const [llmLiveStatus, setLlmLiveStatus] = useState<OllamaModelStatus[]>([]);
   const llmStatusPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const llmHydratedRef = useRef(false);
 
   const [waking, setWaking] = useState(false);
   const [wakeMsg, setWakeMsg] = useState<string | null>(null);
@@ -1278,6 +1282,42 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   }
 
   // ── LLM Testing tab ──────────────────────────────────────────────────
+
+  const LLM_STORAGE_KEY = "llmTestingState";
+
+  // Restore the last comparison (segments, selected models, results) once on
+  // mount, so a page reload doesn't lose it — same idea as the tab-switch
+  // persistence above, just surviving a harder navigation. Runs before the
+  // model-list fetch effect below, via llmHydratedRef ordering.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LLM_STORAGE_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw) as {
+          segmentsText?: string; selectedModels?: string[]; results?: ModelCompareResult[];
+        };
+        if (saved.segmentsText) setLlmSegmentsText(saved.segmentsText);
+        if (saved.selectedModels?.length) setLlmSelectedModels(new Set(saved.selectedModels));
+        if (saved.results?.length) setLlmResults(saved.results);
+      }
+    } catch { /* corrupt/unavailable storage — start fresh */ }
+    llmHydratedRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist whenever the run's inputs/outputs change — after hydration only,
+  // so the restore above doesn't immediately re-save what it just loaded
+  // (harmless either way, just avoids a redundant write on mount).
+  useEffect(() => {
+    if (!llmHydratedRef.current) return;
+    try {
+      localStorage.setItem(LLM_STORAGE_KEY, JSON.stringify({
+        segmentsText: llmSegmentsText,
+        selectedModels: Array.from(llmSelectedModels),
+        results: llmResults,
+      }));
+    } catch { /* storage full/unavailable — persistence is best-effort */ }
+  }, [llmSegmentsText, llmSelectedModels, llmResults]);
 
   function loadOllamaModels() {
     setLlmModelsLoading(true);
@@ -5666,16 +5706,18 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             </table>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+          <div className="space-y-4">
             {llmResults.filter(r => r.ok && r.mix).map(r => {
               const allTracks = r.mix!.timeline.flatMap(s => s.tracks);
+              const chartTracks = timelineToChartTracks(r.mix!.timeline);
               return (
-                <div key={r.model} className="rounded-lg border border-white/10 bg-slate-800/30 p-3 space-y-2">
+                <div key={r.model} className="rounded-lg border border-white/10 bg-slate-800/30 p-3 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="font-mono text-sm text-green-300">{r.model}</span>
                     <span className="text-xs text-slate-500">{r.tookMs != null ? `${(r.tookMs / 1000).toFixed(1)}s` : ""}</span>
                   </div>
-                  <div className="divide-y divide-white/5 max-h-64 overflow-y-auto no-scrollbar">
+                  <MixPaceChart tracks={chartTracks} />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 divide-y divide-white/5 sm:divide-y-0 max-h-64 overflow-y-auto no-scrollbar">
                     {allTracks.map((t, i) => (
                       <div key={`${t.uri}-${i}`} className="py-1 flex items-center gap-2 text-xs">
                         <span className="font-mono text-green-400/90 w-9 text-right shrink-0">{Math.round(t.tempo)}</span>
