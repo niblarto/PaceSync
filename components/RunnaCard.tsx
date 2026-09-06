@@ -267,6 +267,28 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
   const [pacing, setPacing] = useState<Record<string, PacingState>>({});
   const [activityLinks, setActivityLinks] = useState<Record<string, { garminId: string | number | null; stravaId: number | null } | null>>({});
   const [titleSync, setTitleSync] = useState<Record<string, { status: "syncing" | "done" | "error"; message?: string }>>({});
+  const [garminSync, setGarminSync] = useState<{ status: "syncing" | "done" | "error"; message?: string } | null>(null);
+
+  // Manual GarminDB sync for a Rest day that might actually be a run Runna
+  // never reported as completed (e.g. cut short mid-workout, so Runna drops
+  // it from the ical entirely instead of flagging it done — see
+  // lib/runna-schedule.ts's garminOrphanRun). The automatic auto-sync effect
+  // above only fires for TODAY once Runna already shows a completed run, so
+  // it can't help here; this reuses the same sync endpoint Settings' "Sync
+  // now" button calls, just surfaced where the gap is actually noticed.
+  function syncGarminNow() {
+    setGarminSync({ status: "syncing" });
+    fetch("/api/settings/garmin/sync-status", { method: "POST" })
+      .then(r => r.json())
+      .then((d: { ok?: boolean; error?: string }) => {
+        if (d.error) {
+          setGarminSync({ status: "error", message: d.error });
+        } else {
+          setGarminSync({ status: "done", message: "Sync started — refresh in a minute or two" });
+        }
+      })
+      .catch(e => setGarminSync({ status: "error", message: e instanceof Error ? e.message : "Sync failed to start" }));
+  }
 
   function retrySyncTitle(stravaId: number) {
     setTitleSync(s => ({ ...s, [stravaId]: { status: "syncing" } }));
@@ -504,6 +526,26 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                         </>
                       );
                     })()}
+                    {run.type === "rest" && !isToday(run.date) && (
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                        <span className="text-slate-500">
+                          Cut a run short? It won&apos;t show here until GarminDB syncs.
+                        </span>
+                        <button
+                          onClick={e => { e.stopPropagation(); syncGarminNow(); }}
+                          disabled={garminSync?.status === "syncing"}
+                          className="text-sky-400/80 hover:text-sky-300 underline disabled:opacity-50 disabled:cursor-wait"
+                          title="Manually trigger a GarminDB sync so a run missing from Runna's calendar can show up here"
+                        >
+                          {garminSync?.status === "syncing" ? "Syncing Garmin…" : "Sync Garmin now"}
+                        </button>
+                        {garminSync && garminSync.status !== "syncing" && garminSync.message && (
+                          <span className={garminSync.status === "done" ? "text-green-400" : "text-red-400"}>
+                            {garminSync.message}
+                          </span>
+                        )}
+                      </div>
+                    )}
                     {run.laps.length > 0 && (
                       <div className="space-y-0.5">
                         <p className="text-xs text-slate-500 font-medium mb-1">Laps</p>

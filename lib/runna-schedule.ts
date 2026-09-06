@@ -1,4 +1,7 @@
 import { loadRunnaUrl } from "@/lib/runna-config";
+import { loadGarminConfig } from "@/lib/garmin-config";
+import { getTodaysRunEntriesForDate } from "@/lib/todays-run-history";
+import path from "path";
 
 export interface RunnaWorkout {
   uid: string;
@@ -251,6 +254,92 @@ function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPast
   return { workouts, pastRuns };
 }
 
+function fmtGarminDuration(elapsedTime: string | null): string | null {
+  if (!elapsedTime) return null;
+  const parts = elapsedTime.split(":");
+  if (parts.length < 3) return null;
+  const h = parseInt(parts[0]) || 0;
+  const m = parseInt(parts[1]) || 0;
+  const sec = Math.round(parseFloat(parts[2]) || 0);
+  const totalSec = h * 3600 + m * 60 + sec;
+  if (totalSec <= 0) return null;
+  const mm = Math.floor(totalSec / 60);
+  const ss = totalSec % 60;
+  return h > 0
+    ? `${h}:${(mm % 60).toString().padStart(2, "0")}:${ss.toString().padStart(2, "0")}`
+    : `${mm}:${ss.toString().padStart(2, "0")}`;
+}
+
+function fmtGarminPace(distanceMi: number | null, elapsedTime: string | null): string | null {
+  if (!distanceMi || distanceMi <= 0 || !elapsedTime) return null;
+  const parts = elapsedTime.split(":");
+  if (parts.length < 3) return null;
+  const h = parseInt(parts[0]) || 0;
+  const m = parseInt(parts[1]) || 0;
+  const sec = parseFloat(parts[2]) || 0;
+  const totalSec = h * 3600 + m * 60 + sec;
+  if (totalSec <= 0) return null;
+  const paceSec = Math.round(totalSec / distanceMi);
+  return `${Math.floor(paceSec / 60)}:${(paceSec % 60).toString().padStart(2, "0")} /mi`;
+}
+
+// A run that gets cut short mid-workout can disappear from Runna's feed
+// entirely — Runna appears to only emit a COMPLETED_PLAN_WORKOUT event when
+// the scheduled distance/duration was actually met, so an abandoned run
+// leaves its date with no VEVENT at all (the same "nothing scheduled" shape
+// fillRestDays already handles, which would otherwise mislabel it "Rest").
+// Before assuming a truly empty day, check the local Garmin DB (same
+// data/heuristic as app/api/garmin/activity-for-date's garminActivityForDate)
+// for a real recorded activity and, if one exists, surface it as a genuine
+// (if planless) past run instead of silently dropping it.
+function garminOrphanRun(date: string): RunnaPastRun | null {
+  const config = loadGarminConfig();
+  if (!config) return null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+    const db = new Database(path.join(config.dbPath, "garmin_activities.db"), { readonly: true, fileMustExist: true });
+    db.pragma("busy_timeout = 30000");
+    const row = db.prepare(`
+      SELECT name, distance, elapsed_time FROM activities
+      WHERE LOWER(sport) LIKE '%running%' AND DATE(start_time) = ?
+      ORDER BY distance DESC LIMIT 1
+    `).get(date) as { name: string | null; distance: number | null; elapsed_time: string | null } | undefined;
+    db.close();
+    if (!row) return null;
+
+    // Prefer the title of a mix already saved into "Today's Run" for this
+    // date over Garmin's own activity name: the pacing-review confirm flow
+    // (app/api/todays-run/history/route.ts) and creditConfirmedPlay look up
+    // that saved tracklist by (date, title) — if a mix was pre-built or
+    // saved for the ORIGINAL scheduled workout before the run got cut short
+    // and dropped from Runna's feed, this orphan entry needs the same title
+    // or the Summary card's row can never find/confirm that tracklist,
+    // silently breaking play-count crediting for the exact case this exists
+    // to fix. Falls back to the Garmin activity's own name only when no
+    // saved mix exists for the date at all.
+    const savedEntry = getTodaysRunEntriesForDate(date)[0];
+    const title = savedEntry?.workoutTitle || row.name?.trim() || "Garmin Run";
+
+    return {
+      uid: `GARMIN_ORPHAN_${date}`,
+      date,
+      title,
+      type: "other_run",
+      distanceMi: row.distance,
+      durationStr: fmtGarminDuration(row.elapsed_time),
+      avgPace: fmtGarminPace(row.distance, row.elapsed_time),
+      laps: [],
+      // No Runna plan text exists for a run Runna itself doesn't know
+      // about — planSteps stays empty rather than guessing at segments.
+      planSteps: [],
+      appUrl: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // Runna's calendar only emits an event for a day when something is actually
 // scheduled — a day with nothing planned has no VEVENT at all, not an
 // explicit rest entry. Without this, such days are just missing from both
@@ -269,7 +358,8 @@ function fillRestDays(workouts: RunnaWorkout[], pastRuns: RunnaPastRun[], lookba
     if (covered.has(date)) continue;
 
     if (date < today) {
-      pastRuns.push({
+      const orphan = garminOrphanRun(date);
+      pastRuns.push(orphan ?? {
         uid: `SYNTHETIC_REST_${date}`,
         date,
         title: "Rest",
