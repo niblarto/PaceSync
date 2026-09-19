@@ -27,16 +27,11 @@ interface Props {
   runDate?: string;
   distanceMi?: number;
   /** The pinned mix's tracklist, when this workout date has one — shown as
-      a side panel; hovering a track highlights the stretch of route it
-      plays over (by distance, converted from the track's own place in the
-      mix's real timeline — see the segments effect below for why). segment/
-      targetPaceSec (when present) drive that same effect's REAL section
-      boundaries, superseding a fresh re-parse of workoutSegments — the
-      actual mix can legitimately run a segment short or long of its planned
-      duration (ai_dj/workout.py's per-segment "carry" absorbs one segment's
-      over/undershoot into the next one's fill budget), so only the mix's
-      own track placement reflects where a segment truly ended. */
-  mixTracks?: { uri: string | null; name: string; artist: string; startsAtSec: number; durationSec?: number; tempo: number | null; segment?: string; targetPaceSec?: number | null }[];
+      a side panel; hovering a track highlights the stretch of route it plays
+      over (converted to distance via the workout-section it planned-time
+      falls in, then matched against the route's real recorded distance —
+      same axis the section overlay itself uses). */
+  mixTracks?: { uri: string | null; name: string; artist: string; startsAtSec: number; durationSec?: number; tempo: number | null }[];
   onClose: () => void;
 }
 
@@ -87,52 +82,6 @@ function assignSectionColors(sections: WorkoutSection[]): string[] {
     cursor++;
   }
   return colors;
-}
-
-// Builds WorkoutSection boundaries from the mix's OWN real track placement
-// (grouping consecutive same-segment tracks by their actual startsAtSec/
-// durationSec) rather than re-deriving from workoutSegments text at ideal
-// distance×pace timing. The two disagree whenever a segment's real track
-// fill over/undershoots its planned duration — ai_dj/workout.py's build
-// loop carries that over/undershoot into the NEXT segment's fill budget
-// (build_workout_playlist's `carry`), which a fresh text re-parse has no
-// way to know about. Using the mix's real per-track timestamps means the
-// boundary shown here always matches where the segment actually ended in
-// the tracklist/chart, not where it was planned to end.
-//
-// startMi/endMi still uses distance = duration / paceSec per segment (same
-// approach parse_workout_segments.py takes) — just against each segment's
-// REAL summed-track duration instead of its planned one.
-function sectionsFromMixTracks(
-  tracks: { startsAtSec: number; durationSec?: number; segment?: string; targetPaceSec?: number | null }[],
-): WorkoutSection[] {
-  const sections: WorkoutSection[] = [];
-  let miCursor = 0;
-  for (const t of tracks) {
-    if (t.segment == null) return []; // any track missing a segment label -> can't build a reliable grouping
-    const durationSec = t.durationSec ?? 0;
-    const startSec = t.startsAtSec;
-    const endSec = startSec + durationSec;
-    const last = sections[sections.length - 1];
-    if (last && last.label === t.segment) {
-      last.endSec = endSec;
-    } else {
-      sections.push({
-        label: t.segment,
-        kind: "work", // real kind isn't known from the flattened track list — only used for colour cycling/labels here, not BPM matching, so a fixed placeholder is fine
-        startSec, endSec,
-        startMi: miCursor, endMi: miCursor, // distance filled in below once the section's real total duration is known
-        paceSec: t.targetPaceSec ?? null,
-      });
-    }
-  }
-  for (const s of sections) {
-    const mi = s.paceSec ? (s.endSec - s.startSec) / s.paceSec : 0;
-    s.startMi = miCursor;
-    s.endMi = miCursor + mi;
-    miCursor = s.endMi;
-  }
-  return sections;
 }
 
 function mmss(sec: number): string {
@@ -261,17 +210,9 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
 
     (async () => {
       try {
-        // The mix's own real track placement is the authoritative source
-        // for section boundaries when it's available — see
-        // sectionsFromMixTracks for why a fresh workoutSegments re-parse can
-        // disagree with where a segment actually ended in the built mix.
-        // Only fall back to that re-parse (the old behavior) when there's
-        // no mix to derive from at all, or its tracks don't carry segment
-        // labels (older saved/pinned mixes, from before this field existed).
-        const fromMix = mixTracks?.length ? sectionsFromMixTracks(mixTracks) : [];
         const [res, sectionsRes] = await Promise.all([
           fetch(`/api/garmin/route/${activityId}`),
-          fromMix.length === 0 && workoutSegments?.length
+          workoutSegments?.length
             ? fetch("/api/runna/workout-segments", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -286,11 +227,9 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
           points?: RoutePoint[];
           error?: string;
         };
-        const sections: WorkoutSection[] = fromMix.length > 0
-          ? fromMix
-          : sectionsRes
-            ? ((await sectionsRes.json().catch(() => null)) as { sections?: WorkoutSection[] } | null)?.sections ?? []
-            : [];
+        const sections: WorkoutSection[] = sectionsRes
+          ? ((await sectionsRes.json().catch(() => null)) as { sections?: WorkoutSection[] } | null)?.sections ?? []
+          : [];
         if (cancelled) return;
         if (!res.ok || !data.points?.length) throw new Error(data.error ?? "No GPS data");
         setName(data.name ?? null);
@@ -663,6 +602,7 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
                       className="w-2.5 h-2.5 rounded-full shrink-0"
                       style={{ backgroundColor: sectionColorsRef.current[i] }}
                     />
+                    <span className="text-xs text-slate-500 font-mono tabular-nums shrink-0">{mmss(s.endSec)}</span>
                     <span className="text-sm text-slate-200">{sectionTooltip(s)}</span>
                   </button>
                 ))}
