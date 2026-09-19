@@ -50,7 +50,7 @@ export type AiDjLlmCallback = (event: AiDjLlmEvent) => void;
 // Real cadence per 5s pace bucket from GarminDB (sec/mi -> SPM), sent to the
 // remote AI DJ service so its pace->BPM uses measured turnover instead of a
 // linear guess — the service host has no Garmin data of its own.
-function loadCadenceBuckets(): Record<string, number> | null {
+export function loadCadenceBuckets(): Record<string, number> | null {
   const config = loadGarminConfig();
   if (!config) return null;
   try {
@@ -149,7 +149,20 @@ function mergePlayCounts(base: Record<string, number>, extra?: Record<string, nu
 // on top of their real play count so the weighted sort demotes them hard
 // (min(count,10)*PLAY_COUNT_WEIGHT already hits the max penalty at count=1)
 // without excluding them outright, matching PLAY_COUNT_WEIGHT's own scale.
-export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[], extraPlayCounts?: Record<string, number>): Promise<AiDjMixResult> {
+// strictPaceTolerance: hard-excludes any candidate whose effective BPM
+// undershoots a segment's target by more than the tightest ("work") band —
+// no upper limit — bypassing the kind-based Settings BPM overrides
+// entirely. Used by Pace Pro mixes, where every split IS the pace target
+// (see ai_dj/workout.py's build_workout_playlist docstring for the exact
+// rule, which matches lib/pace-analysis.ts's classifyPaceFit()).
+// segmentCandidateUris: one entry per `segments` line (null/missing = no
+// restriction for that segment). When given, that segment's pool is
+// restricted to ONLY these URIs first, falling back to the normal
+// (strictPaceTolerance-filtered, if set) full-library search only if that
+// restricted list can't fill the segment's own time budget — see
+// ai_dj/workout.py's build_workout_playlist docstring. Used by Pace Pro to
+// hand the LLM exactly lib/pace-analysis.ts's "fits" list per split.
+export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[], extraPlayCounts?: Record<string, number>, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null)[]): Promise<AiDjMixResult> {
   const config = loadAiDjConfig();
   if (!config?.enabled) {
     return { ok: false, error: "AI DJ is not enabled in Settings" };
@@ -180,10 +193,10 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   // "local" mixes still need that PC (its GPU runs the model), so those go
   // over HTTP.
   if (config.provider === "claude") {
-    return buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, config.claudeModel, config.claudeEffort);
+    return buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, config.claudeModel, config.claudeEffort, strictPaceTolerance, segmentCandidateUris);
   }
   if (config.provider === "gemini") {
-    return buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, config.geminiModel);
+    return buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, config.geminiModel, undefined, strictPaceTolerance, segmentCandidateUris);
   }
 
   const lastEasyPaceSec = getLastEasyPaceSec();
@@ -196,6 +209,8 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
     // Omitted -> the service falls back to its own --model startup default
     // (see ai_dj/server.py's _build_mix_payload).
     model: config.ollamaModel || undefined,
+    strictPaceTolerance,
+    segmentCandidateUris,
   });
   try {
     if (onProgress) {
@@ -220,7 +235,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
     // shape, and it uses the local Garmin DB for exact pace->BPM.
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[ai-dj] remote service failed (${msg}) — trying on-Pi fallback`);
-    const local = await buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris);
+    const local = await buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, undefined, undefined, strictPaceTolerance, segmentCandidateUris);
     if (local.ok) return local;
     const hint = /timeout|abort/i.test(msg)
       ? "AI DJ service timed out"
@@ -342,6 +357,7 @@ export async function simulateAiDjMix(segment: string, onProgress?: AiDjProgress
 export interface OllamaModelInfo {
   name: string;
   sizeBytes: number | null;
+  capabilities: string[];
 }
 
 // Lists installed Ollama models on the remote AI DJ service host (the
@@ -355,6 +371,33 @@ export async function listOllamaModels(): Promise<{ ok: true; models: OllamaMode
     const data = await res.json() as { models?: OllamaModelInfo[]; error?: string };
     if (data.error) return { ok: false, error: data.error };
     return { ok: true, models: data.models ?? [] };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Could not reach AI DJ service" };
+  }
+}
+
+// Transcribes a PacePro split-table screenshot into pace-pro.csv's own CSV
+// shape via a vision-capable Ollama model on the AI DJ service host — the
+// caller (Settings -> Pace Pro) is responsible for checking that model's
+// "vision" capability via listOllamaModels() first, since a non-vision
+// model errors clearly server-side but the UI should never let the user
+// attempt it in the first place. Defaults to config.ollamaModel, same
+// model choice as a real mix build, since the whole point of switching it
+// to a vision-capable model in Settings is that this feature also uses it.
+export async function transcribePaceProImage(imageBase64: string): Promise<{ ok: true; csv: string } | { ok: false; error: string }> {
+  const config = loadAiDjConfig();
+  if (!config?.url) return { ok: false, error: "AI DJ service URL not configured in Settings" };
+  try {
+    const res = await fetch(`${config.url}/vision-transcribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageBase64, model: config.ollamaModel || undefined }),
+      signal: AbortSignal.timeout(150_000),
+    });
+    const data = await res.json() as { csv?: string; error?: string };
+    if (!res.ok || data.error) return { ok: false, error: data.error ?? `AI DJ service ${res.status}` };
+    if (!data.csv) return { ok: false, error: "No csv returned" };
+    return { ok: true, csv: data.csv };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "Could not reach AI DJ service" };
   }
@@ -451,14 +494,14 @@ export async function compareAiDjModels(
 
 function buildMixLocally(
   segments: string[], easyBias = 0, trackFeedback: object[] = [], playCounts: Record<string, number> = {}, onProgress?: AiDjProgress, avoidUris?: string[],
-  model?: string, effort?: string,
+  model?: string, effort?: string, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null)[],
 ): Promise<AiDjMixResult> {
   return runBridge({
     segments, easyBias, trackFeedback,
     playedTracks: getPlayedTracks(), playCounts, bpmOverrides: loadBpmOverrides(),
     avoidTracks: avoidUris?.length ? avoidUris : undefined,
     easyPaceSec: getLastEasyPaceSec() ?? undefined,
-    model, effort,
+    model, effort, strictPaceTolerance, segmentCandidateUris,
   }, onProgress);
 }
 

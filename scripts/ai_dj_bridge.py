@@ -203,6 +203,10 @@ def main():
     use_llm = is_claude_model(model) or is_gemini_model(model)
 
     library = _load_library(csv_path)
+    strict_pace_tolerance = bool(payload.get("strictPaceTolerance"))
+    segment_candidate_uris = payload.get("segmentCandidateUris")
+    if not isinstance(segment_candidate_uris, list):
+        segment_candidate_uris = None
 
     # One NDJSON progress line per segment; the final line is the mix (or
     # error) JSON. lib/ai-dj-mix.ts parses stdout line-by-line for these.
@@ -214,6 +218,8 @@ def main():
             bpm_overrides=bpm_overrides, avoid_tracks=avoid, effort=effort,
             min_total_sec=max_projected_duration(segments_text), progress=_progress,
             on_llm=_on_llm if payload.get("simulate") else None,
+            strict_pace_tolerance=strict_pace_tolerance,
+            segment_candidate_uris=segment_candidate_uris,
         )
     except ValueError as e:
         print(json.dumps({"error": str(e)}))

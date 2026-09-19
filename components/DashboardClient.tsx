@@ -367,7 +367,14 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [importingBpmCsv, setImportingBpmCsv] = useState(false);
   const [importBpmMsg, setImportBpmMsg] = useState<string | null>(null);
   const noBpmCsvInputRef = useRef<HTMLInputElement>(null);
-  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[]; originalCount: number } | null>(null);
+  const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[]; originalCount: number; origin?: "pace-pro" } | null>(null);
+  // Set alongside an origin: "pace-pro" aiDjMix — carries what's needed to
+  // save edits/remixes back into Settings -> Pace Pro's saved-mix library
+  // (the original PacePro CSV text, for restoring the splits table there;
+  // which library entry to update in place, if this mix came from one).
+  const [paceProLibraryMeta, setPaceProLibraryMeta] = useState<{ splitsCsvText: string; fileName: string | null; savedMixId: string | null } | null>(null);
+  const [paceProSaving, setPaceProSaving] = useState(false);
+  const [paceProSaveMsg, setPaceProSaveMsg] = useState<string | null>(null);
   const [remixing, setRemixing] = useState(false);
   const [toppingUp, setToppingUp] = useState(false);
   const [flowMixing, setFlowMixing] = useState(false);
@@ -491,6 +498,46 @@ export function DashboardClient({ spotifyUser }: Props) {
     router.replace("/dashboard");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allTracks, searchParams]);
+
+  // Deep link from Settings -> Pace Pro's "Send to dashboard" action:
+  // ?loadPaceProMix=1 with the mix payload handed off via sessionStorage
+  // (too large/structured for a URL param). Loads it into the same aiDjMix
+  // state a real Runna workout's mix build would, so Edit/Remix/Fill-the-gap
+  // work on it here — see remixAiDjMix/topUpAiDjMix's "pace-pro" branch for
+  // how remix/gap-fill work for a mix with no real Runna workout behind its
+  // date. splitsCsvText/fileName/savedMixId ride along (unused by the
+  // dashboard itself) purely so "Save to Pace Pro library" can round-trip
+  // back into lib/pace-pro-saved.ts's schema without the original PacePro
+  // CSV having to be re-uploaded.
+  useEffect(() => {
+    if (searchParams.get("loadPaceProMix") !== "1") return;
+    router.replace("/dashboard");
+    try {
+      const raw = sessionStorage.getItem("paceProDashboardHandoff");
+      sessionStorage.removeItem("paceProDashboardHandoff");
+      if (!raw) return;
+      const payload = JSON.parse(raw) as {
+        workoutTitle: string; date: string; totalSec: number;
+        timeline: AiDjTimeline; segments: string[];
+        splitsCsvText: string; fileName: string | null; savedMixId: string | null;
+      };
+      const tracks: TrackWithBPM[] = payload.timeline.flatMap(seg => seg.tracks).map(t => ({
+        id: t.uri.split(":")[2] ?? t.uri,
+        name: t.name,
+        artists: [{ name: t.artist }],
+        album: { name: "", images: [] },
+        duration_ms: Math.round((t.durationSec ?? 0) * 1000),
+        uri: t.uri,
+        bpm: Math.round(t.tempo),
+        energy: t.energy,
+      }));
+      handleAiDjMix(payload.workoutTitle, payload.workoutTitle, tracks, payload.totalSec, payload.segments, payload.date, payload.timeline, undefined, undefined, "pace-pro");
+      setPaceProLibraryMeta({ splitsCsvText: payload.splitsCsvText, fileName: payload.fileName, savedMixId: payload.savedMixId });
+    } catch {
+      // Best-effort — a malformed/missing handoff just means nothing loads.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   // Enrich BPM-less tracks via ReccoBeats; updates the CSV and local state.
   // Returns how many tracks got features and which ones are still missing.
@@ -765,7 +812,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   // Populates the central track list/save UI from an AI DJ mix (built in
   // RunnaScheduleCard) instead of saving straight to Spotify — the user picks
   // which playlist(s) to save to from here.
-  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimeline, avoidUris?: string[], startedAtMs?: number) {
+  function handleAiDjMix(workoutTitle: string, name: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimeline, avoidUris?: string[], startedAtMs?: number, origin?: "pace-pro") {
     setSelectedZones([]);
     setPaceFilter(null);
     setSprintBpmFilter(null);
@@ -774,7 +821,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     setMissingFeaturesFilter(null);
     setSingleTrackFilter(null);
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
-    setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false, avoidUris, originalCount: unique.length });
+    setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false, avoidUris, originalCount: unique.length, origin });
     setChartDismissed(false);
     setPlaylistName(name);
     setPinSaved(false);
@@ -816,6 +863,59 @@ export function DashboardClient({ spotifyUser }: Props) {
     pinMix({ date, workoutTitle, totalSec, timeline, startedAtMs, allowedUris: new Set(unique.map(t => t.uri)) }, true);
   }
 
+  // Builds a mix directly against /api/ai-dj/mix from plain segment text —
+  // the same request RunnaScheduleCard's buildMix() makes, minus its
+  // per-workout progress-bar bookkeeping. Used only for a "pace-pro" origin
+  // mix, which has no real Runna workout for RunnaScheduleCard's ref-based
+  // remix/topUp to look up by date.
+  async function buildMixDirect(
+    title: string, segments: string[], date: string, avoidUris?: string[], extraPlayCounts?: Record<string, number>,
+  ): Promise<{ tracks: TrackWithBPM[]; totalSec: number; timeline: AiDjTimeline; startedAtMs: number }> {
+    const startedAtMs = Date.now();
+    const res = await fetch("/api/ai-dj/mix", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, segments, avoidUris, date, extraPlayCounts, startedAtMs }),
+    });
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({})) as { error?: string };
+      throw new Error(err.error ?? `Mix failed (${res.status})`);
+    }
+    let mix: { trackUris: string[]; totalSec: number; timeline: AiDjTimeline } | null = null;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf("\n\n")) !== -1) {
+        const chunk = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+        if (!dataLine) continue;
+        const msg = JSON.parse(dataLine.slice(6)) as
+          & { type: string; trackUris?: string[]; totalSec?: number; timeline?: AiDjTimeline; error?: string };
+        if (msg.type === "error") throw new Error(msg.error ?? "Mix failed");
+        if (msg.type === "done") mix = { trackUris: msg.trackUris ?? [], totalSec: msg.totalSec ?? 0, timeline: msg.timeline ?? [] };
+      }
+    }
+    if (!mix) throw new Error("Mix stream ended without a result");
+    if (!mix.trackUris.length) throw new Error("No tracks matched this mix");
+    const tracks: TrackWithBPM[] = mix.timeline.flatMap(seg => seg.tracks).map(t => ({
+      id: t.uri.split(":")[2] ?? t.uri,
+      name: t.name,
+      artists: [{ name: t.artist }],
+      album: { name: "", images: [] },
+      duration_ms: Math.round((t.durationSec ?? 0) * 1000),
+      uri: t.uri,
+      bpm: Math.round(t.tempo),
+      energy: t.energy,
+    }));
+    return { tracks, totalSec: mix.totalSec, timeline: mix.timeline, startedAtMs };
+  }
+
   // Rebuild the AI DJ mix from the same workout segments — either because a
   // track in the mix was deleted (stale=true), or the user just wants a
   // different mix. avoidUris accumulates across remixes so the mixer demotes
@@ -829,8 +929,11 @@ export function DashboardClient({ spotifyUser }: Props) {
   // routing through the same buildMix() gives the tracks-card Remix button
   // the identical progress UI instead of a silent fetch. onAiDjMix (passed
   // to RunnaScheduleCard) still updates aiDjMix/step/etc. on completion.
+  // A "pace-pro" origin mix has no real Runna workout behind its date, so it
+  // goes through buildMixDirect() with its own stored segments instead.
   async function remixAiDjMix() {
-    if (!aiDjMix || !runnaScheduleRef.current) return;
+    if (!aiDjMix) return;
+    if (aiDjMix.origin !== "pace-pro" && !runnaScheduleRef.current) return;
     setRemixing(true);
     setSaveError(null);
     const priorUris = aiDjMix.tracks.map(t => t.uri);
@@ -842,7 +945,15 @@ export function DashboardClient({ spotifyUser }: Props) {
     // (not hard-excluded) in the rebuild too, same as a fill-the-gap.
     const extraPlayCounts = Object.fromEntries(Object.keys(removedFromMix).map(uri => [uri, 1]));
     try {
-      await runnaScheduleRef.current.remix(aiDjMix.date, avoidUris, extraPlayCounts);
+      if (aiDjMix.origin === "pace-pro") {
+        const result = await buildMixDirect(aiDjMix.workoutTitle, aiDjMix.segments, aiDjMix.date, avoidUris, extraPlayCounts);
+        handleAiDjMix(aiDjMix.workoutTitle, aiDjMix.name, result.tracks, result.totalSec, aiDjMix.segments, aiDjMix.date, result.timeline,
+          Array.from(new Set([...avoidUris, ...result.tracks.map(t => t.uri)])), result.startedAtMs, "pace-pro");
+      } else {
+        await runnaScheduleRef.current!.remix(aiDjMix.date, avoidUris, extraPlayCounts);
+      }
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "Failed to remix");
     } finally {
       setRemixing(false);
     }
@@ -857,7 +968,8 @@ export function DashboardClient({ spotifyUser }: Props) {
   // no-repeat-artist rule a full build enforces isn't undermined by the
   // splice.
   async function topUpAiDjMix() {
-    if (!aiDjMix || !runnaScheduleRef.current) return;
+    if (!aiDjMix) return;
+    if (aiDjMix.origin !== "pace-pro" && !runnaScheduleRef.current) return;
     const gap = aiDjMix.originalCount - aiDjMix.tracks.length;
     if (gap <= 0) return;
     setToppingUp(true);
@@ -879,7 +991,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     // back in.
     const extraPlayCounts = Object.fromEntries(Object.keys(removedFromMix).map(uri => [uri, 1]));
     try {
-      await runnaScheduleRef.current.topUp(aiDjMix.date, avoidUris, (freshTracks, _totalSec, _timeline, startedAtMs) => {
+      const onTopUpResult = (freshTracks: TrackWithBPM[], _totalSec: number, _timeline: AiDjTimeline, startedAtMs: number) => {
         // freshTracks is a flattened rebuild of the WHOLE mix — the same
         // track can legitimately appear in more than one of its segments
         // (avoidUris is only a soft demotion in the mixer, not a hard
@@ -981,7 +1093,13 @@ export function DashboardClient({ spotifyUser }: Props) {
           if (!stale) pinMix({ date: next.date, workoutTitle: next.workoutTitle, totalSec: next.totalSec, timeline: next.timeline, startedAtMs, allowedUris: new Set(merged.map(t => t.uri)) }, true);
           return next;
         });
-      }, extraPlayCounts);
+      };
+      if (aiDjMix.origin === "pace-pro") {
+        const result = await buildMixDirect(aiDjMix.workoutTitle, aiDjMix.segments, aiDjMix.date, avoidUris, extraPlayCounts);
+        onTopUpResult(result.tracks, result.totalSec, result.timeline, result.startedAtMs);
+      } else {
+        await runnaScheduleRef.current!.topUp(aiDjMix.date, avoidUris, onTopUpResult, extraPlayCounts);
+      }
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : "Failed to top up mix");
     } finally {
@@ -1259,6 +1377,38 @@ export function DashboardClient({ spotifyUser }: Props) {
   function pinMixToWorkout() {
     if (!aiDjMix?.timeline?.length) return;
     return pinMix(aiDjMix);
+  }
+
+  // Saves the current (possibly edited/remixed) state of a "pace-pro" origin
+  // mix back into Settings -> Pace Pro's saved-mix library — updates the
+  // entry in place if this mix was loaded from one (paceProLibraryMeta.
+  // savedMixId), otherwise creates a new entry.
+  async function savePaceProMixToLibrary() {
+    if (!aiDjMix || aiDjMix.origin !== "pace-pro" || !paceProLibraryMeta) return;
+    setPaceProSaving(true);
+    setPaceProSaveMsg(null);
+    try {
+      const res = await fetch("/api/settings/pace-pro-saved", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: paceProLibraryMeta.savedMixId ?? undefined,
+          title: aiDjMix.workoutTitle,
+          totalSec: aiDjMix.totalSec,
+          timeline: aiDjMix.timeline,
+          splitsCsvText: paceProLibraryMeta.splitsCsvText,
+          fileName: paceProLibraryMeta.fileName,
+        }),
+      });
+      const data = await res.json() as { mix?: { id: string; title: string }; error?: string };
+      if (!res.ok || data.error || !data.mix) throw new Error(data.error ?? `Save failed (${res.status})`);
+      setPaceProLibraryMeta(prev => prev ? { ...prev, savedMixId: data.mix!.id } : prev);
+      setPaceProSaveMsg(`Saved "${data.mix.title}" to the Pace Pro library`);
+    } catch (e) {
+      setPaceProSaveMsg(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setPaceProSaving(false);
+    }
   }
 
   async function saveTodaysRun() {
@@ -2387,8 +2537,19 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                             {pinSaving ? <><Spinner />Pinning…</> : pinSaved ? "📌 Pinned!" : "📌 Pin to workout"}
                           </button>
                         )}
+                        {aiDjMix?.origin === "pace-pro" && paceProLibraryMeta && (
+                          <button
+                            onClick={savePaceProMixToLibrary}
+                            disabled={paceProSaving}
+                            className="inline-flex items-center justify-center gap-2 rounded-lg border border-blue-500/40 bg-blue-500/15 hover:bg-blue-500/25 disabled:opacity-60 text-blue-300 font-semibold text-xs px-4 py-1.5 transition-colors whitespace-nowrap"
+                            title="Save this mix's current tracks back to the Pace Pro library in Settings"
+                          >
+                            {paceProSaving ? <><Spinner />Saving…</> : paceProLibraryMeta.savedMixId ? "Update Pace Pro library" : "Save to Pace Pro library"}
+                          </button>
+                        )}
                       </div>
                       {pinError && <p className="text-xs text-red-400">{pinError}</p>}
+                      {paceProSaveMsg && <p className="text-xs text-slate-400">{paceProSaveMsg}</p>}
                       {todaysRunError && <p className="text-xs text-red-400">{todaysRunError}</p>}
                       {todaysRunSaved && todaysRunUrl && (
                         <button

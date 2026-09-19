@@ -215,3 +215,45 @@ export function getPlayedTracks(): { uri: string; paceSec: number | null }[] {
   });
   return played;
 }
+
+export interface PaceAnalysisTrack {
+  uri: string | null;
+  name: string;
+  artist: string;
+  tempo: number;
+  targetPaceSec: number;
+  segment: string;
+  date: string;
+  workoutTitle: string;
+}
+
+// Every confirmed-play track from a segment whose target pace fell within
+// `windowSec` of `paceSec` — the raw material for the Pace Analysis tab.
+// Target-BPM computation and tolerance classification happen in the caller
+// (needs the Garmin cadence lookup, which this file deliberately doesn't
+// depend on - see the module comment). Deduped by (uri, targetPaceSec,
+// date, workoutTitle) so a track appearing twice in the same saved mix
+// (e.g. repeated across reps) isn't double-counted, while genuinely
+// different runs/segments each still contribute their own instance.
+export function getPlayedTracksNearPace(paceSec: number, windowSec: number): PaceAnalysisTrack[] {
+  const today = new Date().toISOString().slice(0, 10);
+  const seen = new Set<string>();
+  const out: PaceAnalysisTrack[] = [];
+  getAllTodaysRunEntries().forEach(entry => {
+    if (entry.date > today) return;
+    if (entry.approved === false) return; // disputed — didn't actually play
+    entry.tracks.forEach(t => {
+      if (t.targetPaceSec == null || t.tempo == null) return;
+      if (Math.abs(t.targetPaceSec - paceSec) > windowSec) return;
+      const key = `${t.uri ?? t.name}|${t.targetPaceSec}|${entry.date}|${entry.workoutTitle}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({
+        uri: t.uri, name: t.name, artist: t.artist, tempo: t.tempo,
+        targetPaceSec: t.targetPaceSec, segment: t.segment,
+        date: entry.date, workoutTitle: entry.workoutTitle,
+      });
+    });
+  });
+  return out;
+}

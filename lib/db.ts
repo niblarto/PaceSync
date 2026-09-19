@@ -68,6 +68,16 @@ CREATE TABLE IF NOT EXISTS pinned_routes (
   PRIMARY KEY (date, workout_title)
 );
 
+CREATE TABLE IF NOT EXISTS saved_pace_pro_mixes (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  total_sec INTEGER NOT NULL,
+  timeline_json TEXT NOT NULL,
+  splits_csv_text TEXT NOT NULL,
+  file_name TEXT,
+  saved_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS race_splits (
   date TEXT NOT NULL,
   workout_title TEXT NOT NULL,
@@ -202,6 +212,10 @@ function runColumnMigrations(conn: Database.Database): void {
   const trackCols = conn.prepare("PRAGMA table_info(tracks)").all() as { name: string }[];
   if (!trackCols.some(c => c.name === "isrc")) {
     conn.exec("ALTER TABLE tracks ADD COLUMN isrc TEXT");
+  }
+  const savedPaceProCols = conn.prepare("PRAGMA table_info(saved_pace_pro_mixes)").all() as { name: string }[];
+  if (savedPaceProCols.length > 0 && !savedPaceProCols.some(c => c.name === "activity_id")) {
+    conn.exec("ALTER TABLE saved_pace_pro_mixes ADD COLUMN activity_id TEXT");
   }
 }
 
