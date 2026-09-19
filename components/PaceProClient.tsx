@@ -681,9 +681,12 @@ export function PaceProClient() {
             activityId={ppRouteMapMix.activityId!}
             label={ppRouteMapMix.title}
             workoutSegments={parsed.ok ? paceProSplitsToSegments(parsed.splits) : undefined}
-            mixTracks={ppRouteMapMix.timeline.flatMap(s => s.tracks).map(t => {
+            mixTracks={ppRouteMapMix.timeline.flatMap(s => s.tracks.map(t => ({ ...t, segment: s.segment, targetPaceSec: s.targetPaceSec }))).map(t => {
               const [mm, ss] = t.startsAt.split(":").map(Number);
-              return { uri: t.uri, name: t.name, artist: t.artist, startsAtSec: (mm || 0) * 60 + (ss || 0), durationSec: t.durationSec, tempo: t.tempo };
+              return {
+                uri: t.uri, name: t.name, artist: t.artist, startsAtSec: (mm || 0) * 60 + (ss || 0),
+                durationSec: t.durationSec, tempo: t.tempo, segment: t.segment, targetPaceSec: t.targetPaceSec,
+              };
             })}
             onClose={() => setPpRouteMapMix(null)}
           />
