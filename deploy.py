@@ -137,6 +137,8 @@ FILES = [
     ('components/RouteMapLightbox.tsx',           'components/RouteMapLightbox.tsx'),
     ('hooks/useRouteMap.ts',                      'hooks/useRouteMap.ts'),
     ('app/garmin/page.tsx',                       'app/garmin/page.tsx'),
+    ('app/pace-pro/page.tsx',                     'app/pace-pro/page.tsx'),
+    ('components/PaceProClient.tsx',              'components/PaceProClient.tsx'),
     ('app/garmin/activity/[id]/page.tsx',         'app/garmin/activity/[id]/page.tsx'),
     ('app/api/garmin/activity/[id]/route.ts',     'app/api/garmin/activity/[id]/route.ts'),
     ('components/GarminClient.tsx',               'components/GarminClient.tsx'),

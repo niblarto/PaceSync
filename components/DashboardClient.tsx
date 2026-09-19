@@ -369,7 +369,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const noBpmCsvInputRef = useRef<HTMLInputElement>(null);
   const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[]; originalCount: number; origin?: "pace-pro" } | null>(null);
   // Set alongside an origin: "pace-pro" aiDjMix — carries what's needed to
-  // save edits/remixes back into Settings -> Pace Pro's saved-mix library
+  // save edits/remixes back into the Pace Pro page's saved-mix library
   // (the original PacePro CSV text, for restoring the splits table there;
   // which library entry to update in place, if this mix came from one).
   const [paceProLibraryMeta, setPaceProLibraryMeta] = useState<{ splitsCsvText: string; fileName: string | null; savedMixId: string | null } | null>(null);
@@ -499,7 +499,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allTracks, searchParams]);
 
-  // Deep link from Settings -> Pace Pro's "Send to dashboard" action:
+  // Deep link from the Pace Pro page's "Send to dashboard" action:
   // ?loadPaceProMix=1 with the mix payload handed off via sessionStorage
   // (too large/structured for a URL param). Loads it into the same aiDjMix
   // state a real Runna workout's mix build would, so Edit/Remix/Fill-the-gap
@@ -1380,7 +1380,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   }
 
   // Saves the current (possibly edited/remixed) state of a "pace-pro" origin
-  // mix back into Settings -> Pace Pro's saved-mix library — updates the
+  // mix back into the Pace Pro page's saved-mix library — updates the
   // entry in place if this mix was loaded from one (paceProLibraryMeta.
   // savedMixId), otherwise creates a new entry.
   async function savePaceProMixToLibrary() {
@@ -1987,6 +1987,9 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 Garmin
               </Link>
             )}
+            <Link href="/pace-pro" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
+              Pace Pro
+            </Link>
             <Link href="/strava" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
               Strava
             </Link>
@@ -2542,7 +2545,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                             onClick={savePaceProMixToLibrary}
                             disabled={paceProSaving}
                             className="inline-flex items-center justify-center gap-2 rounded-lg border border-blue-500/40 bg-blue-500/15 hover:bg-blue-500/25 disabled:opacity-60 text-blue-300 font-semibold text-xs px-4 py-1.5 transition-colors whitespace-nowrap"
-                            title="Save this mix's current tracks back to the Pace Pro library in Settings"
+                            title="Save this mix's current tracks back to the Pace Pro library"
                           >
                             {paceProSaving ? <><Spinner />Saving…</> : paceProLibraryMeta.savedMixId ? "Update Pace Pro library" : "Save to Pace Pro library"}
                           </button>
