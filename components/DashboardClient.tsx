@@ -49,11 +49,16 @@ const ALL_ZONE: RunningZone = {
   textColor: "text-white",
 };
 
-function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, playedCounts }: {
+function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, playedCounts }: {
   tracks: TrackWithBPM[];
   onDelete?: (track: TrackWithBPM) => void;
   /** Drops a track from the currently-viewed AI DJ mix only (keeps it in the library) — only passed while an aiDjMix is active. */
   onRemoveFromMix?: (track: TrackWithBPM) => void;
+  /** Drag-to-reorder within the currently-viewed AI DJ mix — only passed
+      while an aiDjMix is active (reordering a plain library view has no
+      meaning). Indices are into the full `tracks` array (not the visible
+      slice), matching the tracklist order the mix itself keeps. */
+  onReorder?: (fromIndex: number, toIndex: number) => void;
   onSimilar?: (track: TrackWithBPM) => void;
   onSuggest?: (track: TrackWithBPM, mode: "style" | "tempo") => void;
   onSuggestArtist?: (track: TrackWithBPM) => void;
@@ -73,6 +78,12 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onSimilar, onSugg
   // Last track clicked to play in Spotify — tinted orange until a different
   // track is clicked, so it stays visually marked in a long list.
   const [lastPlayedUri, setLastPlayedUri] = useState<string | null>(null);
+  // Index (into the full tracks array) currently being dragged, and which
+  // row it's hovering over — drives the drop-target highlight. Native HTML5
+  // drag/drop rather than a library: this list is already virtualized/long,
+  // and a plain dragstart/dragover/drop trio needs no extra dependency.
+  const [dragFromIndex, setDragFromIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
   const loadMore = useCallback(() => {
     setVisibleCount(c => Math.min(c + 50, tracks.length));
@@ -109,7 +120,20 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onSimilar, onSugg
             if (inlineCard?.trackId === track.id && el) setAnchorEl(prev => (prev === el ? prev : el));
             if (highlightUri === track.uri) highlightRowRef.current = el;
           }}
-          className={highlightUri === track.uri ? "animate-pulse-highlight" : undefined}
+          onDragEnter={onReorder ? () => { if (dragFromIndex !== null) setDragOverIndex(i); } : undefined}
+          onDragOver={onReorder ? (e) => e.preventDefault() : undefined}
+          onDrop={onReorder ? (e) => {
+            e.preventDefault();
+            if (dragFromIndex !== null && dragFromIndex !== i) onReorder(dragFromIndex, i);
+            setDragFromIndex(null);
+            setDragOverIndex(null);
+          } : undefined}
+          onDragEnd={onReorder ? () => { setDragFromIndex(null); setDragOverIndex(null); } : undefined}
+          className={[
+            highlightUri === track.uri ? "animate-pulse-highlight" : "",
+            dragOverIndex === i && dragFromIndex !== null && dragFromIndex !== i ? "outline outline-2 outline-green-500/60 -outline-offset-2" : "",
+            dragFromIndex === i ? "opacity-40" : "",
+          ].filter(Boolean).join(" ") || undefined}
         >
           <TrackRow
             track={track}
@@ -124,6 +148,8 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onSimilar, onSugg
             playedCount={playedCounts?.[track.uri]}
             isPlaying={lastPlayedUri === track.uri}
             onPlay={() => setLastPlayedUri(track.uri)}
+            reorderable={!!onReorder}
+            onDragHandleStart={onReorder ? (e) => { setDragFromIndex(i); e.dataTransfer.effectAllowed = "move"; } : undefined}
           />
         </div>
       ))}
@@ -1832,6 +1858,46 @@ export function DashboardClient({ spotifyUser }: Props) {
     }).catch(e => console.error("[remove-from-mix] persist failed:", e));
   }
 
+  // Drag-to-reorder within the currently-viewed mix. Segment membership
+  // follows position, not the track itself (dragging a track into another
+  // segment's range re-tags it as belonging to that segment) — so this
+  // reorders the flat track list, then rebuilds the timeline by keeping each
+  // segment's original track COUNT and refilling those slots in the new
+  // order, recomputing every startsAt cumulatively from 0. That keeps the
+  // chart/pin/save all reading the new order consistently without having to
+  // track which segment each dragged track "really" belongs to.
+  function reorderMixTrack(fromIndex: number, toIndex: number) {
+    if (!aiDjMix) return;
+    const reordered = [...aiDjMix.tracks];
+    const [moved] = reordered.splice(fromIndex, 1);
+    reordered.splice(toIndex, 0, moved);
+
+    const segCounts = aiDjMix.timeline.map(s => s.tracks.length);
+    let cursor = 0, cursorSec = 0;
+    const newTimeline: AiDjTimeline = aiDjMix.timeline.map((seg, segIdx) => {
+      const count = segCounts[segIdx];
+      const segTracks = reordered.slice(cursor, cursor + count).map(t => {
+        const durationSec = Math.round(t.duration_ms / 1000);
+        const m = Math.floor(cursorSec / 60), s = Math.round(cursorSec % 60);
+        const startsAt = `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+        cursorSec += durationSec;
+        return {
+          uri: t.uri, name: t.name, artist: t.artists.map(a => a.name).join(", "),
+          startsAt, durationSec, tempo: t.bpm, camelot: null, energy: t.energy,
+        };
+      });
+      cursor += count;
+      return { ...seg, tracks: segTracks };
+    });
+
+    setAiDjMix(prev => {
+      if (!prev) return prev;
+      const next = { ...prev, tracks: reordered, timeline: newTimeline };
+      pinMix({ date: next.date, workoutTitle: next.workoutTitle, totalSec: next.totalSec, timeline: next.timeline, allowedUris: new Set(reordered.map(t => t.uri)) }, true);
+      return next;
+    });
+  }
+
   async function handleDeleteTrack(track: TrackWithBPM) {
     const token = await freshSpotifyToken();
 
@@ -2640,6 +2706,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       tracks={filteredTracks}
                       onDelete={handleDeleteTrack}
                       onRemoveFromMix={aiDjMix ? removeTrackFromMix : undefined}
+                      onReorder={aiDjMix && !aiDjMix.stale ? reorderMixTrack : undefined}
                       onSimilar={handleSimilar}
                       onSuggest={handleSuggest}
                       onSuggestArtist={(track) => handleSuggestArtist(track, "list")}

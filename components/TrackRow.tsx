@@ -1,7 +1,7 @@
 "use client";
 
 import { useSession } from "next-auth/react";
-import type { SyntheticEvent } from "react";
+import type { DragEvent, SyntheticEvent } from "react";
 import type { TrackWithBPM } from "@/types";
 import { spotifyFetch } from "@/lib/spotify-browser";
 
@@ -29,6 +29,13 @@ interface Props {
   isPlaying?: boolean;
   /** Fired right before playInSpotify — lets the parent track which row was last clicked. */
   onPlay?: () => void;
+  /** Shows a drag handle for reordering. The handle itself is the
+      `draggable` element (not the row) so dragging only starts from the
+      grip — the row's own click-to-play button is unaffected. dragover/
+      drop/dragend stay on VirtualTrackList's row wrapper, which doesn't
+      need to be draggable to be a drop target. */
+  reorderable?: boolean;
+  onDragHandleStart?: (e: DragEvent<HTMLSpanElement>) => void;
 }
 
 export function MiniSpinner() {
@@ -182,13 +189,23 @@ export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string)
   }
 }
 
-export function TrackRow({ track, index, onDelete, onRemoveFromMix, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, showStats = true, isPlaying, onPlay }: Props) {
+export function TrackRow({ track, index, onDelete, onRemoveFromMix, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, showStats = true, isPlaying, onPlay, reorderable, onDragHandleStart }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(track.name)}`;
 
   return (
     <div className="flex items-center group">
+      {reorderable && (
+        <span
+          draggable
+          onDragStart={onDragHandleStart}
+          className="shrink-0 px-1 py-2 text-slate-700 hover:text-slate-400 cursor-grab active:cursor-grabbing select-none"
+          title="Drag to reorder"
+        >
+          ⠿
+        </span>
+      )}
       <button
         onClick={() => { onPlay?.(); playInSpotify(track.uri, session?.accessToken).catch(() => {}); }}
         className="flex-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-800/60 transition-colors text-left"
