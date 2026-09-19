@@ -2028,6 +2028,18 @@ export function DashboardClient({ spotifyUser }: Props) {
     });
   }
 
+  // uri-based variant of reorderMixTrack, for callers that only know which
+  // tracks moved (not their array positions) — the Pace/BPM chart's song
+  // strip, whose own tracks array is zoom-clipped and so can't reliably
+  // report real positions from its render loop.
+  function reorderMixTrackByUri(fromUri: string, toUri: string) {
+    if (!aiDjMix) return;
+    const fromIndex = aiDjMix.tracks.findIndex(t => t.uri === fromUri);
+    const toIndex = aiDjMix.tracks.findIndex(t => t.uri === toUri);
+    if (fromIndex === -1 || toIndex === -1 || fromIndex === toIndex) return;
+    reorderMixTrack(fromIndex, toIndex);
+  }
+
   // Swaps one track at an exact mix position for a chosen replacement (the
   // "replace by BPM" picker's confirm action) — unlike removeTrackFromMix
   // (which drops a track and marks the mix stale for a later Remix/Fill-the-
@@ -2282,7 +2294,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   ×
                 </button>
               </div>
-              <MixPaceChart tracks={timelineToChartTracks(aiDjMix.timeline)} onTrackClick={setChartHighlightUri} />
+              <MixPaceChart tracks={timelineToChartTracks(aiDjMix.timeline)} onTrackClick={setChartHighlightUri} onReorder={reorderMixTrackByUri} />
             </div>
           </div>
         </div>

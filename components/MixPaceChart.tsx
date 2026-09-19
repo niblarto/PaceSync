@@ -119,15 +119,29 @@ const REST_SUFFIX_RE = / \+ ((\d+)\s*(s|sec|secs|min|mins?)\b[^,]*)$/i;
 // built from a mix's own planned data (no actual pace, since it hasn't been
 // run yet) so it can be shown the moment a mix is built or reloaded from a
 // saved/pinned snapshot. `tracks` should be the full ordered mix track list.
-export function MixPaceChart({ tracks, onTrackClick }: {
+export function MixPaceChart({ tracks, onTrackClick, onReorder }: {
   tracks: MixChartTrack[];
   /** Fired (in addition to the chart's own zoom-to-this-track behavior) when
       a track chip in the bottom strip is clicked — lets a caller scroll to
       and highlight the same track wherever else it's shown (e.g. the main
       dashboard tracklist). */
   onTrackClick?: (uri: string) => void;
+  /** Drag-to-reorder track chips in the bottom song strip — same
+      reordering the main tracklist already supports via drag handles, just
+      driven from the chart instead. Reports the dragged and drop-target
+      track by uri (not array index): the strip's own tracks array is
+      zoom-clipped, so its render-loop position doesn't reliably match the
+      caller's real track order once a track outside the current zoom
+      window is filtered out. Only passed while reordering is meaningful
+      (an active, non-stale mix) — omit to render the strip read-only. */
+  onReorder?: (fromUri: string, toUri: string) => void;
 }) {
   const [xDomain, setXDomain] = useState<[number, number] | null>(null);
+  // Native HTML5 drag/drop for the song-strip chips — mirrors
+  // VirtualTrackList's own drag-to-reorder (DashboardClient.tsx), just
+  // tracked by uri instead of index here (see onReorder's doc comment).
+  const [dragFromUri, setDragFromUri] = useState<string | null>(null);
+  const [dragOverUri, setDragOverUri] = useState<string | null>(null);
   const xDomainRef = useRef(xDomain);
   xDomainRef.current = xDomain;
   const chartWrapRef = useRef<HTMLDivElement>(null);
@@ -526,9 +540,21 @@ export function MixPaceChart({ tracks, onTrackClick }: {
               const isZoomedToThis = xDomain
                 && Math.abs(xDomain[0] - t.startsAtSec) < 1
                 && Math.abs(xDomain[1] - (t.startsAtSec + t.durationSec)) < 1;
+              const canDrag = !!(onReorder && t.uri);
               return (
                 <button
                   key={i}
+                  draggable={canDrag}
+                  onDragStart={canDrag ? (e) => { setDragFromUri(t.uri); e.dataTransfer.effectAllowed = "move"; } : undefined}
+                  onDragEnter={canDrag ? () => { if (dragFromUri !== null) setDragOverUri(t.uri); } : undefined}
+                  onDragOver={canDrag ? (e) => e.preventDefault() : undefined}
+                  onDrop={canDrag ? (e) => {
+                    e.preventDefault();
+                    if (dragFromUri !== null && t.uri && dragFromUri !== t.uri) onReorder!(dragFromUri, t.uri);
+                    setDragFromUri(null);
+                    setDragOverUri(null);
+                  } : undefined}
+                  onDragEnd={canDrag ? () => { setDragFromUri(null); setDragOverUri(null); } : undefined}
                   onClick={() => {
                     setXDomain([t.startsAtSec, t.startsAtSec + t.durationSec]);
                     if (t.uri) onTrackClick?.(t.uri);
@@ -537,12 +563,16 @@ export function MixPaceChart({ tracks, onTrackClick }: {
                     ? `${t.name} — ${t.artist} (${Math.round(t.tempo)} BPM, felt as ${Math.round(effectiveTempo(t.tempo))} double-time)`
                     : `${t.name} — ${t.artist}`}
                   className={`absolute top-0 h-full flex items-center justify-center overflow-hidden border-r border-slate-950/60 transition-colors ${
+                    dragOverUri === t.uri && dragFromUri !== null && dragFromUri !== t.uri
+                      ? "outline outline-2 outline-green-500/70 -outline-offset-2"
+                      : ""
+                  } ${
                     isZoomedToThis
                       ? "bg-purple-500/50 hover:bg-purple-500/60"
                       : i % 2 === 0
                         ? "bg-slate-700/50 hover:bg-purple-500/40"
                         : "bg-slate-700/30 hover:bg-purple-500/40"
-                  }`}
+                  } ${dragFromUri === t.uri ? "opacity-40" : ""} ${canDrag ? "cursor-grab active:cursor-grabbing" : ""}`}
                   style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
                 >
                   {widthPct > 4 && (
