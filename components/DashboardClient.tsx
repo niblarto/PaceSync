@@ -516,6 +516,12 @@ export function DashboardClient({ spotifyUser }: Props) {
   // swap lands in the exact same slot, and its artist name so the picker's
   // online top-up (own + related artists) knows who to search.
   const [replaceTarget, setReplaceTarget] = useState<{ track: TrackWithBPM; index: number } | null>(null);
+  // Right-click context menu for a track chip in the Pace/BPM chart's song
+  // strip — offers the same per-track actions the main tracklist's row
+  // icons do (recycle/eject/delete), resolved here from the chip's uri
+  // since the chart itself only knows uri/name/artist/tempo, not the full
+  // TrackWithBPM/mix-index those actions need.
+  const [chartTrackMenu, setChartTrackMenu] = useState<{ uri: string; x: number; y: number } | null>(null);
   const [remixing, setRemixing] = useState(false);
   const [toppingUp, setToppingUp] = useState(false);
   const [flowMixing, setFlowMixing] = useState(false);
@@ -2294,7 +2300,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   ×
                 </button>
               </div>
-              <MixPaceChart tracks={timelineToChartTracks(aiDjMix.timeline)} onTrackClick={setChartHighlightUri} onReorder={reorderMixTrackByUri} />
+              <MixPaceChart
+                tracks={timelineToChartTracks(aiDjMix.timeline)}
+                onTrackClick={setChartHighlightUri}
+                onReorder={!aiDjMix.stale ? reorderMixTrackByUri : undefined}
+                onTrackContextMenu={(uri, x, y) => setChartTrackMenu({ uri, x, y })}
+              />
             </div>
           </div>
         </div>
@@ -3013,6 +3024,47 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           {similarNotice}
         </div>
       )}
+
+      {chartTrackMenu && aiDjMix && (() => {
+        const idx = aiDjMix.tracks.findIndex(t => t.uri === chartTrackMenu.uri);
+        const track = idx !== -1 ? aiDjMix.tracks[idx] : null;
+        if (!track) { setChartTrackMenu(null); return null; }
+        const item = "w-full text-left px-3 py-1.5 text-sm rounded-md transition-colors";
+        return (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setChartTrackMenu(null)} onContextMenu={(e) => { e.preventDefault(); setChartTrackMenu(null); }} />
+            <div
+              className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl py-1 w-48"
+              style={{
+                left: Math.min(chartTrackMenu.x, window.innerWidth - 200),
+                top: Math.min(chartTrackMenu.y, window.innerHeight - 160),
+              }}
+            >
+              <p className="px-3 py-1.5 text-xs text-slate-500 truncate border-b border-white/10 mb-1">{track.name}</p>
+              {!aiDjMix.stale && (
+                <button
+                  className={`${item} text-sky-300 hover:bg-sky-500/15`}
+                  onClick={() => { setChartTrackMenu(null); setReplaceTarget({ track, index: idx }); }}
+                >
+                  ♻ Replace by BPM
+                </button>
+              )}
+              <button
+                className={`${item} text-amber-300 hover:bg-amber-500/15`}
+                onClick={() => { setChartTrackMenu(null); removeTrackFromMix(track); }}
+              >
+                ⏏ Remove from this mix
+              </button>
+              <button
+                className={`${item} text-red-400 hover:bg-red-500/15`}
+                onClick={() => { setChartTrackMenu(null); void handleDeleteTrack(track); }}
+              >
+                🗑 Delete from library
+              </button>
+            </div>
+          </>
+        );
+      })()}
 
       {replaceTarget && (
         <ReplaceTrackModal

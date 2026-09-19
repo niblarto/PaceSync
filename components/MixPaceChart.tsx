@@ -4,6 +4,8 @@ import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 
 import {
   ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
+import { useSession } from "next-auth/react";
+import { playInSpotify } from "./TrackRow";
 
 // Shared shape for a mix track with pacing/segment info — matches
 // lib/todays-run-history.ts's HistoryTrack (the AI DJ mix's per-track
@@ -119,12 +121,12 @@ const REST_SUFFIX_RE = / \+ ((\d+)\s*(s|sec|secs|min|mins?)\b[^,]*)$/i;
 // built from a mix's own planned data (no actual pace, since it hasn't been
 // run yet) so it can be shown the moment a mix is built or reloaded from a
 // saved/pinned snapshot. `tracks` should be the full ordered mix track list.
-export function MixPaceChart({ tracks, onTrackClick, onReorder }: {
+export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMenu }: {
   tracks: MixChartTrack[];
-  /** Fired (in addition to the chart's own zoom-to-this-track behavior) when
-      a track chip in the bottom strip is clicked — lets a caller scroll to
-      and highlight the same track wherever else it's shown (e.g. the main
-      dashboard tracklist). */
+  /** Fired when a track chip in the bottom strip is clicked (in addition to
+      playing it in Spotify, which the chart does itself) — lets a caller
+      scroll to and highlight the same track wherever else it's shown (e.g.
+      the main dashboard tracklist). */
   onTrackClick?: (uri: string) => void;
   /** Drag-to-reorder track chips in the bottom song strip — same
       reordering the main tracklist already supports via drag handles, just
@@ -135,13 +137,25 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder }: {
       window is filtered out. Only passed while reordering is meaningful
       (an active, non-stale mix) — omit to render the strip read-only. */
   onReorder?: (fromUri: string, toUri: string) => void;
+  /** Right-click on a track chip — the caller owns the actual menu UI (it
+      needs the full track object/mix index to offer recycle/eject/delete,
+      which this component doesn't have), this just reports where to anchor
+      it and which track it's for. viewport-relative (clientX/clientY), same
+      coordinate space a fixed-position menu would use. */
+  onTrackContextMenu?: (uri: string, x: number, y: number) => void;
 }) {
+  const { data: session } = useSession();
   const [xDomain, setXDomain] = useState<[number, number] | null>(null);
   // Native HTML5 drag/drop for the song-strip chips — mirrors
   // VirtualTrackList's own drag-to-reorder (DashboardClient.tsx), just
   // tracked by uri instead of index here (see onReorder's doc comment).
   const [dragFromUri, setDragFromUri] = useState<string | null>(null);
   const [dragOverUri, setDragOverUri] = useState<string | null>(null);
+  // Last track chip clicked to play — tints it, same as the main tracklist's
+  // own "last played" highlight (TrackRow's isPlaying), so it stays visually
+  // marked here too instead of the old "currently zoomed to" tint (track
+  // clicks no longer zoom — see the chip's onClick below).
+  const [lastPlayedUri, setLastPlayedUri] = useState<string | null>(null);
   const xDomainRef = useRef(xDomain);
   xDomainRef.current = xDomain;
   const chartWrapRef = useRef<HTMLDivElement>(null);
@@ -537,9 +551,7 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder }: {
             {timelineTracks.map((t, i) => {
               const leftPct = span > 0 ? ((t.clipStart - timelineDomain[0]) / span) * 100 : 0;
               const widthPct = span > 0 ? ((t.clipEnd - t.clipStart) / span) * 100 : 0;
-              const isZoomedToThis = xDomain
-                && Math.abs(xDomain[0] - t.startsAtSec) < 1
-                && Math.abs(xDomain[1] - (t.startsAtSec + t.durationSec)) < 1;
+              const isLastPlayed = t.uri != null && lastPlayedUri === t.uri;
               const canDrag = !!(onReorder && t.uri);
               return (
                 <button
@@ -556,8 +568,15 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder }: {
                   } : undefined}
                   onDragEnd={canDrag ? () => { setDragFromUri(null); setDragOverUri(null); } : undefined}
                   onClick={() => {
-                    setXDomain([t.startsAtSec, t.startsAtSec + t.durationSec]);
-                    if (t.uri) onTrackClick?.(t.uri);
+                    if (!t.uri) return;
+                    setLastPlayedUri(t.uri);
+                    onTrackClick?.(t.uri);
+                    playInSpotify(t.uri, session?.accessToken).catch(() => {});
+                  }}
+                  onContextMenu={(e) => {
+                    if (!t.uri || !onTrackContextMenu) return;
+                    e.preventDefault();
+                    onTrackContextMenu(t.uri, e.clientX, e.clientY);
                   }}
                   title={t.tempo != null && t.tempo < DOUBLETIME_THRESHOLD
                     ? `${t.name} — ${t.artist} (${Math.round(t.tempo)} BPM, felt as ${Math.round(effectiveTempo(t.tempo))} double-time)`
@@ -567,7 +586,7 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder }: {
                       ? "outline outline-2 outline-green-500/70 -outline-offset-2"
                       : ""
                   } ${
-                    isZoomedToThis
+                    isLastPlayed
                       ? "bg-purple-500/50 hover:bg-purple-500/60"
                       : i % 2 === 0
                         ? "bg-slate-700/50 hover:bg-purple-500/40"
@@ -578,7 +597,7 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder }: {
                   {widthPct > 4 && (
                     <span className="text-[10px] text-slate-200 px-1 truncate whitespace-nowrap">
                       {t.name}
-                      {isZoomedToThis && t.tempo != null && (
+                      {isLastPlayed && t.tempo != null && (
                         <span className="text-slate-400">
                           {" · "}{Math.round(effectiveTempo(t.tempo))} BPM
                           {t.tempo < DOUBLETIME_THRESHOLD && <span className="text-amber-400">{" ×2"}</span>}
@@ -591,7 +610,7 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder }: {
             })}
           </div>
           <p className="text-[10px] text-slate-600 mt-1">
-            🎧 Song playing at each point — click a song or segment to zoom
+            🎧 Song playing at each point — click a song to play it{onReorder ? ", drag to reorder" : ""}, right-click for options, click a segment to zoom
           </p>
         </div>
       )}
