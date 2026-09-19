@@ -119,7 +119,14 @@ const REST_SUFFIX_RE = / \+ ((\d+)\s*(s|sec|secs|min|mins?)\b[^,]*)$/i;
 // built from a mix's own planned data (no actual pace, since it hasn't been
 // run yet) so it can be shown the moment a mix is built or reloaded from a
 // saved/pinned snapshot. `tracks` should be the full ordered mix track list.
-export function MixPaceChart({ tracks }: { tracks: MixChartTrack[] }) {
+export function MixPaceChart({ tracks, onTrackClick }: {
+  tracks: MixChartTrack[];
+  /** Fired (in addition to the chart's own zoom-to-this-track behavior) when
+      a track chip in the bottom strip is clicked — lets a caller scroll to
+      and highlight the same track wherever else it's shown (e.g. the main
+      dashboard tracklist). */
+  onTrackClick?: (uri: string) => void;
+}) {
   const [xDomain, setXDomain] = useState<[number, number] | null>(null);
   const xDomainRef = useRef(xDomain);
   xDomainRef.current = xDomain;
@@ -522,7 +529,10 @@ export function MixPaceChart({ tracks }: { tracks: MixChartTrack[] }) {
               return (
                 <button
                   key={i}
-                  onClick={() => setXDomain([t.startsAtSec, t.startsAtSec + t.durationSec])}
+                  onClick={() => {
+                    setXDomain([t.startsAtSec, t.startsAtSec + t.durationSec]);
+                    if (t.uri) onTrackClick?.(t.uri);
+                  }}
                   title={t.tempo != null && t.tempo < DOUBLETIME_THRESHOLD
                     ? `${t.name} — ${t.artist} (${Math.round(t.tempo)} BPM, felt as ${Math.round(effectiveTempo(t.tempo))} double-time)`
                     : `${t.name} — ${t.artist}`}

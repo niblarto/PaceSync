@@ -12,6 +12,9 @@ interface Props {
   /** Drops the track from the currently-viewed AI DJ mix only — stays in the
       library for other mixes/remixes, unlike onDelete's permanent removal. */
   onRemoveFromMix?: () => void;
+  /** Opens the "replace by BPM" picker for this exact mix position — only
+      passed while an aiDjMix is active (same gating as onRemoveFromMix). */
+  onReplace?: () => void;
   onSimilar?: () => void;
   onSuggestStyle?: () => void;
   onSuggestTempo?: () => void;
@@ -165,6 +168,16 @@ export function EjectIcon() {
   );
 }
 
+export function RecycleIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+      <path d="M10 3a.75.75 0 01.649.375l1.5 2.598a.75.75 0 11-1.298.75L10.5 5.9l-.851 1.474a.75.75 0 11-1.298-.75l1.5-2.598A.75.75 0 0110 3z" />
+      <path fillRule="evenodd" d="M4.5 7.5a.75.75 0 01.75.75v3.19l1.72-1.72a.75.75 0 111.06 1.06l-3 3a.75.75 0 01-1.06 0l-3-3a.75.75 0 111.06-1.06l1.72 1.72V8.25a.75.75 0 01.75-.75zm11 0a.75.75 0 01.75.75v3.19l1.72-1.72a.75.75 0 111.06 1.06l-3 3a.75.75 0 01-1.06 0l-3-3a.75.75 0 111.06-1.06l1.72 1.72V8.25a.75.75 0 01.75-.75z" clipRule="evenodd" />
+      <path d="M6.649 13.375a.75.75 0 011.024.274L9 16h2l1.327-2.351a.75.75 0 111.306.735L11.87 17h-3.74l-1.755-3.106a.75.75 0 01.274-1.024z" />
+    </svg>
+  );
+}
+
 export function TrashIcon() {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
@@ -189,7 +202,7 @@ export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string)
   }
 }
 
-export function TrackRow({ track, index, onDelete, onRemoveFromMix, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, showStats = true, isPlaying, onPlay, reorderable, onDragHandleStart }: Props) {
+export function TrackRow({ track, index, onDelete, onRemoveFromMix, onReplace, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, showStats = true, isPlaying, onPlay, reorderable, onDragHandleStart }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(track.name)}`;
@@ -297,6 +310,15 @@ export function TrackRow({ track, index, onDelete, onRemoveFromMix, onSimilar, o
           title="Search more by this artist (most popular)"
         >
           {suggestBusy === "artist" ? <MiniSpinner /> : <ArtistIcon />}
+        </button>
+      )}
+      {onReplace && (
+        <button
+          onClick={onReplace}
+          className="opacity-0 group-hover:opacity-100 p-1.5 text-slate-600 hover:text-sky-400 transition-all shrink-0 rounded"
+          title="Replace with a track at a specific BPM"
+        >
+          <RecycleIcon />
         </button>
       )}
       {onRemoveFromMix && (

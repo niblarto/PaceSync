@@ -249,28 +249,36 @@ export function PaceProClient() {
     }
   }
 
-  // Pins the just-built mix server-side so it survives a reload/different
-  // browser, replacing whatever was pinned before — Pace Pro only ever
-  // keeps its one most-recent mix, unlike a real workout's per-date pin.
-  async function pinPaceProMix(mix: AiDjMixResponse) {
-    if (!ppCsvText) return;
+  // Pins whichever mix is now showing server-side so it survives a
+  // reload/different browser — Pace Pro only ever keeps its one most-recent
+  // mix (whether just built or loaded from the saved library), unlike a
+  // real workout's per-date pin. Takes explicit values rather than reading
+  // ppTitle/ppCsvText/ppFileName from state, since callers that just set
+  // those via setState (loadSavedPaceProMix) would otherwise see stale
+  // values from before that update flushed.
+  async function pinPaceProMixData(title: string, mix: AiDjMixResponse, splitsCsvText: string, fileName: string | null) {
     try {
       await fetch("/api/settings/pace-pro-pin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          title: ppTitle.trim() || "Pace Pro Run",
+          title: title.trim() || "Pace Pro Run",
           totalSec: mix.totalSec,
           timeline: mix.timeline,
-          splitsCsvText: ppCsvText,
-          fileName: ppFileName,
+          splitsCsvText,
+          fileName,
         }),
       });
       setPpPinnedAt(new Date().toISOString());
     } catch {
-      // Best-effort — the build itself already succeeded and is showing on
+      // Best-effort — the mix itself already succeeded and is showing on
       // the page; a failed pin just means it won't survive a reload.
     }
+  }
+
+  async function pinPaceProMix(mix: AiDjMixResponse) {
+    if (!ppCsvText) return;
+    await pinPaceProMixData(ppTitle, mix, ppCsvText, ppFileName);
   }
 
   async function unpinPaceProMix() {
@@ -318,12 +326,18 @@ export function PaceProClient() {
     setPpCsvText(mix.splitsCsvText);
     setPpFileName(mix.fileName);
     setPpTitle(mix.title);
-    setPpMix({ trackUris: mix.timeline.flatMap(s => s.tracks.map(t => t.uri)), totalSec: mix.totalSec, timeline: mix.timeline });
-    setPpTrackUris(mix.timeline.flatMap(s => s.tracks.map(t => t.uri)));
+    const loadedMix = { trackUris: mix.timeline.flatMap(s => s.tracks.map(t => t.uri)), totalSec: mix.totalSec, timeline: mix.timeline };
+    setPpMix(loadedMix);
+    setPpTrackUris(loadedMix.trackUris);
     setPpLoadedSavedId(mix.id);
     setPpLibraryMsg(null);
     setPpParseError(null);
     setPpError(null);
+    // Whichever mix is opened becomes what reopening this page restores —
+    // matches build/remix's own auto-pin behavior, just via explicit values
+    // since ppTitle/ppCsvText/ppFileName haven't flushed from the setState
+    // calls above yet.
+    void pinPaceProMixData(mix.title, loadedMix, mix.splitsCsvText, mix.fileName);
   }
 
   async function deleteSavedPaceProMix(id: string) {

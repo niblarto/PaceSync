@@ -52,13 +52,26 @@ export function getSavedPaceProMix(id: string): SavedPaceProMix | null {
   return row ? rowToMix(row) : null;
 }
 
+function findIdByTitle(title: string): string | null {
+  const row = getDb()
+    .prepare("SELECT id FROM saved_pace_pro_mixes WHERE lower(trim(title)) = lower(trim(?)) LIMIT 1")
+    .get(title) as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
 export function saveSavedPaceProMix(mix: Omit<SavedPaceProMix, "id" | "savedAt" | "activityId"> & { id?: string }): SavedPaceProMix {
-  const id = mix.id ?? `pp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  // No explicit id (a fresh build, not one reopened from the library) —
+  // a save/update under a title that already exists in the library
+  // overwrites that entry rather than creating a duplicate, so re-saving
+  // "RH26 - 8:20" after rebuilding it always replaces the same row instead
+  // of piling up near-identical copies under the same name.
+  const id = mix.id ?? findIdByTitle(mix.title) ?? `pp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const savedAt = new Date().toISOString();
-  // A fresh save (no id) never carries an activityId of its own — an update
-  // (id given) must NOT touch whatever activity_id is already on that row,
-  // since attach-route and save-mix are separate actions with no reason to
-  // clobber each other.
+  // A genuinely new row never carries an activityId of its own — an update
+  // (whether by explicit id or a title match against an existing row) must
+  // NOT touch whatever activity_id is already on that row, since attach-
+  // route and save-mix are separate actions with no reason to clobber each
+  // other.
   getDb().prepare(`
     INSERT INTO saved_pace_pro_mixes (id, title, total_sec, timeline_json, splits_csv_text, file_name, saved_at, activity_id)
     VALUES (@id, @title, @totalSec, @timelineJson, @splitsCsvText, @fileName, @savedAt, NULL)

@@ -217,6 +217,8 @@ FILES = [
     ('app/api/bpm/suggest/route.ts',              'app/api/bpm/suggest/route.ts'),
     ('app/api/bpm/enrich/route.ts',               'app/api/bpm/enrich/route.ts'),
     ('app/api/bpm/artist-top/route.ts',           'app/api/bpm/artist-top/route.ts'),
+    ('lib/deezer-artist-top.ts',                  'lib/deezer-artist-top.ts'),
+    ('app/api/tracks/replace-candidates/route.ts', 'app/api/tracks/replace-candidates/route.ts'),
     ('app/api/ai-dj/mix/route.ts',                'app/api/ai-dj/mix/route.ts'),
     ('app/api/ai-dj/simulate-mix/route.ts',       'app/api/ai-dj/simulate-mix/route.ts'),
     ('app/api/ai-dj/flow-mix/route.ts',           'app/api/ai-dj/flow-mix/route.ts'),

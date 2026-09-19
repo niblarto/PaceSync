@@ -17,6 +17,34 @@ import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
 import { useRunningPlaylist } from "./useRunningPlaylist";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
 
+function mmssToSec(mmss: string): number {
+  const p = mmss.split(":").map(Number);
+  return p.some(isNaN) ? 0 : p.reduce((acc, x) => acc * 60 + x, 0);
+}
+
+// Drops one track (by uri) out of a mix timeline, shifting every later
+// track's startsAt earlier by the removed track's own duration — used
+// wherever a track leaves an active mix without a full rebuild (soft eject,
+// permanent delete) so the Pace/BPM chart (which renders straight from
+// timeline, not the flat tracks list) never keeps showing a track that's
+// already gone from the visible list.
+function removeUriFromTimeline(timeline: AiDjTimeline, uri: string): AiDjTimeline {
+  let shiftSec = 0;
+  return timeline.map(seg => ({
+    ...seg,
+    tracks: seg.tracks.flatMap(t => {
+      if (t.uri === uri) {
+        shiftSec += t.durationSec ?? 0;
+        return [];
+      }
+      if (shiftSec === 0) return [t];
+      const startSec = Math.max(0, mmssToSec(t.startsAt) - shiftSec);
+      const m = Math.floor(startSec / 60), s = Math.round(startSec % 60);
+      return [{ ...t, startsAt: `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` }];
+    }),
+  }));
+}
+
 function fmtTotalDuration(tracks: TrackWithBPM[]): string {
   const totalSec = Math.round(tracks.reduce((sum, t) => sum + (t.duration_ms || 0), 0) / 1000);
   const h = Math.floor(totalSec / 3600);
@@ -49,11 +77,13 @@ const ALL_ZONE: RunningZone = {
   textColor: "text-white",
 };
 
-function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, playedCounts }: {
+function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, playedCounts }: {
   tracks: TrackWithBPM[];
   onDelete?: (track: TrackWithBPM) => void;
   /** Drops a track from the currently-viewed AI DJ mix only (keeps it in the library) — only passed while an aiDjMix is active. */
   onRemoveFromMix?: (track: TrackWithBPM) => void;
+  /** Opens the "replace by BPM" picker for a track's exact mix position — only passed while an aiDjMix is active. */
+  onReplace?: (track: TrackWithBPM, index: number) => void;
   /** Drag-to-reorder within the currently-viewed AI DJ mix — only passed
       while an aiDjMix is active (reordering a plain library view has no
       meaning). Indices are into the full `tracks` array (not the visible
@@ -88,6 +118,75 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReorder, onSimi
   const loadMore = useCallback(() => {
     setVisibleCount(c => Math.min(c + 50, tracks.length));
   }, [tracks.length]);
+
+  // Auto-scroll the list while dragging a track near its top/bottom edge —
+  // native HTML5 drag/drop doesn't scroll the drop container on its own, so
+  // without this a track can't be dragged past whatever's currently visible
+  // on screen. Speed ramps up the closer the cursor is to the edge (capped),
+  // driven by requestAnimationFrame so it keeps scrolling smoothly for as
+  // long as the cursor stays in the edge zone, not just once per dragover
+  // event.
+  const autoScrollVelocityRef = useRef(0);
+  const autoScrollFrameRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!onReorder) return;
+    const container = containerRef.current;
+    if (!container) return;
+    const EDGE_ZONE = 60; // px from top/bottom that triggers scrolling
+    const MAX_SPEED = 18; // px per frame at the very edge
+
+    const tick = () => {
+      if (autoScrollVelocityRef.current !== 0) {
+        container.scrollTop += autoScrollVelocityRef.current;
+        autoScrollFrameRef.current = requestAnimationFrame(tick);
+      } else {
+        autoScrollFrameRef.current = null;
+      }
+    };
+
+    const onDragOver = (e: DragEvent) => {
+      const rect = container.getBoundingClientRect();
+      const y = e.clientY;
+      let velocity = 0;
+      if (y < rect.top + EDGE_ZONE) {
+        velocity = -MAX_SPEED * (1 - Math.max(0, y - rect.top) / EDGE_ZONE);
+      } else if (y > rect.bottom - EDGE_ZONE) {
+        velocity = MAX_SPEED * (1 - Math.max(0, rect.bottom - y) / EDGE_ZONE);
+      }
+      autoScrollVelocityRef.current = velocity;
+      if (velocity !== 0 && autoScrollFrameRef.current === null) {
+        autoScrollFrameRef.current = requestAnimationFrame(tick);
+      }
+    };
+    const stop = () => {
+      autoScrollVelocityRef.current = 0;
+      if (autoScrollFrameRef.current !== null) {
+        cancelAnimationFrame(autoScrollFrameRef.current);
+        autoScrollFrameRef.current = null;
+      }
+    };
+
+    // dragleave fires whenever the cursor crosses from one child row into
+    // another (a normal bubbling quirk of drag events), not just when it
+    // truly leaves the container — only stop on a leave whose relatedTarget
+    // is outside the container (or absent, e.g. leaving the browser window).
+    const onDragLeave = (e: DragEvent) => {
+      const related = e.relatedTarget as Node | null;
+      if (!related || !container.contains(related)) stop();
+    };
+
+    container.addEventListener("dragover", onDragOver);
+    container.addEventListener("drop", stop);
+    container.addEventListener("dragend", stop);
+    container.addEventListener("dragleave", onDragLeave);
+    return () => {
+      container.removeEventListener("dragover", onDragOver);
+      container.removeEventListener("drop", stop);
+      container.removeEventListener("dragend", stop);
+      container.removeEventListener("dragleave", onDragLeave);
+      stop();
+    };
+  }, [onReorder]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -140,6 +239,7 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReorder, onSimi
             index={i}
             onDelete={onDelete ? () => onDelete(track) : undefined}
             onRemoveFromMix={onRemoveFromMix ? () => onRemoveFromMix(track) : undefined}
+            onReplace={onReplace ? () => onReplace(track, i) : undefined}
             onSimilar={onSimilar ? () => onSimilar(track) : undefined}
             onSuggestStyle={onSuggest ? () => onSuggest(track, "style") : undefined}
             onSuggestTempo={onSuggest ? () => onSuggest(track, "tempo") : undefined}
@@ -359,6 +459,10 @@ export function DashboardClient({ spotifyUser }: Props) {
   // the main list down to just that track, same as any other filter, with
   // its own "Clear filter" affordance.
   const [singleTrackFilter, setSingleTrackFilter] = useState<string | null>(null);
+  // Set when a track chip is clicked in the Pace/BPM chart's song strip —
+  // scrolls to and briefly highlights that same track in the list below,
+  // without filtering the list down to it (unlike singleTrackFilter).
+  const [chartHighlightUri, setChartHighlightUri] = useState<string | null>(null);
   // Free-text search across track name + artist — typing this always shows
   // matches regardless of which zone/pace/etc. filter is active, and takes
   // priority over all of them (same pattern as singleTrackFilter).
@@ -394,6 +498,12 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [importBpmMsg, setImportBpmMsg] = useState<string | null>(null);
   const noBpmCsvInputRef = useRef<HTMLInputElement>(null);
   const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[]; originalCount: number; origin?: "pace-pro" } | null>(null);
+  // Mirrors aiDjMix for reading inside callbacks with an empty dependency
+  // array (e.g. loadLibrary) without them going stale — those can't just
+  // list aiDjMix as a dependency without changing identity/re-running on
+  // every mix update, which isn't what they're for.
+  const aiDjMixRef = useRef<typeof aiDjMix>(null);
+  aiDjMixRef.current = aiDjMix;
   // Set alongside an origin: "pace-pro" aiDjMix — carries what's needed to
   // save edits/remixes back into the Pace Pro page's saved-mix library
   // (the original PacePro CSV text, for restoring the splits table there;
@@ -401,6 +511,11 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [paceProLibraryMeta, setPaceProLibraryMeta] = useState<{ splitsCsvText: string; fileName: string | null; savedMixId: string | null } | null>(null);
   const [paceProSaving, setPaceProSaving] = useState(false);
   const [paceProSaveMsg, setPaceProSaveMsg] = useState<string | null>(null);
+  // "Replace by BPM" picker — set when the ♻ button is clicked on a mix
+  // track, cleared on close/confirm. Carries the track's own position so the
+  // swap lands in the exact same slot, and its artist name so the picker's
+  // online top-up (own + related artists) knows who to search.
+  const [replaceTarget, setReplaceTarget] = useState<{ track: TrackWithBPM; index: number } | null>(null);
   const [remixing, setRemixing] = useState(false);
   const [toppingUp, setToppingUp] = useState(false);
   const [flowMixing, setFlowMixing] = useState(false);
@@ -486,7 +601,14 @@ export function DashboardClient({ spotifyUser }: Props) {
     setCsvName(name);
     setAllTracks(result.tracks);
     setStep("ready");
-    setPlaylistName(name);
+    // Don't stomp on an AI DJ mix's own playlist name — loadLibrary can
+    // resolve after a mix has already loaded (e.g. it races the Pace Pro
+    // dashboard hand-off's own mount-time effect, and consistently lost
+    // that race since this fetch is async and the hand-off reads
+    // sessionStorage synchronously), which would otherwise silently
+    // overwrite the mix's name back to the plain library name right after
+    // it was set.
+    setPlaylistName(prev => aiDjMixRef.current ? prev : name);
     prewarmArt(result.tracks);
   }, []);
 
@@ -1828,7 +1950,15 @@ export function DashboardClient({ spotifyUser }: Props) {
     // that already changed aiDjMix.tracks. Gating on a match there caused
     // ejects to silently no-op whenever they landed in that window.
     setAiDjMix(prev => prev
-      ? { ...prev, tracks: prev.tracks.filter(t => t.uri !== track.uri), stale: true }
+      ? {
+          ...prev,
+          tracks: prev.tracks.filter(t => t.uri !== track.uri),
+          // timeline must drop the ejected track too — it renders the
+          // Pace/BPM chart directly, so leaving a stale entry there kept an
+          // already-removed track showing on the chart/song-strip.
+          timeline: removeUriFromTimeline(prev.timeline, track.uri),
+          stale: true,
+        }
       : prev);
     // The pinned mix (if any) is exactly this now-changed tracklist — it no
     // longer matches reality, so unpin THIS workout specifically (not every
@@ -1898,6 +2028,46 @@ export function DashboardClient({ spotifyUser }: Props) {
     });
   }
 
+  // Swaps one track at an exact mix position for a chosen replacement (the
+  // "replace by BPM" picker's confirm action) — unlike removeTrackFromMix
+  // (which drops a track and marks the mix stale for a later Remix/Fill-the-
+  // gap), this substitutes in place immediately: same slot, same segment,
+  // no stale/rebuild step needed. Every later track's startsAt shifts by
+  // however much the new track's duration differs from the old one's, same
+  // recompute approach as reorderMixTrack.
+  function replaceMixTrack(index: number, replacement: TrackWithBPM) {
+    if (!aiDjMix) return;
+    const nextTracks = [...aiDjMix.tracks];
+    nextTracks[index] = replacement;
+
+    const segCounts = aiDjMix.timeline.map(s => s.tracks.length);
+    let cursor = 0, cursorSec = 0;
+    const newTimeline: AiDjTimeline = aiDjMix.timeline.map((seg, segIdx) => {
+      const count = segCounts[segIdx];
+      const segTracks = nextTracks.slice(cursor, cursor + count).map(t => {
+        const durationSec = Math.round(t.duration_ms / 1000);
+        const m = Math.floor(cursorSec / 60), s = Math.round(cursorSec % 60);
+        const startsAt = `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+        cursorSec += durationSec;
+        return {
+          uri: t.uri, name: t.name, artist: t.artists.map(a => a.name).join(", "),
+          startsAt, durationSec, tempo: t.bpm, camelot: null, energy: t.energy,
+        };
+      });
+      cursor += count;
+      return { ...seg, tracks: segTracks };
+    });
+    const newTotalSec = nextTracks.reduce((sum, t) => sum + t.duration_ms / 1000, 0);
+
+    setAiDjMix(prev => {
+      if (!prev) return prev;
+      const next = { ...prev, tracks: nextTracks, timeline: newTimeline, totalSec: newTotalSec };
+      pinMix({ date: next.date, workoutTitle: next.workoutTitle, totalSec: next.totalSec, timeline: next.timeline, allowedUris: new Set(nextTracks.map(t => t.uri)) }, true);
+      return next;
+    });
+    setReplaceTarget(null);
+  }
+
   async function handleDeleteTrack(track: TrackWithBPM) {
     const token = await freshSpotifyToken();
 
@@ -1911,7 +2081,12 @@ export function DashboardClient({ spotifyUser }: Props) {
     setAiDjMix(prev => {
       if (!prev || !prev.tracks.some(t => t.id === track.id)) return prev;
       hadTrack = true;
-      return { ...prev, tracks: prev.tracks.filter(t => t.id !== track.id), stale: true };
+      return {
+        ...prev,
+        tracks: prev.tracks.filter(t => t.id !== track.id),
+        timeline: removeUriFromTimeline(prev.timeline, track.uri),
+        stale: true,
+      };
     });
 
     // A pin only makes sense for the exact tracklist it was taken from —
@@ -2107,7 +2282,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   ×
                 </button>
               </div>
-              <MixPaceChart tracks={timelineToChartTracks(aiDjMix.timeline)} />
+              <MixPaceChart tracks={timelineToChartTracks(aiDjMix.timeline)} onTrackClick={setChartHighlightUri} />
             </div>
           </div>
         </div>
@@ -2733,6 +2908,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       onDelete={handleDeleteTrack}
                       onRemoveFromMix={aiDjMix ? removeTrackFromMix : undefined}
                       onReorder={aiDjMix && !aiDjMix.stale ? reorderMixTrack : undefined}
+                      onReplace={aiDjMix && !aiDjMix.stale ? (track, index) => setReplaceTarget({ track, index }) : undefined}
                       onSimilar={handleSimilar}
                       onSuggest={handleSuggest}
                       onSuggestArtist={(track) => handleSuggestArtist(track, "list")}
@@ -2742,7 +2918,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       inlineCard={suggest && suggestSeedVisible
                         ? { trackId: suggest.seed.id, node: suggestCardNode }
                         : null}
-                      highlightUri={singleTrackFilter}
+                      highlightUri={singleTrackFilter ?? chartHighlightUri}
                       playedCounts={playedCounts}
                     />
                   )}
@@ -2826,11 +3002,239 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
         </div>
       )}
 
+      {replaceTarget && (
+        <ReplaceTrackModal
+          target={replaceTarget.track}
+          mixUris={aiDjMix?.tracks.map(t => t.uri) ?? [replaceTarget.track.uri]}
+          onClose={() => setReplaceTarget(null)}
+          onConfirm={(replacement) => replaceMixTrack(replaceTarget.index, replacement)}
+        />
+      )}
+
     </div>
   );
 }
 
 type RowStatus = "adding" | "added" | "exists" | "failed";
+
+// Mirrors app/api/tracks/replace-candidates/route.ts's ReplaceCandidate.
+interface ReplaceCandidate {
+  source: "library" | "online";
+  uri: string | null;
+  name: string;
+  artist: string;
+  tempo: number;
+  effectiveBpm: number;
+  durationMs: number | null;
+  isrc: string | null;
+  key: number | null;
+  mode: number | null;
+  energy: number | null;
+  danceability: number | null;
+  valence: number | null;
+}
+
+// "Replace by BPM" picker — Dashboard's ♻ button on a mix track. Prompts for
+// a target BPM, then shows up to 15 candidates (library first, ranked by
+// closeness; topped up online from the replaced track's own + related
+// artists if the library falls short). Clicking a row plays it in Spotify
+// (this app's existing "preview" mechanism — there's no separate audio
+// player anywhere else either); a separate "Use this track" button per row
+// confirms the swap, since a click-to-preview and a click-to-confirm on the
+// same row would be ambiguous.
+function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
+  target: TrackWithBPM;
+  /** Every track uri currently in the mix (including target's own) — sent
+      along so a candidate that's already elsewhere in the tracklist is
+      excluded, not just the one being replaced. */
+  mixUris: string[];
+  onClose: () => void;
+  onConfirm: (replacement: TrackWithBPM) => void;
+}) {
+  const { data: session } = useSession();
+  const [bpmInput, setBpmInput] = useState(String(target.bpm || ""));
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<ReplaceCandidate[] | null>(null);
+  // uri (or isrc, for a not-yet-in-library online candidate) of the row
+  // currently being added — never bare c.isrc alone, since several plain
+  // library rows can all share isrc: null and would otherwise all match a
+  // still-null addingOnline before anything was even clicked.
+  const [addingOnline, setAddingOnline] = useState<string | null>(null);
+  const [playingUri, setPlayingUri] = useState<string | null>(null);
+
+  async function search() {
+    const bpm = parseInt(bpmInput, 10);
+    if (!bpm || bpm <= 0) { setError("Enter a BPM greater than 0"); return; }
+    setLoading(true);
+    setError(null);
+    setCandidates(null);
+    try {
+      const res = await fetch("/api/tracks/replace-candidates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetBpm: bpm, artistName: target.artists[0]?.name, excludeUris: mixUris, originalDurationMs: target.duration_ms }),
+      });
+      const data = await res.json() as { candidates?: ReplaceCandidate[]; error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `Search failed (${res.status})`);
+      setCandidates(data.candidates ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Search failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function preview(c: ReplaceCandidate) {
+    if (!c.uri) return; // online candidate not yet resolved to a playable URI — shouldn't happen, resolveByIsrc always returns one when it succeeds
+    setPlayingUri(c.uri);
+    playInSpotify(c.uri, session?.accessToken).catch(() => {});
+  }
+
+  // A library candidate already has everything TrackWithBPM needs. An
+  // online candidate must first be added to the library/CSV (same
+  // /api/tracks/add path "more by this artist" uses) — otherwise the swap
+  // would silently point the mix at a track with no row in Running.csv,
+  // which the next heal sweep would then have nothing to backfill from.
+  async function use(c: ReplaceCandidate) {
+    if (c.source === "library" && c.uri) {
+      onConfirm({
+        id: c.uri.split(":")[2] ?? c.uri,
+        name: c.name,
+        artists: [{ name: c.artist }],
+        album: { name: "", images: [] },
+        duration_ms: c.durationMs ?? 0,
+        uri: c.uri,
+        bpm: Math.round(c.tempo),
+        energy: c.energy ?? 0,
+      });
+      return;
+    }
+    if (!c.isrc) { setError("This track has no ISRC to add it by"); return; }
+    setAddingOnline(c.uri ?? c.isrc);
+    setError(null);
+    try {
+      const res = await fetch("/api/tracks/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: [{
+            uri: c.uri, name: c.name, artist: c.artist, tempo: c.tempo,
+            key: c.key, mode: c.mode, energy: c.energy, danceability: c.danceability, valence: c.valence,
+          }],
+          allowDeletedUris: c.uri ? [c.uri] : undefined,
+        }),
+      });
+      const data = await res.json() as { error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `Add failed (${res.status})`);
+      if (!c.uri) throw new Error("No Spotify URI resolved for this track");
+      onConfirm({
+        id: c.uri.split(":")[2] ?? c.uri,
+        name: c.name,
+        artists: [{ name: c.artist }],
+        album: { name: "", images: [] },
+        duration_ms: c.durationMs ?? 0,
+        uri: c.uri,
+        bpm: Math.round(c.tempo),
+        energy: c.energy ?? 0,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to add track");
+    } finally {
+      setAddingOnline(null);
+    }
+  }
+
+  const targetBpmForDiff = parseInt(bpmInput, 10) || 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div
+        className="rounded-xl bg-slate-900 border border-white/10 p-5 max-w-lg w-full max-h-[85vh] flex flex-col space-y-4"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="font-semibold text-slate-100">Replace track</h3>
+            <p className="text-sm text-slate-400 mt-0.5 truncate">
+              {target.name} — <span className="text-slate-500">{target.artists.map(a => a.name).join(", ")}</span>
+              <span className="text-slate-600"> · {target.bpm} BPM</span>
+            </p>
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-lg leading-none shrink-0">×</button>
+        </div>
+
+        <div className="flex items-end gap-3">
+          <label className="text-xs text-slate-500 space-y-1">
+            <span className="block">Target BPM</span>
+            <input
+              type="number"
+              value={bpmInput}
+              onChange={e => setBpmInput(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") search(); }}
+              className="w-28 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono"
+            />
+          </label>
+          <button
+            onClick={search}
+            disabled={loading}
+            className="rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-sm px-4 py-1.5 transition-colors"
+          >
+            {loading ? "Searching…" : "Search"}
+          </button>
+        </div>
+        <p className="text-xs text-slate-500">
+          Only tracks within 15s of the original&apos;s length ({Math.round(target.duration_ms / 1000)}s) are shown, so swapping never throws off the rest of the mix&apos;s timing.
+        </p>
+        {error && <p className="text-sm text-red-400">{error}</p>}
+
+        {candidates && (
+          <div className="rounded-lg border border-white/10 divide-y divide-white/5 overflow-y-auto no-scrollbar flex-1 min-h-0">
+            {candidates.length === 0 && (
+              <p className="text-sm text-slate-500 p-4 text-center">No exact matches at that BPM within 15s of the original&apos;s length.</p>
+            )}
+            {candidates.map((c, i) => {
+              const diff = Math.round(c.effectiveBpm - targetBpmForDiff);
+              const durDiffSec = c.durationMs != null ? Math.round((c.durationMs - target.duration_ms) / 1000) : null;
+              return (
+                <div key={`${c.uri ?? c.isrc ?? i}`} className="px-3 py-2 flex items-center gap-3">
+                  <button
+                    onClick={() => preview(c)}
+                    disabled={!c.uri}
+                    className="flex-1 min-w-0 text-left disabled:cursor-default"
+                    title={c.uri ? "Play in Spotify" : undefined}
+                  >
+                    <p className={`text-sm truncate ${playingUri === c.uri && c.uri ? "text-orange-400" : "text-slate-200"}`}>
+                      {c.name} <span className="text-slate-500">— {c.artist}</span>
+                    </p>
+                    <p className="text-xs text-slate-500 flex items-center gap-2">
+                      <span className={Math.abs(diff) <= 2 ? "text-green-400" : "text-amber-400"}>
+                        {Math.round(c.effectiveBpm)} BPM{diff !== 0 ? ` (${diff > 0 ? "+" : ""}${diff})` : ""}
+                      </span>
+                      {durDiffSec != null && (
+                        <span className="text-slate-600">
+                          · {durDiffSec === 0 ? "same length" : `${durDiffSec > 0 ? "+" : ""}${durDiffSec}s vs. original`}
+                        </span>
+                      )}
+                      <span className="text-slate-700">· {c.source === "library" ? "in library" : "online"}</span>
+                    </p>
+                  </button>
+                  <button
+                    onClick={() => use(c)}
+                    disabled={addingOnline !== null && addingOnline === (c.uri ?? c.isrc)}
+                    className="shrink-0 rounded-lg bg-sky-500/15 border border-sky-500/40 hover:bg-sky-500/25 text-sky-300 text-xs px-2.5 py-1.5 transition-colors disabled:opacity-40"
+                  >
+                    {addingOnline !== null && addingOnline === (c.uri ?? c.isrc) ? "Adding…" : "Use this track"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function SuggestionsCard({ suggest, onClose, onAdd }: {
   suggest: SuggestState;
