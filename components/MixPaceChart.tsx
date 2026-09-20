@@ -176,10 +176,18 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
   const tracksRef = useRef<MixChartTrack[]>(tracks);
   tracksRef.current = tracks;
 
-  // Reset zoom whenever the mix itself changes (new build/remix/reload).
+  // Reset zoom whenever the mix itself actually changes (new build/remix/
+  // reload/reorder) — keyed on track content (uris + count), not the
+  // `tracks` array's own identity: the caller passes a freshly-computed
+  // array on every render (timelineToChartTracks(...) inline in JSX), so a
+  // plain [tracks] dependency reset the zoom on ANY parent re-render,
+  // including just clicking a chip (which only changes unrelated state like
+  // the highlighted row, not the mix itself).
+  const tracksKey = tracks.map(t => t.uri).join(",");
   useEffect(() => {
     setXDomain(null);
-  }, [tracks]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tracksKey]);
 
   // Narrow (mobile-width) containers get tighter axis margins so the pace
   // axis sits snug against the left edge and the BPM axis against the right

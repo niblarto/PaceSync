@@ -2891,6 +2891,15 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     </button>
                   )}
 
+                  {aiDjMix && chartDismissed && !aiDjMix.stale && !remixing && aiDjMix.timeline?.length > 0 && (
+                    <button
+                      onClick={() => setChartDismissed(false)}
+                      className="shrink-0 text-xs text-purple-300 hover:text-purple-200 border border-purple-500/30 hover:border-purple-500/50 rounded-lg px-3 py-1.5 transition-colors"
+                    >
+                      📈 Open chart
+                    </button>
+                  )}
+
                   {aiDjMix && (
                     <button
                       onClick={() => {
