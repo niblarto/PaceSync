@@ -156,7 +156,12 @@ export async function POST(req: NextRequest) {
               seenKeys.add(key);
               if (checked > 0) await sleep(120);
               checked++;
-              send({ type: "progress", current: checked, total: need, name: t.title, artist: t.artist });
+              // total is how many candidates there are TO CHECK (the Deezer
+              // pool size), not how many acceptances we're trying to reach —
+              // "need" is a stopping threshold on ACCEPTED matches, a
+              // different count entirely, and showing it as the denominator
+              // here previously read as a nonsensical "40 of 14".
+              send({ type: "progress", current: checked, total: withIsrc.length, name: t.title, artist: t.artist });
               try {
                 const resolved = await resolveByIsrc(t.isrc);
                 if (!resolved) continue;

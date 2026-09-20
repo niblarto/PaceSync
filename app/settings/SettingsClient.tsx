@@ -12,7 +12,7 @@ import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 import { DeletedTracksReview, type RejectedTrack } from "@/components/DeletedTracksReview";
 import { openInSpotify, TrackRow } from "@/components/TrackRow";
-import { useRunningPlaylist } from "@/components/useRunningPlaylist";
+import { useRunningPlaylist, getRunningPlaylist } from "@/components/useRunningPlaylist";
 import { MixPaceChart, timelineToChartTracks } from "@/components/MixPaceChart";
 import type { TrackWithBPM } from "@/types";
 
@@ -875,12 +875,18 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     const uris = tracks.map(t => t.uri);
     setTracklist(prev => prev?.filter(t => !uris.includes(t.uri)) ?? prev);
 
+    // getRunningPlaylist() (the real resolved active playlist), not
+    // runningPlaylist.id from this render's hook snapshot — see
+    // DashboardClient.handleDeleteTrack's own comment on this same race
+    // (confirmed as a real incident elsewhere in this app).
+    const { id: activePlaylistId } = await getRunningPlaylist();
+
     for (let i = 0; i < tracks.length; i++) {
       if (i > 0) await new Promise(r => setTimeout(r, 150));
       const track = tracks[i];
-      if (token && runningPlaylist.id) {
+      if (token && activePlaylistId) {
         try {
-          await spotifyFetch(`https://api.spotify.com/v1/playlists/${runningPlaylist.id}/items`, {
+          await spotifyFetch(`https://api.spotify.com/v1/playlists/${activePlaylistId}/items`, {
             method: "DELETE",
             headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
             body: JSON.stringify({ items: [{ uri: track.uri }] }),

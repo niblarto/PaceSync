@@ -1,4 +1,5 @@
 import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
+import { getRunningPlaylist } from "@/components/useRunningPlaylist";
 
 // Shared client-side delete flow: removes a track from the live Spotify
 // "Running" playlist (best-effort — fire-and-forget, matching the original
@@ -19,17 +20,31 @@ import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 // still legitimately has under its other URI isn't a "never bring this
 // track back" decision, so it shouldn't blacklist the deleted URI the way
 // every other delete path in this app deliberately does.
+//
+// playlistId is intentionally ignored in favor of getRunningPlaylist()'s own
+// resolution — every caller sourced it from useRunningPlaylist()'s current
+// render, which can still be the build-time fallback playlist id if that
+// component hadn't finished its own /api/settings/playlist fetch yet.
+// Confirmed as a real incident: a delete that raced ahead of that fetch
+// removed a track from the OLD "Running" playlist (the fallback env id)
+// instead of the actual active "Running-AI" playlist, while the local CSV/
+// blacklist correctly recorded it against Running-AI — Spotify never
+// actually lost the track, so it kept reappearing in later Exportify
+// imports. The parameter stays (rather than removing it and updating every
+// call site) so this fix applies everywhere at once.
 export function deleteTrackFromLibrary(uri: string, playlistId: string | null, skipDeletedLog?: boolean): void {
-  if (playlistId) {
-    freshSpotifyToken().then(token => {
+  void playlistId; // superseded by getRunningPlaylist() below — see comment above
+  getRunningPlaylist().then(({ id }) => {
+    if (!id) return;
+    return freshSpotifyToken().then(token => {
       if (!token) return;
-      return spotifyFetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
+      return spotifyFetch(`https://api.spotify.com/v1/playlists/${id}/items`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ items: [{ uri }] }),
       });
-    }).catch(err => console.error("[delete] Spotify fetch error:", err));
-  }
+    });
+  }).catch(err => console.error("[delete] Spotify fetch error:", err));
   fetch("/api/tracks/delete", {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },

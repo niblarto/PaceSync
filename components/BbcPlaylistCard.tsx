@@ -6,7 +6,7 @@ import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import Link from "next/link";
 import { FunnelIcon, SparklesIcon, MetronomeIcon, TrashIcon, MiniSpinner, handleArtError, openSpotifyAppFirst } from "./TrackRow";
 import { FloatingCard } from "./FloatingCard";
-import { useRunningPlaylist } from "./useRunningPlaylist";
+import { useRunningPlaylist, getRunningPlaylist } from "./useRunningPlaylist";
 import { DeletedTracksReview, type RejectedTrack } from "./DeletedTracksReview";
 
 interface Track {
@@ -581,7 +581,14 @@ export function BbcPlaylistCard({ pid, defaultName, synopsis, onRemove, editHref
         return;
       }
 
-      await addTracksBrowser(RUNNING_PLAYLIST_ID, filtered.map(t => t.uri));
+      // getRunningPlaylist() (the real resolved active playlist), not the
+      // RUNNING_PLAYLIST_ID closed over from this render — that can still be
+      // the build-time fallback id if this component hadn't finished its own
+      // /api/settings/playlist fetch yet. Confirmed as a real incident
+      // elsewhere (DashboardClient's track delete) where a race like this
+      // silently acted against the wrong playlist.
+      const { id: activePlaylistId } = await getRunningPlaylist();
+      await addTracksBrowser(activePlaylistId, filtered.map(t => t.uri));
 
       // Add every track to the local CSV pool regardless of whether
       // enrichment found a match — a track that Spotify accepted but

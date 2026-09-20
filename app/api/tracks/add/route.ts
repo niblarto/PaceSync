@@ -24,13 +24,20 @@ export async function POST(req: NextRequest) {
   try {
     const { added, rejected } = await addTracksToLibrary(tracks, allowDeletedUris);
     if (added > 0) {
-      // Backfill Duration (ms) and any missing features before responding,
-      // so a mix built right after the add sees complete rows.
-      const heal = await healActiveCsv().catch(() => null);
-      return NextResponse.json({
-        ok: true, added, rejected, healed: heal?.healed ?? 0, incomplete: heal?.incomplete ?? 0,
-        spotifyRetryAt: heal?.spotifyRetryAt ?? null,
-      });
+      // Backfill Duration (ms) and any missing features — fired but not
+      // awaited: a heal sweep does a Spotify/ReccoBeats/Deezer lookup PER
+      // missing track, which for a large batch (e.g. Settings' "Sync from
+      // Spotify" pulling in many tracks at once) can run well past a
+      // minute — long enough to trip the tunnel/proxy in front of this app
+      // and return an HTML timeout page instead of this route's own JSON,
+      // which the client then failed to parse ("Unexpected token '<'").
+      // healActiveCsv() already tracks its own progress (lib/csv-heal.ts's
+      // writeProgress), which Settings' "Check missing" bar polls via
+      // /api/settings/heal-status — every caller of this route already
+      // refreshes that same status after a successful add, so nothing here
+      // needs to wait for the sweep to actually finish.
+      void healActiveCsv().catch(() => {});
+      return NextResponse.json({ ok: true, added, rejected });
     }
     return NextResponse.json({ ok: true, added, rejected });
   } catch (e) {

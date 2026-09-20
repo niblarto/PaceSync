@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useSession } from "next-auth/react";
 import { freshSpotifyToken } from "@/lib/spotify-browser";
-import { useRunningPlaylist } from "./useRunningPlaylist";
+import { getRunningPlaylist } from "./useRunningPlaylist";
 
 function Spinner() {
   return (
@@ -16,7 +16,6 @@ function Spinner() {
 
 export function DedupCard() {
   const { data: session } = useSession();
-  const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +49,15 @@ export function DedupCard() {
     setError(null);
 
     try {
+      // getRunningPlaylist() (the real resolved active playlist), not the
+      // RUNNING_PLAYLIST_ID closed over from this render — this action ends
+      // with a full PUT replace of the target playlist's contents, so
+      // acting against a stale/wrong id here is especially costly (a real
+      // race elsewhere in this app, DashboardClient's track delete, silently
+      // hit the OLD "Running" playlist instead of the actual active one).
+      const { id: RUNNING_PLAYLIST_ID } = await getRunningPlaylist();
+      if (!RUNNING_PLAYLIST_ID) throw new Error("No active playlist configured");
+
       // Read all items in playlist order
       const uris: string[] = [];
       let pageOffset = 0;

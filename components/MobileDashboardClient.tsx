@@ -12,7 +12,7 @@ import { TrackRow } from "./TrackRow";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
 import { NextRunPinned } from "./NextRunPinned";
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
-import { useRunningPlaylist } from "./useRunningPlaylist";
+import { getRunningPlaylist } from "./useRunningPlaylist";
 
 // Mobile-only dashboard — a deliberately separate, smaller component from
 // DashboardClient.tsx (not a shared/extracted piece of it). DashboardClient's
@@ -119,7 +119,6 @@ type Tab = "tracks" | "runna";
 
 export function MobileDashboardClient({ spotifyUser }: Props) {
   const { data: session } = useSession();
-  const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
   const scheduleRef = useRef<RunnaScheduleHandle>(null);
 
   const [tab, setTab] = useState<Tab>("runna");
@@ -200,10 +199,16 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
 
     const fullUri = track.uri.startsWith("spotify:") ? track.uri : `spotify:track:${track.uri}`;
     if (token) {
-      spotifyFetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ items: [{ uri: fullUri }] }),
+      // getRunningPlaylist() (the real resolved active playlist), not the
+      // RUNNING_PLAYLIST_ID closed over from this render — see
+      // DashboardClient.handleDeleteTrack's own comment on this same race.
+      getRunningPlaylist().then(({ id }) => {
+        if (!id) return;
+        return spotifyFetch(`https://api.spotify.com/v1/playlists/${id}/items`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ items: [{ uri: fullUri }] }),
+        });
       }).catch(() => {});
     }
     fetch("/api/tracks/delete", {

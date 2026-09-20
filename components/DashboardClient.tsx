@@ -14,7 +14,7 @@ import { ZoneCard } from "./ZoneCard";
 import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArtError, MiniSpinner } from "./TrackRow";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
-import { useRunningPlaylist } from "./useRunningPlaylist";
+import { useRunningPlaylist, getRunningPlaylist } from "./useRunningPlaylist";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
 
 function mmssToSec(mmss: string): number {
@@ -1927,8 +1927,12 @@ export function DashboardClient({ spotifyUser }: Props) {
     for (const uri of uris) perUri[uri] = existingBefore.has(uri) ? "exists" : "added";
 
     onProgress?.("spotify");
-    if (RUNNING_PLAYLIST_ID) {
-      await addTracksBrowser(RUNNING_PLAYLIST_ID, uris);
+    // getRunningPlaylist() (the real resolved active playlist), not the
+    // RUNNING_PLAYLIST_ID closed over from this render — see
+    // handleDeleteTrack's own comment on this same race.
+    const { id: activePlaylistId } = await getRunningPlaylist();
+    if (activePlaylistId) {
+      await addTracksBrowser(activePlaylistId, uris);
     }
 
     onProgress?.("library", perUri);
@@ -2341,17 +2345,30 @@ export function DashboardClient({ spotifyUser }: Props) {
 
     const fullUri = track.uri.startsWith("spotify:") ? track.uri : `spotify:track:${track.uri}`;
 
-    // Remove from Spotify directly from browser (same pattern as DedupCard)
+    // Remove from Spotify directly from browser (same pattern as DedupCard).
+    // Uses getRunningPlaylist() (awaits the real resolved active playlist),
+    // NOT the RUNNING_PLAYLIST_ID closed over from this render — that can
+    // still be the build-time fallback id if this component hadn't finished
+    // its own /api/settings/playlist fetch yet (e.g. a delete clicked
+    // immediately after page load). Confirmed as a real incident: a delete
+    // that raced ahead of that fetch removed the track from the OLD
+    // "Running" playlist (the fallback env id) while the local CSV/
+    // blacklist recorded it against the actual active "Running-AI"
+    // playlist — Spotify never lost the track, so it kept reappearing in
+    // later Exportify imports of Running-AI.
     if (token) {
-      spotifyFetch(`https://api.spotify.com/v1/playlists/${RUNNING_PLAYLIST_ID}/items`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ items: [{ uri: fullUri }] }),
-      }).then(async (r) => {
-        if (!r.ok) {
-          const body = await r.text().catch(() => "");
-          console.error(`[delete] Spotify ${r.status}: ${body}`);
-        }
+      getRunningPlaylist().then(({ id: playlistId }) => {
+        if (!playlistId) { console.warn("[delete] No active playlist id — skipping Spotify removal"); return; }
+        return spotifyFetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ items: [{ uri: fullUri }] }),
+        }).then(async (r) => {
+          if (!r.ok) {
+            const body = await r.text().catch(() => "");
+            console.error(`[delete] Spotify ${r.status}: ${body}`);
+          }
+        });
       }).catch((err) => { console.error("[delete] Spotify fetch error:", err); });
     } else {
       console.warn("[delete] No Spotify access token — skipping Spotify removal");
