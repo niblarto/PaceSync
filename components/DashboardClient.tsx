@@ -2249,11 +2249,12 @@ export function DashboardClient({ spotifyUser }: Props) {
       for (const run of runs) {
         const budgetMs = run.tracks.reduce((sum, t) => sum + t.duration_ms, 0);
         const artistNames = Array.from(new Set(run.tracks.map(t => t.artists[0]?.name).filter((a): a is string => !!a)));
+        const seedUris = run.tracks.map(t => t.uri);
         try {
           const res = await fetch("/api/tracks/replace-candidates-budget", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ targetBpm: run.targetBpm, artistNames, excludeUris: Array.from(excludeUris), budgetMs }),
+            body: JSON.stringify({ targetBpm: run.targetBpm, artistNames, seedUris, excludeUris: Array.from(excludeUris), budgetMs }),
           });
           if (!res.ok || !res.body) {
             const err = await res.json().catch(() => ({})) as { error?: string };
@@ -3518,7 +3519,7 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
       const res = await fetch("/api/tracks/replace-candidates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ targetBpm: bpm, artistName: target.artists[0]?.name, excludeUris: mixUris, originalDurationMs: target.duration_ms }),
+        body: JSON.stringify({ targetBpm: bpm, artistName: target.artists[0]?.name, targetUri: target.uri, excludeUris: mixUris, originalDurationMs: target.duration_ms }),
       });
       if (!res.ok || !res.body) {
         const err = await res.json().catch(() => ({})) as { error?: string };

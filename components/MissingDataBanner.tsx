@@ -20,9 +20,17 @@ interface CsvStatus {
   missingFeatures: Record<string, number>;
 }
 
+// Only fields that actually exclude a track from AI DJ mixes count here —
+// mirrors lib/csv-heal.ts's scanActiveCsv (which deliberately excludes
+// Genres for the same reason). missingGenres is real data the CsvStatus
+// API returns, but a genre-only gap doesn't affect mix-building, so it must
+// never contribute to this banner's count or its "excluded from AI DJ
+// mixes" claim — folding it in via Math.max previously let a library with
+// plenty of genre-only gaps (and zero actual mix-affecting gaps) show this
+// banner anyway.
 function missingCount(status: CsvStatus): number {
   const featureMax = Math.max(0, ...Object.values(status.missingFeatures));
-  return Math.max(status.missingUri, status.missingDuration, status.missingGenres, featureMax);
+  return Math.max(status.missingUri, status.missingDuration, featureMax);
 }
 
 export function MissingDataBanner() {
@@ -51,7 +59,7 @@ export function MissingDataBanner() {
 
   return (
     <div className="sticky top-14 z-30 bg-amber-500/15 border-b border-amber-500/40 text-amber-300 text-xs px-4 py-2 flex items-center justify-center gap-3">
-      <span>⚠ {count} track{count === 1 ? "" : "s"} missing data (BPM/duration/genres) — excluded from AI DJ mixes</span>
+      <span>⚠ {count} track{count === 1 ? "" : "s"} missing data (BPM/duration) — excluded from AI DJ mixes</span>
       <Link href="/settings" className="underline hover:text-amber-200">Fix in Settings</Link>
       <button
         onClick={() => setDismissedCount(count)}

@@ -5,6 +5,7 @@ import { readAllTracks } from "@/lib/tracks-store";
 import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
 import { resolveByIsrc, sleep } from "@/lib/track-enrich";
 import { deezerArtistTopTracks } from "@/lib/deezer-artist-top";
+import { artistsSharingGenre, parseGenres } from "@/lib/genre-artists";
 
 // Multi-track "remix selected" (Dashboard chart's multi-select ♻ menu):
 // discards every selected track and refills their COMBINED time budget with
@@ -138,7 +139,7 @@ export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json() as { targetBpm?: number; artistNames?: string[]; excludeUris?: string[]; budgetMs?: number };
+  const body = await req.json() as { targetBpm?: number; artistNames?: string[]; seedUris?: string[]; excludeUris?: string[]; budgetMs?: number };
   const targetBpm = body.targetBpm;
   const budgetMs = body.budgetMs;
   if (!targetBpm || targetBpm <= 0) return NextResponse.json({ error: "targetBpm required" }, { status: 400 });
@@ -158,8 +159,10 @@ export async function POST(req: NextRequest) {
         // Padding comment flushes past browsers' 1 KB SSE buffer
         controller.enqueue(encoder.encode(`: ${"x".repeat(1024)}\n\n`));
 
+        const allRows = readAllTracks(loadRunningPlaylistConfig().csvFile);
+
         // ── Library pool (exact BPM, no duration filter) ──
-        const rows = readAllTracks(loadRunningPlaylistConfig().csvFile)
+        const rows = allRows
           .filter(t => t.uri && !excludeUris.has(t.uri) && t.tempo != null && t.durationMs != null && isExactBpm(t.tempo, targetBpm));
 
         const pool: BudgetFillTrack[] = rows
@@ -173,16 +176,33 @@ export async function POST(req: NextRequest) {
           .sort((a, b) => a._dist - b._dist)
           .map(({ _dist, ...c }) => c);
 
-        // ── Online top-up (own + related artists per selected track, Deezer) ──
+        // ── Online top-up (own + genre-sharing artists per selected track, Deezer) ──
         // Only when the library pool alone can't plausibly cover the
         // budget — resolving even a handful of online candidates costs
         // real, sequential network round-trips, so this is skipped
         // entirely (the common case, once matching went literal-tempo-only
         // the library still clusters plenty of material around any popular
         // BPM) whenever the library already sums past budgetMs on its own.
+        // Own artists (one per originally-selected track) are searched
+        // first, same as before; genre-sharing artists (other library
+        // artists tagged with at least one of the selected tracks' genres —
+        // see lib/genre-artists.ts for why this is "genre picks artists",
+        // not a real genre-filtered search) are appended after.
         const libraryTotalSec = pool.reduce((sum, t) => sum + t.durationMs / 1000, 0);
-        const artistNames = libraryTotalSec >= budgetMs / 1000 ? [] : Array.from(new Set((body.artistNames ?? []).filter(Boolean).map(a => a.trim().toLowerCase())))
-          .map(lower => (body.artistNames ?? []).find(a => a.trim().toLowerCase() === lower)!);
+        let artistNames: string[] = [];
+        if (libraryTotalSec < budgetMs / 1000) {
+          const ownArtists = Array.from(new Set((body.artistNames ?? []).filter(Boolean).map(a => a.trim().toLowerCase())))
+            .map(lower => (body.artistNames ?? []).find(a => a.trim().toLowerCase() === lower)!);
+          const seedGenres = new Set<string>();
+          for (const uri of body.seedUris ?? []) {
+            const row = allRows.find(t => t.uri === uri);
+            for (const g of Array.from(parseGenres(row?.genres ?? null))) seedGenres.add(g);
+          }
+          const genreArtists = ownArtists.length > 0
+            ? artistsSharingGenre(allRows, seedGenres, ownArtists, 5)
+            : [];
+          artistNames = [...ownArtists, ...genreArtists.filter(a => !ownArtists.some(o => o.toLowerCase() === a.toLowerCase()))];
+        }
 
         if (artistNames.length > 0) {
           send({ type: "online-start" });

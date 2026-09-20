@@ -220,6 +220,7 @@ FILES = [
     ('lib/deezer-artist-top.ts',                  'lib/deezer-artist-top.ts'),
     ('app/api/tracks/replace-candidates/route.ts', 'app/api/tracks/replace-candidates/route.ts'),
     ('app/api/tracks/replace-candidates-budget/route.ts', 'app/api/tracks/replace-candidates-budget/route.ts'),
+    ('lib/genre-artists.ts',                       'lib/genre-artists.ts'),
     ('app/api/ai-dj/mix/route.ts',                'app/api/ai-dj/mix/route.ts'),
     ('app/api/ai-dj/simulate-mix/route.ts',       'app/api/ai-dj/simulate-mix/route.ts'),
     ('app/api/ai-dj/flow-mix/route.ts',           'app/api/ai-dj/flow-mix/route.ts'),
