@@ -522,6 +522,14 @@ export function DashboardClient({ spotifyUser }: Props) {
   // since the chart itself only knows uri/name/artist/tempo, not the full
   // TrackWithBPM/mix-index those actions need.
   const [chartTrackMenu, setChartTrackMenu] = useState<{ uri: string; x: number; y: number } | null>(null);
+  // Ctrl-click multi-select on chart track chips — separate from the single-
+  // track context menu above; right-clicking while >=2 tracks are selected
+  // opens the multi-select remix menu instead of the single-track one.
+  const [chartSelectedUris, setChartSelectedUris] = useState<Set<string>>(new Set());
+  const [chartSelectionMenu, setChartSelectionMenu] = useState<{ x: number; y: number } | null>(null);
+  const [chartBpmPrompt, setChartBpmPrompt] = useState<{ x: number; y: number } | null>(null);
+  const [chartRemixing, setChartRemixing] = useState(false);
+  const [chartRemixError, setChartRemixError] = useState<string | null>(null);
   const [remixing, setRemixing] = useState(false);
   const [toppingUp, setToppingUp] = useState(false);
   const [flowMixing, setFlowMixing] = useState(false);
@@ -977,6 +985,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
     setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false, avoidUris, originalCount: unique.length, origin });
     setChartDismissed(false);
+    setChartSelectedUris(new Set());
     setPlaylistName(name);
     setPinSaved(false);
     setPinError(null);
@@ -2086,6 +2095,106 @@ export function DashboardClient({ spotifyUser }: Props) {
     setReplaceTarget(null);
   }
 
+  // Batched version of replaceMixTrack for the chart's multi-select remix —
+  // applies every substitution in one state update (one timeline recompute,
+  // one re-pin) instead of N sequential ones, which would each read a
+  // slightly-stale aiDjMix and could clobber each other.
+  function replaceMixTracks(replacements: Map<number, TrackWithBPM>) {
+    if (!aiDjMix || replacements.size === 0) return;
+    const nextTracks = [...aiDjMix.tracks];
+    replacements.forEach((replacement, index) => { nextTracks[index] = replacement; });
+
+    const segCounts = aiDjMix.timeline.map(s => s.tracks.length);
+    let cursor = 0, cursorSec = 0;
+    const newTimeline: AiDjTimeline = aiDjMix.timeline.map((seg, segIdx) => {
+      const count = segCounts[segIdx];
+      const segTracks = nextTracks.slice(cursor, cursor + count).map(t => {
+        const durationSec = Math.round(t.duration_ms / 1000);
+        const m = Math.floor(cursorSec / 60), s = Math.round(cursorSec % 60);
+        const startsAt = `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+        cursorSec += durationSec;
+        return {
+          uri: t.uri, name: t.name, artist: t.artists.map(a => a.name).join(", "),
+          startsAt, durationSec, tempo: t.bpm, camelot: null, energy: t.energy,
+        };
+      });
+      cursor += count;
+      return { ...seg, tracks: segTracks };
+    });
+    const newTotalSec = nextTracks.reduce((sum, t) => sum + t.duration_ms / 1000, 0);
+
+    setAiDjMix(prev => {
+      if (!prev) return prev;
+      const next = { ...prev, tracks: nextTracks, timeline: newTimeline, totalSec: newTotalSec };
+      pinMix({ date: next.date, workoutTitle: next.workoutTitle, totalSec: next.totalSec, timeline: next.timeline, allowedUris: new Set(nextTracks.map(t => t.uri)) }, true);
+      return next;
+    });
+  }
+
+  // Multi-select "remix" from the chart's context menu — resolves a
+  // candidate for each selected track independently (sequentially, so
+  // earlier picks are excluded from later searches and two selected slots
+  // can never land on the same replacement), then applies all substitutions
+  // in one batch. targetBpm: a fixed BPM for every selected track (typed-in
+  // "Remix at BPM"), or undefined to use each track's OWN segment's
+  // targetBpm ("Remix" with no BPM given) — a track whose segment has no
+  // targetBpm (shouldn't happen for a real workout segment, but a defensive
+  // fallback) or that finds no qualifying candidate is left unchanged
+  // rather than aborting the whole batch.
+  async function remixSelectedChartTracks(selectedUris: Set<string>, fixedTargetBpm: number | null) {
+    if (!aiDjMix || selectedUris.size === 0) return;
+    setChartRemixing(true);
+    setChartRemixError(null);
+    try {
+      // Which segment each selected track belongs to, for the per-track
+      // segment-targetBpm mode — same flattening order aiDjMix.tracks/
+      // timeline already share.
+      const segmentByUri = new Map<string, { targetBpm: number | null }>();
+      for (const seg of aiDjMix.timeline) {
+        for (const t of seg.tracks) segmentByUri.set(t.uri, { targetBpm: seg.targetBpm });
+      }
+
+      const excludeUris = new Set(aiDjMix.tracks.map(t => t.uri));
+      const replacements = new Map<number, TrackWithBPM>();
+      const failures: string[] = [];
+
+      for (let i = 0; i < aiDjMix.tracks.length; i++) {
+        const track = aiDjMix.tracks[i];
+        if (!selectedUris.has(track.uri)) continue;
+        const targetBpm = fixedTargetBpm ?? segmentByUri.get(track.uri)?.targetBpm ?? null;
+        if (!targetBpm) { failures.push(track.name); continue; }
+        try {
+          const res = await fetch("/api/tracks/replace-candidates", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              targetBpm, artistName: track.artists[0]?.name,
+              excludeUris: Array.from(excludeUris), originalDurationMs: track.duration_ms,
+            }),
+          });
+          const data = await res.json() as { candidates?: ReplaceCandidate[]; error?: string };
+          if (!res.ok || data.error) throw new Error(data.error);
+          const top = data.candidates?.[0];
+          if (!top) { failures.push(track.name); continue; }
+          const replacement = await resolveCandidateForUse(top);
+          replacements.set(i, replacement);
+          excludeUris.delete(track.uri);
+          excludeUris.add(replacement.uri);
+        } catch {
+          failures.push(track.name);
+        }
+      }
+
+      if (replacements.size > 0) replaceMixTracks(replacements);
+      setChartSelectedUris(new Set());
+      if (failures.length > 0) {
+        setChartRemixError(`No match found for ${failures.length} track${failures.length === 1 ? "" : "s"}: ${failures.slice(0, 3).join(", ")}${failures.length > 3 ? "…" : ""}`);
+      }
+    } finally {
+      setChartRemixing(false);
+    }
+  }
+
   async function handleDeleteTrack(track: TrackWithBPM) {
     const token = await freshSpotifyToken();
 
@@ -2305,6 +2414,15 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 onTrackClick={setChartHighlightUri}
                 onReorder={!aiDjMix.stale ? reorderMixTrackByUri : undefined}
                 onTrackContextMenu={(uri, x, y) => setChartTrackMenu({ uri, x, y })}
+                selectedUris={chartSelectedUris}
+                onToggleSelect={!aiDjMix.stale ? (uri) => {
+                  setChartSelectedUris(prev => {
+                    const next = new Set(prev);
+                    if (next.has(uri)) next.delete(uri); else next.add(uri);
+                    return next;
+                  });
+                } : undefined}
+                onSelectionContextMenu={!aiDjMix.stale ? (x, y) => setChartSelectionMenu({ x, y }) : undefined}
               />
             </div>
           </div>
@@ -3066,6 +3184,85 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
         );
       })()}
 
+      {chartSelectionMenu && aiDjMix && (() => {
+        const item = "w-full text-left px-3 py-1.5 text-sm rounded-md transition-colors";
+        const close = () => setChartSelectionMenu(null);
+        return (
+          <>
+            <div className="fixed inset-0 z-40" onClick={close} onContextMenu={(e) => { e.preventDefault(); close(); }} />
+            <div
+              className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl py-1 w-56"
+              style={{
+                left: Math.min(chartSelectionMenu.x, window.innerWidth - 220),
+                top: Math.min(chartSelectionMenu.y, window.innerHeight - 120),
+              }}
+            >
+              <p className="px-3 py-1.5 text-xs text-slate-500 border-b border-white/10 mb-1">{chartSelectedUris.size} tracks selected</p>
+              <button
+                className={`${item} text-sky-300 hover:bg-sky-500/15`}
+                onClick={() => { close(); void remixSelectedChartTracks(chartSelectedUris, null); }}
+              >
+                ♻ Remix (each track&apos;s segment BPM)
+              </button>
+              <button
+                className={`${item} text-sky-300 hover:bg-sky-500/15`}
+                onClick={() => { const { x, y } = chartSelectionMenu; close(); setChartBpmPrompt({ x, y }); }}
+              >
+                ♻ Remix at BPM…
+              </button>
+            </div>
+          </>
+        );
+      })()}
+
+      {chartBpmPrompt && (() => {
+        return (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setChartBpmPrompt(null)} />
+            <div
+              className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl p-3 w-56 space-y-2"
+              style={{
+                left: Math.min(chartBpmPrompt.x, window.innerWidth - 220),
+                top: Math.min(chartBpmPrompt.y, window.innerHeight - 100),
+              }}
+            >
+              <p className="text-xs text-slate-400">Remix {chartSelectedUris.size} tracks at BPM</p>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const bpm = parseInt((e.currentTarget.elements.namedItem("bpm") as HTMLInputElement).value, 10);
+                  setChartBpmPrompt(null);
+                  if (bpm > 0) void remixSelectedChartTracks(chartSelectedUris, bpm);
+                }}
+                className="flex items-center gap-2"
+              >
+                <input
+                  name="bpm"
+                  type="number"
+                  autoFocus
+                  className="w-20 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono"
+                />
+                <button type="submit" className="rounded-lg bg-green-500 hover:bg-green-400 text-black font-semibold text-xs px-3 py-1.5 transition-colors">
+                  Go
+                </button>
+              </form>
+            </div>
+          </>
+        );
+      })()}
+
+      {chartRemixing && (
+        <div className="fixed bottom-6 right-6 z-20 flex items-center gap-2 rounded-lg bg-slate-800 border border-white/10 px-4 py-2.5 text-sm text-slate-300 shadow-xl">
+          <Spinner /> Remixing selected tracks…
+        </div>
+      )}
+      {chartRemixError && !chartRemixing && (
+        <div className="fixed bottom-6 right-6 z-20 rounded-lg bg-slate-800 border border-amber-500/30 px-4 py-2.5 text-sm text-amber-400 shadow-xl max-w-sm">
+          {chartRemixError}
+          <button onClick={() => setChartRemixError(null)} className="ml-2 text-slate-500 hover:text-slate-300 underline">Dismiss</button>
+        </div>
+      )}
+
       {replaceTarget && (
         <ReplaceTrackModal
           target={replaceTarget.track}
@@ -3096,6 +3293,46 @@ interface ReplaceCandidate {
   energy: number | null;
   danceability: number | null;
   valence: number | null;
+}
+
+function candidateToTrackWithBpm(c: ReplaceCandidate, uri: string): TrackWithBPM {
+  return {
+    id: uri.split(":")[2] ?? uri,
+    name: c.name,
+    artists: [{ name: c.artist }],
+    album: { name: "", images: [] },
+    duration_ms: c.durationMs ?? 0,
+    uri,
+    bpm: Math.round(c.tempo),
+    energy: c.energy ?? 0,
+  };
+}
+
+// A library candidate is already usable as-is. An online candidate must
+// first be added to the library/CSV (same /api/tracks/add path "more by
+// this artist" uses) — otherwise the swap would silently point the mix at a
+// track with no row in Running.csv, which the next heal sweep would then
+// have nothing to backfill from. Shared by the single-track picker
+// (ReplaceTrackModal) and the chart's multi-select auto-remix, so both
+// "using" a candidate mean the same thing.
+async function resolveCandidateForUse(c: ReplaceCandidate): Promise<TrackWithBPM> {
+  if (c.source === "library" && c.uri) return candidateToTrackWithBpm(c, c.uri);
+  if (!c.isrc) throw new Error("This track has no ISRC to add it by");
+  const res = await fetch("/api/tracks/add", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      tracks: [{
+        uri: c.uri, name: c.name, artist: c.artist, tempo: c.tempo,
+        key: c.key, mode: c.mode, energy: c.energy, danceability: c.danceability, valence: c.valence,
+      }],
+      allowDeletedUris: c.uri ? [c.uri] : undefined,
+    }),
+  });
+  const data = await res.json() as { error?: string };
+  if (!res.ok || data.error) throw new Error(data.error ?? `Add failed (${res.status})`);
+  if (!c.uri) throw new Error("No Spotify URI resolved for this track");
+  return candidateToTrackWithBpm(c, c.uri);
 }
 
 // "Replace by BPM" picker — Dashboard's ♻ button on a mix track. Prompts for
@@ -3155,53 +3392,14 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
     playInSpotify(c.uri, session?.accessToken).catch(() => {});
   }
 
-  // A library candidate already has everything TrackWithBPM needs. An
-  // online candidate must first be added to the library/CSV (same
-  // /api/tracks/add path "more by this artist" uses) — otherwise the swap
-  // would silently point the mix at a track with no row in Running.csv,
-  // which the next heal sweep would then have nothing to backfill from.
   async function use(c: ReplaceCandidate) {
-    if (c.source === "library" && c.uri) {
-      onConfirm({
-        id: c.uri.split(":")[2] ?? c.uri,
-        name: c.name,
-        artists: [{ name: c.artist }],
-        album: { name: "", images: [] },
-        duration_ms: c.durationMs ?? 0,
-        uri: c.uri,
-        bpm: Math.round(c.tempo),
-        energy: c.energy ?? 0,
-      });
-      return;
+    if (c.source === "online") {
+      if (!c.isrc) { setError("This track has no ISRC to add it by"); return; }
+      setAddingOnline(c.uri ?? c.isrc);
+      setError(null);
     }
-    if (!c.isrc) { setError("This track has no ISRC to add it by"); return; }
-    setAddingOnline(c.uri ?? c.isrc);
-    setError(null);
     try {
-      const res = await fetch("/api/tracks/add", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tracks: [{
-            uri: c.uri, name: c.name, artist: c.artist, tempo: c.tempo,
-            key: c.key, mode: c.mode, energy: c.energy, danceability: c.danceability, valence: c.valence,
-          }],
-          allowDeletedUris: c.uri ? [c.uri] : undefined,
-        }),
-      });
-      const data = await res.json() as { error?: string };
-      if (!res.ok || data.error) throw new Error(data.error ?? `Add failed (${res.status})`);
-      if (!c.uri) throw new Error("No Spotify URI resolved for this track");
-      onConfirm({
-        id: c.uri.split(":")[2] ?? c.uri,
-        name: c.name,
-        artists: [{ name: c.artist }],
-        album: { name: "", images: [] },
-        duration_ms: c.durationMs ?? 0,
-        uri: c.uri,
-        bpm: Math.round(c.tempo),
-        energy: c.energy ?? 0,
-      });
+      onConfirm(await resolveCandidateForUse(c));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add track");
     } finally {

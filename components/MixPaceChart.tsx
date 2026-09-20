@@ -121,7 +121,7 @@ const REST_SUFFIX_RE = / \+ ((\d+)\s*(s|sec|secs|min|mins?)\b[^,]*)$/i;
 // built from a mix's own planned data (no actual pace, since it hasn't been
 // run yet) so it can be shown the moment a mix is built or reloaded from a
 // saved/pinned snapshot. `tracks` should be the full ordered mix track list.
-export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMenu }: {
+export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMenu, selectedUris, onToggleSelect, onSelectionContextMenu }: {
   tracks: MixChartTrack[];
   /** Fired when a track chip in the bottom strip is clicked (in addition to
       playing it in Spotify, which the chart does itself) — lets a caller
@@ -137,12 +137,26 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
       window is filtered out. Only passed while reordering is meaningful
       (an active, non-stale mix) — omit to render the strip read-only. */
   onReorder?: (fromUri: string, toUri: string) => void;
-  /** Right-click on a track chip — the caller owns the actual menu UI (it
-      needs the full track object/mix index to offer recycle/eject/delete,
-      which this component doesn't have), this just reports where to anchor
-      it and which track it's for. viewport-relative (clientX/clientY), same
-      coordinate space a fixed-position menu would use. */
+  /** Right-click on a track chip that ISN'T part of the current multi-
+      selection (or no selection at all) — the caller owns the actual menu
+      UI (it needs the full track object/mix index to offer recycle/eject/
+      delete, which this component doesn't have), this just reports where to
+      anchor it and which track it's for. viewport-relative (clientX/
+      clientY), same coordinate space a fixed-position menu would use. */
   onTrackContextMenu?: (uri: string, x: number, y: number) => void;
+  /** Ctrl/Cmd-click-selected track uris — selected chips get a visible ring
+      so it's clear what a right-click's multi-select menu will act on.
+      Selection state itself lives in the caller (it's what decides which
+      menu — single vs. multi — a right-click opens). */
+  selectedUris?: Set<string>;
+  /** Fired on a plain click when the ctrl/meta key is held — toggles that
+      track in the caller's selection instead of the normal play-it click. */
+  onToggleSelect?: (uri: string) => void;
+  /** Right-click on a track chip that IS part of the current selection
+      (only fires when selectedUris has 2+ entries) — separate callback from
+      onTrackContextMenu since the caller shows a different menu (multi-
+      select remix options) in this case. */
+  onSelectionContextMenu?: (x: number, y: number) => void;
 }) {
   const { data: session } = useSession();
   const [xDomain, setXDomain] = useState<[number, number] | null>(null);
@@ -567,24 +581,31 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
                     setDragOverUri(null);
                   } : undefined}
                   onDragEnd={canDrag ? () => { setDragFromUri(null); setDragOverUri(null); } : undefined}
-                  onClick={() => {
+                  onClick={(e) => {
                     if (!t.uri) return;
+                    if ((e.ctrlKey || e.metaKey) && onToggleSelect) { onToggleSelect(t.uri); return; }
                     setLastPlayedUri(t.uri);
                     onTrackClick?.(t.uri);
                     playInSpotify(t.uri, session?.accessToken).catch(() => {});
                   }}
                   onContextMenu={(e) => {
-                    if (!t.uri || !onTrackContextMenu) return;
+                    if (!t.uri) return;
                     e.preventDefault();
-                    onTrackContextMenu(t.uri, e.clientX, e.clientY);
+                    if (selectedUris && selectedUris.size >= 2 && selectedUris.has(t.uri) && onSelectionContextMenu) {
+                      onSelectionContextMenu(e.clientX, e.clientY);
+                      return;
+                    }
+                    onTrackContextMenu?.(t.uri, e.clientX, e.clientY);
                   }}
                   title={t.tempo != null && t.tempo < DOUBLETIME_THRESHOLD
                     ? `${t.name} — ${t.artist} (${Math.round(t.tempo)} BPM, felt as ${Math.round(effectiveTempo(t.tempo))} double-time)`
                     : `${t.name} — ${t.artist}`}
                   className={`absolute top-0 h-full flex items-center justify-center overflow-hidden border-r border-slate-950/60 transition-colors ${
-                    dragOverUri === t.uri && dragFromUri !== null && dragFromUri !== t.uri
-                      ? "outline outline-2 outline-green-500/70 -outline-offset-2"
-                      : ""
+                    t.uri && selectedUris?.has(t.uri)
+                      ? "outline outline-2 outline-sky-400 -outline-offset-2"
+                      : dragOverUri === t.uri && dragFromUri !== null && dragFromUri !== t.uri
+                        ? "outline outline-2 outline-green-500/70 -outline-offset-2"
+                        : ""
                   } ${
                     isLastPlayed
                       ? "bg-purple-500/50 hover:bg-purple-500/60"
@@ -610,7 +631,7 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
             })}
           </div>
           <p className="text-[10px] text-slate-600 mt-1">
-            🎧 Song playing at each point — click a song to play it{onReorder ? ", drag to reorder" : ""}, right-click for options, click a segment to zoom
+            🎧 Song playing at each point — click a song to play it{onReorder ? ", drag to reorder" : ""}, right-click for options{onToggleSelect ? ", ctrl/cmd-click to multi-select" : ""}, click a segment to zoom
           </p>
         </div>
       )}
