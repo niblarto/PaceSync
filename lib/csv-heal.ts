@@ -206,10 +206,22 @@ function isFieldBlank(row: TrackRow, header: string): boolean {
   return v === null || v === undefined || v === "";
 }
 
-async function scanActiveCsvWith(watched: string[], includeMissingUri = false): Promise<{ checked: number; incomplete: IncompleteTrack[] }> {
+// requireFields: which of `watched` actually determine whether a row counts
+// as incomplete — defaults to all of `watched`. scanActiveCsvAll passes
+// "Genres" in `watched` (so it's still checked/shown per-row for context)
+// but leaves it out of requireFields, so a row missing ONLY Genres doesn't
+// get flagged at all — a genre-only gap doesn't affect mix-building or
+// anything else "incomplete" is meant to warn about, so it shouldn't count
+// toward the "Tracks with errors" total either. A row missing Genres AND a
+// real field (BPM/duration/etc.) still gets flagged for the real gap, with
+// Genres still shown alongside it as informational context.
+async function scanActiveCsvWith(
+  watched: string[], includeMissingUri = false, requireFields: string[] = watched,
+): Promise<{ checked: number; incomplete: IncompleteTrack[] }> {
   const csvFile = loadRunningPlaylistConfig().csvFile;
   const rows = readAllTracks(csvFile);
   const incomplete: IncompleteTrack[] = [];
+  const requireSet = new Set(requireFields);
   let checked = 0;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -229,12 +241,16 @@ async function scanActiveCsvWith(watched: string[], includeMissingUri = false): 
     }
     const fields: Record<string, boolean> = { "Track URI": true };
     const missing: string[] = [];
+    let hasRequiredGap = false;
     for (const h of watched) {
       const present = !isFieldBlank(row, h);
       fields[h] = present;
-      if (!present) missing.push(h);
+      if (!present) {
+        missing.push(h);
+        if (requireSet.has(h)) hasRequiredGap = true;
+      }
     }
-    if (missing.length > 0) {
+    if (hasRequiredGap) {
       incomplete.push({
         uri: row.uri.trim(),
         name: row.trackName?.trim() || row.uri.trim(),
@@ -258,11 +274,19 @@ export async function scanActiveCsv(): Promise<{ checked: number; incomplete: In
   return scanActiveCsvWith(["Duration (ms)", ...FEATURE_COLS.map(([h]) => h)]);
 }
 
-// Same as scanActiveCsv but also flags rows missing "Genres" and rows with
+// Same as scanActiveCsv but also shows "Genres" status and flags rows with
 // no Track URI at all, for surfacing every kind of incompleteness the heal
-// sweep tracks, not just the subset that excludes a track from mix-building.
+// sweep tracks — EXCEPT a genre-only gap doesn't flag a row on its own (see
+// scanActiveCsvWith's requireFields): a track missing only Genres isn't an
+// "error", so it's excluded from Settings' "Tracks with errors" list/count
+// entirely. Genres still appears (✓/✗) on any row that IS flagged for a
+// real gap, as informational context alongside the actual problem.
 export async function scanActiveCsvAll(): Promise<{ checked: number; incomplete: IncompleteTrack[] }> {
-  return scanActiveCsvWith(["Duration (ms)", "Genres", ...FEATURE_COLS.map(([h]) => h)], true);
+  return scanActiveCsvWith(
+    ["Duration (ms)", "Genres", ...FEATURE_COLS.map(([h]) => h)],
+    true,
+    ["Duration (ms)", ...FEATURE_COLS.map(([h]) => h)],
+  );
 }
 
 export interface CsvStatus {
