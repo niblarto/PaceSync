@@ -128,6 +128,12 @@ function fitBudget<T extends { durationMs: number }>(pool: T[], budgetSec: numbe
   return best.slice().sort((a, b) => a - b).map(p => pool[p]);
 }
 
+// SSE: streams {"type":"progress","current","total","name"} for each online
+// candidate resolved (the library scan itself is instant — no progress
+// needed there), then {"type":"done","tracks","totalMs","budgetMs",
+// "poolSize"} or {"type":"error"}. Only the online top-up is ever slow
+// enough to need this — a plain JSON response left the UI with no signal
+// during a multi-candidate ReccoBeats resolution.
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -139,71 +145,105 @@ export async function POST(req: NextRequest) {
   if (!budgetMs || budgetMs <= 0) return NextResponse.json({ error: "budgetMs required" }, { status: 400 });
   const excludeUris = new Set(body.excludeUris ?? []);
 
-  // ── Library pool (exact BPM, no duration filter — any length qualifies) ──
-  const rows = readAllTracks(loadRunningPlaylistConfig().csvFile)
-    .filter(t => t.uri && !excludeUris.has(t.uri) && t.tempo != null && t.durationMs != null && isExactBpm(t.tempo, targetBpm));
-
-  const pool: BudgetFillTrack[] = rows
-    .map(t => ({
-      source: "library" as const,
-      uri: t.uri, name: t.trackName ?? "", artist: t.artistNames ?? "",
-      tempo: t.tempo!, effectiveBpm: t.tempo!, durationMs: t.durationMs!,
-      isrc: t.isrc, key: t.key, mode: t.mode, energy: t.energy, danceability: t.danceability, valence: t.valence,
-      _dist: bpmDistance(t.tempo!, targetBpm),
-    }))
-    .sort((a, b) => a._dist - b._dist)
-    .map(({ _dist, ...c }) => c);
-
-  // ── Online top-up (own + related artists per selected track, Deezer) ───
-  // Only when the library pool alone can't plausibly cover the budget —
-  // resolving even a handful of online candidates costs real, sequential
-  // network round-trips, so this is skipped entirely (the common case, once
-  // matching went literal-tempo-only the library still clusters plenty of
-  // material around any popular BPM) whenever the library already sums past
-  // budgetMs on its own.
-  const libraryTotalSec = pool.reduce((sum, t) => sum + t.durationMs / 1000, 0);
-  const artistNames = libraryTotalSec >= budgetMs / 1000 ? [] : Array.from(new Set((body.artistNames ?? []).filter(Boolean).map(a => a.trim().toLowerCase())))
-    .map(lower => (body.artistNames ?? []).find(a => a.trim().toLowerCase() === lower)!);
-
-  if (artistNames.length > 0) {
-    const existingUris = new Set(rows.map(t => t.uri));
-    const seenKeys = new Set(pool.map(c => `${c.artist.toLowerCase()}::${c.name.toLowerCase()}`));
-    let resolved = 0;
-
-    const budgetSec = budgetMs / 1000;
-    const poolCoversBudget = () => pool.reduce((sum, t) => sum + t.durationMs / 1000, 0) >= budgetSec;
-
-    for (const artistName of artistNames) {
-      if (resolved >= MAX_ONLINE_RESOLVE || poolCoversBudget()) break;
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (data: object) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+      };
+      const heartbeat = setInterval(() => {
+        try { controller.enqueue(encoder.encode(`: hb\n\n`)); } catch { /* stream closed */ }
+      }, 15000);
       try {
-        const artistResult = await deezerArtistTopTracks(artistName, true);
-        if (!artistResult.ok) continue;
-        const withIsrc = artistResult.tracks.filter((t): t is typeof t & { isrc: string } => !!t.isrc);
-        for (const t of withIsrc) {
-          if (resolved >= MAX_ONLINE_RESOLVE || poolCoversBudget()) break;
-          const key = `${t.artist.toLowerCase()}::${t.title.toLowerCase()}`;
-          if (seenKeys.has(key)) continue;
-          seenKeys.add(key);
-          if (resolved > 0) await sleep(120);
-          resolved++;
-          try {
-            const r = await resolveByIsrc(t.isrc);
-            if (!r) continue;
-            if (existingUris.has(r.uri) || excludeUris.has(r.uri)) continue;
-            if (!isExactBpm(r.tempo, targetBpm)) continue;
-            pool.push({
-              source: "online", uri: r.uri, name: t.title, artist: t.artist,
-              tempo: r.tempo, effectiveBpm: r.tempo, durationMs: t.durationMs ?? 0,
-              isrc: t.isrc, key: r.key, mode: r.mode, energy: r.energy, danceability: r.danceability, valence: r.valence,
-            });
-          } catch { /* best-effort — one failed resolution shouldn't abort the rest */ }
-        }
-      } catch { /* best-effort — one artist's lookup failing shouldn't abort the others */ }
-    }
-  }
+        // Padding comment flushes past browsers' 1 KB SSE buffer
+        controller.enqueue(encoder.encode(`: ${"x".repeat(1024)}\n\n`));
 
-  const usable = pool.filter(t => t.durationMs > 0);
-  const chosen = fitBudget(usable, budgetMs / 1000);
-  const totalMs = chosen.reduce((sum, t) => sum + t.durationMs, 0);
-  return NextResponse.json({ tracks: chosen, totalMs, budgetMs, poolSize: usable.length });
+        // ── Library pool (exact BPM, no duration filter) ──
+        const rows = readAllTracks(loadRunningPlaylistConfig().csvFile)
+          .filter(t => t.uri && !excludeUris.has(t.uri) && t.tempo != null && t.durationMs != null && isExactBpm(t.tempo, targetBpm));
+
+        const pool: BudgetFillTrack[] = rows
+          .map(t => ({
+            source: "library" as const,
+            uri: t.uri, name: t.trackName ?? "", artist: t.artistNames ?? "",
+            tempo: t.tempo!, effectiveBpm: t.tempo!, durationMs: t.durationMs!,
+            isrc: t.isrc, key: t.key, mode: t.mode, energy: t.energy, danceability: t.danceability, valence: t.valence,
+            _dist: bpmDistance(t.tempo!, targetBpm),
+          }))
+          .sort((a, b) => a._dist - b._dist)
+          .map(({ _dist, ...c }) => c);
+
+        // ── Online top-up (own + related artists per selected track, Deezer) ──
+        // Only when the library pool alone can't plausibly cover the
+        // budget — resolving even a handful of online candidates costs
+        // real, sequential network round-trips, so this is skipped
+        // entirely (the common case, once matching went literal-tempo-only
+        // the library still clusters plenty of material around any popular
+        // BPM) whenever the library already sums past budgetMs on its own.
+        const libraryTotalSec = pool.reduce((sum, t) => sum + t.durationMs / 1000, 0);
+        const artistNames = libraryTotalSec >= budgetMs / 1000 ? [] : Array.from(new Set((body.artistNames ?? []).filter(Boolean).map(a => a.trim().toLowerCase())))
+          .map(lower => (body.artistNames ?? []).find(a => a.trim().toLowerCase() === lower)!);
+
+        if (artistNames.length > 0) {
+          send({ type: "online-start" });
+          const existingUris = new Set(rows.map(t => t.uri));
+          const seenKeys = new Set(pool.map(c => `${c.artist.toLowerCase()}::${c.name.toLowerCase()}`));
+          let resolved = 0;
+
+          const budgetSec = budgetMs / 1000;
+          const poolCoversBudget = () => pool.reduce((sum, t) => sum + t.durationMs / 1000, 0) >= budgetSec;
+
+          outer:
+          for (const artistName of artistNames) {
+            if (resolved >= MAX_ONLINE_RESOLVE || poolCoversBudget()) break;
+            try {
+              const artistResult = await deezerArtistTopTracks(artistName, true);
+              if (!artistResult.ok) continue;
+              const withIsrc = artistResult.tracks.filter((t): t is typeof t & { isrc: string } => !!t.isrc);
+              for (const t of withIsrc) {
+                if (resolved >= MAX_ONLINE_RESOLVE || poolCoversBudget()) break outer;
+                const key = `${t.artist.toLowerCase()}::${t.title.toLowerCase()}`;
+                if (seenKeys.has(key)) continue;
+                seenKeys.add(key);
+                if (resolved > 0) await sleep(120);
+                resolved++;
+                send({ type: "progress", current: resolved, total: MAX_ONLINE_RESOLVE, name: t.title, artist: t.artist });
+                try {
+                  const r = await resolveByIsrc(t.isrc);
+                  if (!r) continue;
+                  if (existingUris.has(r.uri) || excludeUris.has(r.uri)) continue;
+                  if (!isExactBpm(r.tempo, targetBpm)) continue;
+                  pool.push({
+                    source: "online", uri: r.uri, name: t.title, artist: t.artist,
+                    tempo: r.tempo, effectiveBpm: r.tempo, durationMs: t.durationMs ?? 0,
+                    isrc: t.isrc, key: r.key, mode: r.mode, energy: r.energy, danceability: r.danceability, valence: r.valence,
+                  });
+                } catch { /* best-effort — one failed resolution shouldn't abort the rest */ }
+              }
+            } catch { /* best-effort — one artist's lookup failing shouldn't abort the others */ }
+          }
+        }
+
+        const usable = pool.filter(t => t.durationMs > 0);
+        const chosen = fitBudget(usable, budgetMs / 1000);
+        const totalMs = chosen.reduce((sum, t) => sum + t.durationMs, 0);
+        send({ type: "done", tracks: chosen, totalMs, budgetMs, poolSize: usable.length });
+      } catch (err) {
+        send({ type: "error", error: err instanceof Error ? err.message : "Search failed" });
+      } finally {
+        clearInterval(heartbeat);
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+      "Content-Encoding": "none",
+    },
+  });
 }

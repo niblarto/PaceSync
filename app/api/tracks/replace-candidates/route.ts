@@ -64,6 +64,10 @@ export interface ReplaceCandidate {
   valence: number | null;
 }
 
+// SSE: streams {"type":"progress","current","total","name"} for each online
+// candidate resolved (the library scan itself is instant), then
+// {"type":"done","candidates"} or {"type":"error"} — same shape as
+// replace-candidates-budget/route.ts's own stream.
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -84,98 +88,132 @@ export async function POST(req: NextRequest) {
   const durationOk = (ms: number | null) =>
     originalDurationMs == null ? true : ms != null && Math.abs(ms - originalDurationMs) <= DURATION_TOLERANCE_SEC * 1000;
 
-  // ── Library search ──────────────────────────────────────────────────
-  const rows = readAllTracks(loadRunningPlaylistConfig().csvFile)
-    .filter(t => t.uri && !excludeUris.has(t.uri) && t.tempo != null && t.durationMs != null && durationOk(t.durationMs));
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (data: object) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+      };
+      const heartbeat = setInterval(() => {
+        try { controller.enqueue(encoder.encode(`: hb\n\n`)); } catch { /* stream closed */ }
+      }, 15000);
+      try {
+        controller.enqueue(encoder.encode(`: ${"x".repeat(1024)}\n\n`));
 
-  const libraryCandidates: ReplaceCandidate[] = rows
-    .map(t => ({
-      source: "library" as const,
-      uri: t.uri,
-      name: t.trackName ?? "",
-      artist: t.artistNames ?? "",
-      tempo: t.tempo!,
-      effectiveBpm: effectiveTempo(t.tempo!),
-      durationMs: t.durationMs,
-      isrc: t.isrc,
-      key: t.key,
-      mode: t.mode,
-      energy: t.energy,
-      danceability: t.danceability,
-      valence: t.valence,
-      _dist: bpmDistance(t.tempo!, targetBpm),
-    }))
-    .filter(t => isExactBpm(t.tempo, targetBpm))
-    .sort((a, b) => a._dist - b._dist)
-    .slice(0, MAX_RESULTS)
-    .map(({ _dist, ...c }) => c);
+        // ── Library search ──────────────────────────────────────────
+        const rows = readAllTracks(loadRunningPlaylistConfig().csvFile)
+          .filter(t => t.uri && !excludeUris.has(t.uri) && t.tempo != null && t.durationMs != null && durationOk(t.durationMs));
 
-  const results: ReplaceCandidate[] = [...libraryCandidates];
-
-  // ── Online top-up (own + related artists, Deezer) ───────────────────
-  // Only when the library alone didn't fill the list, and only when we know
-  // which artist to search from (the track being replaced).
-  if (results.length < MAX_RESULTS && body.artistName) {
-    try {
-      const artistResult = await deezerArtistTopTracks(body.artistName, true);
-      const withIsrc = artistResult.ok
-        ? artistResult.tracks.filter((t): t is typeof t & { isrc: string } => !!t.isrc)
-        : [];
-
-      const existingUris = new Set(rows.map(t => t.uri));
-      const seenKeys = new Set(libraryCandidates.map(c => `${c.artist.toLowerCase()}::${c.name.toLowerCase()}`));
-      const need = MAX_RESULTS - results.length;
-      let checked = 0;
-
-      // Resolve BPM one at a time (ReccoBeats via ISRC) and keep only ones
-      // that actually land near the target — stop once enough are found or
-      // the candidate pool from Deezer runs out, rather than resolving every
-      // single one regardless of how many are already accepted.
-      for (const t of withIsrc) {
-        if (results.length - libraryCandidates.length >= need) break;
-        const key = `${t.artist.toLowerCase()}::${t.title.toLowerCase()}`;
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
-        if (checked > 0) await sleep(120);
-        checked++;
-        try {
-          const resolved = await resolveByIsrc(t.isrc);
-          if (!resolved) continue;
-          if (existingUris.has(resolved.uri)) continue; // already covered by the library search above
-          if (excludeUris.has(resolved.uri)) continue; // already in the mix — would land as a duplicate
-          if (!durationOk(t.durationMs)) continue;
-          if (!isExactBpm(resolved.tempo, targetBpm)) continue;
-          results.push({
-            source: "online",
-            uri: resolved.uri,
-            name: t.title,
-            artist: t.artist,
-            tempo: resolved.tempo,
-            effectiveBpm: effectiveTempo(resolved.tempo),
+        const libraryCandidates: ReplaceCandidate[] = rows
+          .map(t => ({
+            source: "library" as const,
+            uri: t.uri,
+            name: t.trackName ?? "",
+            artist: t.artistNames ?? "",
+            tempo: t.tempo!,
+            effectiveBpm: effectiveTempo(t.tempo!),
             durationMs: t.durationMs,
             isrc: t.isrc,
-            key: resolved.key,
-            mode: resolved.mode,
-            energy: resolved.energy,
-            danceability: resolved.danceability,
-            valence: resolved.valence,
-          });
-        } catch { /* best-effort — one failed resolution shouldn't abort the rest */ }
-      }
-    } catch { /* best-effort — online top-up is a supplement, library results still return */ }
-  }
+            key: t.key,
+            mode: t.mode,
+            energy: t.energy,
+            danceability: t.danceability,
+            valence: t.valence,
+            _dist: bpmDistance(t.tempo!, targetBpm),
+          }))
+          .filter(t => isExactBpm(t.tempo, targetBpm))
+          .sort((a, b) => a._dist - b._dist)
+          .slice(0, MAX_RESULTS)
+          .map(({ _dist, ...c }) => c);
 
-  // Presentation order: every candidate here already passed the BPM
-  // tolerance gate above (that's what decided who's in the pool at all) —
-  // within that already-qualified set, rank by closeness to the original
-  // track's own length, per the user's explicit request. Falls back to BPM
-  // closeness only when there's no original length to rank by (durationOk
-  // lets everything through in that case).
-  results.sort((a, b) => {
-    if (originalDurationMs != null && a.durationMs != null && b.durationMs != null) {
-      return Math.abs(a.durationMs - originalDurationMs) - Math.abs(b.durationMs - originalDurationMs);
-    }
-    return bpmDistance(a.tempo, targetBpm) - bpmDistance(b.tempo, targetBpm);
+        const results: ReplaceCandidate[] = [...libraryCandidates];
+
+        // ── Online top-up (own + related artists, Deezer) ────────────
+        // Only when the library alone didn't fill the list, and only when
+        // we know which artist to search from (the track being replaced).
+        if (results.length < MAX_RESULTS && body.artistName) {
+          send({ type: "online-start" });
+          try {
+            const artistResult = await deezerArtistTopTracks(body.artistName, true);
+            const withIsrc = artistResult.ok
+              ? artistResult.tracks.filter((t): t is typeof t & { isrc: string } => !!t.isrc)
+              : [];
+
+            const existingUris = new Set(rows.map(t => t.uri));
+            const seenKeys = new Set(libraryCandidates.map(c => `${c.artist.toLowerCase()}::${c.name.toLowerCase()}`));
+            const need = MAX_RESULTS - results.length;
+            let checked = 0;
+
+            // Resolve BPM one at a time (ReccoBeats via ISRC) and keep only
+            // ones that actually land near the target — stop once enough
+            // are found or the candidate pool from Deezer runs out, rather
+            // than resolving every single one regardless of how many are
+            // already accepted.
+            for (const t of withIsrc) {
+              if (results.length - libraryCandidates.length >= need) break;
+              const key = `${t.artist.toLowerCase()}::${t.title.toLowerCase()}`;
+              if (seenKeys.has(key)) continue;
+              seenKeys.add(key);
+              if (checked > 0) await sleep(120);
+              checked++;
+              send({ type: "progress", current: checked, total: need, name: t.title, artist: t.artist });
+              try {
+                const resolved = await resolveByIsrc(t.isrc);
+                if (!resolved) continue;
+                if (existingUris.has(resolved.uri)) continue; // already covered by the library search above
+                if (excludeUris.has(resolved.uri)) continue; // already in the mix — would land as a duplicate
+                if (!durationOk(t.durationMs)) continue;
+                if (!isExactBpm(resolved.tempo, targetBpm)) continue;
+                results.push({
+                  source: "online",
+                  uri: resolved.uri,
+                  name: t.title,
+                  artist: t.artist,
+                  tempo: resolved.tempo,
+                  effectiveBpm: effectiveTempo(resolved.tempo),
+                  durationMs: t.durationMs,
+                  isrc: t.isrc,
+                  key: resolved.key,
+                  mode: resolved.mode,
+                  energy: resolved.energy,
+                  danceability: resolved.danceability,
+                  valence: resolved.valence,
+                });
+              } catch { /* best-effort — one failed resolution shouldn't abort the rest */ }
+            }
+          } catch { /* best-effort — online top-up is a supplement, library results still return */ }
+        }
+
+        // Presentation order: every candidate here already passed the BPM
+        // tolerance gate above (that's what decided who's in the pool at
+        // all) — within that already-qualified set, rank by closeness to
+        // the original track's own length, per the user's explicit
+        // request. Falls back to BPM closeness only when there's no
+        // original length to rank by (durationOk lets everything through
+        // in that case).
+        results.sort((a, b) => {
+          if (originalDurationMs != null && a.durationMs != null && b.durationMs != null) {
+            return Math.abs(a.durationMs - originalDurationMs) - Math.abs(b.durationMs - originalDurationMs);
+          }
+          return bpmDistance(a.tempo, targetBpm) - bpmDistance(b.tempo, targetBpm);
+        });
+        send({ type: "done", candidates: results.slice(0, MAX_RESULTS) });
+      } catch (err) {
+        send({ type: "error", error: err instanceof Error ? err.message : "Search failed" });
+      } finally {
+        clearInterval(heartbeat);
+        controller.close();
+      }
+    },
   });
-  return NextResponse.json({ candidates: results.slice(0, MAX_RESULTS) });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+      "Content-Encoding": "none",
+    },
+  });
 }

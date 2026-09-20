@@ -200,14 +200,37 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReor
     return () => obs.disconnect();
   }, [visibleCount, tracks.length, loadMore]);
 
-  // Jump to a track from outside the list (e.g. clicked in a Runna card):
-  // make sure it's within the sliced/visible range, then scroll it into view.
+  // Jump to a track from outside the list (e.g. clicked in a Runna card or
+  // a chart chip): make sure it's within the sliced/visible range, then
+  // scroll it into view with real padding above/below — scrollIntoView's
+  // own block:"center" only centers within this list's OWN inner scroll
+  // area, which can still land the row snug against the sticky chart above
+  // it (a separate, outer scroll context it has no visibility into), so the
+  // row reads as sitting right at the edge rather than clearly mid-list.
+  // Manually computing the scroll offset keeps a fixed pixel margin
+  // regardless of what's stacked above this container on the page.
+  const HIGHLIGHT_SCROLL_PADDING = 96;
   useEffect(() => {
     if (!highlightUri) return;
     const idx = tracks.findIndex(t => t.uri === highlightUri);
     if (idx === -1) return;
     if (idx >= visibleCount) { setVisibleCount(Math.min(idx + 50, tracks.length)); return; }
-    highlightRowRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    const container = containerRef.current;
+    const row = highlightRowRef.current;
+    if (!container || !row) return;
+    const rowTop = row.offsetTop;
+    const rowBottom = rowTop + row.offsetHeight;
+    const viewTop = container.scrollTop;
+    const viewBottom = viewTop + container.clientHeight;
+    let target: number | null = null;
+    if (rowTop < viewTop + HIGHLIGHT_SCROLL_PADDING) {
+      target = rowTop - HIGHLIGHT_SCROLL_PADDING;
+    } else if (rowBottom > viewBottom - HIGHLIGHT_SCROLL_PADDING) {
+      target = rowBottom - container.clientHeight + HIGHLIGHT_SCROLL_PADDING;
+    }
+    if (target != null) {
+      container.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+    }
   }, [highlightUri, tracks, visibleCount]);
 
   return (
@@ -530,6 +553,10 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [chartBpmPrompt, setChartBpmPrompt] = useState<{ x: number; y: number } | null>(null);
   const [chartRemixing, setChartRemixing] = useState(false);
   const [chartRemixError, setChartRemixError] = useState<string | null>(null);
+  // Live status while a run's online (Deezer/ReccoBeats) top-up is checking
+  // candidates one at a time — null whenever nothing's in flight (the
+  // library search itself is instant, no status needed for that part).
+  const [chartRemixStatus, setChartRemixStatus] = useState<string | null>(null);
   const [remixing, setRemixing] = useState(false);
   const [toppingUp, setToppingUp] = useState(false);
   const [flowMixing, setFlowMixing] = useState(false);
@@ -2224,10 +2251,39 @@ export function DashboardClient({ spotifyUser }: Props) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ targetBpm: run.targetBpm, artistNames, excludeUris: Array.from(excludeUris), budgetMs }),
           });
-          const data = await res.json() as { tracks?: ReplaceCandidate[]; error?: string };
-          if (!res.ok || data.error) throw new Error(data.error);
-          const picked = data.tracks ?? [];
-          if (picked.length === 0) { failures.push(...run.tracks.map(t => t.name)); continue; }
+          if (!res.ok || !res.body) {
+            const err = await res.json().catch(() => ({})) as { error?: string };
+            throw new Error(err.error ?? `Search failed (${res.status})`);
+          }
+          let picked: ReplaceCandidate[] | null = null;
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let sep;
+            while ((sep = buf.indexOf("\n\n")) !== -1) {
+              const chunk = buf.slice(0, sep);
+              buf = buf.slice(sep + 2);
+              const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+              if (!dataLine) continue;
+              const msg = JSON.parse(dataLine.slice(6)) as
+                { type: string; current?: number; total?: number; name?: string; artist?: string; tracks?: ReplaceCandidate[]; error?: string };
+              if (msg.type === "online-start") {
+                setChartRemixStatus("Online lookup starting…");
+              } else if (msg.type === "progress") {
+                setChartRemixStatus(`Online lookup: checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""} (${msg.current}/${msg.total})`);
+              } else if (msg.type === "error") {
+                throw new Error(msg.error ?? "Search failed");
+              } else if (msg.type === "done") {
+                picked = msg.tracks ?? [];
+              }
+            }
+          }
+          setChartRemixStatus(null);
+          if (!picked || picked.length === 0) { failures.push(...run.tracks.map(t => t.name)); continue; }
           const resolved: TrackWithBPM[] = [];
           for (const c of picked) {
             const t = await resolveCandidateForUse(c);
@@ -2247,6 +2303,7 @@ export function DashboardClient({ spotifyUser }: Props) {
         setChartRemixError(`No match found for ${failures.length} track${failures.length === 1 ? "" : "s"}: ${failures.slice(0, 3).join(", ")}${failures.length > 3 ? "…" : ""}`);
       }
     } finally {
+      setChartRemixStatus(null);
       setChartRemixing(false);
     }
   }
@@ -3308,8 +3365,8 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
       })()}
 
       {chartRemixing && (
-        <div className="fixed bottom-6 right-6 z-20 flex items-center gap-2 rounded-lg bg-slate-800 border border-white/10 px-4 py-2.5 text-sm text-slate-300 shadow-xl">
-          <Spinner /> Remixing selected tracks…
+        <div className="fixed bottom-6 right-6 z-20 flex items-center gap-2 rounded-lg bg-slate-800 border border-white/10 px-4 py-2.5 text-sm text-slate-300 shadow-xl max-w-sm">
+          <Spinner /> {chartRemixStatus ?? "Remixing selected tracks…"}
         </div>
       )}
       {chartRemixError && !chartRemixing && (
@@ -3419,6 +3476,10 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
   // still-null addingOnline before anything was even clicked.
   const [addingOnline, setAddingOnline] = useState<string | null>(null);
   const [playingUri, setPlayingUri] = useState<string | null>(null);
+  // Live status while the online (Deezer/ReccoBeats) top-up is checking
+  // candidates one at a time — null whenever nothing's in flight (library
+  // search is instant, no status needed for that part).
+  const [onlineStatus, setOnlineStatus] = useState<string | null>(null);
 
   async function search() {
     const bpm = parseInt(bpmInput, 10);
@@ -3426,18 +3487,47 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
     setLoading(true);
     setError(null);
     setCandidates(null);
+    setOnlineStatus(null);
     try {
       const res = await fetch("/api/tracks/replace-candidates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ targetBpm: bpm, artistName: target.artists[0]?.name, excludeUris: mixUris, originalDurationMs: target.duration_ms }),
       });
-      const data = await res.json() as { candidates?: ReplaceCandidate[]; error?: string };
-      if (!res.ok || data.error) throw new Error(data.error ?? `Search failed (${res.status})`);
-      setCandidates(data.candidates ?? []);
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `Search failed (${res.status})`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const msg = JSON.parse(dataLine.slice(6)) as
+            { type: string; current?: number; total?: number; name?: string; artist?: string; candidates?: ReplaceCandidate[]; error?: string };
+          if (msg.type === "online-start") {
+            setOnlineStatus("Online lookup starting…");
+          } else if (msg.type === "progress") {
+            setOnlineStatus(`Online lookup: checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""} (${msg.current}/${msg.total})`);
+          } else if (msg.type === "error") {
+            throw new Error(msg.error ?? "Search failed");
+          } else if (msg.type === "done") {
+            setCandidates(msg.candidates ?? []);
+          }
+        }
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Search failed");
     } finally {
+      setOnlineStatus(null);
       setLoading(false);
     }
   }
@@ -3504,6 +3594,9 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
         <p className="text-xs text-slate-500">
           Only tracks within 15s of the original&apos;s length ({Math.round(target.duration_ms / 1000)}s) are shown, so swapping never throws off the rest of the mix&apos;s timing.
         </p>
+        {onlineStatus && (
+          <p className="text-xs text-sky-400 flex items-center gap-1.5"><Spinner /> {onlineStatus}</p>
+        )}
         {error && <p className="text-sm text-red-400">{error}</p>}
 
         {candidates && (
