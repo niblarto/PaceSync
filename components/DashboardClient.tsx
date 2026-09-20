@@ -2095,20 +2095,48 @@ export function DashboardClient({ spotifyUser }: Props) {
     setReplaceTarget(null);
   }
 
-  // Batched version of replaceMixTrack for the chart's multi-select remix —
-  // applies every substitution in one state update (one timeline recompute,
-  // one re-pin) instead of N sequential ones, which would each read a
-  // slightly-stale aiDjMix and could clobber each other.
-  function replaceMixTracks(replacements: Map<number, TrackWithBPM>) {
-    if (!aiDjMix || replacements.size === 0) return;
-    const nextTracks = [...aiDjMix.tracks];
-    replacements.forEach((replacement, index) => { nextTracks[index] = replacement; });
+  // Splices one or more contiguous ranges of aiDjMix.tracks (by ORIGINAL
+  // index, all computed against the same pre-splice array — so multiple
+  // ops in one call must not overlap) with a replacement track list of
+  // possibly different length. Used by the chart's multi-select remix,
+  // where a selected run is discarded and refilled with "as many or as few
+  // tracks as fit the combined budget" — unlike replaceMixTrack's 1-for-1
+  // swap, a run's replacement count can differ from how many were selected.
+  // Segment membership is adjusted by each op's own count delta (replacement
+  // length minus original run length) rather than assumed unchanged, so a
+  // segment that gained/lost tracks keeps exactly the right ones in the
+  // rebuilt timeline.
+  function spliceMixTracks(ops: { startIdx: number; endIdx: number; tracks: TrackWithBPM[] }[]) {
+    if (!aiDjMix || ops.length === 0) return;
+    const sorted = [...ops].sort((a, b) => a.startIdx - b.startIdx);
 
-    const segCounts = aiDjMix.timeline.map(s => s.tracks.length);
-    let cursor = 0, cursorSec = 0;
+    const nextTracks: TrackWithBPM[] = [];
+    let cursor = 0;
+    for (const op of sorted) {
+      nextTracks.push(...aiDjMix.tracks.slice(cursor, op.startIdx));
+      nextTracks.push(...op.tracks);
+      cursor = op.endIdx + 1;
+    }
+    nextTracks.push(...aiDjMix.tracks.slice(cursor));
+
+    // Original per-segment counts, adjusted by any op whose original range
+    // falls inside that segment's own slice of the OLD track order.
+    const segCounts: number[] = [];
+    let segStart = 0;
+    for (const seg of aiDjMix.timeline) {
+      const segEnd = segStart + seg.tracks.length - 1;
+      let delta = 0;
+      for (const op of sorted) {
+        if (op.startIdx >= segStart && op.startIdx <= segEnd) delta += op.tracks.length - (op.endIdx - op.startIdx + 1);
+      }
+      segCounts.push(seg.tracks.length + delta);
+      segStart = segEnd + 1;
+    }
+
+    let cursor2 = 0, cursorSec = 0;
     const newTimeline: AiDjTimeline = aiDjMix.timeline.map((seg, segIdx) => {
-      const count = segCounts[segIdx];
-      const segTracks = nextTracks.slice(cursor, cursor + count).map(t => {
+      const count = Math.max(0, segCounts[segIdx]);
+      const segTracks = nextTracks.slice(cursor2, cursor2 + count).map(t => {
         const durationSec = Math.round(t.duration_ms / 1000);
         const m = Math.floor(cursorSec / 60), s = Math.round(cursorSec % 60);
         const startsAt = `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
@@ -2118,74 +2146,102 @@ export function DashboardClient({ spotifyUser }: Props) {
           startsAt, durationSec, tempo: t.bpm, camelot: null, energy: t.energy,
         };
       });
-      cursor += count;
+      cursor2 += count;
       return { ...seg, tracks: segTracks };
     });
     const newTotalSec = nextTracks.reduce((sum, t) => sum + t.duration_ms / 1000, 0);
 
     setAiDjMix(prev => {
       if (!prev) return prev;
-      const next = { ...prev, tracks: nextTracks, timeline: newTimeline, totalSec: newTotalSec };
+      const next = { ...prev, tracks: nextTracks, timeline: newTimeline, totalSec: newTotalSec, originalCount: nextTracks.length };
       pinMix({ date: next.date, workoutTitle: next.workoutTitle, totalSec: next.totalSec, timeline: next.timeline, allowedUris: new Set(nextTracks.map(t => t.uri)) }, true);
       return next;
     });
   }
 
-  // Multi-select "remix" from the chart's context menu — resolves a
-  // candidate for each selected track independently (sequentially, so
-  // earlier picks are excluded from later searches and two selected slots
-  // can never land on the same replacement), then applies all substitutions
-  // in one batch. targetBpm: a fixed BPM for every selected track (typed-in
-  // "Remix at BPM"), or undefined to use each track's OWN segment's
-  // targetBpm ("Remix" with no BPM given) — a track whose segment has no
-  // targetBpm (shouldn't happen for a real workout segment, but a defensive
-  // fallback) or that finds no qualifying candidate is left unchanged
-  // rather than aborting the whole batch.
+  // Multi-select "remix" from the chart's context menu — discards every
+  // selected track and refills the group's COMBINED duration with as many
+  // or as few exact-BPM tracks as fit closest (server-side combination
+  // search, /api/tracks/replace-candidates-budget), instead of swapping
+  // each selected slot 1-for-1: a single slot's own duration is a much
+  // tighter target than "the stretch sums close", so 1-for-1 frequently
+  // failed to find any qualifying candidate at all for a given slot.
+  //
+  // targetBpm: a fixed BPM for the whole selection (typed-in "Remix at
+  // BPM"), or null to use each contiguous run's OWN segment targetBpm
+  // ("Remix" with no BPM given) — the selection is split into contiguous
+  // runs by segment first in that case, so a selection spanning several
+  // segments gets each segment's own stretch refilled at ITS OWN target,
+  // rather than incorrectly pooling multiple different BPMs into one
+  // combined budget.
   async function remixSelectedChartTracks(selectedUris: Set<string>, fixedTargetBpm: number | null) {
     if (!aiDjMix || selectedUris.size === 0) return;
     setChartRemixing(true);
     setChartRemixError(null);
     try {
-      // Which segment each selected track belongs to, for the per-track
-      // segment-targetBpm mode — same flattening order aiDjMix.tracks/
-      // timeline already share.
-      const segmentByUri = new Map<string, { targetBpm: number | null }>();
+      const segmentByUri = new Map<string, number | null>();
       for (const seg of aiDjMix.timeline) {
-        for (const t of seg.tracks) segmentByUri.set(t.uri, { targetBpm: seg.targetBpm });
+        for (const t of seg.tracks) segmentByUri.set(t.uri, seg.targetBpm);
       }
 
-      const excludeUris = new Set(aiDjMix.tracks.map(t => t.uri));
-      const replacements = new Map<number, TrackWithBPM>();
-      const failures: string[] = [];
-
+      // Contiguous runs of selected tracks, split whenever the target BPM
+      // changes (or a non-selected track breaks the run) — each run is
+      // filled independently against its own budget/BPM.
+      interface Run { startIdx: number; endIdx: number; targetBpm: number; tracks: TrackWithBPM[] }
+      const runs: Run[] = [];
+      let current: Run | null = null;
       for (let i = 0; i < aiDjMix.tracks.length; i++) {
         const track = aiDjMix.tracks[i];
-        if (!selectedUris.has(track.uri)) continue;
-        const targetBpm = fixedTargetBpm ?? segmentByUri.get(track.uri)?.targetBpm ?? null;
-        if (!targetBpm) { failures.push(track.name); continue; }
-        try {
-          const res = await fetch("/api/tracks/replace-candidates", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              targetBpm, artistName: track.artists[0]?.name,
-              excludeUris: Array.from(excludeUris), originalDurationMs: track.duration_ms,
-            }),
-          });
-          const data = await res.json() as { candidates?: ReplaceCandidate[]; error?: string };
-          if (!res.ok || data.error) throw new Error(data.error);
-          const top = data.candidates?.[0];
-          if (!top) { failures.push(track.name); continue; }
-          const replacement = await resolveCandidateForUse(top);
-          replacements.set(i, replacement);
-          excludeUris.delete(track.uri);
-          excludeUris.add(replacement.uri);
-        } catch {
-          failures.push(track.name);
+        const bpm = fixedTargetBpm ?? segmentByUri.get(track.uri) ?? null;
+        if (selectedUris.has(track.uri) && bpm) {
+          if (current && current.targetBpm === bpm && current.endIdx === i - 1) {
+            current.endIdx = i;
+            current.tracks.push(track);
+          } else {
+            current = { startIdx: i, endIdx: i, targetBpm: bpm, tracks: [track] };
+            runs.push(current);
+          }
+        } else {
+          current = null;
         }
       }
 
-      if (replacements.size > 0) replaceMixTracks(replacements);
+      const skipped = aiDjMix.tracks.filter(t => selectedUris.has(t.uri) && !runs.some(r => r.tracks.includes(t)));
+      const failures: string[] = skipped.map(t => t.name);
+
+      // Applied as one batch at the end: splicing runs one at a time would
+      // shift every later index out from under the next run's own
+      // startIdx/endIdx.
+      const spliceOps: { startIdx: number; endIdx: number; tracks: TrackWithBPM[] }[] = [];
+      const excludeUris = new Set(aiDjMix.tracks.map(t => t.uri));
+
+      for (const run of runs) {
+        const budgetMs = run.tracks.reduce((sum, t) => sum + t.duration_ms, 0);
+        const artistNames = Array.from(new Set(run.tracks.map(t => t.artists[0]?.name).filter((a): a is string => !!a)));
+        try {
+          const res = await fetch("/api/tracks/replace-candidates-budget", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ targetBpm: run.targetBpm, artistNames, excludeUris: Array.from(excludeUris), budgetMs }),
+          });
+          const data = await res.json() as { tracks?: ReplaceCandidate[]; error?: string };
+          if (!res.ok || data.error) throw new Error(data.error);
+          const picked = data.tracks ?? [];
+          if (picked.length === 0) { failures.push(...run.tracks.map(t => t.name)); continue; }
+          const resolved: TrackWithBPM[] = [];
+          for (const c of picked) {
+            const t = await resolveCandidateForUse(c);
+            resolved.push(t);
+            excludeUris.add(t.uri);
+          }
+          for (const t of run.tracks) excludeUris.delete(t.uri);
+          spliceOps.push({ startIdx: run.startIdx, endIdx: run.endIdx, tracks: resolved });
+        } catch {
+          failures.push(...run.tracks.map(t => t.name));
+        }
+      }
+
+      if (spliceOps.length > 0) spliceMixTracks(spliceOps);
       setChartSelectedUris(new Set());
       if (failures.length > 0) {
         setChartRemixError(`No match found for ${failures.length} track${failures.length === 1 ? "" : "s"}: ${failures.slice(0, 3).join(", ")}${failures.length > 3 ? "…" : ""}`);
@@ -3202,7 +3258,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 className={`${item} text-sky-300 hover:bg-sky-500/15`}
                 onClick={() => { close(); void remixSelectedChartTracks(chartSelectedUris, null); }}
               >
-                ♻ Remix (each track&apos;s segment BPM)
+                ♻ Remix (segment&apos;s original BPM)
               </button>
               <button
                 className={`${item} text-sky-300 hover:bg-sky-500/15`}
