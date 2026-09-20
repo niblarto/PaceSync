@@ -44,6 +44,11 @@ const SWAP_LOOKAHEAD = 8;
 // already uses for the single-track swap), and stays capped modestly even
 // then rather than exhausting every related-artist track Deezer offers.
 const MAX_ONLINE_RESOLVE = 30;
+// Hard cap on how many DIFFERENT artists' Deezer catalogs get searched —
+// each is its own sequential fetch, on top of every candidate's own
+// ReccoBeats resolution, so this stays small regardless of how many
+// candidate artists the (own-artists + genre-sharing) selection turns up.
+const MAX_ARTISTS_SEARCHED = 5;
 
 function bpmDistance(tempo: number, targetBpm: number): number {
   return Math.abs(tempo - targetBpm);
@@ -139,7 +144,13 @@ export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json() as { targetBpm?: number; artistNames?: string[]; seedUris?: string[]; excludeUris?: string[]; budgetMs?: number };
+  const body = await req.json() as {
+    targetBpm?: number; artistNames?: string[]; seedUris?: string[]; excludeUris?: string[]; budgetMs?: number;
+    /** Explicit override from the picker's "search by artist/genre" control
+        — see replace-candidates/route.ts's own body type for the full
+        explanation, mirrored here. */
+    searchMode?: "artist" | "genre"; searchValue?: string;
+  };
   const targetBpm = body.targetBpm;
   const budgetMs = body.budgetMs;
   if (!targetBpm || targetBpm <= 0) return NextResponse.json({ error: "targetBpm required" }, { status: 400 });
@@ -176,32 +187,42 @@ export async function POST(req: NextRequest) {
           .sort((a, b) => a._dist - b._dist)
           .map(({ _dist, ...c }) => c);
 
-        // ── Online top-up (own + genre-sharing artists per selected track, Deezer) ──
+        // ── Online top-up (Deezer) ────────────────────────────────────
         // Only when the library pool alone can't plausibly cover the
         // budget — resolving even a handful of online candidates costs
         // real, sequential network round-trips, so this is skipped
         // entirely (the common case, once matching went literal-tempo-only
         // the library still clusters plenty of material around any popular
         // BPM) whenever the library already sums past budgetMs on its own.
-        // Own artists (one per originally-selected track) are searched
-        // first, same as before; genre-sharing artists (other library
-        // artists tagged with at least one of the selected tracks' genres —
-        // see lib/genre-artists.ts for why this is "genre picks artists",
-        // not a real genre-filtered search) are appended after.
+        // Which artists get searched (capped at MAX_ARTISTS_SEARCHED):
+        //  - Explicit "search by artist" override: just that one artist.
+        //  - Explicit "search by genre" override: every library artist
+        //    tagged with that exact genre.
+        //  - No override (the original automatic behavior): one artist per
+        //    originally-selected track, then other library artists sharing
+        //    at least one of those tracks' genre tags, up to the cap.
         const libraryTotalSec = pool.reduce((sum, t) => sum + t.durationMs / 1000, 0);
         let artistNames: string[] = [];
         if (libraryTotalSec < budgetMs / 1000) {
-          const ownArtists = Array.from(new Set((body.artistNames ?? []).filter(Boolean).map(a => a.trim().toLowerCase())))
-            .map(lower => (body.artistNames ?? []).find(a => a.trim().toLowerCase() === lower)!);
-          const seedGenres = new Set<string>();
-          for (const uri of body.seedUris ?? []) {
-            const row = allRows.find(t => t.uri === uri);
-            for (const g of Array.from(parseGenres(row?.genres ?? null))) seedGenres.add(g);
+          if (body.searchMode === "artist" && body.searchValue) {
+            artistNames = [body.searchValue];
+          } else if (body.searchMode === "genre" && body.searchValue) {
+            const seedGenres = new Set([body.searchValue.trim().toLowerCase()]);
+            artistNames = artistsSharingGenre(allRows, seedGenres, [], MAX_ARTISTS_SEARCHED);
+          } else {
+            const ownArtists = Array.from(new Set((body.artistNames ?? []).filter(Boolean).map(a => a.trim().toLowerCase())))
+              .map(lower => (body.artistNames ?? []).find(a => a.trim().toLowerCase() === lower)!);
+            const seedGenres = new Set<string>();
+            for (const uri of body.seedUris ?? []) {
+              const row = allRows.find(t => t.uri === uri);
+              for (const g of Array.from(parseGenres(row?.genres ?? null))) seedGenres.add(g);
+            }
+            const genreArtists = ownArtists.length > 0
+              ? artistsSharingGenre(allRows, seedGenres, ownArtists, Math.max(0, MAX_ARTISTS_SEARCHED - ownArtists.length))
+              : [];
+            artistNames = [...ownArtists, ...genreArtists.filter(a => !ownArtists.some(o => o.toLowerCase() === a.toLowerCase()))];
           }
-          const genreArtists = ownArtists.length > 0
-            ? artistsSharingGenre(allRows, seedGenres, ownArtists, 5)
-            : [];
-          artistNames = [...ownArtists, ...genreArtists.filter(a => !ownArtists.some(o => o.toLowerCase() === a.toLowerCase()))];
+          artistNames = artistNames.slice(0, MAX_ARTISTS_SEARCHED);
         }
 
         if (artistNames.length > 0) {

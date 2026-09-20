@@ -2205,7 +2205,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   // segments gets each segment's own stretch refilled at ITS OWN target,
   // rather than incorrectly pooling multiple different BPMs into one
   // combined budget.
-  async function remixSelectedChartTracks(selectedUris: Set<string>, fixedTargetBpm: number | null) {
+  async function remixSelectedChartTracks(selectedUris: Set<string>, fixedTargetBpm: number | null, searchOverride?: { mode: "artist" | "genre"; value: string } | null) {
     if (!aiDjMix || selectedUris.size === 0) return;
     setChartRemixing(true);
     setChartRemixError(null);
@@ -2254,7 +2254,10 @@ export function DashboardClient({ spotifyUser }: Props) {
           const res = await fetch("/api/tracks/replace-candidates-budget", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ targetBpm: run.targetBpm, artistNames, seedUris, excludeUris: Array.from(excludeUris), budgetMs }),
+            body: JSON.stringify({
+              targetBpm: run.targetBpm, artistNames, seedUris, excludeUris: Array.from(excludeUris), budgetMs,
+              ...(searchOverride ? { searchMode: searchOverride.mode, searchValue: searchOverride.value } : {}),
+            }),
           });
           if (!res.ok || !res.body) {
             const err = await res.json().catch(() => ({})) as { error?: string };
@@ -3340,15 +3343,9 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <p className="px-3 py-1.5 text-xs text-slate-500 border-b border-white/10 mb-1">{chartSelectedUris.size} tracks selected</p>
               <button
                 className={`${item} text-sky-300 hover:bg-sky-500/15`}
-                onClick={() => { close(); void remixSelectedChartTracks(chartSelectedUris, null); }}
-              >
-                ♻ Remix (segment&apos;s original BPM)
-              </button>
-              <button
-                className={`${item} text-sky-300 hover:bg-sky-500/15`}
                 onClick={() => { const { x, y } = chartSelectionMenu; close(); setChartBpmPrompt({ x, y }); }}
               >
-                ♻ Remix at BPM…
+                ♻ Remix…
               </button>
             </div>
           </>
@@ -3360,32 +3357,19 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           <>
             <div className="fixed inset-0 z-40" onClick={() => setChartBpmPrompt(null)} />
             <div
-              className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl p-3 w-56 space-y-2"
+              className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl p-3 w-80 space-y-2"
               style={{
-                left: Math.min(chartBpmPrompt.x, window.innerWidth - 220),
-                top: Math.min(chartBpmPrompt.y, window.innerHeight - 100),
+                left: Math.min(chartBpmPrompt.x, window.innerWidth - 340),
+                top: Math.min(chartBpmPrompt.y, window.innerHeight - 160),
               }}
             >
-              <p className="text-xs text-slate-400">Remix {chartSelectedUris.size} tracks at BPM</p>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const bpm = parseInt((e.currentTarget.elements.namedItem("bpm") as HTMLInputElement).value, 10);
+              <p className="text-xs text-slate-400">Remix {chartSelectedUris.size} tracks</p>
+              <RemixPromptForm
+                onSubmit={(bpm, override) => {
                   setChartBpmPrompt(null);
-                  if (bpm > 0) void remixSelectedChartTracks(chartSelectedUris, bpm);
+                  void remixSelectedChartTracks(chartSelectedUris, bpm, override);
                 }}
-                className="flex items-center gap-2"
-              >
-                <input
-                  name="bpm"
-                  type="number"
-                  autoFocus
-                  className="w-20 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono"
-                />
-                <button type="submit" className="rounded-lg bg-green-500 hover:bg-green-400 text-black font-semibold text-xs px-3 py-1.5 transition-colors">
-                  Go
-                </button>
-              </form>
+              />
             </div>
           </>
         );
@@ -3475,6 +3459,137 @@ async function resolveCandidateForUse(c: ReplaceCandidate): Promise<TrackWithBPM
   return candidateToTrackWithBpm(c, c.uri);
 }
 
+// Module-level cache: the {genres, artists} list barely changes within a
+// session and is small, so fetch it once and share across every open
+// picker instead of refetching per-modal-open.
+let genresArtistsCache: Promise<{ genres: string[]; artists: string[] }> | null = null;
+function fetchGenresArtists() {
+  if (!genresArtistsCache) {
+    genresArtistsCache = fetch("/api/tracks/genres-artists")
+      .then(r => r.json())
+      .catch(() => ({ genres: [], artists: [] }));
+  }
+  return genresArtistsCache;
+}
+
+// Explicit "search online by artist or genre" override control, shared by
+// the single-track ReplaceTrackModal and the chart's multi-select remix
+// BPM prompt. Defaults to "automatic" (value=null, meaning: let the server
+// pick the same track's own artist + genre-sharing artists); typing
+// selects an explicit artist or genre to search instead, filtered against
+// the library's own known values as the user types.
+function SearchModePicker({ value, onChange }: {
+  value: { mode: "artist" | "genre"; value: string } | null;
+  onChange: (v: { mode: "artist" | "genre"; value: string } | null) => void;
+}) {
+  const [options, setOptions] = useState<{ genres: string[]; artists: string[] }>({ genres: [], artists: [] });
+  const [mode, setMode] = useState<"artist" | "genre">(value?.mode ?? "artist");
+  const [text, setText] = useState(value?.value ?? "");
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => { fetchGenresArtists().then(setOptions); }, []);
+
+  const list = mode === "artist" ? options.artists : options.genres;
+  const filtered = text.trim()
+    ? list.filter(v => v.toLowerCase().includes(text.trim().toLowerCase())).slice(0, 8)
+    : list.slice(0, 8);
+
+  function pick(v: string) {
+    setText(v);
+    setOpen(false);
+    onChange({ mode, value: v });
+  }
+
+  function clear() {
+    setText("");
+    setOpen(false);
+    onChange(null);
+  }
+
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="text-slate-500 shrink-0">Search online by</span>
+      <div className="flex rounded-lg border border-white/10 overflow-hidden shrink-0">
+        {(["artist", "genre"] as const).map(m => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => { setMode(m); setText(""); onChange(null); }}
+            className={`px-2 py-1 transition-colors ${mode === m ? "bg-sky-500/20 text-sky-300" : "bg-slate-800/60 text-slate-500 hover:text-slate-300"}`}
+          >
+            {m === "artist" ? "Artist" : "Genre"}
+          </button>
+        ))}
+      </div>
+      <div className="relative flex-1 min-w-0">
+        <input
+          type="text"
+          value={text}
+          placeholder={mode === "artist" ? "Same as track (default)" : "Same as track's genre (default)"}
+          onChange={e => { setText(e.target.value); setOpen(true); if (!e.target.value.trim()) onChange(null); }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setTimeout(() => setOpen(false), 150)}
+          className="w-full rounded-lg bg-slate-800/60 border border-white/10 px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+        />
+        {open && filtered.length > 0 && (
+          <div className="absolute z-10 mt-1 w-full max-h-40 overflow-y-auto no-scrollbar rounded-lg bg-slate-900 border border-white/10 shadow-xl">
+            {filtered.map(v => (
+              <button
+                key={v}
+                type="button"
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => pick(v)}
+                className="block w-full text-left px-2 py-1 hover:bg-sky-500/15 text-slate-200 truncate"
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {value && (
+        <button type="button" onClick={clear} className="text-slate-500 hover:text-slate-300 shrink-0">Reset</button>
+      )}
+    </div>
+  );
+}
+
+// Multi-select remix prompt body (BPM field left blank = each run's own
+// segment BPM) — shared by the chart's selection context menu, paired with
+// the same SearchModePicker override control the single-track modal uses.
+function RemixPromptForm({ onSubmit }: {
+  onSubmit: (bpm: number | null, override: { mode: "artist" | "genre"; value: string } | null) => void;
+}) {
+  const [bpmInput, setBpmInput] = useState("");
+  const [searchOverride, setSearchOverride] = useState<{ mode: "artist" | "genre"; value: string } | null>(null);
+
+  return (
+    <form
+      onSubmit={e => {
+        e.preventDefault();
+        const bpm = parseInt(bpmInput, 10);
+        onSubmit(bpm > 0 ? bpm : null, searchOverride);
+      }}
+      className="space-y-2"
+    >
+      <label className="block text-xs text-slate-500 space-y-1">
+        <span className="block">BPM (leave blank for segment&apos;s original BPM)</span>
+        <input
+          value={bpmInput}
+          onChange={e => setBpmInput(e.target.value)}
+          type="number"
+          autoFocus
+          className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono"
+        />
+      </label>
+      <SearchModePicker value={searchOverride} onChange={setSearchOverride} />
+      <button type="submit" className="w-full rounded-lg bg-green-500 hover:bg-green-400 text-black font-semibold text-xs px-3 py-1.5 transition-colors">
+        Remix
+      </button>
+    </form>
+  );
+}
+
 // "Replace by BPM" picker — Dashboard's ♻ button on a mix track. Prompts for
 // a target BPM, then shows up to 15 candidates (library first, ranked by
 // closeness; topped up online from the replaced track's own + related
@@ -3507,6 +3622,10 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
   // candidates one at a time — null whenever nothing's in flight (library
   // search is instant, no status needed for that part).
   const [onlineStatus, setOnlineStatus] = useState<string | null>(null);
+  // Explicit override for which artist(s)/genre to search online — null
+  // means "automatic" (same track's own artist, plus genre-sharing
+  // artists), per the server route's default behavior.
+  const [searchOverride, setSearchOverride] = useState<{ mode: "artist" | "genre"; value: string } | null>(null);
 
   async function search() {
     const bpm = parseInt(bpmInput, 10);
@@ -3519,7 +3638,10 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
       const res = await fetch("/api/tracks/replace-candidates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ targetBpm: bpm, artistName: target.artists[0]?.name, targetUri: target.uri, excludeUris: mixUris, originalDurationMs: target.duration_ms }),
+        body: JSON.stringify({
+          targetBpm: bpm, artistName: target.artists[0]?.name, targetUri: target.uri, excludeUris: mixUris, originalDurationMs: target.duration_ms,
+          ...(searchOverride ? { searchMode: searchOverride.mode, searchValue: searchOverride.value } : {}),
+        }),
       });
       if (!res.ok || !res.body) {
         const err = await res.json().catch(() => ({})) as { error?: string };
@@ -3621,6 +3743,7 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
         <p className="text-xs text-slate-500">
           Only tracks within 15s of the original&apos;s length ({Math.round(target.duration_ms / 1000)}s) are shown, so swapping never throws off the rest of the mix&apos;s timing.
         </p>
+        <SearchModePicker value={searchOverride} onChange={setSearchOverride} />
         {onlineStatus && (
           <p className="text-xs text-sky-400 flex items-center gap-1.5"><Spinner /> {onlineStatus}</p>
         )}

@@ -33,6 +33,13 @@ import { artistsSharingGenre, parseGenres } from "@/lib/genre-artists";
 const MAX_RESULTS = 15;
 const DOUBLETIME_THRESHOLD = 95; // mirrors lib/pace-analysis.ts / MixPaceChart
 const DURATION_TOLERANCE_SEC = 15;
+// Hard cap on how many DIFFERENT artists' Deezer catalogs get searched in
+// one online top-up — each is its own sequential (own-top-tracks + related-
+// top-tracks) fetch, on top of every candidate's own ReccoBeats resolution,
+// so letting this grow unbounded (previously: own artist + up to 5 genre-
+// sharing artists, searched exhaustively one after another) made a single
+// search visibly churn through many artists before finishing.
+const MAX_ARTISTS_SEARCHED = 5;
 
 function bpmDistance(tempo: number, targetBpm: number): number {
   const candidates = [tempo, tempo * 2, tempo / 2];
@@ -73,7 +80,20 @@ export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json() as { targetBpm?: number; artistName?: string; targetUri?: string; excludeUris?: string[]; originalDurationMs?: number };
+  const body = await req.json() as {
+    targetBpm?: number; artistName?: string; targetUri?: string; excludeUris?: string[]; originalDurationMs?: number;
+    /** Explicit override for what the online top-up searches by, from the
+        picker's "search by artist/genre" control — when given, this is used
+        INSTEAD of the automatic "replaced track's own artist + genre-sharing
+        artists" default. searchMode "artist": searchValue is one artist
+        name, searched alone (no automatic genre expansion added on top —
+        the user picked a specific artist on purpose). searchMode "genre":
+        searchValue is one genre tag, and every library artist carrying that
+        tag (up to MAX_ARTISTS_SEARCHED) is searched — the counterpart to
+        artistsSharingGenre's usual "tags from the replaced track" input,
+        just driven by a user-picked genre instead. */
+    searchMode?: "artist" | "genre"; searchValue?: string;
+  };
   const targetBpm = body.targetBpm;
   if (!targetBpm || targetBpm <= 0) return NextResponse.json({ error: "targetBpm required" }, { status: 400 });
   const originalDurationMs = body.originalDurationMs;
@@ -131,22 +151,36 @@ export async function POST(req: NextRequest) {
 
         const results: ReplaceCandidate[] = [...libraryCandidates];
 
-        // ── Online top-up (own + genre-sharing artists, Deezer) ───────
-        // Only when the library alone didn't fill the list, and only when
-        // we know which artist to search from (the track being replaced).
-        // The replaced track's own artist is searched first, same as
-        // before; if that's not enough, other library artists sharing at
-        // least one of its genre tags are searched too (see
-        // lib/genre-artists.ts for why this is "genre picks artists to
-        // search", not a real genre-filtered search — Deezer has no such
-        // API).
-        if (results.length < MAX_RESULTS && body.artistName) {
+        // ── Online top-up (Deezer) ────────────────────────────────────
+        // Only when the library alone didn't fill the list. Which artists
+        // get searched (capped at MAX_ARTISTS_SEARCHED total):
+        //  - Explicit "search by artist" override: just that one artist.
+        //  - Explicit "search by genre" override: every library artist
+        //    tagged with that exact genre (see lib/genre-artists.ts — this
+        //    is "genre picks artists to search", not a real genre-filtered
+        //    track search, since Deezer has no such API).
+        //  - No override (the original automatic behavior): the replaced
+        //    track's own artist first, then other library artists sharing
+        //    at least one of ITS genre tags, up to the cap.
+        const canSearchOnline = body.searchMode
+          ? !!body.searchValue
+          : !!body.artistName;
+        if (results.length < MAX_RESULTS && canSearchOnline) {
           send({ type: "online-start" });
           try {
-            const targetRow = body.targetUri ? allRows.find(t => t.uri === body.targetUri) : undefined;
-            const seedGenres = parseGenres(targetRow?.genres ?? null);
-            const genreArtists = artistsSharingGenre(allRows, seedGenres, body.artistName, 5);
-            const artistNames = [body.artistName, ...genreArtists];
+            let artistNames: string[];
+            if (body.searchMode === "artist" && body.searchValue) {
+              artistNames = [body.searchValue];
+            } else if (body.searchMode === "genre" && body.searchValue) {
+              const seedGenres = new Set([body.searchValue.trim().toLowerCase()]);
+              artistNames = artistsSharingGenre(allRows, seedGenres, [], MAX_ARTISTS_SEARCHED);
+            } else {
+              const targetRow = body.targetUri ? allRows.find(t => t.uri === body.targetUri) : undefined;
+              const seedGenres = parseGenres(targetRow?.genres ?? null);
+              const genreArtists = artistsSharingGenre(allRows, seedGenres, body.artistName!, MAX_ARTISTS_SEARCHED - 1);
+              artistNames = [body.artistName!, ...genreArtists];
+            }
+            artistNames = artistNames.slice(0, MAX_ARTISTS_SEARCHED);
 
             const existingUris = new Set(rows.map(t => t.uri));
             const seenKeys = new Set(libraryCandidates.map(c => `${c.artist.toLowerCase()}::${c.name.toLowerCase()}`));
