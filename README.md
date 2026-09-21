@@ -17,9 +17,13 @@ A Next.js web app for managing a Spotify running playlist based on heart rate zo
 - **Automatic BPM enrichment**: tracks without BPM data are looked up on ReccoBeats automatically, with a Deezer-ISRC fallback for tracks ReccoBeats doesn't know by Spotify ID — and a manual **save-to-playlist / re-import** round-trip in the dashboard for anything neither source can match (see [Tracks without BPM data](#tracks-without-bpm-data))
 - **Check for missing data**: a per-playlist heal sweep in Settings that backfills missing Spotify URIs, genres, and audio features in one pass, with a live status/log and Spotify rate-limit awareness — plus workbook import (FreeYourMusic/Chosic) for bulk backfills (see [Checking for missing library data](#checking-for-missing-library-data))
 - **🎧 AI DJ Mix** (optional): build a pace-matched playlist for any Runna workout — including strength sessions (up-tempo, high-energy, any BPM) — with a live progress bar, per-segment LLM detail, per-run-type BPM limits, and a pin option so a mix survives future rule changes. Choose a **Local LLM** (Ollama, via the [AI_DJ companion app](https://github.com/niblarto/AI_DJ)), **Claude**, or **Gemini** as the backend, with a prompt log and usage/cost tracking in Settings. See [AI DJ Mix](#ai-dj-mix-optional) below
+- **Editing an AI DJ mix in place**: drag tracks to reorder (in the tracklist or directly in the pace/BPM chart), click a chart track to play it, right-click for a per-track menu (replace by BPM, remove, delete), or Ctrl+click several adjacent tracks and right-click to **remix** them as a group — discarding the selection and refilling its combined duration with fresh exact-BPM matches. See [Editing a Mix](#editing-a-mix) below
+- **Replace-by-BPM online search**: constrain the online top-up to a specific artist or genre (typeahead, with a **force online lookup** toggle to bypass the library) and/or a Low/Medium/High energy band — genre search is backed by a real [Discogs](https://www.discogs.com) genre/style lookup (with a verified library-genre-to-Discogs-style mapping table) rather than guessing, and automatically tops up any shortfall from the wider library with a warning if a narrow search can't fill the requested length. See [Editing a Mix](#editing-a-mix) below
+- **Pace Pro**: a separate pace-planning tool (`/pace-pro`) for building a custom split/mix outside of Runna — splits editor, its own saved-mix library, and a **Send to Dashboard** handoff so a Pace Pro mix can be edited, remixed and saved using the same dashboard tools as a Runna-built mix
 - Dedup playlist, to remove duplicate tracks
 - Garmin activity stats: pace/cadence/HR charts and activity summaries, read directly from a local [GarminDB](https://github.com/tcgoetz/GarminDB) database
 - **Strava integration** (optional): a `/strava` stats page (recent activities, HR zones), and automatic syncing of Runna workout titles/planned steps onto new Strava activities via webhook. See [Strava Integration](#strava-integration) below
+- **Weather** (optional): Met Office forecast shown on the Runna schedule card for each run's scheduled time — see [Settings → Integrations](#settings--integrations)
 - Weekly cron job to keep the playlist fresh:-
     - Pull down the tracks of the last show, for the BBC programmes that are currently subcribed to
     - Upload to the active Spotify playlist, then dedupe it.
@@ -362,6 +366,46 @@ Track selection within each section can happen three ways, chosen per the **Sett
 
 ---
 
+## Editing a Mix
+
+Once an AI DJ (or Pace Pro) mix is loaded into the dashboard's central track list, it can be edited in place before saving:
+
+**Reordering:**
+- Drag any track's handle up or down in the list to move it — auto-scrolls when you drag near the top/bottom edge.
+- The pace/BPM chart supports the same drag-to-reorder directly on the chart's song strip.
+
+**Chart interactions:**
+- **Click** a track in the chart to play it instantly (does not zoom).
+- **Right-click** a single track for a menu: replace by BPM, remove from mix, delete from library.
+- **Ctrl+click** to select several adjacent tracks, then **right-click the selection** for a **Remix…** menu — discards the whole selection and refills its combined duration with fresh matches, rather than swapping each track 1-for-1 (which fails easily, since a single slot's own duration tolerance is much stricter than "the whole stretch sums close").
+- **Double-click** (or the reset-zoom link) to reset the chart's zoom; clicking a track no longer resets it.
+- **📈 Open chart** button (next to Close mix) reopens the chart after dismissing it with the corner ✕.
+
+**Replace by BPM (♻):**
+
+Prompts for a target BPM, then shows candidates — library first (ranked by closeness to the original track's length), topped up online from Deezer if the library falls short:
+
+- **Search online by**: **Any** (automatic — the replaced track's own artist, plus other library artists sharing its genre tags), **Artist** (type any artist, with a typeahead of artists already in your library), or **Genre** (type any genre; typeahead of genres already in your library). Genre search queries [Discogs](https://www.discogs.com)' real genre/style-tagged release database for artists actually credited on matching releases — via `lib/discogs-genre-map.ts`, a verified table mapping this library's own genre tags to Discogs' exact style vocabulary (which only accepts exact matches, e.g. "Drum n Bass" — plain-language variants like "Liquid Funk" return nothing without the mapping). Requires a free Discogs personal access token — see [Settings → Integrations](#settings--integrations) below. Falls back to a library-only genre-sharing heuristic if no token is set.
+- **Force online lookup**: skips the library pool entirely for an explicit Artist/Genre search, so results always come fresh from Deezer instead of resurfacing the same library rows.
+- An explicit single-artist search checks that artist's **full** Deezer top catalog (not a truncated sample) and isn't capped at the usual per-search track limit, since it's one deliberate, bounded lookup.
+- **Energy**: optional Low / Medium / High filter (Spotify/ReccoBeats' 0.0–1.0 energy feature, split into even thirds), applied on top of the exact-BPM match.
+- BPM matching is **exact** — a candidate must round to precisely the target BPM, not "close enough" — so a swap never quietly drifts the mix's pacing.
+
+**Multi-select remix** (the chart's Ctrl+click + right-click → Remix… flow) uses the same Artist/Genre/Energy/Force-online controls, plus an optional explicit BPM (leave blank to reuse each selected run's original segment BPM). If the artist/genre/energy-constrained search can't find enough tracks to cover the full combined duration, it automatically tops up the shortfall with any exact-BPM library tracks (dropping the artist/genre/energy constraint for just the top-up) and shows a warning naming how many tracks came from the fallback — so the mix's length is preserved even when a narrow search comes up short.
+
+---
+
+## Pace Pro
+
+A separate pace-planning page (`/pace-pro`, linked from the dashboard) for building a mix from a race pacing strategy instead of a Runna workout.
+
+1. Upload a **Garmin PacePro split plan** as a CSV export (Splits, Split Distance, Split Pace), or paste a screenshot of one directly (Ctrl+V) — it's transcribed automatically.
+2. Build a pace-matched track listing from the splits, the same way as any other AI DJ mix (see [AI DJ Mix](#ai-dj-mix-optional) above for how tracks are picked) — including the same Save to Spotify, pin, and remix options.
+3. Pace Pro keeps its **own saved-mix library**, separate from Runna's pinned-per-workout mixes, so you can build and revisit multiple pacing strategies (e.g. different race-day plans) independently.
+4. **Send to Dashboard** hands the current Pace Pro mix off to the main dashboard's central track list — from there it can be edited, reordered, and remixed using all the same tools as a Runna-built mix (see [Editing a Mix](#editing-a-mix) above), then optionally **saved back to its Pace Pro library** with any edits applied.
+
+---
+
 ## GarminDB Integration
 
 ![Garmin activity page — pace, cadence and HR charts](docs/screenshots/garmin-stats.png)
@@ -452,6 +496,15 @@ Alternatively, set `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` in `.env.local` b
 Once you've reviewed and saved an AI DJ mix's pacing for a run (see [AI DJ Mix](#ai-dj-mix-optional)), the tracklist is also appended to that run's Strava description.
 
 **HR zones from Strava:** Settings → Heart Rate Settings can pull your five-zone HR set directly from your Strava account (in addition to Garmin or manual entry) — an alternative zone source, not a separate feature from the sync above.
+
+---
+
+## Settings → Integrations
+
+A few optional third-party lookups are configured here as simple API key fields (each stored on the Pi, same as the other Settings keys):
+
+- **Discogs** (used by the dashboard's ♻ Replace/Remix **Genre** search — see [Editing a Mix](#editing-a-mix) above): a free personal access token from [discogs.com/settings/developers](https://www.discogs.com/settings/developers) (click **Generate token** — no need to register an application for this). Without a token, genre search silently falls back to a library-only heuristic instead of Discogs' real genre/style-tagged release database.
+- **Met Office** (weather on the Runna schedule card): see the Weather card in Settings for its own API key + postcode fields.
 
 ---
 
