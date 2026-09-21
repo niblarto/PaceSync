@@ -212,6 +212,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [metofficeSaving, setMetofficeSaving] = useState(false);
   const [metofficeSaved, setMetofficeSaved] = useState(false);
   const [metofficeError, setMetofficeError] = useState<string | null>(null);
+  const [discogsToken, setDiscogsToken] = useState("");
+  const [discogsConfigured, setDiscogsConfigured] = useState(false);
+  const [discogsSaving, setDiscogsSaving] = useState(false);
+  const [discogsSaved, setDiscogsSaved] = useState(false);
+  const [discogsError, setDiscogsError] = useState<string | null>(null);
 
   // ── ntfy state ─────────────────────────────────────────────────────────────
   const [ntfyTopic, setNtfyTopic] = useState("");
@@ -1018,6 +1023,35 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setMetofficeError(e instanceof Error ? e.message : "Failed to save — try again.");
     } finally {
       setMetofficeSaving(false);
+    }
+  }
+
+  useEffect(() => {
+    fetch("/api/settings/discogs-key")
+      .then(r => r.json())
+      .then((d: { configured?: boolean }) => setDiscogsConfigured(!!d.configured))
+      .catch(() => {});
+  }, []);
+
+  async function saveDiscogsToken() {
+    setDiscogsSaving(true);
+    setDiscogsSaved(false);
+    setDiscogsError(null);
+    try {
+      const res = await fetch("/api/settings/discogs-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiToken: discogsToken.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setDiscogsSaved(true);
+      setDiscogsConfigured(true);
+      setDiscogsToken("");
+    } catch (e) {
+      setDiscogsError(e instanceof Error ? e.message : "Failed to save — try again.");
+    } finally {
+      setDiscogsSaving(false);
     }
   }
 
@@ -4716,6 +4750,43 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             {metofficeSaving ? "Saving…" : metofficeSaved ? "Saved!" : "Save"}
           </button>
           {metofficeHasKey && <span className="text-xs text-green-400">✓ Configured</span>}
+        </div>
+      </div>
+
+      {/* Discogs */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h2 className="font-semibold text-base">Discogs</h2>
+          <p className="text-sm text-slate-400 mt-1">
+            Powers the &quot;search online by genre&quot; option on the dashboard&apos;s replace-by-BPM (♻) picker —
+            Discogs&apos; release database has real genre/style tags, so this finds artists actually credited on
+            releases tagged with the genre you type, rather than only artists already in this library.
+            Get a free personal access token at{" "}
+            <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener noreferrer" className="text-green-400 hover:text-green-300 underline">
+              discogs.com/settings/developers
+            </a>.
+          </p>
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm text-slate-300">Personal access token</label>
+          <input
+            type="password"
+            value={discogsToken}
+            onChange={e => { setDiscogsToken(e.target.value); setDiscogsSaved(false); }}
+            placeholder={discogsConfigured ? "•••••••••••••••••••• (saved — enter to replace)" : "Personal access token"}
+            className="w-full rounded-lg bg-slate-800/80 border border-white/10 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-green-500/50 font-mono"
+          />
+        </div>
+        {discogsError && <p className="text-sm text-red-400">{discogsError}</p>}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={saveDiscogsToken}
+            disabled={discogsSaving || !discogsToken.trim()}
+            className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+          >
+            {discogsSaving ? "Saving…" : discogsSaved ? "Saved!" : "Save"}
+          </button>
+          {discogsConfigured && <span className="text-xs text-green-400">✓ Configured</span>}
         </div>
       </div>
 

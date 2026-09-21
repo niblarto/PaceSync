@@ -21,10 +21,27 @@ function parseGenres(raw: string | null): Set<string> {
   return new Set(raw.split(",").map(g => g.trim().toLowerCase()).filter(Boolean));
 }
 
+// Picks up to `count` items from `items` without replacement, weighted by
+// each item's `count` field (higher = more likely, never guaranteed) —
+// weighted reservoir sampling: draw each item's key as
+// Math.random() ** (1 / weight), take the top `count` keys. A strict
+// top-N-by-count pick is deterministic (the same most-prolific artists win
+// every single search); this gives real variety across repeated searches
+// while still favoring more-represented artists on average. Shared with
+// lib/discogs-artist-search.ts's own copy of the same algorithm.
+function weightedSampleWithoutReplacement<T extends { count: number }>(items: T[], count: number): T[] {
+  return items
+    .map(item => ({ item, key: Math.random() ** (1 / Math.max(item.count, 0.01)) }))
+    .sort((a, b) => b.key - a.key)
+    .slice(0, count)
+    .map(x => x.item);
+}
+
 // Other artists (excluding excludeArtists, case-insensitive) sharing at
-// least one genre tag with seedGenres — ranked by how many OTHER same-
-// genre tracks that artist has in the library (a rough "how central to this
-// genre" signal), deduped, capped at maxArtists so a genre with hundreds of
+// least one genre tag with seedGenres — weighted-random sample favoring
+// artists with more OTHER same-genre tracks in the library (a rough "how
+// central to this genre" signal) without always picking the exact same
+// top artists, deduped, capped at maxArtists so a genre with hundreds of
 // tagged tracks doesn't turn into hundreds of online searches.
 export function artistsSharingGenre(
   rows: Pick<TrackRow, "artistNames" | "genres">[],
@@ -45,10 +62,7 @@ export function artistsSharingGenre(
     if (existing) existing.count++;
     else counts.set(key, { name: artist, count: 1 });
   }
-  return Array.from(counts.values())
-    .sort((a, b) => b.count - a.count)
-    .slice(0, maxArtists)
-    .map(a => a.name);
+  return weightedSampleWithoutReplacement(Array.from(counts.values()), maxArtists).map(a => a.name);
 }
 
 export { parseGenres };

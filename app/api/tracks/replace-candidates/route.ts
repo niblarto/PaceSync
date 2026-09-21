@@ -6,6 +6,8 @@ import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
 import { resolveByIsrc, sleep } from "@/lib/track-enrich";
 import { deezerArtistTopTracks } from "@/lib/deezer-artist-top";
 import { artistsSharingGenre, parseGenres } from "@/lib/genre-artists";
+import { discogsArtistsForGenre } from "@/lib/discogs-artist-search";
+import { energyInBand, type EnergyBand } from "@/lib/energy-bands";
 
 // Candidates to swap in for one track in a mix, by target BPM — Dashboard's
 // ♻ "replace by BPM" button. BPM match is exact, not closest-available: a
@@ -39,7 +41,22 @@ const DURATION_TOLERANCE_SEC = 15;
 // so letting this grow unbounded (previously: own artist + up to 5 genre-
 // sharing artists, searched exhaustively one after another) made a single
 // search visibly churn through many artists before finishing.
-const MAX_ARTISTS_SEARCHED = 5;
+const MAX_ARTISTS_SEARCHED = 10;
+// Hard cap on total individual track BPM resolutions (ReccoBeats calls) in
+// one online top-up, across every artist searched — each resolution is its
+// own sequential network round-trip, so even several popular artists' full
+// top-tracks lists could otherwise run into the hundreds before giving up.
+// Doesn't apply to an explicit single-artist search (searchMode "artist")
+// — see the online top-up block below for why that case checks the whole
+// catalog regardless of this cap.
+const MAX_TRACKS_SEARCHED = 200;
+// Genre search's artists are picked automatically (Discogs credits or the
+// library's own genre-sharing heuristic), not chosen by the user the way
+// "search by artist" is — so once an artist's first few tracks have been
+// checked without filling the result list, move on to the next artist
+// rather than exhausting one artist's whole top-tracks + related-artists
+// catalog before trying another.
+const MAX_TRACKS_PER_ARTIST_IN_GENRE_MODE = 5;
 
 function bpmDistance(tempo: number, targetBpm: number): number {
   const candidates = [tempo, tempo * 2, tempo / 2];
@@ -93,6 +110,12 @@ export async function POST(req: NextRequest) {
         artistsSharingGenre's usual "tags from the replaced track" input,
         just driven by a user-picked genre instead. */
     searchMode?: "artist" | "genre"; searchValue?: string;
+    /** Picker's "force online lookup" toggle — see replace-candidates-
+        budget/route.ts's own copy of this field for the full explanation. */
+    forceOnline?: boolean;
+    /** Optional Low/Medium/High energy filter, on top of the exact-BPM
+        match — see lib/energy-bands.ts. */
+    energyBand?: EnergyBand;
   };
   const targetBpm = body.targetBpm;
   if (!targetBpm || targetBpm <= 0) return NextResponse.json({ error: "targetBpm required" }, { status: 400 });
@@ -124,8 +147,30 @@ export async function POST(req: NextRequest) {
         const allRows = readAllTracks(loadRunningPlaylistConfig().csvFile);
 
         // ── Library search ──────────────────────────────────────────
-        const rows = allRows
-          .filter(t => t.uri && !excludeUris.has(t.uri) && t.tempo != null && t.durationMs != null && durationOk(t.durationMs));
+        // Same genre/artist-consistency fix as replace-candidates-budget/
+        // route.ts: an explicit "search by artist/genre" override must
+        // constrain which LIBRARY candidates qualify too, not just which
+        // artists get searched online — otherwise any exact-BPM/duration
+        // library track of any artist/genre still shows up in the results
+        // list (confirmed: an explicit "Sub Focus" artist override still
+        // returned whatever-artist library matches, since only the online
+        // top-up ever respected it, and that never ran because the
+        // unfiltered library pool alone already reached MAX_RESULTS).
+        // forceOnline skips the library entirely for this override — see
+        // that field's own doc comment above.
+        const genreFilter = body.searchMode === "genre" && body.searchValue
+          ? body.searchValue.trim().toLowerCase()
+          : null;
+        const artistFilter = body.searchMode === "artist" && body.searchValue
+          ? body.searchValue.trim().toLowerCase()
+          : null;
+        const rows = body.forceOnline
+          ? []
+          : allRows
+            .filter(t => t.uri && !excludeUris.has(t.uri) && t.tempo != null && t.durationMs != null && durationOk(t.durationMs))
+            .filter(t => !genreFilter || (t.genres ?? "").toLowerCase().includes(genreFilter))
+            .filter(t => !artistFilter || (t.artistNames ?? "").toLowerCase().includes(artistFilter))
+            .filter(t => !body.energyBand || (t.energy != null && energyInBand(t.energy, body.energyBand)));
 
         const libraryCandidates: ReplaceCandidate[] = rows
           .map(t => ({
@@ -172,8 +217,15 @@ export async function POST(req: NextRequest) {
             if (body.searchMode === "artist" && body.searchValue) {
               artistNames = [body.searchValue];
             } else if (body.searchMode === "genre" && body.searchValue) {
-              const seedGenres = new Set([body.searchValue.trim().toLowerCase()]);
-              artistNames = artistsSharingGenre(allRows, seedGenres, [], MAX_ARTISTS_SEARCHED);
+              // Discogs first — real genre/style-tagged release data, not
+              // limited to artists already in this library. Falls back to
+              // the library-only heuristic if no Discogs token is
+              // configured (Settings > Integrations) or it finds nothing.
+              artistNames = await discogsArtistsForGenre(body.searchValue, MAX_ARTISTS_SEARCHED);
+              if (artistNames.length === 0) {
+                const seedGenres = new Set([body.searchValue.trim().toLowerCase()]);
+                artistNames = artistsSharingGenre(allRows, seedGenres, [], MAX_ARTISTS_SEARCHED);
+              }
             } else {
               const targetRow = body.targetUri ? allRows.find(t => t.uri === body.targetUri) : undefined;
               const seedGenres = parseGenres(targetRow?.genres ?? null);
@@ -187,13 +239,37 @@ export async function POST(req: NextRequest) {
             const need = MAX_RESULTS - results.length;
             let checked = 0;
 
+            // A single explicitly-named artist (searchMode "artist") is one
+            // deliberate, bounded lookup — check its FULL Deezer top
+            // catalog (up to 50, not the default 15) and skip the overall
+            // MAX_TRACKS_SEARCHED cap, since there's only ever one artist
+            // to exhaust. See replace-candidates-budget/route.ts's own copy
+            // of this for the full explanation (confirmed live: a 168 BPM
+            // search against Teebee's catalog had its one real match,
+            // "Cherokee", at position #39 — past both the old top=15 limit
+            // and the checked>=30 point the budget route used to give up
+            // at).
+            const singleArtistMode = body.searchMode === "artist" && artistNames.length === 1;
+            const topLimit = singleArtistMode ? 50 : 15;
+            const tracksCap = singleArtistMode ? Infinity : MAX_TRACKS_SEARCHED;
+
+            console.log(`[replace-candidates] online top-up: artists=${JSON.stringify(artistNames)} need=${need} targetBpm=${targetBpm}`);
+            let rejectedNoIsrc = 0, rejectedNoBpm = 0, rejectedExisting = 0, rejectedExcluded = 0, rejectedDuration = 0, rejectedBpm = 0, rejectedEnergy = 0, accepted = 0;
+
             outer:
             for (const artistName of artistNames) {
               if (results.length - libraryCandidates.length >= need) break;
-              const artistResult = await deezerArtistTopTracks(artistName, true);
+              const artistResult = await deezerArtistTopTracks(artistName, true, topLimit);
+              if (!artistResult.ok) {
+                console.log(`[replace-candidates] Deezer lookup failed for "${artistName}": ${artistResult.error}`);
+              }
               const withIsrc = artistResult.ok
                 ? artistResult.tracks.filter((t): t is typeof t & { isrc: string } => !!t.isrc)
                 : [];
+              if (artistResult.ok) {
+                rejectedNoIsrc += artistResult.tracks.length - withIsrc.length;
+                console.log(`[replace-candidates] "${artistName}": Deezer returned ${artistResult.tracks.length} tracks, ${withIsrc.length} with an ISRC`);
+              }
 
               // Resolve BPM one at a time (ReccoBeats via ISRC) and keep
               // only ones that actually land near the target — stop once
@@ -206,6 +282,15 @@ export async function POST(req: NextRequest) {
               let checkedForArtist = 0;
               for (const t of withIsrc) {
                 if (results.length - libraryCandidates.length >= need) break outer;
+                if (checked >= tracksCap) break outer;
+                // Genre search spreads across up to MAX_ARTISTS_SEARCHED
+                // artists that were never explicitly requested (unlike the
+                // "search by artist" override, which is one artist the user
+                // specifically typed) — capping how many of any one
+                // artist's tracks get resolved keeps the search moving
+                // across artists instead of burning the whole budget deep
+                // into one artist's catalog.
+                if (body.searchMode === "genre" && checkedForArtist >= MAX_TRACKS_PER_ARTIST_IN_GENRE_MODE) break;
                 const key = `${t.artist.toLowerCase()}::${t.title.toLowerCase()}`;
                 if (seenKeys.has(key)) continue;
                 seenKeys.add(key);
@@ -216,14 +301,16 @@ export async function POST(req: NextRequest) {
                 // artist, not how many acceptances we're trying to reach —
                 // "need" is a stopping threshold on ACCEPTED matches, a
                 // different count entirely.
-                send({ type: "progress", current: checkedForArtist, total: withIsrc.length, name: t.title, artist: t.artist });
+                send({ type: "progress", current: checkedForArtist, total: withIsrc.length, name: t.title, artist: t.artist, hits: accepted });
                 try {
                   const resolved = await resolveByIsrc(t.isrc);
-                  if (!resolved) continue;
-                  if (existingUris.has(resolved.uri)) continue; // already covered by the library search above
-                  if (excludeUris.has(resolved.uri)) continue; // already in the mix — would land as a duplicate
-                  if (!durationOk(t.durationMs)) continue;
-                  if (!isExactBpm(resolved.tempo, targetBpm)) continue;
+                  if (!resolved) { rejectedNoBpm++; continue; }
+                  if (existingUris.has(resolved.uri)) { rejectedExisting++; continue; } // already covered by the library search above
+                  if (excludeUris.has(resolved.uri)) { rejectedExcluded++; continue; } // already in the mix — would land as a duplicate
+                  if (!durationOk(t.durationMs)) { rejectedDuration++; continue; }
+                  if (!isExactBpm(resolved.tempo, targetBpm)) { rejectedBpm++; continue; }
+                  if (body.energyBand && (resolved.energy == null || !energyInBand(resolved.energy, body.energyBand))) { rejectedEnergy++; continue; }
+                  accepted++;
                   results.push({
                     source: "online",
                     uri: resolved.uri,
@@ -242,7 +329,10 @@ export async function POST(req: NextRequest) {
                 } catch { /* best-effort — one failed resolution shouldn't abort the rest */ }
               }
             }
-          } catch { /* best-effort — online top-up is a supplement, library results still return */ }
+            console.log(`[replace-candidates] online top-up done: checked=${checked} accepted=${accepted} rejected{noIsrc=${rejectedNoIsrc}, noBpmData=${rejectedNoBpm}, alreadyInLibrary=${rejectedExisting}, alreadyInMix=${rejectedExcluded}, durationMismatch=${rejectedDuration}, bpmMismatch=${rejectedBpm}, energyMismatch=${rejectedEnergy}}`);
+          } catch (err) {
+            console.log(`[replace-candidates] online top-up threw: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
 
         // Presentation order: every candidate here already passed the BPM

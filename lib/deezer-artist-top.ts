@@ -20,7 +20,7 @@ export type DeezerArtistTopResult =
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-export async function deezerArtistTopTracks(artistName: string, includeRelated: boolean): Promise<DeezerArtistTopResult> {
+export async function deezerArtistTopTracks(artistName: string, includeRelated: boolean, topLimit = 15): Promise<DeezerArtistTopResult> {
   const ar = await fetch(`https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}&limit=25`);
   if (!ar.ok) return { ok: false, error: `Deezer artist search failed (${ar.status})` };
   const ad = await ar.json() as { data?: { id: number; name: string }[] };
@@ -38,7 +38,13 @@ export async function deezerArtistTopTracks(artistName: string, includeRelated: 
     return { ok: false, error: `No exact Deezer match for "${artistName}" (closest: "${candidates[0].name}")` };
   }
 
-  const tr = await fetch(`https://api.deezer.com/artist/${artist.id}/top?limit=15`);
+  // topLimit defaults to 15 (the original, cheap "related artists + a few
+  // tracks each" case), but a caller doing one deliberate, explicit
+  // single-artist search wants the artist's FULL Deezer top list (its /top
+  // endpoint tops out around 50) — confirmed live: a 168 BPM search against
+  // Teebee's catalog had its one real match ("Cherokee") sitting at
+  // position #39, unreachable at the old fixed limit=15.
+  const tr = await fetch(`https://api.deezer.com/artist/${artist.id}/top?limit=${topLimit}`);
   if (!tr.ok) return { ok: false, error: `Deezer top tracks failed (${tr.status})` };
   const td = await tr.json() as { data?: { id: number; title: string; artist: { name: string } }[] };
   let tracks = td.data ?? [];
@@ -49,7 +55,7 @@ export async function deezerArtistTopTracks(artistName: string, includeRelated: 
   // relevance/rank so it's still "popular songs", just via a different
   // endpoint.
   if (tracks.length === 0) {
-    const sr = await fetch(`https://api.deezer.com/search?q=artist:"${encodeURIComponent(artist.name)}"&limit=25`);
+    const sr = await fetch(`https://api.deezer.com/search?q=artist:"${encodeURIComponent(artist.name)}"&limit=${Math.max(topLimit, 25)}`);
     if (sr.ok) {
       const sd = await sr.json() as { data?: { id: number; title: string; artist: { name: string }; rank?: number }[] };
       tracks = (sd.data ?? [])

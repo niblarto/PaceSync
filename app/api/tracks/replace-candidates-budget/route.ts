@@ -6,6 +6,8 @@ import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
 import { resolveByIsrc, sleep } from "@/lib/track-enrich";
 import { deezerArtistTopTracks } from "@/lib/deezer-artist-top";
 import { artistsSharingGenre, parseGenres } from "@/lib/genre-artists";
+import { discogsArtistsForGenre } from "@/lib/discogs-artist-search";
+import { energyInBand, type EnergyBand } from "@/lib/energy-bands";
 
 // Multi-track "remix selected" (Dashboard chart's multi-select ♻ menu):
 // discards every selected track and refills their COMBINED time budget with
@@ -43,12 +45,27 @@ const SWAP_LOOKAHEAD = 8;
 // "library first, online only if short" rule replace-candidates/route.ts
 // already uses for the single-track swap), and stays capped modestly even
 // then rather than exhausting every related-artist track Deezer offers.
+//
+// EXCEPTION: an explicit single-artist override (searchMode "artist") skips
+// this cap and checks that artist's FULL catalog — this is one deliberate,
+// bounded lookup against a specific artist the user named, not an
+// open-ended scan across several automatically-picked artists (confirmed:
+// a 168 BPM search against Teebee's catalog had its one genuine match,
+// "Cherokee", sitting at position #39 — past where the old 30-track cap
+// gave up). The cap still applies per-artist whenever MORE than one artist
+// is being searched (genre mode, or the automatic own-artist +
+// genre-sharing default), where unbounded-per-artist would make a
+// multi-artist search open-ended again.
 const MAX_ONLINE_RESOLVE = 30;
+// See replace-candidates/route.ts's own copy of this constant — genre
+// search's artists are picked automatically, so cap how many of any one
+// artist's tracks get resolved before moving to the next artist.
+const MAX_TRACKS_PER_ARTIST_IN_GENRE_MODE = 5;
 // Hard cap on how many DIFFERENT artists' Deezer catalogs get searched —
 // each is its own sequential fetch, on top of every candidate's own
-// ReccoBeats resolution, so this stays small regardless of how many
+// ReccoBeats resolution, so this stays bounded regardless of how many
 // candidate artists the (own-artists + genre-sharing) selection turns up.
-const MAX_ARTISTS_SEARCHED = 5;
+const MAX_ARTISTS_SEARCHED = 10;
 
 function bpmDistance(tempo: number, targetBpm: number): number {
   return Math.abs(tempo - targetBpm);
@@ -150,6 +167,17 @@ export async function POST(req: NextRequest) {
         — see replace-candidates/route.ts's own body type for the full
         explanation, mirrored here. */
     searchMode?: "artist" | "genre"; searchValue?: string;
+    /** Picker's "force online lookup" toggle — skips the library pool
+        entirely for an explicit artist/genre override, so results always
+        come fresh from Deezer instead of the same library rows the library
+        pool would otherwise keep resurfacing. No effect without
+        searchMode/searchValue also set — "force online" only makes sense
+        alongside an explicit artist/genre choice. */
+    forceOnline?: boolean;
+    /** Optional Low/Medium/High energy filter, on top of the exact-BPM
+        match — see lib/energy-bands.ts for the band ranges. Applies to
+        both the library pool and every online candidate, same as BPM. */
+    energyBand?: EnergyBand;
   };
   const targetBpm = body.targetBpm;
   const budgetMs = body.budgetMs;
@@ -173,8 +201,44 @@ export async function POST(req: NextRequest) {
         const allRows = readAllTracks(loadRunningPlaylistConfig().csvFile);
 
         // ── Library pool (exact BPM, no duration filter) ──
-        const rows = allRows
-          .filter(t => t.uri && !excludeUris.has(t.uri) && t.tempo != null && t.durationMs != null && isExactBpm(t.tempo, targetBpm));
+        // An explicit "search by artist/genre" override must actually
+        // constrain which tracks are eligible, not just which artists get
+        // searched ONLINE — otherwise any exact-BPM track already in the
+        // library, regardless of artist/genre, can fill the whole budget
+        // before online search ever runs (confirmed: a 168 BPM Rap/Hip Hop
+        // track filled a "Drum and Bass" remix's budget this way, and
+        // separately an explicit "Sub Focus" artist override still pulled
+        // from the WHOLE library pool since only online search respected
+        // it — the library pool alone already covered the budget every
+        // time, so online never ran). Genre match is substring-based
+        // against the row's own comma-separated Genres tag
+        // (case-insensitive) — deliberately looser than an exact tag match,
+        // since a track's Genres column can carry several related tags at
+        // once and the user's typed genre won't always be phrased exactly
+        // like the stored tag. Artist match is against the row's primary
+        // artist (first name in the comma-separated Artist Name(s) field),
+        // also case-insensitive substring, same convention as
+        // lib/genre-artists.ts.
+        //
+        // forceOnline (the picker's "force online lookup" toggle) skips the
+        // library pool for this override entirely — Sub Focus's own
+        // library tracks might legitimately already be in the mix
+        // (excludeUris) or exhausted, and a user reaching for "force
+        // online" wants FRESH candidates from Deezer, not the same already-
+        // seen library rows resurfacing.
+        const genreFilter = body.searchMode === "genre" && body.searchValue
+          ? body.searchValue.trim().toLowerCase()
+          : null;
+        const artistFilter = body.searchMode === "artist" && body.searchValue
+          ? body.searchValue.trim().toLowerCase()
+          : null;
+        const rows = body.forceOnline
+          ? []
+          : allRows
+            .filter(t => t.uri && !excludeUris.has(t.uri) && t.tempo != null && t.durationMs != null && isExactBpm(t.tempo, targetBpm))
+            .filter(t => !genreFilter || (t.genres ?? "").toLowerCase().includes(genreFilter))
+            .filter(t => !artistFilter || (t.artistNames ?? "").toLowerCase().includes(artistFilter))
+            .filter(t => !body.energyBand || (t.energy != null && energyInBand(t.energy, body.energyBand)));
 
         const pool: BudgetFillTrack[] = rows
           .map(t => ({
@@ -207,8 +271,14 @@ export async function POST(req: NextRequest) {
           if (body.searchMode === "artist" && body.searchValue) {
             artistNames = [body.searchValue];
           } else if (body.searchMode === "genre" && body.searchValue) {
-            const seedGenres = new Set([body.searchValue.trim().toLowerCase()]);
-            artistNames = artistsSharingGenre(allRows, seedGenres, [], MAX_ARTISTS_SEARCHED);
+            // Discogs first (real genre/style-tagged release data), falls
+            // back to the library-only heuristic — see replace-candidates/
+            // route.ts's own copy of this branch for the full explanation.
+            artistNames = await discogsArtistsForGenre(body.searchValue, MAX_ARTISTS_SEARCHED);
+            if (artistNames.length === 0) {
+              const seedGenres = new Set([body.searchValue.trim().toLowerCase()]);
+              artistNames = artistsSharingGenre(allRows, seedGenres, [], MAX_ARTISTS_SEARCHED);
+            }
           } else {
             const ownArtists = Array.from(new Set((body.artistNames ?? []).filter(Boolean).map(a => a.trim().toLowerCase())))
               .map(lower => (body.artistNames ?? []).find(a => a.trim().toLowerCase() === lower)!);
@@ -225,35 +295,67 @@ export async function POST(req: NextRequest) {
           artistNames = artistNames.slice(0, MAX_ARTISTS_SEARCHED);
         }
 
+        console.log(`[replace-candidates-budget] searchMode=${body.searchMode ?? "auto"} searchValue=${body.searchValue ?? "(none)"} forceOnline=${!!body.forceOnline} energyBand=${body.energyBand ?? "(any)"} libraryPoolSize=${pool.length} libraryTotalSec=${libraryTotalSec.toFixed(1)} budgetSec=${(budgetMs / 1000).toFixed(1)} artistNames=${JSON.stringify(artistNames)}`);
+
+        // A single explicitly-named artist (searchMode "artist") is one
+        // deliberate, bounded lookup — check that artist's FULL Deezer top
+        // catalog (up to 50 tracks, not the default 15) and don't give up
+        // at MAX_ONLINE_RESOLVE either, since there's only ever one artist
+        // to exhaust. Genre mode / automatic mode still use the smaller
+        // per-artist default and the overall cap, since those can involve
+        // several artists and staying bounded matters more there.
+        const singleArtistMode = body.searchMode === "artist" && artistNames.length === 1;
+        const topLimit = singleArtistMode ? 50 : 15;
+        const resolveCap = singleArtistMode ? Infinity : MAX_ONLINE_RESOLVE;
+
         if (artistNames.length > 0) {
           send({ type: "online-start" });
           const existingUris = new Set(rows.map(t => t.uri));
           const seenKeys = new Set(pool.map(c => `${c.artist.toLowerCase()}::${c.name.toLowerCase()}`));
           let resolved = 0;
+          let rejectedNoBpm = 0, rejectedExisting = 0, rejectedExcluded = 0, rejectedBpm = 0, rejectedEnergy = 0, accepted = 0;
 
           const budgetSec = budgetMs / 1000;
           const poolCoversBudget = () => pool.reduce((sum, t) => sum + t.durationMs / 1000, 0) >= budgetSec;
 
           outer:
           for (const artistName of artistNames) {
-            if (resolved >= MAX_ONLINE_RESOLVE || poolCoversBudget()) break;
+            if (resolved >= resolveCap || poolCoversBudget()) break;
             try {
-              const artistResult = await deezerArtistTopTracks(artistName, true);
-              if (!artistResult.ok) continue;
+              const artistResult = await deezerArtistTopTracks(artistName, true, topLimit);
+              if (!artistResult.ok) {
+                console.log(`[replace-candidates-budget] Deezer lookup failed for "${artistName}": ${artistResult.error}`);
+                continue;
+              }
               const withIsrc = artistResult.tracks.filter((t): t is typeof t & { isrc: string } => !!t.isrc);
+              console.log(`[replace-candidates-budget] "${artistName}": Deezer returned ${artistResult.tracks.length} tracks, ${withIsrc.length} with an ISRC`);
+              let resolvedForArtist = 0;
               for (const t of withIsrc) {
-                if (resolved >= MAX_ONLINE_RESOLVE || poolCoversBudget()) break outer;
+                if (resolved >= resolveCap || poolCoversBudget()) break outer;
+                // See replace-candidates/route.ts's own copy of this cap
+                // for the full explanation — genre search's artists aren't
+                // user-chosen, so spread the budget across artists instead
+                // of exhausting one before trying the next.
+                if (body.searchMode === "genre" && resolvedForArtist >= MAX_TRACKS_PER_ARTIST_IN_GENRE_MODE) break;
                 const key = `${t.artist.toLowerCase()}::${t.title.toLowerCase()}`;
                 if (seenKeys.has(key)) continue;
                 seenKeys.add(key);
                 if (resolved > 0) await sleep(120);
                 resolved++;
-                send({ type: "progress", current: resolved, total: MAX_ONLINE_RESOLVE, name: t.title, artist: t.artist });
+                resolvedForArtist++;
+                // hits: a running count of ACCEPTED matches so far, shown
+                // alongside the checked/total progress — lets the user see
+                // "found 1 so far" while a long single-artist search is
+                // still working through the rest of the catalog.
+                send({ type: "progress", current: resolved, total: Number.isFinite(resolveCap) ? resolveCap : withIsrc.length, name: t.title, artist: t.artist, hits: accepted });
                 try {
                   const r = await resolveByIsrc(t.isrc);
-                  if (!r) continue;
-                  if (existingUris.has(r.uri) || excludeUris.has(r.uri)) continue;
-                  if (!isExactBpm(r.tempo, targetBpm)) continue;
+                  if (!r) { rejectedNoBpm++; continue; }
+                  if (existingUris.has(r.uri)) { rejectedExisting++; continue; }
+                  if (excludeUris.has(r.uri)) { rejectedExcluded++; continue; }
+                  if (!isExactBpm(r.tempo, targetBpm)) { rejectedBpm++; continue; }
+                  if (body.energyBand && (r.energy == null || !energyInBand(r.energy, body.energyBand))) { rejectedEnergy++; continue; }
+                  accepted++;
                   pool.push({
                     source: "online", uri: r.uri, name: t.title, artist: t.artist,
                     tempo: r.tempo, effectiveBpm: r.tempo, durationMs: t.durationMs ?? 0,
@@ -263,12 +365,59 @@ export async function POST(req: NextRequest) {
               }
             } catch { /* best-effort — one artist's lookup failing shouldn't abort the others */ }
           }
+          console.log(`[replace-candidates-budget] online top-up done: checked=${resolved} accepted=${accepted} rejected{noBpmData=${rejectedNoBpm}, alreadyInLibrary=${rejectedExisting}, alreadyInMix=${rejectedExcluded}, bpmMismatch=${rejectedBpm}, energyMismatch=${rejectedEnergy}}`);
         }
 
+        // An explicit artist/genre override constrains the pool to that
+        // artist/genre — but that artist might genuinely only have a
+        // handful of tracks at the exact target BPM (confirmed live: a
+        // Teebee 168 BPM search found exactly 1 real match, "Cherokee",
+        // against a ~25min combined budget from 6 selected tracks — using
+        // just that one match left the mix ~18min shorter than before).
+        // Rather than silently apply a big underfill, backfill the
+        // remaining shortfall from the WHOLE library (any artist/genre,
+        // still exact-BPM, but NOT energy-filtered — the backfill is a
+        // last-resort length-preservation measure, and stacking the energy
+        // constraint on top would only make the underfill worse) so the
+        // mix's actual length is preserved, and tell the user how many of
+        // the final tracks came from that fallback so they know the result
+        // isn't purely Teebee/"Drum and Bass"/whatever they asked for.
         const usable = pool.filter(t => t.durationMs > 0);
-        const chosen = fitBudget(usable, budgetMs / 1000);
+        const constrainedSec = usable.reduce((sum, t) => sum + t.durationMs / 1000, 0);
+        const budgetSec = budgetMs / 1000;
+        const hasConstraint = ((body.searchMode === "artist" || body.searchMode === "genre") && !!body.searchValue) || !!body.energyBand;
+        let backfillCount = 0;
+        if (hasConstraint && constrainedSec < budgetSec * 0.5) {
+          const usedUris = new Set(usable.map(t => t.uri).filter((u): u is string => !!u));
+          const fallbackRows = allRows
+            .filter(t => t.uri && !usedUris.has(t.uri) && !excludeUris.has(t.uri) && t.tempo != null && t.durationMs != null && isExactBpm(t.tempo, targetBpm));
+          const fallbackPool: BudgetFillTrack[] = fallbackRows
+            .map(t => ({
+              source: "library" as const,
+              uri: t.uri, name: t.trackName ?? "", artist: t.artistNames ?? "",
+              tempo: t.tempo!, effectiveBpm: t.tempo!, durationMs: t.durationMs!,
+              isrc: t.isrc, key: t.key, mode: t.mode, energy: t.energy, danceability: t.danceability, valence: t.valence,
+              _dist: bpmDistance(t.tempo!, targetBpm),
+            }))
+            .sort((a, b) => a._dist - b._dist)
+            .map(({ _dist, ...c }) => c);
+          backfillCount = fallbackPool.length;
+          usable.push(...fallbackPool);
+          console.log(`[replace-candidates-budget] constrained pool only covers ${constrainedSec.toFixed(0)}s of ${budgetSec.toFixed(0)}s budget — backfilling with ${fallbackPool.length} unconstrained library tracks`);
+        }
+
+        const constraintDesc = [
+          body.searchValue ? `"${body.searchValue}"` : null,
+          body.energyBand ? `${body.energyBand} energy` : null,
+        ].filter(Boolean).join(" + ");
+        const fallbackTrackSet = new Set(backfillCount > 0 ? usable.slice(usable.length - backfillCount) : []);
+        const chosen = fitBudget(usable, budgetSec);
         const totalMs = chosen.reduce((sum, t) => sum + t.durationMs, 0);
-        send({ type: "done", tracks: chosen, totalMs, budgetMs, poolSize: usable.length });
+        const chosenFromFallback = chosen.filter(t => fallbackTrackSet.has(t)).length;
+        send({
+          type: "done", tracks: chosen, totalMs, budgetMs, poolSize: usable.length,
+          ...(chosenFromFallback > 0 ? { warning: `Only found enough ${constraintDesc} matches to cover part of the budget — topped up with ${chosenFromFallback} other track${chosenFromFallback === 1 ? "" : "s"} from your library to keep the mix's length.` } : {}),
+        });
       } catch (err) {
         send({ type: "error", error: err instanceof Error ? err.message : "Search failed" });
       } finally {

@@ -16,6 +16,7 @@ import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaSched
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
 import { useRunningPlaylist, getRunningPlaylist } from "./useRunningPlaylist";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
+import type { EnergyBand } from "@/lib/energy-bands";
 
 function mmssToSec(mmss: string): number {
   const p = mmss.split(":").map(Number);
@@ -2205,7 +2206,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   // segments gets each segment's own stretch refilled at ITS OWN target,
   // rather than incorrectly pooling multiple different BPMs into one
   // combined budget.
-  async function remixSelectedChartTracks(selectedUris: Set<string>, fixedTargetBpm: number | null, searchOverride?: { mode: "artist" | "genre"; value: string } | null) {
+  async function remixSelectedChartTracks(selectedUris: Set<string>, fixedTargetBpm: number | null, searchOverride?: { mode: "artist" | "genre"; value: string } | null, forceOnline?: boolean, energyBand?: EnergyBand | null) {
     if (!aiDjMix || selectedUris.size === 0) return;
     setChartRemixing(true);
     setChartRemixError(null);
@@ -2239,6 +2240,7 @@ export function DashboardClient({ spotifyUser }: Props) {
 
       const skipped = aiDjMix.tracks.filter(t => selectedUris.has(t.uri) && !runs.some(r => r.tracks.includes(t)));
       const failures: string[] = skipped.map(t => t.name);
+      const warnings: string[] = [];
 
       // Applied as one batch at the end: splicing runs one at a time would
       // shift every later index out from under the next run's own
@@ -2256,7 +2258,8 @@ export function DashboardClient({ spotifyUser }: Props) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               targetBpm: run.targetBpm, artistNames, seedUris, excludeUris: Array.from(excludeUris), budgetMs,
-              ...(searchOverride ? { searchMode: searchOverride.mode, searchValue: searchOverride.value } : {}),
+              ...(searchOverride ? { searchMode: searchOverride.mode, searchValue: searchOverride.value, forceOnline: !!forceOnline } : {}),
+              ...(energyBand ? { energyBand } : {}),
             }),
           });
           if (!res.ok || !res.body) {
@@ -2278,15 +2281,17 @@ export function DashboardClient({ spotifyUser }: Props) {
               const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
               if (!dataLine) continue;
               const msg = JSON.parse(dataLine.slice(6)) as
-                { type: string; current?: number; total?: number; name?: string; artist?: string; tracks?: ReplaceCandidate[]; error?: string };
+                { type: string; current?: number; total?: number; name?: string; artist?: string; hits?: number; tracks?: ReplaceCandidate[]; warning?: string; error?: string };
               if (msg.type === "online-start") {
                 setChartRemixStatus("Online lookup starting…");
               } else if (msg.type === "progress") {
-                setChartRemixStatus(`Online lookup: checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""} (${msg.current}/${msg.total})`);
+                const hitsText = msg.hits ? ` — ${msg.hits} match${msg.hits === 1 ? "" : "es"} found` : "";
+                setChartRemixStatus(`Online lookup: checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""} (${msg.current}/${msg.total})${hitsText}`);
               } else if (msg.type === "error") {
                 throw new Error(msg.error ?? "Search failed");
               } else if (msg.type === "done") {
                 picked = msg.tracks ?? [];
+                if (msg.warning) warnings.push(msg.warning);
               }
             }
           }
@@ -2307,9 +2312,12 @@ export function DashboardClient({ spotifyUser }: Props) {
 
       if (spliceOps.length > 0) spliceMixTracks(spliceOps);
       setChartSelectedUris(new Set());
+      const messages: string[] = [];
       if (failures.length > 0) {
-        setChartRemixError(`No match found for ${failures.length} track${failures.length === 1 ? "" : "s"}: ${failures.slice(0, 3).join(", ")}${failures.length > 3 ? "…" : ""}`);
+        messages.push(`No match found for ${failures.length} track${failures.length === 1 ? "" : "s"}: ${failures.slice(0, 3).join(", ")}${failures.length > 3 ? "…" : ""}`);
       }
+      messages.push(...warnings);
+      if (messages.length > 0) setChartRemixError(messages.join(" "));
     } finally {
       setChartRemixStatus(null);
       setChartRemixing(false);
@@ -3357,17 +3365,17 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           <>
             <div className="fixed inset-0 z-40" onClick={() => setChartBpmPrompt(null)} />
             <div
-              className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl p-3 w-80 space-y-2"
+              className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl p-3 w-[28rem] space-y-2"
               style={{
-                left: Math.min(chartBpmPrompt.x, window.innerWidth - 340),
+                left: Math.min(chartBpmPrompt.x, window.innerWidth - 460),
                 top: Math.min(chartBpmPrompt.y, window.innerHeight - 160),
               }}
             >
               <p className="text-xs text-slate-400">Remix {chartSelectedUris.size} tracks</p>
               <RemixPromptForm
-                onSubmit={(bpm, override) => {
+                onSubmit={(bpm, override, forceOnline, energyBand) => {
                   setChartBpmPrompt(null);
-                  void remixSelectedChartTracks(chartSelectedUris, bpm, override);
+                  void remixSelectedChartTracks(chartSelectedUris, bpm, override, forceOnline, energyBand);
                 }}
               />
             </div>
@@ -3478,12 +3486,19 @@ function fetchGenresArtists() {
 // pick the same track's own artist + genre-sharing artists); typing
 // selects an explicit artist or genre to search instead, filtered against
 // the library's own known values as the user types.
-function SearchModePicker({ value, onChange }: {
+function SearchModePicker({ value, onChange, forceOnline, onForceOnlineChange }: {
   value: { mode: "artist" | "genre"; value: string } | null;
   onChange: (v: { mode: "artist" | "genre"; value: string } | null) => void;
+  forceOnline: boolean;
+  onForceOnlineChange: (v: boolean) => void;
 }) {
   const [options, setOptions] = useState<{ genres: string[]; artists: string[] }>({ genres: [], artists: [] });
-  const [mode, setMode] = useState<"artist" | "genre">(value?.mode ?? "artist");
+  // "Any" (the 3rd toggle option) is exactly today's null override — the
+  // automatic default (replaced track's own artist + genre-sharing
+  // artists), just given an explicit, visible name instead of being an
+  // implicit "nothing selected" state. Picking Artist or Genre and typing a
+  // value is what actually takes precedence over it.
+  const [mode, setMode] = useState<"any" | "artist" | "genre">(value?.mode ?? "any");
   const [text, setText] = useState(value?.value ?? "");
   const [open, setOpen] = useState(false);
 
@@ -3497,59 +3512,116 @@ function SearchModePicker({ value, onChange }: {
   function pick(v: string) {
     setText(v);
     setOpen(false);
-    onChange({ mode, value: v });
+    if (mode !== "any") onChange({ mode, value: v });
   }
 
-  function clear() {
+  function selectMode(m: "any" | "artist" | "genre") {
+    setMode(m);
     setText("");
     setOpen(false);
     onChange(null);
+    if (m === "any") onForceOnlineChange(false);
   }
 
   return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-slate-500 shrink-0">Search online by</span>
+        <div className="flex rounded-lg border border-white/10 overflow-hidden shrink-0">
+          {(["any", "artist", "genre"] as const).map(m => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => selectMode(m)}
+              className={`px-2 py-1 transition-colors ${mode === m ? "bg-sky-500/20 text-sky-300" : "bg-slate-800/60 text-slate-500 hover:text-slate-300"}`}
+            >
+              {m === "any" ? "Any" : m === "artist" ? "Artist" : "Genre"}
+            </button>
+          ))}
+        </div>
+        {mode !== "any" && (
+          <div className="relative flex-1 min-w-0">
+            <input
+              type="text"
+              value={text}
+              placeholder={mode === "artist" ? "Type an artist…" : "Type a genre…"}
+              onChange={e => {
+                const v = e.target.value;
+                setText(v);
+                setOpen(true);
+                // A typed value counts as the override too, not just a
+                // clicked suggestion — the earlier version only called
+                // onChange from pick() (dropdown click), so typing an
+                // artist/genre and hitting Remix/Search without ever
+                // clicking a suggestion silently left the override at null
+                // and the search fell through to "automatic" (confirmed
+                // live: typing "Teebee" + Force Online still logged
+                // searchMode=auto searchValue=(none) server-side).
+                onChange(v.trim() ? { mode, value: v } : null);
+              }}
+              onFocus={() => setOpen(true)}
+              onBlur={() => setTimeout(() => setOpen(false), 150)}
+              className="w-full rounded-lg bg-slate-800/60 border border-white/10 px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+            />
+            {open && filtered.length > 0 && (
+              <div className="absolute z-10 mt-1 w-full max-h-40 overflow-y-auto no-scrollbar rounded-lg bg-slate-900 border border-white/10 shadow-xl">
+                {filtered.map(v => (
+                  <button
+                    key={v}
+                    type="button"
+                    onMouseDown={e => e.preventDefault()}
+                    onClick={() => pick(v)}
+                    className="block w-full text-left px-2 py-1 hover:bg-sky-500/15 text-slate-200 truncate"
+                  >
+                    {v}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {mode === "any" && (
+          <span className="text-slate-600 flex-1 min-w-0 truncate">Same as track (default)</span>
+        )}
+      </div>
+      {mode !== "any" && (
+        <label className="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={forceOnline}
+            onChange={e => onForceOnlineChange(e.target.checked)}
+            className="accent-sky-500"
+          />
+          Force online lookup (skip the library, search Deezer directly against this artist/genre)
+        </label>
+      )}
+    </div>
+  );
+}
+
+// Optional Low/Medium/High energy filter, alongside BPM and the
+// artist/genre override — see lib/energy-bands.ts for the band ranges.
+// null means "any energy" (no filter), same null-means-unset convention as
+// SearchModePicker's value.
+function EnergyPicker({ value, onChange }: {
+  value: EnergyBand | null;
+  onChange: (v: EnergyBand | null) => void;
+}) {
+  return (
     <div className="flex items-center gap-2 text-xs">
-      <span className="text-slate-500 shrink-0">Search online by</span>
+      <span className="text-slate-500 shrink-0">Energy</span>
       <div className="flex rounded-lg border border-white/10 overflow-hidden shrink-0">
-        {(["artist", "genre"] as const).map(m => (
+        {(["any", "low", "medium", "high"] as const).map(band => (
           <button
-            key={m}
+            key={band}
             type="button"
-            onClick={() => { setMode(m); setText(""); onChange(null); }}
-            className={`px-2 py-1 transition-colors ${mode === m ? "bg-sky-500/20 text-sky-300" : "bg-slate-800/60 text-slate-500 hover:text-slate-300"}`}
+            onClick={() => onChange(band === "any" ? null : band)}
+            className={`px-2 py-1 capitalize transition-colors ${(value ?? "any") === band ? "bg-sky-500/20 text-sky-300" : "bg-slate-800/60 text-slate-500 hover:text-slate-300"}`}
           >
-            {m === "artist" ? "Artist" : "Genre"}
+            {band}
           </button>
         ))}
       </div>
-      <div className="relative flex-1 min-w-0">
-        <input
-          type="text"
-          value={text}
-          placeholder={mode === "artist" ? "Same as track (default)" : "Same as track's genre (default)"}
-          onChange={e => { setText(e.target.value); setOpen(true); if (!e.target.value.trim()) onChange(null); }}
-          onFocus={() => setOpen(true)}
-          onBlur={() => setTimeout(() => setOpen(false), 150)}
-          className="w-full rounded-lg bg-slate-800/60 border border-white/10 px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
-        />
-        {open && filtered.length > 0 && (
-          <div className="absolute z-10 mt-1 w-full max-h-40 overflow-y-auto no-scrollbar rounded-lg bg-slate-900 border border-white/10 shadow-xl">
-            {filtered.map(v => (
-              <button
-                key={v}
-                type="button"
-                onMouseDown={e => e.preventDefault()}
-                onClick={() => pick(v)}
-                className="block w-full text-left px-2 py-1 hover:bg-sky-500/15 text-slate-200 truncate"
-              >
-                {v}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-      {value && (
-        <button type="button" onClick={clear} className="text-slate-500 hover:text-slate-300 shrink-0">Reset</button>
-      )}
     </div>
   );
 }
@@ -3558,17 +3630,19 @@ function SearchModePicker({ value, onChange }: {
 // segment BPM) — shared by the chart's selection context menu, paired with
 // the same SearchModePicker override control the single-track modal uses.
 function RemixPromptForm({ onSubmit }: {
-  onSubmit: (bpm: number | null, override: { mode: "artist" | "genre"; value: string } | null) => void;
+  onSubmit: (bpm: number | null, override: { mode: "artist" | "genre"; value: string } | null, forceOnline: boolean, energyBand: EnergyBand | null) => void;
 }) {
   const [bpmInput, setBpmInput] = useState("");
   const [searchOverride, setSearchOverride] = useState<{ mode: "artist" | "genre"; value: string } | null>(null);
+  const [forceOnline, setForceOnline] = useState(false);
+  const [energyBand, setEnergyBand] = useState<EnergyBand | null>(null);
 
   return (
     <form
       onSubmit={e => {
         e.preventDefault();
         const bpm = parseInt(bpmInput, 10);
-        onSubmit(bpm > 0 ? bpm : null, searchOverride);
+        onSubmit(bpm > 0 ? bpm : null, searchOverride, forceOnline, energyBand);
       }}
       className="space-y-2"
     >
@@ -3582,7 +3656,8 @@ function RemixPromptForm({ onSubmit }: {
           className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono"
         />
       </label>
-      <SearchModePicker value={searchOverride} onChange={setSearchOverride} />
+      <SearchModePicker value={searchOverride} onChange={setSearchOverride} forceOnline={forceOnline} onForceOnlineChange={setForceOnline} />
+      <EnergyPicker value={energyBand} onChange={setEnergyBand} />
       <button type="submit" className="w-full rounded-lg bg-green-500 hover:bg-green-400 text-black font-semibold text-xs px-3 py-1.5 transition-colors">
         Remix
       </button>
@@ -3626,6 +3701,8 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
   // means "automatic" (same track's own artist, plus genre-sharing
   // artists), per the server route's default behavior.
   const [searchOverride, setSearchOverride] = useState<{ mode: "artist" | "genre"; value: string } | null>(null);
+  const [forceOnline, setForceOnline] = useState(false);
+  const [energyBand, setEnergyBand] = useState<EnergyBand | null>(null);
 
   async function search() {
     const bpm = parseInt(bpmInput, 10);
@@ -3640,7 +3717,8 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           targetBpm: bpm, artistName: target.artists[0]?.name, targetUri: target.uri, excludeUris: mixUris, originalDurationMs: target.duration_ms,
-          ...(searchOverride ? { searchMode: searchOverride.mode, searchValue: searchOverride.value } : {}),
+          ...(searchOverride ? { searchMode: searchOverride.mode, searchValue: searchOverride.value, forceOnline } : {}),
+          ...(energyBand ? { energyBand } : {}),
         }),
       });
       if (!res.ok || !res.body) {
@@ -3661,11 +3739,12 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
           const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
           if (!dataLine) continue;
           const msg = JSON.parse(dataLine.slice(6)) as
-            { type: string; current?: number; total?: number; name?: string; artist?: string; candidates?: ReplaceCandidate[]; error?: string };
+            { type: string; current?: number; total?: number; name?: string; artist?: string; hits?: number; candidates?: ReplaceCandidate[]; error?: string };
           if (msg.type === "online-start") {
             setOnlineStatus("Online lookup starting…");
           } else if (msg.type === "progress") {
-            setOnlineStatus(`Online lookup: checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""} (${msg.current}/${msg.total})`);
+            const hitsText = msg.hits ? ` — ${msg.hits} match${msg.hits === 1 ? "" : "es"} found` : "";
+            setOnlineStatus(`Online lookup: checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""} (${msg.current}/${msg.total})${hitsText}`);
           } else if (msg.type === "error") {
             throw new Error(msg.error ?? "Search failed");
           } else if (msg.type === "done") {
@@ -3743,7 +3822,8 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
         <p className="text-xs text-slate-500">
           Only tracks within 15s of the original&apos;s length ({Math.round(target.duration_ms / 1000)}s) are shown, so swapping never throws off the rest of the mix&apos;s timing.
         </p>
-        <SearchModePicker value={searchOverride} onChange={setSearchOverride} />
+        <SearchModePicker value={searchOverride} onChange={setSearchOverride} forceOnline={forceOnline} onForceOnlineChange={setForceOnline} />
+        <EnergyPicker value={energyBand} onChange={setEnergyBand} />
         {onlineStatus && (
           <p className="text-xs text-sky-400 flex items-center gap-1.5"><Spinner /> {onlineStatus}</p>
         )}
