@@ -552,6 +552,10 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [chartSelectedUris, setChartSelectedUris] = useState<Set<string>>(new Set());
   const [chartSelectionMenu, setChartSelectionMenu] = useState<{ x: number; y: number } | null>(null);
   const [chartBpmPrompt, setChartBpmPrompt] = useState<{ x: number; y: number } | null>(null);
+  // "🔍 Lookup tracks…" — paste a plain-text tracklist, resolve each line
+  // to a real track + BPM via /api/tracks/lookup-list, read-only for now
+  // (see LookupTracksModal — no mix-integration yet, that's a follow-up).
+  const [lookupListOpen, setLookupListOpen] = useState(false);
   const [chartRemixing, setChartRemixing] = useState(false);
   const [chartRemixError, setChartRemixError] = useState<string | null>(null);
   // Live status while a run's online (Deezer/ReccoBeats) top-up is checking
@@ -1579,12 +1583,18 @@ export function DashboardClient({ spotifyUser }: Props) {
     setPaceProSaving(true);
     setPaceProSaveMsg(null);
     try {
+      // Use whatever the user has typed into the "Spotify playlist name"
+      // field, not aiDjMix.workoutTitle — that field never updates after
+      // the mix is loaded (it's set once when the mix is built/loaded), so
+      // saving under it silently ignored any rename the user made before
+      // clicking "Save to Pace Pro library"/"Update Pace Pro library".
+      const title = playlistName.trim() || aiDjMix.workoutTitle;
       const res = await fetch("/api/settings/pace-pro-saved", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: paceProLibraryMeta.savedMixId ?? undefined,
-          title: aiDjMix.workoutTitle,
+          title,
           totalSec: aiDjMix.totalSec,
           timeline: aiDjMix.timeline,
           splitsCsvText: paceProLibraryMeta.splitsCsvText,
@@ -2321,6 +2331,78 @@ export function DashboardClient({ spotifyUser }: Props) {
     } finally {
       setChartRemixStatus(null);
       setChartRemixing(false);
+    }
+  }
+
+  // "Try and add to mix" on the Lookup tracks modal — takes the user's
+  // CHECKED, already-resolved lookup matches and fits them against the
+  // current chart selection's combined duration, via the same
+  // fitBudget()/"fill the gap as near as possible" rule the multi-select
+  // Remix… flow uses (server-side, /api/tracks/lookup-fit — see that
+  // route's own comment). The selection is treated as ONE contiguous span
+  // (its min→max index range) rather than split into per-segment BPM runs
+  // like remixSelectedChartTracks does, since these tracks weren't picked
+  // by BPM search — there's no per-run BPM to split on here.
+  async function addLookupTracksToMix(picked: LookupResult[]): Promise<{ ok: boolean; message: string }> {
+    if (!aiDjMix || chartSelectedUris.size === 0) return { ok: false, message: "Select tracks in the chart first (Ctrl+click)." };
+    const matched = picked.filter(r => r.matched && r.uri && r.tempo != null && r.durationMs != null);
+    if (matched.length === 0) return { ok: false, message: "No checked tracks have a resolved match to add." };
+
+    const indices = aiDjMix.tracks
+      .map((t, i) => (chartSelectedUris.has(t.uri) ? i : -1))
+      .filter(i => i !== -1);
+    if (indices.length === 0) return { ok: false, message: "Selected tracks are no longer in the mix." };
+    const startIdx = Math.min(...indices);
+    const endIdx = Math.max(...indices);
+    const budgetMs = aiDjMix.tracks.slice(startIdx, endIdx + 1).reduce((sum, t) => sum + t.duration_ms, 0);
+
+    try {
+      const res = await fetch("/api/tracks/lookup-fit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          budgetMs,
+          tracks: matched.map(r => ({ uri: r.uri, name: r.name, artist: r.matchedArtist, tempo: r.tempo, durationMs: r.durationMs })),
+        }),
+      });
+      const data = await res.json() as { tracks?: { uri: string; name: string; artist: string; tempo: number; durationMs: number }[]; totalMs?: number; error?: string };
+      if (!res.ok || data.error || !data.tracks) throw new Error(data.error ?? `Fit failed (${res.status})`);
+      if (data.tracks.length === 0) return { ok: false, message: "Couldn't fit any of the checked tracks against the selection's length." };
+
+      const excludeUris = new Set(aiDjMix.tracks.map(t => t.uri));
+      const resolved: TrackWithBPM[] = [];
+      for (const t of data.tracks) {
+        const original = matched.find(r => r.uri === t.uri);
+        const alreadyInLibrary = original?.inLibrary ?? false;
+        if (!alreadyInLibrary) {
+          // Not in the CSV yet — add it the same way "more by this artist"/
+          // replace-candidates does, so the mix never points at a track
+          // with no library row (the next heal sweep would have nothing to
+          // backfill from otherwise).
+          await fetch("/api/tracks/add", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              tracks: [{ uri: t.uri, name: t.name, artist: t.artist, tempo: t.tempo }],
+              allowDeletedUris: [t.uri],
+            }),
+          }).catch(() => {});
+        }
+        resolved.push({
+          id: t.uri.split(":")[2] ?? t.uri, name: t.name, artists: [{ name: t.artist }],
+          album: { name: "", images: [] }, duration_ms: t.durationMs, uri: t.uri,
+          bpm: Math.round(t.tempo), energy: 0, // lookup-list doesn't resolve energy — not needed for chart display
+        });
+        excludeUris.add(t.uri);
+      }
+
+      spliceMixTracks([{ startIdx, endIdx, tracks: resolved }]);
+      setChartSelectedUris(new Set());
+      const totalSec = Math.round((data.totalMs ?? 0) / 1000);
+      const budgetSec = Math.round(budgetMs / 1000);
+      return { ok: true, message: `Added ${resolved.length} track${resolved.length === 1 ? "" : "s"} (${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, "0")} of ${Math.floor(budgetSec / 60)}:${String(budgetSec % 60).padStart(2, "0")} target).` };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : "Failed to fit tracks to mix" };
     }
   }
 
@@ -3330,6 +3412,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               >
                 🗑 Delete from library
               </button>
+              <button
+                className={`${item} text-emerald-300 hover:bg-emerald-500/15`}
+                onClick={() => { setChartTrackMenu(null); setLookupListOpen(true); }}
+              >
+                🔍 Lookup tracks…
+              </button>
             </div>
           </>
         );
@@ -3354,6 +3442,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 onClick={() => { const { x, y } = chartSelectionMenu; close(); setChartBpmPrompt({ x, y }); }}
               >
                 ♻ Remix…
+              </button>
+              <button
+                className={`${item} text-emerald-300 hover:bg-emerald-500/15`}
+                onClick={() => { close(); setLookupListOpen(true); }}
+              >
+                🔍 Lookup tracks…
               </button>
             </div>
           </>
@@ -3401,6 +3495,14 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           mixUris={aiDjMix?.tracks.map(t => t.uri) ?? [replaceTarget.track.uri]}
           onClose={() => setReplaceTarget(null)}
           onConfirm={(replacement) => replaceMixTrack(replaceTarget.index, replacement)}
+        />
+      )}
+
+      {lookupListOpen && (
+        <LookupTracksModal
+          onClose={() => setLookupListOpen(false)}
+          hasChartSelection={chartSelectedUris.size > 0}
+          onAddToMix={addLookupTracksToMix}
         />
       )}
 
@@ -3662,6 +3764,283 @@ function RemixPromptForm({ onSubmit }: {
         Remix
       </button>
     </form>
+  );
+}
+
+interface LookupResult {
+  raw: string;
+  title: string | null;
+  artist: string | null;
+  matched: boolean;
+  uri: string | null;
+  name: string | null;
+  matchedArtist: string | null;
+  tempo: number | null;
+  durationMs: number | null;
+  inLibrary: boolean;
+  error: string | null;
+}
+
+// Chart's multi-select "🔍 Lookup tracks…" menu item — paste a plain-text
+// tracklist (one per line, "Title" — Artist / Title - Artist), resolves
+// each line to a real Spotify track + BPM via /api/tracks/lookup-list (same
+// Deezer-ISRC-then-ReccoBeats pipeline as everything else here), and shows
+// whether it's already in the active library. Matched rows get a checkbox;
+// clicking the row itself (not the checkbox) plays it in Spotify, same
+// preview convention as ReplaceTrackModal below. Checked tracks can be
+// **Added to library** (just adds them, no mix change) or **Try and add to
+// mix**, which requires an existing chart selection (Ctrl+click) and fits
+// the checked tracks against that selection's combined duration using the
+// same fill-the-gap-as-near-as-possible rule as the Remix… flow (see
+// addLookupTracksToMix / /api/tracks/lookup-fit).
+function LookupTracksModal({ onClose, hasChartSelection, onAddToMix }: {
+  onClose: () => void;
+  hasChartSelection: boolean;
+  onAddToMix: (picked: LookupResult[]) => Promise<{ ok: boolean; message: string }>;
+}) {
+  const { data: session } = useSession();
+  const [text, setText] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<LookupResult[] | null>(null);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [playingUri, setPlayingUri] = useState<string | null>(null);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [addingToLibrary, setAddingToLibrary] = useState(false);
+  const [addingToMix, setAddingToMix] = useState(false);
+  const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const mouseDownOnBackdrop = useRef(false);
+
+  async function lookup() {
+    if (!text.trim()) { setError("Paste a list of tracks first"); return; }
+    setLoading(true);
+    setError(null);
+    setResults(null);
+    setProgress(null);
+    setChecked(new Set());
+    setActionMsg(null);
+    try {
+      const res = await fetch("/api/tracks/lookup-list", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `Lookup failed (${res.status})`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const msg = JSON.parse(dataLine.slice(6)) as
+            { type: string; current?: number; total?: number; name?: string; artist?: string; results?: LookupResult[]; error?: string };
+          if (msg.type === "progress") {
+            setProgress(`Checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""} (${msg.current}/${msg.total})`);
+          } else if (msg.type === "error") {
+            throw new Error(msg.error ?? "Lookup failed");
+          } else if (msg.type === "done") {
+            const done = msg.results ?? [];
+            setResults(done);
+            // Default every matched row to checked — most of the time the
+            // whole pasted list is what the user wants to act on, and
+            // unchecking the odd wrong match is less friction than
+            // checking each of a dozen rows individually.
+            setChecked(new Set(done.filter(r => r.matched && r.uri).map(r => r.uri!)));
+          }
+        }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Lookup failed");
+    } finally {
+      setProgress(null);
+      setLoading(false);
+    }
+  }
+
+  function preview(r: LookupResult) {
+    if (!r.uri) return;
+    setPlayingUri(r.uri);
+    playInSpotify(r.uri, session?.accessToken).catch(() => {});
+  }
+
+  function toggleChecked(uri: string) {
+    setChecked(prev => {
+      const next = new Set(prev);
+      if (next.has(uri)) next.delete(uri); else next.add(uri);
+      return next;
+    });
+  }
+
+  const checkedResults = () => (results ?? []).filter(r => r.matched && r.uri && checked.has(r.uri));
+
+  async function addCheckedToLibrary() {
+    const picked = checkedResults().filter(r => !r.inLibrary);
+    if (picked.length === 0) { setActionMsg("Nothing checked that isn't already in the library."); return; }
+    setAddingToLibrary(true);
+    setActionMsg(null);
+    try {
+      const res = await fetch("/api/tracks/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks: picked.map(r => ({ uri: r.uri, name: r.name, artist: r.matchedArtist, tempo: r.tempo })),
+          allowDeletedUris: picked.map(r => r.uri),
+        }),
+      });
+      const data = await res.json() as { error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `Add failed (${res.status})`);
+      setResults(prev => prev?.map(r => (r.uri && checked.has(r.uri) ? { ...r, inLibrary: true } : r)) ?? prev);
+      setActionMsg(`Added ${picked.length} track${picked.length === 1 ? "" : "s"} to the library.`);
+    } catch (e) {
+      setActionMsg(e instanceof Error ? e.message : "Failed to add to library");
+    } finally {
+      setAddingToLibrary(false);
+    }
+  }
+
+  async function addCheckedToMix() {
+    const picked = checkedResults();
+    if (picked.length === 0) { setActionMsg("Check at least one matched track first."); return; }
+    setAddingToMix(true);
+    setActionMsg(null);
+    try {
+      const { message } = await onAddToMix(picked);
+      setActionMsg(message);
+    } finally {
+      setAddingToMix(false);
+    }
+  }
+
+  const matchedCount = results?.filter(r => r.matched).length ?? 0;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      // Close only on a genuine click-on-the-backdrop, not a mouseup that
+      // happens to land there — dragging the textarea's resize handle can
+      // end the drag over the backdrop once the modal has grown, and a
+      // plain onClick={onClose} here treated that as "close the whole
+      // modal" (confirmed: resizing the textarea made the modal vanish).
+      // Tracking where the mousedown itself started fixes it: only close if
+      // BOTH the press and the release were on the backdrop itself.
+      onMouseDown={e => { if (e.target === e.currentTarget) mouseDownOnBackdrop.current = true; }}
+      onClick={e => { if (e.target === e.currentTarget && mouseDownOnBackdrop.current) onClose(); mouseDownOnBackdrop.current = false; }}
+    >
+      <div
+        className="rounded-xl bg-slate-900 border border-white/10 p-5 max-w-3xl w-full max-h-[90vh] flex flex-col space-y-4"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="font-semibold text-slate-100">Lookup tracks</h3>
+            <p className="text-sm text-slate-400 mt-0.5">
+              Paste a list, one track per line — e.g. <span className="text-slate-500">&quot;Song Title&quot; — Artist Name</span>
+            </p>
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-lg leading-none shrink-0">×</button>
+        </div>
+
+        <textarea
+          value={text}
+          onChange={e => setText(e.target.value)}
+          placeholder={'"Global Love" — High Contrast\n"All Blue" — Halogenix ft. Cleveland Watkiss'}
+          rows={10}
+          className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono resize-y"
+        />
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={lookup}
+            disabled={loading}
+            className="rounded-lg bg-green-500 hover:bg-green-400 disabled:opacity-40 text-black font-semibold text-sm px-4 py-1.5 transition-colors"
+          >
+            {loading ? "Looking up…" : "Look up"}
+          </button>
+          {results && <span className="text-xs text-slate-500">{matchedCount} of {results.length} matched</span>}
+        </div>
+
+        {progress && (
+          <p className="text-xs text-sky-400 flex items-center gap-1.5"><Spinner /> {progress}</p>
+        )}
+        {error && <p className="text-sm text-red-400">{error}</p>}
+
+        {results && (
+          <div className="rounded-lg border border-white/10 divide-y divide-white/5 overflow-y-auto no-scrollbar flex-1 min-h-0">
+            {results.map((r, i) => (
+              <div key={i} className="px-3 py-2 flex items-center gap-3">
+                {r.matched ? (
+                  <>
+                    <input
+                      type="checkbox"
+                      checked={!!r.uri && checked.has(r.uri)}
+                      onChange={() => r.uri && toggleChecked(r.uri)}
+                      className="accent-emerald-500 shrink-0"
+                    />
+                    <button
+                      onClick={() => preview(r)}
+                      className="flex-1 min-w-0 text-left"
+                      title="Play in Spotify"
+                    >
+                      <p className={`text-sm truncate ${playingUri === r.uri ? "text-orange-400" : "text-slate-200"}`}>
+                        {r.name} <span className="text-slate-500">— {r.matchedArtist}</span>
+                      </p>
+                      <p className="text-xs text-slate-500 flex items-center gap-2">
+                        <span className="text-green-400">{Math.round(r.tempo ?? 0)} BPM</span>
+                        {r.durationMs != null && (
+                          <span className="text-slate-600">· {Math.floor(r.durationMs / 60000)}:{String(Math.round((r.durationMs % 60000) / 1000)).padStart(2, "0")}</span>
+                        )}
+                        {r.inLibrary && <span className="text-sky-400">· already in library</span>}
+                      </p>
+                    </button>
+                  </>
+                ) : (
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm truncate text-slate-400">{r.title ?? r.raw}{r.artist ? <span className="text-slate-600"> — {r.artist}</span> : null}</p>
+                    <p className="text-xs text-red-400/80">{r.error ?? "No match"}</p>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {results && matchedCount > 0 && (
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={addCheckedToLibrary}
+                disabled={addingToLibrary || checked.size === 0}
+                className="rounded-lg border border-sky-500/40 bg-sky-500/15 hover:bg-sky-500/25 disabled:opacity-40 text-sky-300 font-semibold text-xs px-3 py-1.5 transition-colors"
+              >
+                {addingToLibrary ? "Adding…" : "Add to library"}
+              </button>
+              <button
+                onClick={addCheckedToMix}
+                disabled={addingToMix || checked.size === 0 || !hasChartSelection}
+                title={hasChartSelection ? undefined : "Ctrl+click tracks in the chart first, so there's a gap to fit these into"}
+                className="rounded-lg border border-purple-500/40 bg-purple-500/15 hover:bg-purple-500/25 disabled:opacity-40 text-purple-300 font-semibold text-xs px-3 py-1.5 transition-colors"
+              >
+                {addingToMix ? "Fitting…" : "Try and add to mix"}
+              </button>
+              <span className="text-xs text-slate-600">{checked.size} checked</span>
+            </div>
+            {!hasChartSelection && (
+              <p className="text-xs text-slate-600">Select tracks in the chart (Ctrl+click) to enable &quot;Try and add to mix&quot;.</p>
+            )}
+            {actionMsg && <p className="text-xs text-slate-400">{actionMsg}</p>}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

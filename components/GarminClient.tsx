@@ -198,12 +198,24 @@ export function GarminClient() {
   const router = useRouter();
   const activityScrollRef = useRef<HTMLDivElement>(null);
 
+  // Activities filter/sort — name search, sport-type checkboxes (all types
+  // checked by default so nothing's hidden until the user actually
+  // narrows it), and an optional distance sort. Sort toggles between
+  // longest-first and shortest-first on repeated clicks; null (the
+  // default) keeps the original date order from the API.
+  const [activityNameFilter, setActivityNameFilter] = useState("");
+  const [activitySportFilter, setActivitySportFilter] = useState<Set<string> | null>(null); // null = "all" (not yet initialized from data)
+  const [distanceSort, setDistanceSort] = useState<"desc" | "asc" | null>(null);
+
   useEffect(() => {
     fetch("/api/garmin/data")
       .then(r => r.json())
       .then((d: GarminData & { error?: string }) => {
         if (d.error) { setError(d.error); return; }
         setData(d);
+        // Every distinct sport type starts checked, so filtering doesn't
+        // hide anything until the user actually unchecks something.
+        setActivitySportFilter(new Set(d.activities.map(sportLabel)));
       })
       .catch(e => setError(String(e)))
       .finally(() => setLoading(false));
@@ -236,6 +248,42 @@ export function GarminClient() {
       setTimeout(() => { el.style.backgroundColor = ""; }, 1200);
     });
   }, [data]);
+
+  // Every distinct sport type present in the data, in a stable order (Run
+  // first since it's the overwhelmingly common case here, then whatever
+  // else shows up alphabetically) — drives both the checkbox list and the
+  // filter itself.
+  const sportTypes = data
+    ? Array.from(new Set(data.activities.map(sportLabel))).sort((a, b) => (a === "Run" ? -1 : b === "Run" ? 1 : a.localeCompare(b)))
+    : [];
+
+  const filteredActivities = data
+    ? data.activities.filter(a => {
+        if (activitySportFilter && !activitySportFilter.has(sportLabel(a))) return false;
+        if (activityNameFilter.trim() && !(a.name || "").toLowerCase().includes(activityNameFilter.trim().toLowerCase())) return false;
+        return true;
+      })
+    : [];
+
+  const sortedActivities = distanceSort
+    ? [...filteredActivities].sort((a, b) => {
+        const da = a.distance ?? -1, db = b.distance ?? -1;
+        return distanceSort === "desc" ? db - da : da - db;
+      })
+    : filteredActivities;
+
+  function toggleSport(label: string) {
+    setActivitySportFilter(prev => {
+      const base = prev ?? new Set(sportTypes);
+      const next = new Set(base);
+      if (next.has(label)) next.delete(label); else next.add(label);
+      return next;
+    });
+  }
+
+  function cycleDistanceSort() {
+    setDistanceSort(prev => (prev === null ? "desc" : prev === "desc" ? "asc" : null));
+  }
 
   return (
     <div
@@ -312,6 +360,42 @@ export function GarminClient() {
             {/* Activities */}
             <div className={CARD}>
               <h2 className="font-semibold text-sm text-slate-300 mb-4">Activities</h2>
+
+              <div className="flex flex-wrap items-center gap-3 mb-3">
+                <input
+                  type="text"
+                  value={activityNameFilter}
+                  onChange={e => setActivityNameFilter(e.target.value)}
+                  placeholder="Filter by name…"
+                  className="rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500 w-48"
+                />
+                <div className="flex flex-wrap items-center gap-2">
+                  {sportTypes.map(label => {
+                    const checked = activitySportFilter?.has(label) ?? true;
+                    return (
+                      <label key={label} className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleSport(label)}
+                          className="accent-green-500"
+                        />
+                        {label}
+                      </label>
+                    );
+                  })}
+                </div>
+                {(activityNameFilter.trim() || (activitySportFilter && activitySportFilter.size !== sportTypes.length) || distanceSort) && (
+                  <button
+                    onClick={() => { setActivityNameFilter(""); setActivitySportFilter(new Set(sportTypes)); setDistanceSort(null); }}
+                    className="text-xs text-slate-500 hover:text-slate-300 underline"
+                  >
+                    Clear filters
+                  </button>
+                )}
+                <span className="text-xs text-slate-600 ml-auto">{sortedActivities.length} of {data.activities.length}</span>
+              </div>
+
               <div className="max-h-[660px] overflow-auto no-scrollbar" ref={activityScrollRef}>
                 <table className="w-full">
                   <thead className="sticky top-0 z-10 bg-slate-900">
@@ -319,7 +403,13 @@ export function GarminClient() {
                       <th className={TH}>Date</th>
                       <th className={TH}>Type</th>
                       <th className={TH}>Name</th>
-                      <th className={TH}>Distance</th>
+                      <th className={TH}>
+                        <button onClick={cycleDistanceSort} className="flex items-center gap-1 hover:text-slate-300 transition-colors">
+                          Distance
+                          {distanceSort === "desc" && <span>▼</span>}
+                          {distanceSort === "asc" && <span>▲</span>}
+                        </button>
+                      </th>
                       <th className={TH}>Time</th>
                       <th className={TH}>Pace</th>
                       <th className={TH}>Avg HR</th>
@@ -327,7 +417,7 @@ export function GarminClient() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/50">
-                    {data.activities.map(a => (
+                    {sortedActivities.map(a => (
                       <tr
                         key={a.activity_id}
                         id={`act-${a.activity_id}`}
@@ -347,6 +437,11 @@ export function GarminClient() {
                         <td className={TD}>{a.calories?.toLocaleString() ?? "—"}</td>
                       </tr>
                     ))}
+                    {sortedActivities.length === 0 && (
+                      <tr>
+                        <td colSpan={8} className="py-6 text-center text-sm text-slate-500">No activities match the current filters.</td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
