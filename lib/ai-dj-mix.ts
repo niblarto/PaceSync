@@ -244,6 +244,27 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   }
 }
 
+// Dashboard chart's multi-select "🤖 AI Remix…" — same job as the
+// deterministic replace-candidates-budget route (fill the selected tracks'
+// combined duration with tracks at one target BPM, avoiding what's already
+// selected), but the LLM does the picking instead of a closest-fit search.
+// Reuses buildAiDjMix's whole pipeline (remote service, on-Pi Claude/Gemini
+// bridge, Ollama) unmodified by writing ONE synthetic segment line in the
+// "Ns at Xbpm" form ai_dj/workout.py's parse_workout recognizes as a
+// literal BPM target — no pace_to_bpm conversion, no Settings sweet-spot/
+// bounds shift, just the user's own typed BPM (see Segment.literal_bpm in
+// workout.py). "work" tolerance band applies (BPM_TOLERANCES, tight/
+// symmetric) — the same standard tolerance every other BPM match in this
+// app uses. Whole SECONDS, not minutes — this app's every other BPM-fill
+// path (replace-candidates-budget, Remix…) works to a ±15s tolerance, so
+// rounding the budget to the nearest minute first (an earlier version of
+// this) could already be off by up to 30s before the fit search even ran.
+export async function buildAiDjRemix(targetBpm: number, budgetMs: number, avoidUris: string[], onProgress?: AiDjProgress): Promise<AiDjMixResult> {
+  const seconds = Math.max(1, Math.round(budgetMs / 1000));
+  const segment = `${seconds}s at ${Math.round(targetBpm)}bpm`;
+  return buildAiDjMix("AI Remix", [segment], onProgress, avoidUris);
+}
+
 // Spawns scripts/ai_dj_bridge.py with `stdinPayload` and parses its NDJSON
 // progress lines + final mix/error JSON line — shared by the segment-based
 // mix and the flow-mix (fixed track pool) modes, which differ only in what

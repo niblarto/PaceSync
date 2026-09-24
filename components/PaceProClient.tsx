@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { MixPaceChart, timelineToChartTracks } from "@/components/MixPaceChart";
 import { RouteMapLightbox } from "@/components/RouteMapLightbox";
 import { parsePaceProCsv, paceProSplitsToSegments, totalDistanceMi, totalDurationSec, fmtPaceSec, type PaceProSplit } from "@/lib/pace-pro";
 
@@ -686,17 +685,6 @@ export function PaceProClient() {
               {ppMix.llmFailures.length} segment{ppMix.llmFailures.length !== 1 ? "s" : ""} fell back to deterministic BPM matching (LLM call failed).
             </p>
           )}
-
-          <MixPaceChart tracks={timelineToChartTracks(ppMix.timeline)} />
-
-          <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs max-h-96 overflow-y-auto no-scrollbar">
-            {ppMix.timeline.flatMap(s => s.tracks).map((t, i) => (
-              <div key={`${t.uri}-${i}`} className="px-3 py-1.5 flex items-center justify-between gap-3">
-                <span className="text-slate-300 truncate">{t.name} — <span className="text-slate-500">{t.artist}</span></span>
-                <span className="text-slate-400 shrink-0">{t.tempo.toFixed(1)} BPM</span>
-              </div>
-            ))}
-          </div>
         </div>
       )}
 

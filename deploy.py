@@ -234,6 +234,7 @@ FILES = [
     ('lib/energy-bands.ts',                        'lib/energy-bands.ts'),
     ('app/api/tracks/genres-artists/route.ts',     'app/api/tracks/genres-artists/route.ts'),
     ('app/api/ai-dj/mix/route.ts',                'app/api/ai-dj/mix/route.ts'),
+    ('app/api/ai-dj/remix/route.ts',              'app/api/ai-dj/remix/route.ts'),
     ('app/api/ai-dj/simulate-mix/route.ts',       'app/api/ai-dj/simulate-mix/route.ts'),
     ('app/api/ai-dj/flow-mix/route.ts',           'app/api/ai-dj/flow-mix/route.ts'),
     ('app/api/ai-dj/health/route.ts',             'app/api/ai-dj/health/route.ts'),

@@ -557,6 +557,16 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [chartSelectedUris, setChartSelectedUris] = useState<Set<string>>(new Set());
   const [chartSelectionMenu, setChartSelectionMenu] = useState<{ x: number; y: number } | null>(null);
   const [chartBpmPrompt, setChartBpmPrompt] = useState<{ x: number; y: number } | null>(null);
+  // "🤖 AI Remix…" — same job as ♻ Remix… (fill the selection's combined
+  // duration at one target BPM) but the AI DJ's LLM picks the tracks
+  // instead of a deterministic closest-fit search. Separate prompt/status
+  // state from the deterministic Remix's since the two can't run at once
+  // anyway (both replace the same chart selection) but keeping them
+  // distinct avoids one flow's loading state bleeding into the other's UI.
+  const [chartAiRemixPrompt, setChartAiRemixPrompt] = useState<{ x: number; y: number } | null>(null);
+  const [chartAiRemixing, setChartAiRemixing] = useState(false);
+  const [chartAiRemixStatus, setChartAiRemixStatus] = useState<string | null>(null);
+  const [chartAiRemixError, setChartAiRemixError] = useState<string | null>(null);
   // "🔍 Lookup tracks…" — paste a plain-text tracklist, resolve each line
   // to a real track + BPM via /api/tracks/lookup-list, read-only for now
   // (see LookupTracksModal — no mix-integration yet, that's a follow-up).
@@ -2411,6 +2421,85 @@ export function DashboardClient({ spotifyUser }: Props) {
     }
   }
 
+  // "🤖 AI Remix…" — same shape as addLookupTracksToMix above (selection
+  // treated as ONE contiguous span, not split into per-BPM runs the way
+  // remixSelectedChartTracks does, since there's only ever one target BPM
+  // here): discards the selected tracks and refills their combined
+  // duration via /api/ai-dj/remix, which lets the AI DJ's LLM (Claude/
+  // Gemini/Ollama, whichever is configured in Settings) pick the
+  // replacement tracks instead of a deterministic closest-fit search.
+  async function aiRemixSelectedChartTracks(selectedUris: Set<string>, targetBpm: number) {
+    if (!aiDjMix || selectedUris.size === 0) return;
+    const indices = aiDjMix.tracks
+      .map((t, i) => (selectedUris.has(t.uri) ? i : -1))
+      .filter(i => i !== -1);
+    if (indices.length === 0) return;
+    const startIdx = Math.min(...indices);
+    const endIdx = Math.max(...indices);
+    const budgetMs = aiDjMix.tracks.slice(startIdx, endIdx + 1).reduce((sum, t) => sum + t.duration_ms, 0);
+    const avoidUris = aiDjMix.tracks.map(t => t.uri); // every track already in the mix, not just the selection — a pick elsewhere in the mix would land as a duplicate
+
+    setChartAiRemixing(true);
+    setChartAiRemixError(null);
+    setChartAiRemixStatus(null);
+    try {
+      const res = await fetch("/api/ai-dj/remix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetBpm, budgetMs, avoidUris }),
+      });
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `AI Remix failed (${res.status})`);
+      }
+      type AiRemixTimeline = { tracks: { uri: string; name: string; artist: string; tempo: number; durationSec?: number; energy: number }[] }[];
+      let timeline: AiRemixTimeline | null = null;
+      let warning: string | null = null;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const msg = JSON.parse(dataLine.slice(6)) as
+            { type: string; current?: number; total?: number; segment?: string; detail?: string; timeline?: AiRemixTimeline; error?: string };
+          if (msg.type === "progress") {
+            setChartAiRemixStatus(msg.detail ?? `${msg.segment ?? "AI DJ"}…`);
+          } else if (msg.type === "warning") {
+            warning = msg.error ?? null;
+          } else if (msg.type === "error") {
+            throw new Error(msg.error ?? "AI Remix failed");
+          } else if (msg.type === "done") {
+            timeline = msg.timeline ?? null;
+          }
+        }
+      }
+      const picked = timeline?.flatMap(s => s.tracks) ?? [];
+      if (picked.length === 0) throw new Error("The AI DJ didn't return any tracks for this BPM/length.");
+
+      const resolved: TrackWithBPM[] = picked.map(t => ({
+        id: t.uri.split(":")[2] ?? t.uri, name: t.name, artists: [{ name: t.artist }],
+        album: { name: "", images: [] }, duration_ms: Math.round((t.durationSec ?? 0) * 1000), uri: t.uri,
+        bpm: Math.round(t.tempo), energy: t.energy ?? 0,
+      }));
+      spliceMixTracks([{ startIdx, endIdx, tracks: resolved }]);
+      setChartSelectedUris(new Set());
+      if (warning) setChartAiRemixError(warning);
+    } catch (e) {
+      setChartAiRemixError(e instanceof Error ? e.message : "AI Remix failed");
+    } finally {
+      setChartAiRemixStatus(null);
+      setChartAiRemixing(false);
+    }
+  }
+
   async function handleDeleteTrack(track: TrackWithBPM) {
     const token = await freshSpotifyToken();
 
@@ -3457,6 +3546,13 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 ♻ Remix…
               </button>
               <button
+                className={`${item} text-purple-300 hover:bg-purple-500/15`}
+                onClick={() => { const { x, y } = chartSelectionMenu; close(); setChartAiRemixPrompt({ x, y }); }}
+                title="Set a target BPM and let the AI DJ pick tracks to fill this selection's combined length"
+              >
+                🤖 AI Remix…
+              </button>
+              <button
                 className={`${item} text-emerald-300 hover:bg-emerald-500/15`}
                 onClick={() => { close(); setLookupListOpen(true); }}
               >
@@ -3499,6 +3595,60 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
         <div className="fixed bottom-6 right-6 z-20 rounded-lg bg-slate-800 border border-amber-500/30 px-4 py-2.5 text-sm text-amber-400 shadow-xl max-w-sm">
           {chartRemixError}
           <button onClick={() => setChartRemixError(null)} className="ml-2 text-slate-500 hover:text-slate-300 underline">Dismiss</button>
+        </div>
+      )}
+
+      {chartAiRemixPrompt && (() => {
+        return (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setChartAiRemixPrompt(null)} />
+            <div
+              className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl p-3 w-72 space-y-2"
+              style={{
+                left: Math.min(chartAiRemixPrompt.x, window.innerWidth - 300),
+                top: Math.min(chartAiRemixPrompt.y, window.innerHeight - 140),
+              }}
+            >
+              <p className="text-xs text-slate-400">AI Remix {chartSelectedUris.size} tracks</p>
+              <form
+                onSubmit={e => {
+                  e.preventDefault();
+                  const form = e.currentTarget;
+                  const bpm = parseInt((new FormData(form).get("bpm") as string) ?? "", 10);
+                  if (!bpm || bpm <= 0) return;
+                  setChartAiRemixPrompt(null);
+                  void aiRemixSelectedChartTracks(chartSelectedUris, bpm);
+                }}
+                className="space-y-2"
+              >
+                <label className="block text-xs text-slate-500 space-y-1">
+                  <span className="block">Target BPM</span>
+                  <input
+                    name="bpm"
+                    type="number"
+                    autoFocus
+                    className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono"
+                  />
+                </label>
+                <p className="text-[11px] text-slate-600">The AI DJ will pick library tracks at this BPM to fill these tracks' combined length, same tolerances as everywhere else.</p>
+                <button type="submit" className="w-full rounded-lg bg-purple-500 hover:bg-purple-400 text-black font-semibold text-xs px-3 py-1.5 transition-colors">
+                  🤖 AI Remix
+                </button>
+              </form>
+            </div>
+          </>
+        );
+      })()}
+
+      {chartAiRemixing && (
+        <div className="fixed bottom-6 right-6 z-20 flex items-center gap-2 rounded-lg bg-slate-800 border border-white/10 px-4 py-2.5 text-sm text-slate-300 shadow-xl max-w-sm">
+          <Spinner /> {chartAiRemixStatus ?? "AI DJ is picking tracks…"}
+        </div>
+      )}
+      {chartAiRemixError && !chartAiRemixing && (
+        <div className="fixed bottom-6 right-6 z-20 rounded-lg bg-slate-800 border border-amber-500/30 px-4 py-2.5 text-sm text-amber-400 shadow-xl max-w-sm">
+          {chartAiRemixError}
+          <button onClick={() => setChartAiRemixError(null)} className="ml-2 text-slate-500 hover:text-slate-300 underline">Dismiss</button>
         </div>
       )}
 
