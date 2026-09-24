@@ -87,6 +87,7 @@ export interface ReplaceCandidate {
   energy: number | null;
   danceability: number | null;
   valence: number | null;
+  genres: string | null; // library candidates only — Deezer's online top-up has no genre data to offer
 }
 
 // SSE: streams {"type":"progress","current","total","name"} for each online
@@ -187,6 +188,7 @@ export async function POST(req: NextRequest) {
             energy: t.energy,
             danceability: t.danceability,
             valence: t.valence,
+            genres: t.genres,
             _dist: bpmDistance(t.tempo!, targetBpm),
           }))
           .filter(t => isExactBpm(t.tempo, targetBpm))
@@ -325,6 +327,7 @@ export async function POST(req: NextRequest) {
                     energy: resolved.energy,
                     danceability: resolved.danceability,
                     valence: resolved.valence,
+                    genres: null,
                   });
                 } catch { /* best-effort — one failed resolution shouldn't abort the rest */ }
               }

@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS saved_pace_pro_mixes (
   timeline_json TEXT NOT NULL,
   splits_csv_text TEXT NOT NULL,
   file_name TEXT,
-  saved_at TEXT NOT NULL
+  saved_at TEXT NOT NULL,
+  spotify_playlist_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS race_splits (
@@ -124,6 +125,15 @@ CREATE TABLE IF NOT EXISTS deleted_tracks (
   name TEXT,
   artist TEXT,
   deleted_at TEXT NOT NULL
+);
+
+-- A track explicitly confirmed as NOT a duplicate (e.g. "Keep this track"
+-- in Settings' "Possible duplicates" review) — excluded from future
+-- duplicateGroups scans for the lifetime of that URI, since re-flagging a
+-- track the user already reviewed and kept on every visit is just noise.
+CREATE TABLE IF NOT EXISTS confirmed_unique_tracks (
+  uri TEXT PRIMARY KEY,
+  confirmed_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS added_tracks (
@@ -216,6 +226,13 @@ function runColumnMigrations(conn: Database.Database): void {
   const savedPaceProCols = conn.prepare("PRAGMA table_info(saved_pace_pro_mixes)").all() as { name: string }[];
   if (savedPaceProCols.length > 0 && !savedPaceProCols.some(c => c.name === "activity_id")) {
     conn.exec("ALTER TABLE saved_pace_pro_mixes ADD COLUMN activity_id TEXT");
+  }
+  if (savedPaceProCols.length > 0 && !savedPaceProCols.some(c => c.name === "spotify_playlist_id")) {
+    conn.exec("ALTER TABLE saved_pace_pro_mixes ADD COLUMN spotify_playlist_id TEXT");
+  }
+  const pinnedRouteCols = conn.prepare("PRAGMA table_info(pinned_routes)").all() as { name: string }[];
+  if (pinnedRouteCols.length > 0 && !pinnedRouteCols.some(c => c.name === "pace_pro_mix_id")) {
+    conn.exec("ALTER TABLE pinned_routes ADD COLUMN pace_pro_mix_id TEXT");
   }
 }
 

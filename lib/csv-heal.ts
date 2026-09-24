@@ -5,6 +5,7 @@ import { readAllTracks, backfillTrackFields, regenerateCsvFile } from "@/lib/tra
 import type { TrackRow } from "@/types/track";
 import { deezerDurationMs, deezerGenres, fetchFeatures, lastfmDurationMs, sleep, TrackFeatures } from "@/lib/track-enrich";
 import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest, SearchTokenSource } from "@/lib/spotify-rate-limit";
+import { spotifySearchUri, isSpotifyRateLimited } from "@/lib/spotify-search";
 import { getBpmOverride } from "@/lib/bpm-track-overrides";
 import { getDb } from "@/lib/db";
 
@@ -105,6 +106,10 @@ const FEATURE_COLS: Array<[string, keyof TrackFeatures]> = [
 // rate limit, so the caller can stop using Spotify for the rest of the
 // sweep instead of hammering it. `retryAt` is the ISO timestamp Retry-After
 // resolves to, surfaced in HealProgress.spotifyRetryAt for the log window.
+// spotifySearchUri/isSpotifyRateLimited (imported above, from
+// lib/spotify-search.ts) use the same sentinel shape — this file's own
+// duration lookup below still needs its own copy since it's a different
+// endpoint, but the URI-search sentinel is now shared, not duplicated.
 const SPOTIFY_LONG_RATE_LIMIT = Symbol("spotify-long-rate-limit");
 interface SpotifyRateLimited { kind: typeof SPOTIFY_LONG_RATE_LIMIT; retryAt: string }
 
@@ -136,35 +141,6 @@ async function spotifyDurationMs(id: string, token: string): Promise<number | nu
   if (!res.ok) return null;
   const t = (await res.json()) as { duration_ms?: number };
   return typeof t.duration_ms === "number" ? t.duration_ms : null;
-}
-
-// Finds a Spotify track URI for a row that has none. Prefers an exact ISRC
-// search (`isrc:{isrc}`) when the row has one — a precise single-recording
-// match, no fuzzy title/artist guessing — falling back to name + artist
-// otherwise (e.g. a row imported from a non-Spotify CSV with no ISRC at
-// all). Same rate-limit handling as spotifyDurationMs. Only the top result
-// is used — good enough for the common case, same trade-off the BBC cron's
-// search already makes.
-async function spotifySearchUri(name: string, artist: string, token: string, isrc?: string | null): Promise<string | null | SpotifyRateLimited> {
-  const q = encodeURIComponent(isrc ? `isrc:${isrc}` : `track:${name} artist:${artist}`);
-  recordSpotifyRequest();
-  let res = await fetch(`https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (res.status === 429) {
-    const wait = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
-    const retryAt = new Date(Date.now() + wait * 1000).toISOString();
-    console.log(`[csv-heal] Spotify 429 (search) — retry-after ${wait}s`);
-    if (wait > 10) return { kind: SPOTIFY_LONG_RATE_LIMIT, retryAt };
-    await sleep(wait * 1000);
-    recordSpotifyRequest();
-    res = await fetch(`https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-  }
-  if (!res.ok) return null;
-  const data = await res.json() as { tracks?: { items?: { uri?: string }[] } };
-  return data.tracks?.items?.[0]?.uri ?? null;
 }
 
 export interface IncompleteTrack {
@@ -493,7 +469,7 @@ async function doHealInner(): Promise<HealResult> {
       const activeUriToken = await uriTokens.current();
       if (!activeUriToken) break; // nothing usable — no apps configured, or both rate-limited
       const result = await spotifySearchUri(g.name, g.artist, activeUriToken, g.isrc);
-      if (isRateLimited(result)) {
+      if (isSpotifyRateLimited(result)) {
         const wasUsingPrimary = uriTokens.usingPrimary;
         const hasAnotherApp = await uriTokens.onRateLimited();
         if (hasAnotherApp) {

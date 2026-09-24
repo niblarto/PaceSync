@@ -30,7 +30,7 @@ export function DuplicateTracksBanner() {
     <div className="sticky top-14 z-30 bg-amber-500/15 border-b border-amber-500/40 text-amber-300 text-xs px-4 py-2 flex items-center justify-center gap-3">
       <span>
         🎭 {count} possible duplicate{count === 1 ? "" : "s"} in your library —{" "}
-        <Link href="/settings?tab=tracklist" className="underline hover:text-amber-200">
+        <Link href="/settings?tab=tracklist&focus=duplicates" className="underline hover:text-amber-200">
           review in Settings
         </Link>
       </span>

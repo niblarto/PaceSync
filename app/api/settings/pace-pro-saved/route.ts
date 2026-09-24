@@ -1,12 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { listSavedPaceProMixes, saveSavedPaceProMix, deleteSavedPaceProMix } from "@/lib/pace-pro-saved";
+import { listSavedPaceProMixes, saveSavedPaceProMix, deleteSavedPaceProMix, getSavedPaceProMix } from "@/lib/pace-pro-saved";
 import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 
-export async function GET() {
+// ?id=<mixId> returns just that one mix (e.g. RunnaCard.tsx's route map
+// resolving a linked Pace Pro mix's own tracklist) instead of the whole
+// library — no id returns the full list, same as before.
+export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const id = req.nextUrl.searchParams.get("id");
+  if (id) {
+    const mix = getSavedPaceProMix(id);
+    if (!mix) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({ mix });
+  }
   return NextResponse.json({ mixes: listSavedPaceProMixes() });
 }
 

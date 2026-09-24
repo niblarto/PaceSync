@@ -126,7 +126,12 @@ export async function POST(req: NextRequest) {
     }
 
     const incoming = rowsFromUpload(parseCsv(csv));
-    const result = mergeTracksIntoPlaylist(csvFile, incoming, { excludeUris: new Set(rejected.map(r => r.uri)) });
+    // overwriteTempo: an Exportify re-export carries Spotify's own real
+    // audio-feature BPM for a track already in the library — that should
+    // win over whatever this app previously resolved (ReccoBeats/Deezer,
+    // which can occasionally land on a half/double-time reading), not sit
+    // blank-only behind the old value the way every other field does.
+    const result = mergeTracksIntoPlaylist(csvFile, incoming, { excludeUris: new Set(rejected.map(r => r.uri)), overwriteTempo: true });
     await regenerateCsvFile(csvFile, dest);
     console.log(`[save-default-playlist] appended ${result.appended} rows, merged data into ${result.merged} existing rows in ${dest}${rejected.length ? `, rejected ${rejected.length} previously-deleted` : ""}`);
     // Always heal, even when nothing new was appended: the *existing* rows

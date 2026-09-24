@@ -403,6 +403,33 @@ export async function transcribePaceProImage(imageBase64: string): Promise<{ ok:
   }
 }
 
+// Same OCR pathway as transcribePaceProImage, but for the Runna schedule
+// card's race-splits table (split #, split distance, split pace,
+// cumulative distance, cumulative avg pace, elevation change — all 6
+// columns, unlike Pace Pro's own OCR which deliberately drops elevation/
+// cumulative). Calls a separate AI_DJ service endpoint
+// (/vision-transcribe-race-splits) with its own tailored vision prompt,
+// returning tab-separated text in the exact shape
+// lib/race-splits.ts's parsePastedSplits already parses.
+export async function transcribeRaceSplitsImage(imageBase64: string): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const config = loadAiDjConfig();
+  if (!config?.url) return { ok: false, error: "AI DJ service URL not configured in Settings" };
+  try {
+    const res = await fetch(`${config.url}/vision-transcribe-race-splits`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageBase64, model: config.ollamaModel || undefined }),
+      signal: AbortSignal.timeout(150_000),
+    });
+    const data = await res.json() as { text?: string; error?: string };
+    if (!res.ok || data.error) return { ok: false, error: data.error ?? `AI DJ service ${res.status}` };
+    if (!data.text) return { ok: false, error: "No text returned" };
+    return { ok: true, text: data.text };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Could not reach AI DJ service" };
+  }
+}
+
 export interface OllamaModelStatus {
   name: string;
   sizeBytes: number;

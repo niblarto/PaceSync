@@ -23,6 +23,11 @@ export interface LibraryAddTrack {
   energy?: number;
   danceability?: number;
   valence?: number;
+  /** Comma-separated, same convention as the CSV's own Genres column — set
+      by the title/artist/BPM/genre bulk import (Settings > Playlist
+      Management), which supplies genre directly rather than relying on the
+      Deezer-album lookup every other add path uses. */
+  genres?: string;
 }
 
 export interface LibraryAddResult {
@@ -69,6 +74,7 @@ export async function addTracksToLibrary(tracks: LibraryAddTrack[], allowDeleted
     isrc: t.isrc ?? null,
     trackName: t.name,
     artistNames: t.artist,
+    genres: t.genres ?? null,
     tempo: t.tempo,
     key: t.key,
     mode: t.mode,

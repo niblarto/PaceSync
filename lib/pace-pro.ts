@@ -109,3 +109,30 @@ export function totalDistanceMi(splits: PaceProSplit[]): number {
 export function totalDurationSec(splits: PaceProSplit[]): number {
   return splits.reduce((sum, s) => sum + s.distanceMi * s.paceSec, 0);
 }
+
+// Converts a Pace Pro import (3 columns: split #, distance, pace) into the
+// 6-column shape the Runna schedule card's race-splits table uses
+// (lib/race-splits.ts's RaceSplit — adds cumulative distance/pace),
+// so a saved Pace Pro mix from the library can be "linked" onto a race
+// workout without re-pasting or re-scanning its splits. Elevation change
+// is always 0 here — Pace Pro's own export carries no elevation data at
+// all, so this is a best-effort conversion, not a substitute for the real
+// race-splits screenshot when elevation actually matters.
+export function paceProSplitsToRaceSplits(splits: PaceProSplit[]): {
+  splitNum: number; splitMi: number; splitPaceSec: number;
+  cumulativeMi: number; cumulativePaceSec: number; elevationChangeM: number;
+}[] {
+  let cumMi = 0, cumSec = 0;
+  return splits.map(s => {
+    cumMi += s.distanceMi;
+    cumSec += s.distanceMi * s.paceSec;
+    return {
+      splitNum: s.splitNum,
+      splitMi: s.distanceMi,
+      splitPaceSec: s.paceSec,
+      cumulativeMi: Math.round(cumMi * 100) / 100,
+      cumulativePaceSec: cumMi > 0 ? Math.round(cumSec / cumMi) : s.paceSec,
+      elevationChangeM: 0,
+    };
+  });
+}

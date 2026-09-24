@@ -5,6 +5,7 @@ import Link from "next/link";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 import type { TrackWithBPM } from "@/types";
 import type { RaceSplitsEntry } from "@/lib/race-splits";
+import type { SavedPaceProMix } from "@/lib/pace-pro-saved";
 import { RouteMapLightbox } from "./RouteMapLightbox";
 import { openInSpotify } from "./TrackRow";
 
@@ -826,6 +827,20 @@ function routeDate(a: RouteActivity): string {
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
+// A PinnedRoute's runDate is usually already the short "25 Jul" form
+// routeDate() above produces (every normal "pin this run's route" path
+// writes it that way) — but "Link existing Pace Pro mix…" wrote the raw
+// GarminDB start_time straight through instead (confirmed:
+// "2025-09-28 09:35:10.000000" showing up unformatted in the Pinned route
+// label). Reformats on render so it's correct regardless of which path
+// wrote it, rather than only fixing new links going forward.
+function fmtPinnedRunDate(runDate: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}/.test(runDate)) return runDate; // already short-form, or unparseable — leave as-is
+  const d = new Date(runDate.slice(0, 19).replace(" ", "T"));
+  if (isNaN(d.getTime())) return runDate;
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
 // ── Garmin Connect courses ────────────────────────────────────────────────────
 
 interface GarminCourse {
@@ -935,7 +950,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   const [pinningDate, setPinningDate] = useState<string | null>(null);
   const [deletingDate, setDeletingDate] = useState<string | null>(null);
 
-  interface PinnedRouteInfo { activityId: string; name: string; distanceMi: number; runDate: string }
+  interface PinnedRouteInfo { activityId: string; name: string; distanceMi: number; runDate: string; paceProMixId: string | null }
   const [pinnedRoutes, setPinnedRoutes] = useState<Record<string, PinnedRouteInfo | null>>({});
 
   // Pace Pro splits pasted in for a race workout — keyed by workout date,
@@ -945,6 +960,18 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   const [splitsText, setSplitsText] = useState("");
   const [splitsSaving, setSplitsSaving] = useState(false);
   const [splitsError, setSplitsError] = useState<string | null>(null);
+  // Screenshot-OCR path for the same splits box — transcribes a race-splits
+  // table screenshot (all 6 columns, unlike Pace Pro's own OCR) into the
+  // same tab-separated text splitsText/saveRaceSplits already expects, via
+  // /api/settings/race-splits-image (mirrors PaceProClient.tsx's own
+  // handlePaceProImage).
+  const [splitsImageTranscribing, setSplitsImageTranscribing] = useState(false);
+  // "Link existing Pace Pro mix…" — pick a saved mix from the library
+  // (Settings > Pace Pro) to reuse its splits (+ linked route, if any) on
+  // this race workout instead of pasting/scanning fresh ones.
+  const [paceProLibrary, setPaceProLibrary] = useState<SavedPaceProMix[] | null>(null);
+  const [splitsLinking, setSplitsLinking] = useState<string | null>(null); // workout date whose picker is open
+  const [splitsLinkBusy, setSplitsLinkBusy] = useState(false);
 
   async function unpinMix(date: string, title: string) {
     setUnpinningDate(date);
@@ -1028,6 +1055,138 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       .catch(() => setRaceSplits(s => ({ ...s, [w.date]: null })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, workouts, raceSplits]);
+
+  // arrayBuffer -> base64 without a data: URI wrapper (Ollama's /api/chat
+  // images field wants raw base64) — same helper as PaceProClient.tsx's own.
+  function arrayBufferToBase64(buf: ArrayBuffer): string {
+    let binary = "";
+    const bytes = new Uint8Array(buf);
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
+    }
+    return btoa(binary);
+  }
+
+  async function handleSplitsImage(blob: Blob) {
+    setSplitsImageTranscribing(true);
+    setSplitsError(null);
+    try {
+      const buf = await blob.arrayBuffer();
+      const base64 = arrayBufferToBase64(buf);
+      const res = await fetch("/api/settings/race-splits-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64: base64 }),
+      });
+      const data = await res.json() as { text?: string; error?: string };
+      if (!res.ok || data.error || !data.text) {
+        setSplitsError(data.error ?? `Screenshot transcription failed (${res.status})`);
+        return;
+      }
+      setSplitsText(data.text);
+    } catch (e) {
+      setSplitsError(e instanceof Error ? e.message : "Screenshot transcription failed");
+    } finally {
+      setSplitsImageTranscribing(false);
+    }
+  }
+
+  function openSplitsLinkPicker(date: string) {
+    setSplitsLinking(date);
+    setSplitsError(null);
+    if (paceProLibrary === null) {
+      fetch("/api/settings/pace-pro-saved")
+        .then(r => r.json())
+        .then((d: { mixes?: SavedPaceProMix[] }) => setPaceProLibrary(d.mixes ?? []))
+        .catch(() => setPaceProLibrary([]));
+    }
+  }
+
+  async function linkPaceProMix(w: RunnaWorkout, mixId: string) {
+    setSplitsLinkBusy(true);
+    setSplitsError(null);
+    try {
+      const res = await fetch("/api/ai-dj/race-splits/link-pace-pro", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date: w.date, workoutTitle: w.title, mixId }),
+      });
+      const d = await res.json() as { error?: string; splits?: RaceSplitsEntry; routeLinked?: boolean };
+      if (!res.ok || d.error) throw new Error(d.error ?? "Failed to link mix");
+      setRaceSplits(s => ({ ...s, [w.date]: d.splits ?? null }));
+      setSplitsLinking(null);
+      setSplitsEditing(null);
+      // The link may have also pinned a route (if the mix had one attached)
+      // — re-fetch so the "📌 Pinned route" button appears immediately
+      // instead of waiting for the next expand/routeMap-close refetch.
+      if (d.routeLinked) {
+        fetch(`/api/garmin/pin-route?date=${w.date}&title=${encodeURIComponent(w.title)}`)
+          .then(r => r.json())
+          .then((rd: { route?: PinnedRouteInfo | null }) => setPinnedRoutes(s => ({ ...s, [w.date]: rd.route ?? null })))
+          .catch(() => {});
+      }
+    } catch (e) {
+      setSplitsError(e instanceof Error ? e.message : "Failed to link mix");
+    } finally {
+      setSplitsLinkBusy(false);
+    }
+  }
+
+  // Resolves which mix tracklist a route-map open should show: the AI DJ
+  // mix pinned to this workout date if one exists, otherwise (when the
+  // pinned route itself came from "Link existing Pace Pro mix…") that Pace
+  // Pro mix's own tracklist, converted to the same shape — see
+  // PaceProClient.tsx's own ppRouteMapMix block for the identical
+  // conversion this mirrors. Returns undefined if neither is available.
+  async function resolveRouteMapTracks(w: RunnaWorkout, pr: PinnedRouteInfo): Promise<RouteMixTrack[] | undefined> {
+    const pinned = mixSnapshots[w.date]?.tracks;
+    if (pinned?.length) return pinned;
+    if (!pr.paceProMixId) return undefined;
+    try {
+      const res = await fetch(`/api/settings/pace-pro-saved?id=${encodeURIComponent(pr.paceProMixId)}`);
+      const d = await res.json() as { mix?: SavedPaceProMix; error?: string };
+      if (!res.ok || !d.mix) return undefined;
+      return d.mix.timeline.flatMap(s => s.tracks).map(t => {
+        const [mm, ss] = t.startsAt.split(":").map(Number);
+        return { uri: t.uri, name: t.name, artist: t.artist, startsAtSec: (mm || 0) * 60 + (ss || 0), durationSec: t.durationSec, tempo: t.tempo };
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  // "Tracklist →" next to the "Pinned route" button — loads whichever
+  // tracklist that route actually plays (same resolution order as
+  // resolveRouteMapTracks: a pinned AI DJ mix first, otherwise the linked
+  // Pace Pro mix) into the dashboard's central track list, same as the
+  // existing Tracklist link on a regular (non-race) pinned mix
+  // (loadSnapshotIntoTracklist above) — just sourced from a Pace Pro mix's
+  // own timeline when that's what this race's route came from, since a
+  // race workout doesn't necessarily have a separate AI DJ mix pinned too.
+  async function loadPinnedRouteIntoTracklist(w: RunnaWorkout, pr: PinnedRouteInfo) {
+    if (!onAiDjMix) return;
+    const snap = mixSnapshots[w.date];
+    if (snap) { loadSnapshotIntoTracklist(w, snap); return; }
+    if (!pr.paceProMixId) return;
+    try {
+      const res = await fetch(`/api/settings/pace-pro-saved?id=${encodeURIComponent(pr.paceProMixId)}`);
+      const d = await res.json() as { mix?: SavedPaceProMix; error?: string };
+      if (!res.ok || !d.mix) return;
+      const mix = d.mix;
+      const tracks: TrackWithBPM[] = mix.timeline.flatMap(s => s.tracks).filter(t => t.uri).map(t => ({
+        id: t.uri.split(":")[2] ?? t.uri,
+        name: t.name,
+        artists: [{ name: t.artist }],
+        album: { name: "", images: [] },
+        duration_ms: Math.round((t.durationSec ?? 0) * 1000),
+        uri: t.uri,
+        bpm: Math.round(t.tempo ?? 0),
+        energy: t.energy ?? 0,
+      }));
+      onAiDjMix(mix.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w, raceSplits[w.date]), w.date, mix.timeline);
+    } catch { /* best-effort — no tracklist to load if this fails */ }
+  }
 
   async function saveRaceSplits(w: RunnaWorkout) {
     setSplitsSaving(true);
@@ -1589,7 +1748,51 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                       if (isEditing) {
                         return (
                           <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-2">
-                            <p className="text-xs text-purple-300/80 font-medium">Paste Pace Pro splits</p>
+                            <p className="text-xs text-purple-300/80 font-medium">Race splits</p>
+                            <div
+                              tabIndex={0}
+                              onClick={e => e.stopPropagation()}
+                              onPaste={e => {
+                                const item = Array.from(e.clipboardData.items).find(i => i.type.startsWith("image/"));
+                                const file = item?.getAsFile();
+                                if (file) { e.preventDefault(); void handleSplitsImage(file); }
+                              }}
+                              className="rounded-lg bg-slate-800/60 border border-dashed border-white/15 text-slate-400 text-xs px-3 py-2 focus:outline-none focus:ring-1 focus:ring-purple-500 cursor-text select-none"
+                              title="Click here, then Ctrl+V to paste a screenshot of the race splits table"
+                            >
+                              {splitsImageTranscribing ? "Reading screenshot…" : "📸 Click here, then paste (Ctrl+V) a screenshot of the splits table"}
+                            </div>
+                            {splitsLinking === w.date ? (
+                              <div className="rounded-lg bg-slate-800/60 border border-white/10 p-2 space-y-1.5">
+                                <div className="flex items-center justify-between">
+                                  <p className="text-[11px] text-slate-400">Link a saved Pace Pro mix</p>
+                                  <button onClick={e => { e.stopPropagation(); setSplitsLinking(null); }} className="text-[11px] text-slate-500 hover:text-slate-300">✕</button>
+                                </div>
+                                {paceProLibrary === null && <p className="text-[11px] text-slate-600">Loading…</p>}
+                                {paceProLibrary?.length === 0 && <p className="text-[11px] text-slate-600">No saved Pace Pro mixes yet.</p>}
+                                <div className="max-h-32 overflow-y-auto no-scrollbar space-y-1">
+                                  {paceProLibrary?.map(mix => (
+                                    <button
+                                      key={mix.id}
+                                      onClick={e => { e.stopPropagation(); void linkPaceProMix(w, mix.id); }}
+                                      disabled={splitsLinkBusy}
+                                      className="w-full text-left text-[11px] rounded-md bg-slate-900/60 hover:bg-slate-900 disabled:opacity-40 px-2 py-1 text-slate-300 transition-colors flex items-center justify-between gap-2"
+                                    >
+                                      <span className="truncate">{mix.title}</span>
+                                      {mix.activityId && <span className="text-emerald-400 shrink-0" title="Has a linked Garmin route">🗺</span>}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={e => { e.stopPropagation(); openSplitsLinkPicker(w.date); }}
+                                className="text-[11px] text-purple-300 hover:text-purple-200 underline"
+                              >
+                                🔗 Link existing Pace Pro mix…
+                              </button>
+                            )}
+                            <p className="text-[11px] text-slate-600">…or paste/edit the table as text below:</p>
                             <textarea
                               value={splitsText}
                               onChange={e => setSplitsText(e.target.value)}
@@ -1621,7 +1824,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                         return (
                           <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-1">
                             <p className="text-xs text-purple-300/80 font-medium flex items-center justify-between gap-2">
-                              <span>🏁 Pace Pro splits — {saved.splits.length} miles</span>
+                              <span>🏁 Pace Pro splits — {saved.splits.length} split{saved.splits.length === 1 ? "" : "s"}, {saved.splits[saved.splits.length - 1].cumulativeMi}mi</span>
                               <span className="flex items-center gap-2 shrink-0">
                                 <button
                                   onClick={e => { e.stopPropagation(); setSplitsEditing(w.date); setSplitsText(""); setSplitsError(null); }}
@@ -1653,31 +1856,44 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                           onClick={e => { e.stopPropagation(); setSplitsEditing(w.date); setSplitsText(""); setSplitsError(null); }}
                           className="text-xs px-2.5 py-1 rounded-lg border bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25 transition-colors"
                         >
-                          🏁 Paste Pace Pro splits
+                          🏁 Add race splits
                         </button>
                       );
                     })()}
                     {showRouteMaps && garminConfigured && pinnedRoutes[w.date] && (
-                      <button
-                        onClick={e => {
-                          e.stopPropagation();
-                          const pr = pinnedRoutes[w.date]!;
-                          setRouteMap({
-                            id: pr.activityId,
-                            label: `${pr.runDate} · ${pr.distanceMi.toFixed(1)}mi`,
-                            segments: mixSegmentsFor(w, raceSplits[w.date]),
-                            workoutDate: w.date,
-                            workoutTitle: w.title,
-                            runDate: pr.runDate,
-                            distanceMi: pr.distanceMi,
-                            mixTracks: mixSnapshots[w.date]?.tracks,
-                          });
-                        }}
-                        className="w-full text-left text-xs px-2.5 py-1.5 rounded-lg border border-purple-500/40 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 transition-colors"
-                        title={pinnedRoutes[w.date]!.name || undefined}
-                      >
-                        📌 Pinned route: {pinnedRoutes[w.date]!.runDate} · {pinnedRoutes[w.date]!.distanceMi.toFixed(1)}mi
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={async e => {
+                            e.stopPropagation();
+                            const pr = pinnedRoutes[w.date]!;
+                            const mixTracks = await resolveRouteMapTracks(w, pr);
+                            const formattedRunDate = fmtPinnedRunDate(pr.runDate);
+                            setRouteMap({
+                              id: pr.activityId,
+                              label: `${formattedRunDate} · ${pr.distanceMi.toFixed(1)}mi`,
+                              segments: mixSegmentsFor(w, raceSplits[w.date]),
+                              workoutDate: w.date,
+                              workoutTitle: w.title,
+                              runDate: formattedRunDate,
+                              distanceMi: pr.distanceMi,
+                              mixTracks,
+                            });
+                          }}
+                          className="flex-1 text-left text-xs px-2.5 py-1.5 rounded-lg border border-purple-500/40 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 transition-colors"
+                          title={pinnedRoutes[w.date]!.name || undefined}
+                        >
+                          📌 Pinned route: {fmtPinnedRunDate(pinnedRoutes[w.date]!.runDate)} · {pinnedRoutes[w.date]!.distanceMi.toFixed(1)}mi
+                        </button>
+                        {onAiDjMix && (mixSnapshots[w.date] || pinnedRoutes[w.date]!.paceProMixId) && (
+                          <button
+                            onClick={e => { e.stopPropagation(); void loadPinnedRouteIntoTracklist(w, pinnedRoutes[w.date]!); }}
+                            title="Load this route's tracklist into the main track list — delete, similar and suggest actions available there"
+                            className="shrink-0 text-xs text-purple-300 hover:text-purple-200 underline px-1"
+                          >
+                            Tracklist →
+                          </button>
+                        )}
+                      </div>
                     )}
                     {showRouteMaps && garminConfigured && isRun && w.distanceMi && (() => {
                       const r = routes[w.uid];

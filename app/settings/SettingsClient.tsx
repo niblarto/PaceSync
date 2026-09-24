@@ -7,6 +7,7 @@ import { useSession } from "next-auth/react";
 import type { RunningZone } from "@/types";
 import { BbcBrowserCard } from "@/components/BbcBrowserCard";
 import { DedupCard } from "@/components/DedupCard";
+import { ImportLookupCsvPanel } from "@/components/ImportLookupCsvPanel";
 import { invalidateRunningPlaylistCache } from "@/components/useRunningPlaylist";
 import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
@@ -563,14 +564,30 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     id: string; name: string; artist: string; genre: string;
     uri: string; bpm: number; energy: number; durationMs: number;
     addedAt: string | null; // ISO timestamp from the CSV's "Added At" column, if present
+    // Carried through for the Tracklist page's own inline field editing
+    // (separate from "Tracks with errors", which already edits these same
+    // fields but only for flagged rows) — null when the column's blank or
+    // absent from this CSV export, same convention as bpm using 0.
+    key: number | null; mode: number | null; danceability: number | null; valence: number | null;
   }
   const [tracklist, setTracklist] = useState<ManagedTrack[] | null>(null);
+  // URIs explicitly confirmed as NOT a duplicate ("Keep this track" in the
+  // Possible Duplicates review below) — excluded from duplicateGroups so a
+  // reviewed-and-kept track doesn't keep reappearing on every visit.
+  const [confirmedUniqueUris, setConfirmedUniqueUris] = useState<Set<string>>(new Set());
   const [tracklistLoading, setTracklistLoading] = useState(false);
   const [tracklistError, setTracklistError] = useState<string | null>(null);
   const [tracklistFilter, setTracklistFilter] = useState("");
   const [tracklistBpmMin, setTracklistBpmMin] = useState("");
   const [tracklistBpmMax, setTracklistBpmMax] = useState("");
   const [tracklistGenre, setTracklistGenre] = useState("");
+  // Separate from tracklistGenre (a substring match against a genre VALUE)
+  // — this filters to rows with NO genre at all, for the missing-data
+  // summary's "N missing genres" stat. Genre-only gaps are deliberately
+  // excluded from the "Tracks with errors" list (an earlier explicit
+  // decision), so that stat can't reuse that list the way the other
+  // missing-data stats do — it points at the Tracklist table instead.
+  const [tracklistOnlyMissingGenre, setTracklistOnlyMissingGenre] = useState(false);
   const [tracklistSort, setTracklistSort] = useState<{ key: "name" | "artist" | "bpm" | "genre" | "added"; dir: "asc" | "desc" }>({ key: "name", dir: "asc" });
   const [tracklistDeletingUris, setTracklistDeletingUris] = useState<Set<string>>(new Set());
   const [tracklistVisibleCount, setTracklistVisibleCount] = useState(100);
@@ -581,6 +598,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [bulkDeleteProgress, setBulkDeleteProgress] = useState<{ done: number; total: number } | null>(null);
   const [duplicatesOpen, setDuplicatesOpen] = useState(false);
+  const duplicatesSectionRef = useRef<HTMLDivElement>(null);
 
   // "Added this week" — moved here from the BBC page so it lives alongside
   // the rest of the library-management UI; collapsed by default since it's
@@ -615,15 +633,158 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   interface IncompleteManagedTrack extends TrackWithBPM { missing: string[]; fields: Record<string, boolean> }
   const [incompleteTracks, setIncompleteTracks] = useState<IncompleteManagedTrack[] | null>(null);
   const [incompleteTracksOpen, setIncompleteTracksOpen] = useState(false);
+  // Set when a specific stat in the missing-data summary above ("19 missing
+  // Spotify URI" etc.) is clicked — filters the "Tracks with errors" list
+  // below to just tracks missing THAT field, instead of showing everything.
+  // Matches the exact CSV header names track.fields is keyed by ("Track
+  // URI", "Duration (ms)", "Genres", "Tempo", …), so it can be used
+  // directly as a fields[...] lookup.
+  const [incompleteFilterField, setIncompleteFilterField] = useState<string | null>(null);
+  const incompleteTracksRef = useRef<HTMLDivElement>(null);
+  // Set true while waiting for incompleteTracks to (re)load before the
+  // section can actually be scrolled to — see the effect below.
+  const [pendingIncompleteScroll, setPendingIncompleteScroll] = useState(false);
+
+  function focusIncompleteTracks(field: string | null) {
+    setIncompleteFilterField(field);
+    setIncompleteTracksOpen(true);
+    // The "Tracks with errors" section only exists inside the "Tracklist"
+    // tab's panel (className toggles "hidden" based on activeTab) — the
+    // missing-data summary this is clicked from lives on the Playlist tab,
+    // so without switching tabs the section sits in a display:none
+    // container and scrollIntoView silently does nothing (confirmed: that's
+    // exactly why clicking a stat looked like it did nothing at all).
+    setActiveTab("tracklist");
+    // incompleteTracks is normally only loaded when the Tracklist tab is
+    // opened (loadIncompleteTracks() below) — force it here too in case
+    // this is the first time that tab's data has been fetched this session.
+    if (incompleteTracks === null) {
+      setPendingIncompleteScroll(true);
+      loadIncompleteTracks();
+    } else {
+      requestAnimationFrame(() => {
+        incompleteTracksRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  }
+
+  // "N missing genres" on the missing-data summary — a genre-only gap is
+  // deliberately excluded from the "Tracks with errors" list (see
+  // scanActiveCsvAll's own comment: it's not treated as an error), so this
+  // can't reuse focusIncompleteTracks the way every other stat does.
+  // Instead it clears every other tracklist filter, turns on the
+  // genre-blank-only filter, and scrolls to the tracklist table itself.
+  function focusMissingGenres() {
+    setActiveTab("tracklist");
+    setTracklistFilter("");
+    setTracklistBpmMin("");
+    setTracklistBpmMax("");
+    setTracklistGenre("");
+    setTracklistOnlyMissingGenre(true);
+    if (tracklist === null) loadTracklist();
+    requestAnimationFrame(() => {
+      tracklistContainerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
+  // Fires once incompleteTracks actually arrives from a focusIncompleteTracks-
+  // triggered load — the section only mounts once this state is non-null, so
+  // scrolling has to wait for it rather than firing on the same tick as the
+  // fetch kicking off.
+  useEffect(() => {
+    if (!pendingIncompleteScroll || incompleteTracks === null) return;
+    setPendingIncompleteScroll(false);
+    requestAnimationFrame(() => {
+      incompleteTracksRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, [pendingIncompleteScroll, incompleteTracks]);
+
+  // Shared by the Playlist tab (clicking a stat jumps to + filters the
+  // Tracklist tab's "Tracks with errors" section) and the Tracklist tab
+  // itself (same summary shown again right above that section, so a
+  // different filter can be picked without navigating back to Playlist —
+  // per the user's explicit request for easier management from one place).
+  // Defined as a function (not a separate component) since it closes over
+  // a lot of this component's own state directly; safe to call from JSX
+  // further down since by then every hook above it has already run for
+  // this render.
+  function renderMissingDataSummary() {
+    if (!healStatus) return null;
+    return (
+      <div className="rounded-lg bg-slate-800/40 border border-white/10 p-3 space-y-1.5">
+        <div className="flex items-center gap-3">
+          <p className="text-sm font-medium text-slate-200">{healStatus.total} tracks</p>
+          {healStatus.missingUri > 0 && (
+            <button
+              onClick={deleteMissingUriTracks}
+              disabled={deletingMissingUris}
+              title="Remove every track with no Spotify URI from the local library (nothing to unfollow on Spotify — these were never matched)"
+              className={`text-xs rounded-lg border px-2.5 py-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${
+                deleteMissingUrisConfirm
+                  ? "border-red-500/50 bg-red-500/20 text-red-300 hover:bg-red-500/30"
+                  : "border-white/10 bg-slate-800/60 hover:bg-slate-700/60 text-slate-300"
+              }`}
+            >
+              {deletingMissingUris
+                ? "Deleting…"
+                : deleteMissingUrisConfirm
+                  ? `Confirm delete ${healStatus.missingUri}?`
+                  : `Delete ${healStatus.missingUri} missing`}
+            </button>
+          )}
+        </div>
+        {deleteMissingUrisError && <p className="text-xs text-red-400">{deleteMissingUrisError}</p>}
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
+          {healStatus.missingUri > 0 && (
+            <button onClick={() => focusIncompleteTracks("Track URI")} className="text-red-400 hover:underline">
+              {healStatus.missingUri} missing Spotify URI
+            </button>
+          )}
+          {healStatus.missingDuration > 0 && (
+            <button onClick={() => focusIncompleteTracks("Duration (ms)")} className="hover:text-slate-200 hover:underline">
+              {healStatus.missingDuration} missing duration
+            </button>
+          )}
+          {healStatus.missingGenres > 0 && (
+            <button onClick={focusMissingGenres} className="hover:text-slate-200 hover:underline">
+              {healStatus.missingGenres} missing genres
+            </button>
+          )}
+          {Object.entries(healStatus.missingFeatures).filter(([, n]) => n > 0).map(([field, n]) => (
+            <button key={field} onClick={() => focusIncompleteTracks(field)} className="hover:text-slate-200 hover:underline">
+              {n} missing {field.toLowerCase()}
+            </button>
+          ))}
+          {healStatus.missingDuration === 0 && healStatus.missingGenres === 0
+            && healStatus.missingUri === 0
+            && Object.values(healStatus.missingFeatures).every(n => n === 0) && (
+            <span className="text-green-400">Nothing missing 🎉</span>
+          )}
+        </div>
+        <p className="text-xs">
+          {healProgress?.spotifyRetryAt && new Date(healProgress.spotifyRetryAt).getTime() > Date.now() ? (
+            <span className="text-amber-400">
+              ⚠ Spotify rate limit active — clears {new Date(healProgress.spotifyRetryAt).toLocaleTimeString()}
+            </span>
+          ) : (
+            <span className="text-slate-600">Spotify rate limit: not active</span>
+          )}
+        </p>
+      </div>
+    );
+  }
+
   const [incompleteDeletingUris, setIncompleteDeletingUris] = useState<Set<string>>(new Set());
   // Manual single-field edit for a "Tracks with errors" row — keyed by
   // "uri::field" so each track's badges can be edited independently.
   const EDITABLE_FIELDS: Record<string, boolean> = {
     "Tempo": true, "Key": true, "Mode": true, "Energy": true, "Danceability": true, "Valence": true, "Genres": true,
+    "Duration (ms)": true,
   };
   const FIELD_TO_KEY: Record<string, string> = {
     "Tempo": "tempo", "Key": "key", "Mode": "mode", "Energy": "energy",
     "Danceability": "danceability", "Valence": "valence", "Genres": "genres",
+    "Duration (ms)": "durationMs",
   };
   const [editingField, setEditingField] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
@@ -645,7 +806,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       if (!res.ok) throw new Error(d.error ?? "Failed to save");
       setEditingField(null);
       setEditingValue("");
-      loadIncompleteTracks();
+      // Refresh whichever list(s) are currently loaded and could show this
+      // uri — both the "Tracks with errors" list and the full Tracklist
+      // table share this same edit control, so either or both may need it.
+      if (incompleteTracks !== null) loadIncompleteTracks();
+      if (tracklist !== null) void loadTracklist();
     } catch (e) {
       setEditingError(e instanceof Error ? e.message : "Failed to save");
     } finally {
@@ -744,7 +909,17 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     const idxGenre = col("Genres", "Genre");
     const idxDuration = col("Track Duration (ms)", "Duration (ms)", "Duration");
     const idxAdded = col("Added At", "Date Added", "Added");
+    const idxKey = col("Key");
+    const idxMode = col("Mode");
+    const idxDanceability = col("Danceability");
+    const idxValence = col("Valence");
     if (idxUri === -1 || idxName === -1) return [];
+
+    const numOrNull = (row: string[], idx: number) => {
+      if (idx === -1) return null;
+      const n = parseFloat(row[idx]);
+      return isNaN(n) ? null : n;
+    };
 
     const tracks: ManagedTrack[] = [];
     for (let i = 1; i < lines.length; i++) {
@@ -763,6 +938,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         energy: idxEnergy !== -1 ? (parseFloat(row[idxEnergy]) || 0) : 0,
         durationMs: idxDuration !== -1 ? (parseInt(row[idxDuration], 10) || 0) : 0,
         addedAt: idxAdded !== -1 ? (row[idxAdded]?.trim() || null) : null,
+        key: numOrNull(row, idxKey),
+        mode: numOrNull(row, idxMode),
+        danceability: numOrNull(row, idxDanceability),
+        valence: numOrNull(row, idxValence),
       });
     }
     return tracks;
@@ -776,6 +955,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       if (!res.ok) throw new Error("Failed to load library CSV");
       const text = await res.text();
       setTracklist(parseTracklistCsv(text));
+      fetch("/api/tracks/confirm-unique")
+        .then(r => r.json())
+        .then((d: { uris?: string[] }) => setConfirmedUniqueUris(new Set(d.uris ?? [])))
+        .catch(() => {});
     } catch (e) {
       setTracklistError(e instanceof Error ? e.message : "Failed to load tracklist");
     } finally {
@@ -787,6 +970,23 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setTracklistDeletingUris(prev => new Set(prev).add(track.uri));
     setTracklist(prev => prev?.filter(t => t.uri !== track.uri) ?? prev);
     deleteTrackFromLibrary(track.uri, runningPlaylist.id, skipDeletedLog);
+  }
+
+  const [confirmingUniqueUris, setConfirmingUniqueUris] = useState<Set<string>>(new Set());
+
+  async function confirmTrackUnique(uri: string) {
+    setConfirmingUniqueUris(prev => new Set(prev).add(uri));
+    setConfirmedUniqueUris(prev => new Set(prev).add(uri)); // optimistic — drops it out of duplicateGroups immediately
+    try {
+      await fetch("/api/tracks/confirm-unique", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uri }),
+      });
+    } catch { /* best-effort — worst case it's re-flagged next visit and can be kept again */ }
+    finally {
+      setConfirmingUniqueUris(prev => { const next = new Set(prev); next.delete(uri); return next; });
+    }
   }
 
   const allGenres = tracklist
@@ -801,10 +1001,19 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // remaster, that one is flagged as the suggested keeper; otherwise (zero or
   // multiple remasters — including the "two different-length copies, neither
   // marked as a remaster" case) it's left fully ambiguous for manual review.
+  // dupMatchKey is deliberately broad (strips remix/version suffixes same as
+  // the workbook-import fuzzy matcher) so it CAN group genuinely different
+  // songs together (e.g. two different remixes of the same original) — by
+  // design, per explicit product decision, rather than trying to get
+  // pattern-matching clever about telling them apart: the user listens
+  // (track name is clickable -> opens in Spotify) and decides "Delete this
+  // one" or "Keep this track" (confirmedUniqueUris) themselves. A track
+  // marked kept is filtered out of every future scan here.
   const duplicateGroups = (() => {
     if (!tracklist) return [];
     const byKey = new Map<string, ManagedTrack[]>();
     for (const t of tracklist) {
+      if (confirmedUniqueUris.has(t.uri)) continue;
       const key = dupMatchKey(t.name, t.artist);
       const group = byKey.get(key);
       if (group) group.push(t); else byKey.set(key, [t]);
@@ -830,6 +1039,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       if (min != null && (t.bpm === 0 || t.bpm < min)) return false;
       if (max != null && (t.bpm === 0 || t.bpm > max)) return false;
       if (tracklistGenre && !t.genre.toLowerCase().includes(tracklistGenre.toLowerCase())) return false;
+      if (tracklistOnlyMissingGenre && t.genre.trim() !== "") return false;
       // The bulk-delete artist field previews live as you type, same as
       // every other filter here — matches by substring while typing, so
       // the table shows exactly what "Delete artist" would remove.
@@ -2815,6 +3025,39 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ?focus=duplicates (the dashboard's "N possible duplicates" banner) —
+  // auto-opens the Possible Duplicates panel and scrolls to it once its
+  // data has actually loaded. Landing on the tracklist tab alone wasn't
+  // enough: the panel defaults collapsed and sits well down the page, so
+  // the link looked like it did nothing (confirmed: "does not show the
+  // tracks... when I click on it").
+  useEffect(() => {
+    if (searchParams.get("focus") !== "duplicates") return;
+    // Force the tracklist data to load even if the tab-switch effect
+    // hasn't fired yet on this same render pass — duplicateGroups is
+    // derived from `tracklist`, so without this, a fast page load could
+    // have this effect's OWN dependency (duplicateGroups.length) stuck at
+    // 0 forever if nothing else happens to trigger loadTracklist() first.
+    if (tracklist === null && !tracklistLoading) { void loadTracklist(); return; }
+    if (duplicateGroups.length === 0) return; // still loading, or genuinely none — wait
+    setDuplicatesOpen(true);
+    // A single requestAnimationFrame can fire before the newly-expanded
+    // section has actually committed to the DOM (setDuplicatesOpen's
+    // re-render hasn't necessarily flushed by the next paint) — retry for
+    // a short window instead of a one-shot attempt.
+    let attempts = 0;
+    const tryScroll = () => {
+      attempts++;
+      if (duplicatesSectionRef.current) {
+        duplicatesSectionRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      } else if (attempts < 20) {
+        setTimeout(tryScroll, 100);
+      }
+    };
+    requestAnimationFrame(tryScroll);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, duplicateGroups.length, tracklist, tracklistLoading]);
+
   useEffect(() => {
     // Always refetch on switching to this tab (not just the first time) —
     // deletions can happen from other tabs (e.g. Tracklist's per-track or
@@ -3314,54 +3557,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               after a save/import or "Check for missing data" above; can run
               for a long time on a large library, so this keeps it visible
               instead of the page looking like nothing happened. */}
-          {healStatus && (
-            <div className="rounded-lg bg-slate-800/40 border border-white/10 p-3 space-y-1.5">
-              <div className="flex items-center gap-3">
-                <p className="text-sm font-medium text-slate-200">{healStatus.total} tracks</p>
-                {healStatus.missingUri > 0 && (
-                  <button
-                    onClick={deleteMissingUriTracks}
-                    disabled={deletingMissingUris}
-                    title="Remove every track with no Spotify URI from the local library (nothing to unfollow on Spotify — these were never matched)"
-                    className={`text-xs rounded-lg border px-2.5 py-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${
-                      deleteMissingUrisConfirm
-                        ? "border-red-500/50 bg-red-500/20 text-red-300 hover:bg-red-500/30"
-                        : "border-white/10 bg-slate-800/60 hover:bg-slate-700/60 text-slate-300"
-                    }`}
-                  >
-                    {deletingMissingUris
-                      ? "Deleting…"
-                      : deleteMissingUrisConfirm
-                        ? `Confirm delete ${healStatus.missingUri}?`
-                        : `Delete ${healStatus.missingUri} missing`}
-                  </button>
-                )}
-              </div>
-              {deleteMissingUrisError && <p className="text-xs text-red-400">{deleteMissingUrisError}</p>}
-              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
-                {healStatus.missingUri > 0 && <span className="text-red-400">{healStatus.missingUri} missing Spotify URI</span>}
-                {healStatus.missingDuration > 0 && <span>{healStatus.missingDuration} missing duration</span>}
-                {healStatus.missingGenres > 0 && <span>{healStatus.missingGenres} missing genres</span>}
-                {Object.entries(healStatus.missingFeatures).filter(([, n]) => n > 0).map(([field, n]) => (
-                  <span key={field}>{n} missing {field.toLowerCase()}</span>
-                ))}
-                {healStatus.missingDuration === 0 && healStatus.missingGenres === 0
-                  && healStatus.missingUri === 0
-                  && Object.values(healStatus.missingFeatures).every(n => n === 0) && (
-                  <span className="text-green-400">Nothing missing 🎉</span>
-                )}
-              </div>
-              <p className="text-xs">
-                {healProgress?.spotifyRetryAt && new Date(healProgress.spotifyRetryAt).getTime() > Date.now() ? (
-                  <span className="text-amber-400">
-                    ⚠ Spotify rate limit active — clears {new Date(healProgress.spotifyRetryAt).toLocaleTimeString()}
-                  </span>
-                ) : (
-                  <span className="text-slate-600">Spotify rate limit: not active</span>
-                )}
-              </p>
-            </div>
-          )}
+          {healStatus && renderMissingDataSummary()}
 
           {healProgress && !healProgress.running && healProgress.finishedAt && (
             <div className="rounded-lg bg-green-500/10 border border-green-500/30 p-3">
@@ -3462,6 +3658,18 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             </div>
           )}
           {appendCsvError && <p className="text-xs text-red-400">{appendCsvError}</p>}
+        </div>
+
+        {/* Bulk-import a bare title/artist/BPM/genre CSV (e.g. a tracklist
+            copied from a forum/site, not a Spotify export) — checks
+            candidates against the active library first (loose name+artist
+            match, so near-duplicates still flag) and the deleted-tracks
+            log, then a review screen lets the user pick which flagged
+            candidates to actually import (multiple similar rows can all be
+            kept — see ImportLookupCsvPanel's own comment for the full
+            pipeline). */}
+        <div className="pt-3 border-t border-white/10 space-y-2">
+          <ImportLookupCsvPanel />
         </div>
 
         </div>
@@ -5317,6 +5525,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     <div className={activeTab === "tracklist" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
 
+      {/* Same missing-data summary as the Playlist tab — repeated here so a
+          different filter can be picked directly, without navigating back
+          to Playlist first (the "Tracks with errors" section below is only
+          ever mounted in THIS tab's panel, so this is also where the
+          Playlist tab's own stat clicks land after switching tabs). */}
+      {healStatus && renderMissingDataSummary()}
+
       {!!recentTracks?.length && (
         <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
           <button
@@ -5347,9 +5562,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       )}
 
       {!!incompleteTracks?.length && (
-        <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+        <div ref={incompleteTracksRef} className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
           <button
-            onClick={() => setIncompleteTracksOpen(o => !o)}
+            onClick={() => { setIncompleteTracksOpen(o => !o); setIncompleteFilterField(null); }}
             className="w-full flex items-center justify-between gap-4 p-5 text-left hover:bg-slate-800/40 transition-colors"
           >
             <div>
@@ -5370,6 +5585,16 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </button>
           {incompleteTracksOpen && (
             <div className="border-t border-white/10">
+              {incompleteFilterField && (
+                <div className="px-5 pt-3 flex items-center gap-2 flex-wrap">
+                  <span className="text-xs text-slate-400">
+                    Showing only tracks missing <span className="text-amber-300">{incompleteFilterField}</span>
+                  </span>
+                  <button onClick={() => setIncompleteFilterField(null)} className="text-xs text-slate-500 hover:text-slate-300 underline">
+                    Show all
+                  </button>
+                </div>
+              )}
               <div className="px-5 py-3 flex items-center justify-between gap-3 border-b border-white/10 flex-wrap">
                 <p className="text-xs text-slate-500">
                   {healProgress?.running
@@ -5400,7 +5625,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                 <p className="text-xs text-slate-400 px-5 pt-2">{saveErrorsToSpotifyMsg}</p>
               )}
               <div className="divide-y divide-slate-800/50 px-5">
-                {incompleteTracks.map((track, i) => (
+                {(incompleteFilterField
+                  ? incompleteTracks.filter(t => t.fields[incompleteFilterField] === false)
+                  : incompleteTracks
+                ).map((track, i) => (
                   <div key={track.uri} className="py-1.5">
                     <TrackRow
                       track={track}
@@ -5467,7 +5695,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       )}
 
       {duplicateGroups.length > 0 && (
-        <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+        <div ref={duplicatesSectionRef} className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
           <button
             onClick={() => setDuplicatesOpen(o => !o)}
             className="w-full flex items-center justify-between gap-4 p-5 text-left hover:bg-slate-800/40 transition-colors"
@@ -5510,13 +5738,23 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                           {Math.floor(t.durationMs / 60000)}:{String(Math.round((t.durationMs % 60000) / 1000)).padStart(2, "0")} · {t.bpm || "?"} BPM
                         </p>
                       </div>
-                      <button
-                        onClick={() => deleteManagedTrack(t, true)}
-                        disabled={tracklistDeletingUris.has(t.uri)}
-                        className="shrink-0 text-xs text-red-400 hover:text-red-300 border border-red-500/30 hover:border-red-500/50 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
-                      >
-                        Delete this one
-                      </button>
+                      <div className="shrink-0 flex items-center gap-2">
+                        <button
+                          onClick={() => confirmTrackUnique(t.uri)}
+                          disabled={confirmingUniqueUris.has(t.uri)}
+                          title="Not actually a duplicate — keep this track and stop flagging it against this group"
+                          className="text-xs text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 hover:border-emerald-500/50 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
+                        >
+                          Keep this track
+                        </button>
+                        <button
+                          onClick={() => deleteManagedTrack(t, true)}
+                          disabled={tracklistDeletingUris.has(t.uri)}
+                          className="text-xs text-red-400 hover:text-red-300 border border-red-500/30 hover:border-red-500/50 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
+                        >
+                          Delete this one
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -5581,9 +5819,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                 </datalist>
               </>
             )}
-            {(tracklistFilter || tracklistBpmMin || tracklistBpmMax || tracklistGenre) && (
+            {tracklistOnlyMissingGenre && (
+              <span className="text-xs text-amber-300">Showing only tracks missing a genre</span>
+            )}
+            {(tracklistFilter || tracklistBpmMin || tracklistBpmMax || tracklistGenre || tracklistOnlyMissingGenre) && (
               <button
-                onClick={() => { setTracklistFilter(""); setTracklistBpmMin(""); setTracklistBpmMax(""); setTracklistGenre(""); }}
+                onClick={() => { setTracklistFilter(""); setTracklistBpmMin(""); setTracklistBpmMax(""); setTracklistGenre(""); setTracklistOnlyMissingGenre(false); }}
                 className="text-xs text-slate-400 hover:text-slate-200 underline"
               >
                 Clear
@@ -5687,7 +5928,16 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               };
               const genres = t.genre.split(",").map(g => g.trim()).filter(Boolean);
               return (
-                <div key={t.uri}>
+                // key is uri+index, not just uri — a real data bug (now
+                // guarded against for future imports, see the confirm-unique
+                // import route's dupe-uri check) can leave two DIFFERENT
+                // library rows sharing the same Spotify URI; React silently
+                // misbehaves on duplicate keys (rows visually duplicating,
+                // stale content bleeding between rows) rather than erroring,
+                // which is exactly what this looked like — a broad filter
+                // showed extra copies, a narrower one (collapsing the
+                // colliding pair down to its real 2 rows) "fixed" it.
+                <div key={`${t.uri}-${i}`}>
                   <TrackRow
                     track={track}
                     index={i}
@@ -5710,6 +5960,68 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                       ))}
                     </div>
                   )}
+                  {/* Inline field editing — same click-to-edit control as
+                      "Tracks with errors" above, but every field is always
+                      editable here (not just blank ones), since this is the
+                      general "fix any track's data" surface rather than
+                      only flagged gaps. Shows the CURRENT value (or a dash)
+                      rather than a ✓/✗ presence check. */}
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 pl-[3.25rem] pr-3 pb-2 -mt-1">
+                    {([
+                      ["Tempo", t.bpm || null],
+                      ["Key", t.key],
+                      ["Mode", t.mode],
+                      ["Energy", t.energy || null],
+                      ["Danceability", t.danceability],
+                      ["Valence", t.valence],
+                      ["Duration (ms)", t.durationMs || null],
+                      ["Genres", t.genre || null],
+                    ] as [string, number | string | null][]).map(([field, value]) => {
+                      const editKey = `${t.uri}::${field}`;
+                      if (editingField === editKey) {
+                        return (
+                          <span key={field} className="text-xs flex items-center gap-1.5">
+                            <input
+                              autoFocus
+                              type={field === "Genres" ? "text" : "number"}
+                              value={editingValue}
+                              onChange={e => setEditingValue(e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === "Enter") saveFieldEdit(t.uri, field);
+                                if (e.key === "Escape") { setEditingField(null); setEditingError(null); }
+                              }}
+                              placeholder={field}
+                              className="w-20 rounded bg-slate-800/80 border border-white/20 text-xs px-1.5 py-0.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+                            />
+                            <button
+                              onClick={() => saveFieldEdit(t.uri, field)}
+                              disabled={editingSaving || !editingValue.trim()}
+                              className="text-green-400 hover:text-green-300 disabled:opacity-40"
+                            >
+                              ✓
+                            </button>
+                            <button
+                              onClick={() => { setEditingField(null); setEditingError(null); }}
+                              className="text-slate-500 hover:text-slate-400"
+                            >
+                              ✗
+                            </button>
+                            {editingError && <span className="text-red-400">{editingError}</span>}
+                          </span>
+                        );
+                      }
+                      return (
+                        <span
+                          key={field}
+                          onClick={() => { setEditingField(editKey); setEditingValue(value != null ? String(value) : ""); setEditingError(null); }}
+                          title={`Click to edit ${field}`}
+                          className={`text-xs flex items-center gap-1 cursor-pointer hover:underline ${value != null ? "text-slate-400 hover:text-slate-200" : "text-red-400"}`}
+                        >
+                          {field}: {value ?? "—"}
+                        </span>
+                      );
+                    })}
+                  </div>
                 </div>
               );
             })}

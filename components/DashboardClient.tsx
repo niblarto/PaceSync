@@ -540,6 +540,11 @@ export function DashboardClient({ spotifyUser }: Props) {
   // swap lands in the exact same slot, and its artist name so the picker's
   // online top-up (own + related artists) knows who to search.
   const [replaceTarget, setReplaceTarget] = useState<{ track: TrackWithBPM; index: number } | null>(null);
+  // "Quick Swap" picker — same idea as replaceTarget, but a library-only,
+  // no-prompt variant: opens straight into results at the track's own BPM
+  // (no target-BPM entry, no online top-up), for "just show me something
+  // else that fits here" without the full Replace flow's extra steps.
+  const [quickSwapTarget, setQuickSwapTarget] = useState<{ track: TrackWithBPM; index: number } | null>(null);
   // Right-click context menu for a track chip in the Pace/BPM chart's song
   // strip — offers the same per-track actions the main tracklist's row
   // icons do (recycle/eject/delete), resolved here from the chip's uri
@@ -3400,6 +3405,14 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   ♻ Replace by BPM
                 </button>
               )}
+              {!aiDjMix.stale && (
+                <button
+                  className={`${item} text-teal-300 hover:bg-teal-500/15`}
+                  onClick={() => { setChartTrackMenu(null); setQuickSwapTarget({ track, index: idx }); }}
+                >
+                  🔁 Quick Swap
+                </button>
+              )}
               <button
                 className={`${item} text-amber-300 hover:bg-amber-500/15`}
                 onClick={() => { setChartTrackMenu(null); removeTrackFromMix(track); }}
@@ -3498,6 +3511,15 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
         />
       )}
 
+      {quickSwapTarget && (
+        <QuickSwapModal
+          target={quickSwapTarget.track}
+          mixUris={aiDjMix?.tracks.map(t => t.uri) ?? [quickSwapTarget.track.uri]}
+          onClose={() => setQuickSwapTarget(null)}
+          onConfirm={(replacement) => replaceMixTrack(quickSwapTarget.index, replacement)}
+        />
+      )}
+
       {lookupListOpen && (
         <LookupTracksModal
           onClose={() => setLookupListOpen(false)}
@@ -3527,6 +3549,7 @@ interface ReplaceCandidate {
   energy: number | null;
   danceability: number | null;
   valence: number | null;
+  genres: string | null;
 }
 
 function candidateToTrackWithBpm(c: ReplaceCandidate, uri: string): TrackWithBPM {
@@ -4245,6 +4268,172 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
                     className="shrink-0 rounded-lg bg-sky-500/15 border border-sky-500/40 hover:bg-sky-500/25 text-sky-300 text-xs px-2.5 py-1.5 transition-colors disabled:opacity-40"
                   >
                     {addingOnline !== null && addingOnline === (c.uri ?? c.isrc) ? "Adding…" : "Use this track"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// "Quick Swap" — a fast, no-prompt sibling of ReplaceTrackModal for the
+// common case: you just want another track that fits this exact slot,
+// without typing a target BPM or opting into an online top-up. Searches
+// the library ONLY (no Deezer/ReccoBeats round-trips — that's what makes
+// it "quick"), locked to the track's own BPM and duration tolerance, and
+// surfaces genre per row (replace-candidates' ReplaceCandidate.genres)
+// since that's the other thing you'd eyeball before picking a swap.
+function QuickSwapModal({ target, mixUris, onClose, onConfirm }: {
+  target: TrackWithBPM;
+  mixUris: string[];
+  onClose: () => void;
+  onConfirm: (replacement: TrackWithBPM) => void;
+}) {
+  const { data: session } = useSession();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<ReplaceCandidate[] | null>(null);
+  const [addingUri, setAddingUri] = useState<string | null>(null);
+  const [playingUri, setPlayingUri] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch("/api/tracks/replace-candidates", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            targetBpm: target.bpm, targetUri: target.uri, excludeUris: mixUris, originalDurationMs: target.duration_ms,
+            // No artistName/searchMode passed — canSearchOnline stays false
+            // server-side, so this is a library-only lookup by design (kept
+            // library-only deliberately: "quick" swap should never trigger
+            // a Deezer/ReccoBeats round-trip).
+          }),
+        });
+        if (!res.ok || !res.body) {
+          const err = await res.json().catch(() => ({})) as { error?: string };
+          throw new Error(err.error ?? `Search failed (${res.status})`);
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let sep;
+          while ((sep = buf.indexOf("\n\n")) !== -1) {
+            const chunk = buf.slice(0, sep);
+            buf = buf.slice(sep + 2);
+            const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+            if (!dataLine) continue;
+            // Library-only search (no artistName sent) never emits
+            // "online-start"/"progress" frames — only "done"/"error".
+            const msg = JSON.parse(dataLine.slice(6)) as { type: string; candidates?: ReplaceCandidate[]; error?: string };
+            if (msg.type === "error") {
+              throw new Error(msg.error ?? "Search failed");
+            } else if (msg.type === "done" && !cancelled) {
+              setCandidates(msg.candidates ?? []);
+            }
+          }
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : "Search failed");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target.uri]);
+
+  function preview(c: ReplaceCandidate) {
+    if (!c.uri) return;
+    setPlayingUri(c.uri);
+    playInSpotify(c.uri, session?.accessToken).catch(() => {});
+  }
+
+  async function use(c: ReplaceCandidate) {
+    // Library-only search — every candidate here already has a real uri,
+    // never an online/ISRC-only one.
+    if (!c.uri) return;
+    setAddingUri(c.uri);
+    setError(null);
+    try {
+      onConfirm(await resolveCandidateForUse(c));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to add track");
+    } finally {
+      setAddingUri(null);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div
+        className="rounded-xl bg-slate-900 border border-white/10 p-5 max-w-lg w-full max-h-[85vh] flex flex-col space-y-4"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="font-semibold text-slate-100">Quick Swap</h3>
+            <p className="text-sm text-slate-400 mt-0.5 truncate">
+              {target.name} — <span className="text-slate-500">{target.artists.map(a => a.name).join(", ")}</span>
+              <span className="text-slate-600"> · {target.bpm} BPM</span>
+            </p>
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-lg leading-none shrink-0">×</button>
+        </div>
+        <p className="text-xs text-slate-500">
+          Library tracks at {target.bpm} BPM within 15s of the original&apos;s length ({Math.round(target.duration_ms / 1000)}s).
+        </p>
+
+        {loading && (
+          <p className="text-sm text-slate-400 flex items-center gap-1.5"><Spinner /> Finding tracks that fit…</p>
+        )}
+        {error && <p className="text-sm text-red-400">{error}</p>}
+
+        {candidates && !loading && (
+          <div className="rounded-lg border border-white/10 divide-y divide-white/5 overflow-y-auto no-scrollbar flex-1 min-h-0">
+            {candidates.length === 0 && (
+              <p className="text-sm text-slate-500 p-4 text-center">No library tracks at {target.bpm} BPM within 15s of the original&apos;s length.</p>
+            )}
+            {candidates.map((c, i) => {
+              const durDiffSec = c.durationMs != null ? Math.round((c.durationMs - target.duration_ms) / 1000) : null;
+              return (
+                <div key={`${c.uri ?? i}`} className="px-3 py-2 flex items-center gap-3">
+                  <button
+                    onClick={() => preview(c)}
+                    disabled={!c.uri}
+                    className="flex-1 min-w-0 text-left disabled:cursor-default"
+                    title={c.uri ? "Play in Spotify" : undefined}
+                  >
+                    <p className={`text-sm truncate ${playingUri === c.uri && c.uri ? "text-orange-400" : "text-slate-200"}`}>
+                      {c.name} <span className="text-slate-500">— {c.artist}</span>
+                    </p>
+                    <p className="text-xs text-slate-500 flex items-center gap-2 flex-wrap">
+                      <span className="text-green-400">{Math.round(c.effectiveBpm)} BPM</span>
+                      {c.energy != null && <span className="text-slate-600">· energy {Math.round(c.energy * 100)}</span>}
+                      {durDiffSec != null && (
+                        <span className="text-slate-600">
+                          · {durDiffSec === 0 ? "same length" : `${durDiffSec > 0 ? "+" : ""}${durDiffSec}s vs. original`}
+                        </span>
+                      )}
+                      {c.genres && <span className="text-slate-600 truncate">· {c.genres}</span>}
+                    </p>
+                  </button>
+                  <button
+                    onClick={() => use(c)}
+                    disabled={addingUri !== null && addingUri === c.uri}
+                    className="shrink-0 rounded-lg bg-teal-500/15 border border-teal-500/40 hover:bg-teal-500/25 text-teal-300 text-xs px-2.5 py-1.5 transition-colors disabled:opacity-40"
+                  >
+                    {addingUri !== null && addingUri === c.uri ? "Adding…" : "Use this track"}
                   </button>
                 </div>
               );

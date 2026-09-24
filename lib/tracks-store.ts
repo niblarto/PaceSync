@@ -165,7 +165,19 @@ export interface MergeResult { appended: number; merged: number; skipped: number
 // inserted as a new row; an existing URI's row gets blank cells backfilled
 // (never overwritten); a row with no URI at all is always appended
 // unconditionally (matches the original's "no dedup possible" fallback).
-export function mergeTracksIntoPlaylist(csvFile: string, incoming: Partial<TrackRow>[], opts?: { excludeUris?: Set<string> }): MergeResult {
+//
+// overwriteTempo: when true and the incoming row has a Tempo value, that
+// value REPLACES whatever's already stored for that URI (not blank-only) —
+// used by the Exportify "Append" re-import path, since a fresh Exportify
+// export carries Spotify's own audio-feature BPM and should win over
+// whatever this app previously resolved/guessed for that track. Every
+// other field on the row still only backfills blanks, same as always.
+// Safe regardless of a local BPM override existing for that URI: overrides
+// are applied at CSV-OUTPUT time (trackRowToCsvRow, above), universally,
+// on every read — so writing a fresh Tempo into the DB here never actually
+// surfaces anywhere an override is set; the override still wins on output
+// exactly as it always has.
+export function mergeTracksIntoPlaylist(csvFile: string, incoming: Partial<TrackRow>[], opts?: { excludeUris?: Set<string>; overwriteTempo?: boolean }): MergeResult {
   const db = getDb();
   let appended = 0, merged = 0, skipped = 0;
   const tx = db.transaction(() => {
@@ -183,6 +195,9 @@ export function mergeTracksIntoPlaylist(csvFile: string, incoming: Partial<Track
       const existing = db.prepare("SELECT 1 FROM tracks WHERE csv_file = ? AND uri = ?").get(csvFile, uri);
       if (existing) {
         backfillTrackFields(csvFile, uri, row);
+        if (opts?.overwriteTempo && row.tempo != null) {
+          db.prepare("UPDATE tracks SET tempo = ? WHERE csv_file = ? AND uri = ?").run(row.tempo, csvFile, uri);
+        }
         merged++;
       } else {
         insertRow(csvFile, rowNo++, row);

@@ -16,6 +16,7 @@ interface AiDjMixResponse { trackUris: string[]; totalSec: number; timeline: AiD
 interface SavedPaceProMix {
   id: string; title: string; totalSec: number; timeline: AiDjSimTimelineSegment[];
   splitsCsvText: string; fileName: string | null; savedAt: string; activityId: string | null;
+  spotifyPlaylistId: string | null;
 }
 
 export function PaceProClient() {
@@ -50,6 +51,14 @@ export function PaceProClient() {
   const [ppActivityInputs, setPpActivityInputs] = useState<Record<string, string>>({});
   const [ppAttachingId, setPpAttachingId] = useState<string | null>(null);
   const [ppRouteMapMix, setPpRouteMapMix] = useState<SavedPaceProMix | null>(null);
+  // Duplicate/rename on a saved mix row — id of the mix whose rename input
+  // is currently open (null = none), and per-mix busy flags so multiple
+  // rows' buttons don't fight over one shared "saving" state.
+  const [ppRenamingId, setPpRenamingId] = useState<string | null>(null);
+  const [ppRenameInput, setPpRenameInput] = useState("");
+  const [ppRenameBusyId, setPpRenameBusyId] = useState<string | null>(null);
+  const [ppDuplicatingId, setPpDuplicatingId] = useState<string | null>(null);
+  const [ppSpotifySavingId, setPpSpotifySavingId] = useState<string | null>(null);
 
   // Restore the last pinned Pace Pro mix and the saved-mix library on mount.
   useEffect(() => {
@@ -348,6 +357,94 @@ export function PaceProClient() {
     } catch { /* best-effort — already removed from the list */ }
   }
 
+  // Clones a saved mix (splits + tracklist) under a new title — deliberately
+  // does not carry over the source's Spotify playlist link or attached
+  // GarminDB route (see the duplicate route's own doc comment for why).
+  async function duplicatePaceProMix(mix: SavedPaceProMix) {
+    setPpDuplicatingId(mix.id);
+    setPpLibraryMsg(null);
+    try {
+      const res = await fetch("/api/settings/pace-pro-saved/duplicate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: mix.id, title: `${mix.title} (copy)` }),
+      });
+      const data = await res.json() as { mix?: SavedPaceProMix; error?: string };
+      if (!res.ok || data.error || !data.mix) throw new Error(data.error ?? `Duplicate failed (${res.status})`);
+      setPpSavedMixes(prev => [data.mix!, ...prev]);
+      setPpLibraryMsg(`Duplicated as "${data.mix.title}"`);
+    } catch (e) {
+      setPpLibraryMsg(e instanceof Error ? e.message : "Failed to duplicate");
+    } finally {
+      setPpDuplicatingId(null);
+    }
+  }
+
+  function startRenamePaceProMix(mix: SavedPaceProMix) {
+    setPpRenamingId(mix.id);
+    setPpRenameInput(mix.title);
+  }
+
+  // Renames both the local saved-mix title and, if this mix already has its
+  // own linked Spotify playlist, that playlist's name too — one action
+  // covers both, per the product intent ("renames the local version and the
+  // spotify version"). A mix never saved to Spotify yet has nothing there
+  // to rename; its playlist (if any is made later) is simply created under
+  // the new title.
+  async function commitRenamePaceProMix(id: string) {
+    const title = ppRenameInput.trim();
+    if (!title) { setPpRenamingId(null); return; }
+    setPpRenameBusyId(id);
+    try {
+      const res = await fetch("/api/settings/pace-pro-saved/rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, title }),
+      });
+      const data = await res.json() as { ok?: boolean; title?: string; spotifyRenamed?: boolean; spotifyError?: string; error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `Rename failed (${res.status})`);
+      setPpSavedMixes(prev => prev.map(m => m.id === id ? { ...m, title: data.title ?? title } : m));
+      if (ppLoadedSavedId === id) setPpTitle(data.title ?? title);
+      setPpLibraryMsg(
+        data.spotifyRenamed
+          ? `Renamed (Spotify playlist renamed too)`
+          : data.spotifyError
+            ? `Renamed locally — Spotify rename failed: ${data.spotifyError}`
+            : `Renamed`
+      );
+      setPpRenamingId(null);
+    } catch (e) {
+      setPpLibraryMsg(e instanceof Error ? e.message : "Failed to rename");
+    } finally {
+      setPpRenameBusyId(null);
+    }
+  }
+
+  // "Save to Spotify" for one saved mix — unlike the builder's own
+  // savePaceProToSpotify() above (always the shared "Today's Run"
+  // playlist), this finds-or-creates a playlist named after the mix's OWN
+  // title and remembers its id (spotifyPlaylistId) so a later rename can
+  // target it directly.
+  async function savePaceProMixToItsOwnSpotifyPlaylist(mix: SavedPaceProMix) {
+    setPpSpotifySavingId(mix.id);
+    setPpLibraryMsg(null);
+    try {
+      const res = await fetch("/api/settings/pace-pro-saved/spotify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: mix.id }),
+      });
+      const data = await res.json() as { url?: string; spotifyPlaylistId?: string; error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `Save failed (${res.status})`);
+      setPpSavedMixes(prev => prev.map(m => m.id === mix.id ? { ...m, spotifyPlaylistId: data.spotifyPlaylistId ?? m.spotifyPlaylistId } : m));
+      setPpLibraryMsg(`Saved "${mix.title}" to Spotify`);
+    } catch (e) {
+      setPpLibraryMsg(e instanceof Error ? e.message : "Failed to save to Spotify");
+    } finally {
+      setPpSpotifySavingId(null);
+    }
+  }
+
   // Attaches a GarminDB activity (by id, e.g. the numeric id in
   // https://connect.garmin.com/app/activity/<id>) as a saved Pace Pro mix's
   // route/map — no live Garmin Connect lookup here; the id only resolves
@@ -610,26 +707,76 @@ export function PaceProClient() {
             {ppSavedMixes.map(mix => (
               <div key={mix.id} className="px-3 py-2.5 space-y-2">
                 <div className="flex items-center justify-between gap-3">
-                  <button
-                    onClick={() => loadSavedPaceProMix(mix)}
-                    className={`text-left min-w-0 flex-1 group ${ppLoadedSavedId === mix.id ? "cursor-default" : "cursor-pointer"}`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className={`text-sm font-medium truncate ${ppLoadedSavedId === mix.id ? "text-purple-300" : "text-slate-200 group-hover:text-green-300"}`}>
-                        {mix.title}
-                      </span>
-                      {ppLoadedSavedId === mix.id && <span className="text-[10px] uppercase tracking-wide text-purple-400 shrink-0">loaded</span>}
+                  {ppRenamingId === mix.id ? (
+                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                      <input
+                        type="text"
+                        autoFocus
+                        value={ppRenameInput}
+                        onChange={e => setPpRenameInput(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === "Enter") void commitRenamePaceProMix(mix.id);
+                          if (e.key === "Escape") setPpRenamingId(null);
+                        }}
+                        className="min-w-0 flex-1 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+                      />
+                      <button
+                        onClick={() => commitRenamePaceProMix(mix.id)}
+                        disabled={ppRenameBusyId === mix.id}
+                        className="text-green-400 hover:text-green-300 text-xs shrink-0 disabled:opacity-40"
+                      >
+                        {ppRenameBusyId === mix.id ? "…" : "✓"}
+                      </button>
+                      <button onClick={() => setPpRenamingId(null)} className="text-slate-500 hover:text-slate-300 text-xs shrink-0">✗</button>
                     </div>
-                    <div className="text-xs text-slate-500">
-                      {mix.timeline.flatMap(s => s.tracks).length} tracks · {Math.round(mix.totalSec / 60)} min · saved {new Date(mix.savedAt).toLocaleDateString()}
+                  ) : (
+                    <button
+                      onClick={() => loadSavedPaceProMix(mix)}
+                      className={`text-left min-w-0 flex-1 group ${ppLoadedSavedId === mix.id ? "cursor-default" : "cursor-pointer"}`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className={`text-sm font-medium truncate ${ppLoadedSavedId === mix.id ? "text-purple-300" : "text-slate-200 group-hover:text-green-300"}`}>
+                          {mix.title}
+                        </span>
+                        {ppLoadedSavedId === mix.id && <span className="text-[10px] uppercase tracking-wide text-purple-400 shrink-0">loaded</span>}
+                        {mix.spotifyPlaylistId && <span className="text-[10px] text-green-500 shrink-0" title="Has its own Spotify playlist">🎧</span>}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        {mix.timeline.flatMap(s => s.tracks).length} tracks · {Math.round(mix.totalSec / 60)} min · saved {new Date(mix.savedAt).toLocaleDateString()}
+                      </div>
+                    </button>
+                  )}
+                  {ppRenamingId !== mix.id && (
+                    <div className="flex items-center gap-3 shrink-0">
+                      <button
+                        onClick={() => savePaceProMixToItsOwnSpotifyPlaylist(mix)}
+                        disabled={ppSpotifySavingId === mix.id}
+                        title="Save this mix's tracks to its own Spotify playlist (find-or-create by this mix's title)"
+                        className="text-slate-500 hover:text-green-400 text-xs transition-colors disabled:opacity-40"
+                      >
+                        {ppSpotifySavingId === mix.id ? "Saving…" : "Spotify"}
+                      </button>
+                      <button
+                        onClick={() => startRenamePaceProMix(mix)}
+                        className="text-slate-500 hover:text-slate-200 text-xs transition-colors"
+                      >
+                        Rename
+                      </button>
+                      <button
+                        onClick={() => duplicatePaceProMix(mix)}
+                        disabled={ppDuplicatingId === mix.id}
+                        className="text-slate-500 hover:text-slate-200 text-xs transition-colors disabled:opacity-40"
+                      >
+                        {ppDuplicatingId === mix.id ? "Duplicating…" : "Duplicate"}
+                      </button>
+                      <button
+                        onClick={() => deleteSavedPaceProMix(mix.id)}
+                        className="text-slate-500 hover:text-red-400 text-xs transition-colors"
+                      >
+                        Delete
+                      </button>
                     </div>
-                  </button>
-                  <button
-                    onClick={() => deleteSavedPaceProMix(mix.id)}
-                    className="text-slate-500 hover:text-red-400 text-xs shrink-0 transition-colors"
-                  >
-                    Delete
-                  </button>
+                  )}
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
                   {mix.activityId ? (
