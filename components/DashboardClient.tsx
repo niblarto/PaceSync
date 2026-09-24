@@ -2436,7 +2436,18 @@ export function DashboardClient({ spotifyUser }: Props) {
     if (indices.length === 0) return;
     const startIdx = Math.min(...indices);
     const endIdx = Math.max(...indices);
-    const budgetMs = aiDjMix.tracks.slice(startIdx, endIdx + 1).reduce((sum, t) => sum + t.duration_ms, 0);
+    // The budget must be the SELECTED tracks' own combined length, not
+    // everything between the first and last selected index — a
+    // non-contiguous selection (e.g. ctrl-click skips a track) would
+    // otherwise silently fold an unselected track's duration into the
+    // target (confirmed: a 2-track, 9:55 selection sent a ~14.9min budget
+    // to the mixer — an unselected track sitting between the two picks was
+    // being summed in here even though it was never going to be replaced).
+    if (endIdx - startIdx + 1 !== indices.length) {
+      setChartAiRemixError("AI Remix needs a contiguous selection (no un-selected track skipped in between) — select a run of adjacent tracks and try again.");
+      return;
+    }
+    const budgetMs = indices.reduce((sum, i) => sum + aiDjMix.tracks[i].duration_ms, 0);
     const avoidUris = aiDjMix.tracks.map(t => t.uri); // every track already in the mix, not just the selection — a pick elsewhere in the mix would land as a duplicate
 
     setChartAiRemixing(true);
