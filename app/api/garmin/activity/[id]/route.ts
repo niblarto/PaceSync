@@ -54,6 +54,14 @@ interface ChartPoint {
   pace: number | null;
   cadence: number | null;
   hr: number | null;
+  // Cumulative distance (miles) at the END of this 10s bucket — integrated
+  // from each raw record's own speed × time-delta before bucketing, since
+  // activity_records carries no distance column of its own (unlike
+  // activity_laps, which only has one cumulative total per LAP, too coarse
+  // for a per-10s chart point). Lets a client overlay a per-MILE target
+  // (e.g. a Pace Pro plan's split paces) against this time-based chart by
+  // looking up which split each point's distance falls into.
+  distanceMi: number;
 }
 
 function buildChartData(rawRecords: RawRecord[]): ChartPoint[] {
@@ -61,17 +69,30 @@ function buildChartData(rawRecords: RawRecord[]): ChartPoint[] {
 
   const t0 = parseGarminTs(rawRecords[0].timestamp);
 
-  const buckets = new Map<number, { paces: number[]; cadences: number[]; hrs: number[] }>();
+  const buckets = new Map<number, { paces: number[]; cadences: number[]; hrs: number[]; distanceMi: number }>();
 
+  let cumulativeMi = 0;
+  let prevMs = t0;
   for (const r of rawRecords) {
-    const elapsed = Math.round((parseGarminTs(r.timestamp) - t0) / 1000);
+    const nowMs = parseGarminTs(r.timestamp);
+    const dtHours = Math.max(0, nowMs - prevMs) / 3_600_000;
+    // Integrate BEFORE advancing prevMs, using this record's own speed for
+    // the interval since the previous record — same "speed × elapsed"
+    // convention run-pacing's own pace-vs-actual comparison already uses.
+    cumulativeMi += (r.speed ?? 0) * dtHours;
+    prevMs = nowMs;
+
+    const elapsed = Math.round((nowMs - t0) / 1000);
     const b = Math.floor(elapsed / BUCKET_SECS);
-    if (!buckets.has(b)) buckets.set(b, { paces: [], cadences: [], hrs: [] });
+    if (!buckets.has(b)) buckets.set(b, { paces: [], cadences: [], hrs: [], distanceMi: 0 });
     const bucket = buckets.get(b)!;
     const pace = speedToPace(r.speed ?? 0);
     if (pace !== null) bucket.paces.push(pace);
     if (r.cadence && r.cadence > 10) bucket.cadences.push(r.cadence * 2);
     if (r.hr && r.hr > 30) bucket.hrs.push(r.hr);
+    // Last record in the bucket wins — cumulative distance at the bucket's
+    // own end point, not an average (distance only ever increases).
+    bucket.distanceMi = cumulativeMi;
   }
 
   const avg = (arr: number[]) =>
@@ -79,11 +100,12 @@ function buildChartData(rawRecords: RawRecord[]): ChartPoint[] {
 
   return Array.from(buckets.entries())
     .sort(([a], [b]) => a - b)
-    .map(([b, { paces, cadences, hrs }]) => ({
+    .map(([b, { paces, cadences, hrs, distanceMi }]) => ({
       t: b * BUCKET_SECS,
       pace: avg(paces),
       cadence: avg(cadences),
       hr: avg(hrs),
+      distanceMi: Math.round(distanceMi * 1000) / 1000,
     }));
 }
 

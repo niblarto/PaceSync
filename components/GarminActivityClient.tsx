@@ -10,6 +10,15 @@ import {
 } from "recharts";
 import { openInSpotify } from "./TrackRow";
 import { useRunningPlaylist } from "./useRunningPlaylist";
+import { parsePaceProCsv, type PaceProSplit } from "@/lib/pace-pro";
+
+// Local mirror of lib/pace-pro-saved.ts's SavedPaceProMix — only the
+// fields this page's "overlay a Pace Pro plan" picker actually needs.
+interface SavedPaceProMixSummary {
+  id: string;
+  title: string;
+  splitsCsvText: string;
+}
 
 interface ActivityDetail {
   activity_id: string;
@@ -72,6 +81,7 @@ interface ChartPoint {
   pace: number | null;
   cadence: number | null;
   hr: number | null;
+  distanceMi: number;
 }
 
 interface ActivityData {
@@ -185,6 +195,10 @@ function fmtTimeTick(secs: number, spanSec?: number): string {
   return `${m}m`;
 }
 
+function fmtDistanceTick(mi: number): string {
+  return `${mi.toFixed(mi < 10 ? 2 : 1)}mi`;
+}
+
 const ZONE_COLORS = [
   "bg-emerald-500",
   "bg-green-500",
@@ -220,20 +234,27 @@ function HrTooltip({ active, payload, label }: {
 // Custom tooltip for pace/cadence chart
 function ChartTooltip({ active, payload, label }: {
   active?: boolean;
-  payload?: Array<{ name: string; value: number; color: string }>;
+  payload?: Array<{ name: string; value: number; color: string; payload?: { distanceMi?: number } }>;
   label?: number;
 }) {
   if (!active || !payload?.length || label === undefined) return null;
   const m = Math.floor(label / 60);
   const s = label % 60;
+  // Every series entry carries the same underlying chart row (.payload),
+  // so any entry's distanceMi is the point being hovered — just read it
+  // off the first one rather than needing a separate lookup.
+  const distanceMi = payload[0]?.payload?.distanceMi;
   return (
     <div className="bg-slate-950 border border-white/10 rounded-lg p-2.5 text-xs space-y-1 shadow-xl">
-      <p className="text-slate-400 font-medium mb-1">{m}:{s.toString().padStart(2, "0")}</p>
+      <p className="text-slate-400 font-medium mb-1">
+        {m}:{s.toString().padStart(2, "0")}
+        {distanceMi != null && <span className="text-slate-600"> · {distanceMi.toFixed(2)}mi</span>}
+      </p>
       {payload.map(p => (
         <p key={p.name} style={{ color: p.color }}>
           {p.name === "Cadence"
             ? `${p.value} SPM`
-            : `${fmtPaceSecs(p.value)} /mi${p.name === "Target" ? " target" : ""}`}
+            : `${fmtPaceSecs(p.value)} /mi${p.name === "Target" ? " target" : p.name === "Pace Pro plan" ? " planned" : ""}`}
         </p>
       ))}
     </div>
@@ -247,6 +268,14 @@ export function GarminActivityClient({ id }: { id: string }) {
   const [mix, setMix] = useState<MixPacing | null>(null);
   const [votes, setVotes] = useState<{ uri: string; paceSec: number; vote: "up" | "down" }[]>([]);
   const [deletedUris, setDeletedUris] = useState<Set<string>>(new Set());
+  // "Overlay a Pace Pro plan" — lets the pace chart also show a saved Pace
+  // Pro plan's per-split target pace (distance-based, unlike the existing
+  // blue "Target" line above which is time-based, from the mix actually
+  // played on this run) alongside the run's real pace, for comparing "how
+  // did I actually run vs. how I planned to run this course."
+  const [paceProLibrary, setPaceProLibrary] = useState<SavedPaceProMixSummary[] | null>(null);
+  const [selectedPaceProId, setSelectedPaceProId] = useState<string>("");
+  const [paceProSplits, setPaceProSplits] = useState<PaceProSplit[] | null>(null);
   const { data: session } = useSession();
   const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
 
@@ -367,6 +396,26 @@ export function GarminActivityClient({ id }: { id: string }) {
       .catch(() => {});
   }, [id]);
 
+  // Pace Pro library — loaded once, lazily, the first time the overlay
+  // picker is opened (same pattern PaceProClient/RunnaCard already use for
+  // their own saved-mix pickers).
+  function loadPaceProLibrary() {
+    if (paceProLibrary !== null) return;
+    fetch("/api/settings/pace-pro-saved")
+      .then(r => r.json())
+      .then((d: { mixes?: SavedPaceProMixSummary[] }) => setPaceProLibrary(d.mixes ?? []))
+      .catch(() => setPaceProLibrary([]));
+  }
+
+  function selectPaceProMix(mixId: string) {
+    setSelectedPaceProId(mixId);
+    if (!mixId) { setPaceProSplits(null); return; }
+    const selected = paceProLibrary?.find(m => m.id === mixId);
+    if (!selected) { setPaceProSplits(null); return; }
+    const parsed = parsePaceProCsv(selected.splitsCsvText);
+    setPaceProSplits(parsed.ok ? parsed.splits : null);
+  }
+
   function voteFor(t: MixTrack): "up" | "down" | null {
     if (!t.uri || t.targetPaceSec == null) return null;
     const v = votes.find(v => v.uri === t.uri && Math.abs(v.paceSec - (t.targetPaceSec as number)) <= 10);
@@ -405,8 +454,29 @@ export function GarminActivityClient({ id }: { id: string }) {
     const track = mix.tracks.find(x => t >= x.startsAtSec && t < x.startsAtSec + x.durationSec);
     return track?.targetPaceSec ?? null;
   };
-  const chartRecords = mix
-    ? (data?.records ?? []).map(r => ({ ...r, target: targetAt(r.t) }))
+  // Expected pace over DISTANCE from a selected Pace Pro plan — drawn in
+  // purple, distinct from the (time-based) blue "Target" line above. Splits
+  // are each split's OWN length (lib/pace-pro.ts's PaceProSplit), not
+  // cumulative, so this walks them to find cumulative distance boundaries
+  // and picks whichever split this chart point's own cumulative distance
+  // falls into.
+  const paceProTargetAt = (distanceMi: number): number | null => {
+    if (!paceProSplits?.length) return null;
+    let cum = 0;
+    for (const split of paceProSplits) {
+      cum += split.distanceMi;
+      if (distanceMi <= cum) return split.paceSec;
+    }
+    // Past the plan's last split (e.g. a cool-down beyond the planned race
+    // distance) — hold the final split's pace rather than showing nothing.
+    return paceProSplits[paceProSplits.length - 1]?.paceSec ?? null;
+  };
+  const chartRecords = (mix || paceProSplits)
+    ? (data?.records ?? []).map(r => ({
+        ...r,
+        ...(mix ? { target: targetAt(r.t) } : {}),
+        ...(paceProSplits ? { paceProTarget: paceProTargetAt(r.distanceMi) } : {}),
+      }))
     : data?.records ?? [];
 
   // HR zone times and total for the bar chart
@@ -436,6 +506,22 @@ export function GarminActivityClient({ id }: { id: string }) {
   })();
 
   const hasHr = hasChart && (data?.records ?? []).some(r => r.hr !== null);
+
+  // Distance-at-time lookup for the second (distance) X axis below the
+  // time axis — chartRecords is bucketed every 10s, so an exact match is
+  // the common case; falls back to nearest otherwise (e.g. a tick value
+  // Recharts computed that doesn't land exactly on a bucket boundary).
+  function distanceAtTime(t: number): number {
+    const records = data?.records ?? [];
+    if (!records.length) return 0;
+    let closest = records[0];
+    let closestDiff = Math.abs(records[0].t - t);
+    for (const r of records) {
+      const diff = Math.abs(r.t - t);
+      if (diff < closestDiff) { closest = r; closestDiff = diff; }
+    }
+    return closest.distanceMi;
+  }
 
   // Track timeline strip beneath the pace/cadence chart: each song's slice of
   // the chart's current time domain, positioned/sized to line up with the X
@@ -584,7 +670,23 @@ export function GarminActivityClient({ id }: { id: string }) {
             {/* Pace & Cadence chart */}
             {hasChart && (
               <div className={CARD}>
-                <h2 className="font-semibold text-sm text-slate-300 mb-1">Pace & Cadence</h2>
+                <div className="flex items-start justify-between gap-4 mb-1 flex-wrap">
+                  <h2 className="font-semibold text-sm text-slate-300">Pace & Cadence</h2>
+                  <label className="text-xs text-slate-500 flex items-center gap-1.5">
+                    <span className="text-purple-400">◈</span> Overlay Pace Pro plan
+                    <select
+                      value={selectedPaceProId}
+                      onChange={e => selectPaceProMix(e.target.value)}
+                      onFocus={loadPaceProLibrary}
+                      className="rounded-lg bg-slate-800/60 border border-white/10 text-xs px-2 py-1 text-slate-200 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                    >
+                      <option value="">None</option>
+                      {paceProLibrary?.map(m => (
+                        <option key={m.id} value={m.id}>{m.title}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
                 <p className="text-xs text-slate-500 mb-4">
                   10-second averages — faster pace at top, cadence on right axis ·
                   scroll to zoom, drag to pan{xDomain ? " · " : ", "}
@@ -599,7 +701,7 @@ export function GarminActivityClient({ id }: { id: string }) {
                   className="cursor-grab"
                   style={{ touchAction: "none", userSelect: "none" }}
                 >
-                <ResponsiveContainer width="100%" height={260}>
+                <ResponsiveContainer width="100%" height={278}>
                   <ComposedChart
                     data={chartRecords}
                     margin={{ top: 4, right: 52, left: 4, bottom: 0 }}
@@ -608,6 +710,7 @@ export function GarminActivityClient({ id }: { id: string }) {
 
                     {/* X: elapsed time */}
                     <XAxis
+                      xAxisId="time"
                       dataKey="t"
                       type="number"
                       scale="linear"
@@ -617,6 +720,24 @@ export function GarminActivityClient({ id }: { id: string }) {
                       tick={{ fill: "#64748b", fontSize: 10 }}
                       axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
                       tickLine={false}
+                      {...(xTicks ? { ticks: xTicks } : { interval: "preserveStartEnd", tickCount: 8 })}
+                    />
+                    {/* X: distance — same tick positions (time values) as the
+                        axis above, just labeled with cumulative distance at
+                        each position instead of elapsed time, so the two
+                        rows read as one aligned timeline with both units. */}
+                    <XAxis
+                      xAxisId="distance"
+                      dataKey="t"
+                      type="number"
+                      scale="linear"
+                      domain={xDomain ?? ["dataMin", "dataMax"]}
+                      allowDataOverflow
+                      tickFormatter={t => fmtDistanceTick(distanceAtTime(t))}
+                      tick={{ fill: "#475569", fontSize: 10 }}
+                      axisLine={false}
+                      tickLine={false}
+                      orientation="bottom"
                       {...(xTicks ? { ticks: xTicks } : { interval: "preserveStartEnd", tickCount: 8 })}
                     />
 
@@ -651,6 +772,7 @@ export function GarminActivityClient({ id }: { id: string }) {
                     <Tooltip content={<ChartTooltip />} />
 
                     <Line
+                      xAxisId="time"
                       yAxisId="pace"
                       type="monotone"
                       dataKey="pace"
@@ -662,6 +784,7 @@ export function GarminActivityClient({ id }: { id: string }) {
                       isAnimationActive={false}
                     />
                     <Line
+                      xAxisId="time"
                       yAxisId="cadence"
                       type="monotone"
                       dataKey="cadence"
@@ -674,11 +797,27 @@ export function GarminActivityClient({ id }: { id: string }) {
                     />
                     {mix && (
                       <Line
+                        xAxisId="time"
                         yAxisId="pace"
                         type="stepAfter"
                         dataKey="target"
                         name="Target"
                         stroke="#3b82f6"
+                        strokeWidth={1.5}
+                        strokeDasharray="5 3"
+                        dot={false}
+                        connectNulls={false}
+                        isAnimationActive={false}
+                      />
+                    )}
+                    {paceProSplits && (
+                      <Line
+                        xAxisId="time"
+                        yAxisId="pace"
+                        type="stepAfter"
+                        dataKey="paceProTarget"
+                        name="Pace Pro plan"
+                        stroke="#c084fc"
                         strokeWidth={1.5}
                         strokeDasharray="5 3"
                         dot={false}
