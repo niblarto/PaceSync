@@ -497,7 +497,7 @@ export function RaceDetailClient({ id }: { id: string }) {
 
               {race.paceProMixId ? (
                 <div className="flex items-center gap-3 flex-wrap text-sm">
-                  <span className="text-purple-400">Linked</span>
+                  <span className="text-purple-400">Linked: {linkedMix?.title ?? "…"}</span>
                   <button
                     onClick={sendToDashboard}
                     disabled={sendingToDashboard}

@@ -4952,6 +4952,8 @@ function QuickSwapModal({ target, mixUris, onClose, onConfirm }: {
   onConfirm: (replacement: TrackWithBPM) => void;
 }) {
   const { data: session } = useSession();
+  const [bpmInput, setBpmInput] = useState(String(target.bpm));
+  const [searchBpm, setSearchBpm] = useState(target.bpm);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<ReplaceCandidate[] | null>(null);
@@ -4968,7 +4970,7 @@ function QuickSwapModal({ target, mixUris, onClose, onConfirm }: {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            targetBpm: target.bpm, targetUri: target.uri, excludeUris: mixUris, originalDurationMs: target.duration_ms,
+            targetBpm: searchBpm, targetUri: target.uri, excludeUris: mixUris, originalDurationMs: target.duration_ms,
             // No artistName/searchMode passed — canSearchOnline stays false
             // server-side, so this is a library-only lookup by design (kept
             // library-only deliberately: "quick" swap should never trigger
@@ -5010,7 +5012,12 @@ function QuickSwapModal({ target, mixUris, onClose, onConfirm }: {
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target.uri]);
+  }, [target.uri, searchBpm]);
+
+  function applyBpm() {
+    const n = parseInt(bpmInput, 10);
+    if (!isNaN(n) && n > 0) setSearchBpm(n);
+  }
 
   function preview(c: ReplaceCandidate) {
     if (!c.uri) return;
@@ -5049,8 +5056,31 @@ function QuickSwapModal({ target, mixUris, onClose, onConfirm }: {
           </div>
           <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-lg leading-none shrink-0">×</button>
         </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-slate-500 shrink-0">Target BPM</label>
+          <input
+            type="number"
+            value={bpmInput}
+            onChange={e => setBpmInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") applyBpm(); }}
+            className="w-20 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-teal-500"
+          />
+          <button
+            onClick={applyBpm}
+            disabled={loading || parseInt(bpmInput, 10) === searchBpm}
+            className="rounded-lg bg-teal-500/15 border border-teal-500/40 hover:bg-teal-500/25 disabled:opacity-40 text-teal-300 text-xs px-2.5 py-1 transition-colors"
+          >
+            Search
+          </button>
+          {searchBpm !== target.bpm && (
+            <button onClick={() => { setBpmInput(String(target.bpm)); setSearchBpm(target.bpm); }} className="text-xs text-slate-500 hover:text-slate-300">
+              Reset to {target.bpm}
+            </button>
+          )}
+        </div>
         <p className="text-xs text-slate-500">
-          Library tracks at {target.bpm} BPM within 15s of the original&apos;s length ({Math.round(target.duration_ms / 1000)}s).
+          Library tracks at {searchBpm} BPM within 15s of the original&apos;s length ({Math.round(target.duration_ms / 1000)}s).
         </p>
 
         {loading && (
@@ -5061,7 +5091,7 @@ function QuickSwapModal({ target, mixUris, onClose, onConfirm }: {
         {candidates && !loading && (
           <div className="rounded-lg border border-white/10 divide-y divide-white/5 overflow-y-auto no-scrollbar flex-1 min-h-0">
             {candidates.length === 0 && (
-              <p className="text-sm text-slate-500 p-4 text-center">No library tracks at {target.bpm} BPM within 15s of the original&apos;s length.</p>
+              <p className="text-sm text-slate-500 p-4 text-center">No library tracks at {searchBpm} BPM within 15s of the original&apos;s length.</p>
             )}
             {candidates.map((c, i) => {
               const durDiffSec = c.durationMs != null ? Math.round((c.durationMs - target.duration_ms) / 1000) : null;
