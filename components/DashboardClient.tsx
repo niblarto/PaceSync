@@ -307,6 +307,22 @@ const FALLBACK_AVATAR = "data:image/svg+xml;utf8," + encodeURIComponent(
 
 type Step = "idle" | "ready" | "saving" | "saved" | "partial";
 
+// Mirrors /api/tracks/genres's `hierarchy` response — see lib/genre-hierarchy.ts.
+interface GenreHierarchyNode {
+  mainGenre: string;
+  subgenres: { subgenre: string; tags: { genre: string; count: number }[] }[];
+}
+
+// Mirrors /api/tracks/genre-uris's GET (single-genre, full-track-info) response.
+interface GenreTagTrack {
+  uri: string;
+  name: string;
+  artist: string;
+  durationMs: number | null;
+  tempo: number | null;
+  energy: number | null;
+}
+
 interface Suggestion {
   name: string;
   artist: string;
@@ -579,6 +595,44 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [chartRemixStatus, setChartRemixStatus] = useState<string | null>(null);
   const [remixing, setRemixing] = useState(false);
   const [toppingUp, setToppingUp] = useState(false);
+  // Right-click on the "🎧 Remix" button — "Remix by genre…" restricts the
+  // rebuild's candidate pool to only the checked genres (see
+  // remixAiDjMix's genreRestrictUris param). genrePickerPos is the
+  // right-click's own popup menu (just the one "Remix by genre…" item for
+  // now — a single-entry menu keeps room for more remix variants later
+  // without redesigning this); genrePickerOpen is the picker modal itself.
+  const [genrePickerPos, setGenrePickerPos] = useState<{ x: number; y: number } | null>(null);
+  const [genrePickerOpen, setGenrePickerOpen] = useState(false);
+  const [allGenres, setAllGenres] = useState<{ genre: string; count: number }[] | null>(null);
+  // 3-tier main genre -> subgenre -> tags tree (lib/genre-hierarchy.ts,
+  // computed server-side against this library's live counts — see
+  // /api/tracks/genres). null while loading.
+  const [genreHierarchy, setGenreHierarchy] = useState<GenreHierarchyNode[] | null>(null);
+  // Which main-genre/subgenre branches are expanded — keyed by mainGenre, or
+  // "mainGenre::subgenre" for a subgenre. Collapsed by default (a 288-tag
+  // tree fully expanded is overwhelming); typing into the filter box
+  // auto-expands every branch that has a matching tag so a search result
+  // is never hidden inside a collapsed branch.
+  const [expandedGenreBranches, setExpandedGenreBranches] = useState<Set<string>>(new Set());
+  // Selected genres persist across the filter box's own text changes —
+  // typing to find another genre must never clear what's already checked,
+  // per the explicit request ("another genre could be looked up and
+  // selected or unselected before execution").
+  const [selectedGenres, setSelectedGenres] = useState<Set<string>>(new Set());
+  const [genreFilterText, setGenreFilterText] = useState("");
+  // Which single genre leaf's own track list is expanded (at most one at a
+  // time) — "expand the genre to show the tracks" — and that genre's
+  // fetched tracks, cached per genre so re-expanding doesn't re-fetch.
+  const [expandedGenreTag, setExpandedGenreTag] = useState<string | null>(null);
+  const [genreTagTracks, setGenreTagTracks] = useState<Record<string, GenreTagTrack[] | "loading" | "error">>({});
+  // Individually unchecked tracks WITHIN an otherwise-selected genre — a
+  // genre checkbox selects every one of its tracks as candidates by
+  // default; unchecking one here excludes just that track without having
+  // to deselect the whole genre. Cleared for a genre once it's deselected
+  // entirely (an excluded track under a genre that's no longer selected
+  // means nothing).
+  const [excludedGenreTrackUris, setExcludedGenreTrackUris] = useState<Set<string>>(new Set());
+  const [genreTrackPlayingUri, setGenreTrackPlayingUri] = useState<string | null>(null);
   const [flowMixing, setFlowMixing] = useState(false);
   const [flowMixError, setFlowMixError] = useState<string | null>(null);
   const [flowMixWarning, setFlowMixWarning] = useState<{ text: string; uris: string[] } | null>(null);
@@ -1080,12 +1134,13 @@ export function DashboardClient({ spotifyUser }: Props) {
   // remix/topUp to look up by date.
   async function buildMixDirect(
     title: string, segments: string[], date: string, avoidUris?: string[], extraPlayCounts?: Record<string, number>,
+    segmentCandidateUris?: (string[] | null)[],
   ): Promise<{ tracks: TrackWithBPM[]; totalSec: number; timeline: AiDjTimeline; startedAtMs: number }> {
     const startedAtMs = Date.now();
     const res = await fetch("/api/ai-dj/mix", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, segments, avoidUris, date, extraPlayCounts, startedAtMs }),
+      body: JSON.stringify({ title, segments, avoidUris, date, extraPlayCounts, startedAtMs, segmentCandidateUris }),
     });
     if (!res.ok || !res.body) {
       const err = await res.json().catch(() => ({})) as { error?: string };
@@ -1141,7 +1196,12 @@ export function DashboardClient({ spotifyUser }: Props) {
   // to RunnaScheduleCard) still updates aiDjMix/step/etc. on completion.
   // A "pace-pro" origin mix has no real Runna workout behind its date, so it
   // goes through buildMixDirect() with its own stored segments instead.
-  async function remixAiDjMix() {
+  // genreRestrictUris: when set (right-click "Remix by genre…"), every
+  // segment's candidate pool is hard-restricted to just these URIs (see
+  // lib/ai-dj-mix.ts's segmentCandidateUris doc comment) — one identical
+  // list repeated per segment, since the genre restriction applies to the
+  // whole mix, not any one segment specifically.
+  async function remixAiDjMix(genreRestrictUris?: string[]) {
     if (!aiDjMix) return;
     if (aiDjMix.origin !== "pace-pro" && !runnaScheduleRef.current) return;
     setRemixing(true);
@@ -1156,16 +1216,196 @@ export function DashboardClient({ spotifyUser }: Props) {
     const extraPlayCounts = Object.fromEntries(Object.keys(removedFromMix).map(uri => [uri, 1]));
     try {
       if (aiDjMix.origin === "pace-pro") {
-        const result = await buildMixDirect(aiDjMix.workoutTitle, aiDjMix.segments, aiDjMix.date, avoidUris, extraPlayCounts);
+        const segmentCandidateUris = genreRestrictUris ? aiDjMix.segments.map(() => genreRestrictUris) : undefined;
+        const result = await buildMixDirect(aiDjMix.workoutTitle, aiDjMix.segments, aiDjMix.date, avoidUris, extraPlayCounts, segmentCandidateUris);
         handleAiDjMix(aiDjMix.workoutTitle, aiDjMix.name, result.tracks, result.totalSec, aiDjMix.segments, aiDjMix.date, result.timeline,
           Array.from(new Set([...avoidUris, ...result.tracks.map(t => t.uri)])), result.startedAtMs, "pace-pro");
       } else {
-        await runnaScheduleRef.current!.remix(aiDjMix.date, avoidUris, extraPlayCounts);
+        await runnaScheduleRef.current!.remix(aiDjMix.date, avoidUris, extraPlayCounts, genreRestrictUris);
       }
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : "Failed to remix");
     } finally {
       setRemixing(false);
+    }
+  }
+
+  function openGenrePicker() {
+    setGenrePickerPos(null);
+    setGenrePickerOpen(true);
+    // Filter text, expanded branches, selected genres, per-track exclusions
+    // — none of it is reset here. Reopening the picker (or it having closed
+    // itself some other way) should pick up exactly where it left off;
+    // only the explicit "×" close button/backdrop click should ever lose
+    // it, and even those don't clear this state — they just hide the
+    // modal, so the next open is unchanged too.
+    if (allGenres === null) {
+      fetch("/api/tracks/genres")
+        .then(r => r.json())
+        .then((d: { genres?: { genre: string; count: number }[]; hierarchy?: GenreHierarchyNode[] }) => {
+          setAllGenres(d.genres ?? []);
+          setGenreHierarchy(d.hierarchy ?? []);
+        })
+        .catch(() => { setAllGenres([]); setGenreHierarchy([]); });
+    }
+  }
+
+  function toggleGenre(genre: string) {
+    setSelectedGenres(prev => {
+      const next = new Set(prev);
+      if (next.has(genre)) next.delete(genre); else next.add(genre);
+      return next;
+    });
+  }
+
+  // Select/deselect ALL genres currently matching the filter box — not the
+  // whole library's genre list — so "select all" after narrowing the
+  // search only sweeps up what's visible, matching what the user can
+  // actually see they're selecting.
+  function setAllVisibleGenres(genres: string[], selected: boolean) {
+    setSelectedGenres(prev => {
+      const next = new Set(prev);
+      for (const g of genres) { if (selected) next.add(g); else next.delete(g); }
+      return next;
+    });
+  }
+
+  function toggleGenreBranch(key: string) {
+    setExpandedGenreBranches(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  // "Expand the genre to show the tracks" — toggles a single genre leaf's
+  // own track list open/closed (at most one open at a time, accordion
+  // style, so the modal doesn't grow unbounded), fetching on first expand.
+  function toggleGenreTagTracks(genre: string) {
+    if (expandedGenreTag === genre) { setExpandedGenreTag(null); return; }
+    setExpandedGenreTag(genre);
+    if (genreTagTracks[genre] !== undefined) return;
+    setGenreTagTracks(prev => ({ ...prev, [genre]: "loading" }));
+    fetch(`/api/tracks/genre-uris?genre=${encodeURIComponent(genre)}`)
+      .then(r => r.json())
+      .then((d: { tracks?: GenreTagTrack[]; error?: string }) => {
+        setGenreTagTracks(prev => ({ ...prev, [genre]: d.error || !d.tracks ? "error" : d.tracks }));
+      })
+      .catch(() => setGenreTagTracks(prev => ({ ...prev, [genre]: "error" })));
+  }
+
+  function toggleGenreTrackExcluded(uri: string) {
+    setExcludedGenreTrackUris(prev => {
+      const next = new Set(prev);
+      if (next.has(uri)) next.delete(uri); else next.add(uri);
+      return next;
+    });
+  }
+
+  function playGenreTrack(uri: string) {
+    setGenreTrackPlayingUri(uri);
+    playInSpotify(uri, session?.accessToken).catch(() => {});
+  }
+
+  // Delete a track directly from the genre picker's expanded track list —
+  // same handleDeleteTrack the rest of the app uses (removes from the
+  // active Spotify playlist AND the local library CSV), so it behaves
+  // identically to deleting from the main track list, just reachable from
+  // here too. Also drops it out of whichever genre's cached track list
+  // shows it and out of the exclusion set, so the picker doesn't keep
+  // offering a track that's already gone.
+  async function deleteGenreTrack(t: GenreTagTrack) {
+    const track: TrackWithBPM = {
+      id: t.uri.split(":")[2] ?? t.uri, name: t.name, artists: [{ name: t.artist }],
+      album: { name: "", images: [] }, duration_ms: t.durationMs ?? 0, uri: t.uri,
+      bpm: t.tempo ?? 0, energy: t.energy ?? 0,
+    };
+    await handleDeleteTrack(track);
+    // Every genre whose CACHED track list actually contained this uri —
+    // used to decrement (or drop) each affected tag's count client-side
+    // below. handleDeleteTrack's own CSV-delete request
+    // (app/api/tracks/delete) is deliberately fire-and-forget (never
+    // awaited, even from here), so a server REFETCH of /api/tracks/genres
+    // right after this can land before that write actually finishes and
+    // come back still showing the old count (confirmed live: deleting
+    // both of "epadunk"'s 2 tracks left the count badge reading "2" while
+    // this panel, updated optimistically below, correctly showed "No
+    // tracks" — the two were desynced because a refetch had raced the
+    // still-in-flight server delete). Recomputing from what this
+    // component already knows just got deleted is instant and can't race
+    // anything.
+    const affectedGenres: string[] = [];
+    const emptiedGenres: string[] = [];
+    setGenreTagTracks(prev => {
+      const next = { ...prev };
+      for (const [genre, tracks] of Object.entries(next)) {
+        if (!Array.isArray(tracks)) continue;
+        if (!tracks.some(x => x.uri === t.uri)) continue;
+        affectedGenres.push(genre);
+        const filtered = tracks.filter(x => x.uri !== t.uri);
+        next[genre] = filtered;
+        if (filtered.length === 0) emptiedGenres.push(genre);
+      }
+      return next;
+    });
+    setExcludedGenreTrackUris(prev => {
+      if (!prev.has(t.uri)) return prev;
+      const next = new Set(prev);
+      next.delete(t.uri);
+      return next;
+    });
+    if (emptiedGenres.length > 0) {
+      setSelectedGenres(prev => {
+        if (!emptiedGenres.some(g => prev.has(g))) return prev;
+        const next = new Set(prev);
+        for (const g of emptiedGenres) next.delete(g);
+        return next;
+      });
+      if (emptiedGenres.includes(expandedGenreTag ?? "")) setExpandedGenreTag(null);
+    }
+    if (affectedGenres.length > 0) {
+      const emptied = new Set(emptiedGenres);
+      const affected = new Set(affectedGenres);
+      setAllGenres(prev => prev && prev
+        .map(g => affected.has(g.genre) ? { ...g, count: g.count - 1 } : g)
+        .filter(g => !emptied.has(g.genre)));
+      setGenreHierarchy(prev => prev && prev
+        .map(mg => ({
+          mainGenre: mg.mainGenre,
+          subgenres: mg.subgenres
+            .map(sg => ({
+              subgenre: sg.subgenre,
+              tags: sg.tags
+                .map(tag => affected.has(tag.genre) ? { ...tag, count: tag.count - 1 } : tag)
+                .filter(tag => !emptied.has(tag.genre)),
+            }))
+            .filter(sg => sg.tags.length > 0),
+        }))
+        .filter(mg => mg.subgenres.length > 0));
+    }
+  }
+
+  async function runGenreRestrictedRemix() {
+    if (selectedGenres.size === 0) return;
+    setGenrePickerOpen(false);
+    try {
+      const res = await fetch("/api/tracks/genre-uris", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ genres: Array.from(selectedGenres) }),
+      });
+      const d = await res.json() as { uris?: string[]; error?: string };
+      if (!res.ok || d.error) throw new Error(d.error ?? "Failed to look up genre tracks");
+      if (!d.uris?.length) { setSaveError("No library tracks match the selected genres."); return; }
+      // Individually unchecked tracks (from an expanded genre's own track
+      // list) are excluded even though their genre is otherwise selected.
+      const uris = excludedGenreTrackUris.size > 0
+        ? d.uris.filter(u => !excludedGenreTrackUris.has(u))
+        : d.uris;
+      if (!uris.length) { setSaveError("Every matching track was individually excluded."); return; }
+      await remixAiDjMix(uris);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "Failed to remix by genre");
     }
   }
 
@@ -3226,8 +3466,10 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                           {toppingUp ? <><Spinner />Filling gap…</> : "🎧 Fill the gap"}
                         </button>
                         <button
-                          onClick={remixAiDjMix}
+                          onClick={() => void remixAiDjMix()}
+                          onContextMenu={e => { e.preventDefault(); setGenrePickerPos({ x: e.clientX, y: e.clientY }); }}
                           disabled={remixing || toppingUp}
+                          title="Right-click for a genre-restricted remix"
                           className="inline-flex items-center justify-center gap-2 rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-1.5 transition-colors"
                         >
                           {remixing ? <><Spinner />Remixing…</> : "🎧 Remix"}
@@ -3253,8 +3495,10 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       <div className="flex items-center gap-1.5">
                         {aiDjMix && (
                           <button
-                            onClick={remixAiDjMix}
+                            onClick={() => void remixAiDjMix()}
+                            onContextMenu={e => { e.preventDefault(); setGenrePickerPos({ x: e.clientX, y: e.clientY }); }}
                             disabled={remixing}
+                            title="Right-click for a genre-restricted remix"
                             className="inline-flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/15 hover:bg-purple-500/25 disabled:opacity-60 disabled:cursor-not-allowed text-purple-300 font-semibold text-xs px-4 py-1.5 transition-colors whitespace-nowrap"
                           >
                             {remixing ? <><Spinner />Remixing…</> : "🎧 Remix"}
@@ -3594,6 +3838,257 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               />
             </div>
           </>
+        );
+      })()}
+
+      {genrePickerPos && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setGenrePickerPos(null)} onContextMenu={e => { e.preventDefault(); setGenrePickerPos(null); }} />
+          <div
+            className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl py-1 w-48"
+            style={{
+              left: Math.min(genrePickerPos.x, window.innerWidth - 200),
+              top: Math.min(genrePickerPos.y, window.innerHeight - 60),
+            }}
+          >
+            <button
+              className="w-full text-left px-3 py-1.5 text-sm rounded-md text-purple-300 hover:bg-purple-500/15 transition-colors"
+              onClick={openGenrePicker}
+            >
+              🎼 Remix by genre…
+            </button>
+          </div>
+        </>
+      )}
+
+      {genrePickerOpen && (() => {
+        const q = genreFilterText.trim().toLowerCase();
+        // Every main genre/subgenre, pre-filtered to only the tags matching
+        // the filter box — a branch with zero matching tags is left out
+        // entirely rather than shown empty. Auto-expanded (regardless of
+        // expandedGenreBranches) whenever the filter box is non-empty, so a
+        // search result is never hidden inside a branch the user hasn't
+        // manually opened — matches the explicit request that another
+        // genre can always be "looked up and selected" without extra clicks.
+        const filteredTree = (genreHierarchy ?? [])
+          .map(mg => ({
+            mainGenre: mg.mainGenre,
+            subgenres: mg.subgenres
+              .map(sg => ({ subgenre: sg.subgenre, tags: sg.tags.filter(t => !q || t.genre.includes(q)) }))
+              .filter(sg => sg.tags.length > 0),
+          }))
+          .filter(mg => mg.subgenres.length > 0);
+        const allTreeGenres = filteredTree.flatMap(mg => mg.subgenres.flatMap(sg => sg.tags.map(t => t.genre)));
+        const allVisibleSelected = allTreeGenres.length > 0 && allTreeGenres.every(g => selectedGenres.has(g));
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setGenrePickerOpen(false)}>
+            <div
+              className="rounded-xl bg-slate-900 border border-white/10 p-5 max-w-2xl w-full max-h-[85vh] flex flex-col space-y-3"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h3 className="font-semibold text-slate-100">Remix by genre</h3>
+                  <p className="text-sm text-slate-400 mt-0.5">Only tracks tagged with a checked genre are sent as candidates.</p>
+                </div>
+                <button onClick={() => setGenrePickerOpen(false)} className="text-slate-500 hover:text-slate-300 text-lg leading-none shrink-0">×</button>
+              </div>
+
+              <input
+                type="text"
+                value={genreFilterText}
+                onChange={e => setGenreFilterText(e.target.value)}
+                placeholder="Filter genres…"
+                autoFocus
+                className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
+              />
+
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-slate-500">{selectedGenres.size} selected</span>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setAllVisibleGenres(allTreeGenres, true)}
+                    disabled={allTreeGenres.length === 0}
+                    className="text-purple-300 hover:text-purple-200 underline disabled:opacity-40"
+                  >
+                    Select {q ? "all shown" : "all"}
+                  </button>
+                  <button
+                    onClick={() => setAllVisibleGenres(allTreeGenres, false)}
+                    disabled={allTreeGenres.length === 0}
+                    className="text-slate-400 hover:text-slate-300 underline disabled:opacity-40"
+                  >
+                    Select none{q ? " shown" : ""}
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-white/10 divide-y divide-white/5 overflow-y-auto no-scrollbar flex-1 min-h-0">
+                {genreHierarchy === null && (
+                  <p className="text-sm text-slate-500 p-4 text-center flex items-center justify-center gap-1.5"><Spinner /> Loading genres…</p>
+                )}
+                {genreHierarchy !== null && filteredTree.length === 0 && (
+                  <p className="text-sm text-slate-500 p-4 text-center">
+                    {genreHierarchy.length === 0 ? "No genres tagged in the library yet." : "No genres match that filter."}
+                  </p>
+                )}
+                {filteredTree.map(mg => {
+                  const mgGenres = mg.subgenres.flatMap(sg => sg.tags.map(t => t.genre));
+                  const mgCount = mg.subgenres.reduce((sum, sg) => sum + sg.tags.reduce((s, t) => s + t.count, 0), 0);
+                  const mgSelectedCount = mgGenres.filter(g => selectedGenres.has(g)).length;
+                  const mgOpen = !!q || expandedGenreBranches.has(mg.mainGenre);
+                  return (
+                    <div key={mg.mainGenre}>
+                      <div className="px-3 py-1.5 flex items-center gap-2 hover:bg-white/5 transition-colors">
+                        <button
+                          onClick={() => toggleGenreBranch(mg.mainGenre)}
+                          className="text-slate-500 hover:text-slate-300 shrink-0 w-4 text-center"
+                          title={mgOpen ? "Collapse" : "Expand"}
+                        >
+                          {mgOpen ? "▾" : "▸"}
+                        </button>
+                        <button
+                          onClick={() => toggleGenreBranch(mg.mainGenre)}
+                          className="text-sm text-slate-100 font-medium flex-1 min-w-0 text-left truncate"
+                        >
+                          {mg.mainGenre}
+                          {mgSelectedCount > 0 && <span className="text-purple-400 font-normal"> · {mgSelectedCount} selected</span>}
+                        </button>
+                        <span className="text-xs text-slate-600 shrink-0">{mgCount}</span>
+                        <button
+                          onClick={() => setAllVisibleGenres(mgGenres, mgSelectedCount < mgGenres.length)}
+                          className="text-xs text-purple-300/80 hover:text-purple-200 underline shrink-0"
+                        >
+                          {mgSelectedCount === mgGenres.length ? "none" : "all"}
+                        </button>
+                      </div>
+                      {mgOpen && mg.subgenres.map(sg => {
+                        const sgKey = `${mg.mainGenre}::${sg.subgenre}`;
+                        const sgGenres = sg.tags.map(t => t.genre);
+                        const sgCount = sg.tags.reduce((s, t) => s + t.count, 0);
+                        const sgSelectedCount = sgGenres.filter(g => selectedGenres.has(g)).length;
+                        const sgOpen = !!q || expandedGenreBranches.has(sgKey);
+                        return (
+                          <div key={sgKey} className="pl-5 border-l border-white/5 ml-3.5">
+                            <div className="px-3 py-1 flex items-center gap-2 hover:bg-white/5 transition-colors">
+                              <button
+                                onClick={() => toggleGenreBranch(sgKey)}
+                                className="text-slate-600 hover:text-slate-400 shrink-0 w-4 text-center text-xs"
+                                title={sgOpen ? "Collapse" : "Expand"}
+                              >
+                                {sgOpen ? "▾" : "▸"}
+                              </button>
+                              <button
+                                onClick={() => toggleGenreBranch(sgKey)}
+                                className="text-xs text-slate-300 flex-1 min-w-0 text-left truncate"
+                              >
+                                {sg.subgenre}
+                                {sgSelectedCount > 0 && <span className="text-purple-400"> · {sgSelectedCount}</span>}
+                              </button>
+                              <span className="text-[11px] text-slate-700 shrink-0">{sgCount}</span>
+                              <button
+                                onClick={() => setAllVisibleGenres(sgGenres, sgSelectedCount < sgGenres.length)}
+                                className="text-[11px] text-purple-300/70 hover:text-purple-200 underline shrink-0"
+                              >
+                                {sgSelectedCount === sgGenres.length ? "none" : "all"}
+                              </button>
+                            </div>
+                            {sgOpen && sg.tags.map(({ genre, count }) => {
+                              const tagOpen = expandedGenreTag === genre;
+                              const tagTracks = genreTagTracks[genre];
+                              return (
+                                <div key={genre}>
+                                  <div className="pl-7 pr-3 py-1 flex items-center gap-2.5 hover:bg-white/5 transition-colors">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedGenres.has(genre)}
+                                      onChange={() => toggleGenre(genre)}
+                                      className="accent-purple-500 shrink-0"
+                                    />
+                                    <button onClick={() => toggleGenreTagTracks(genre)} className="text-sm text-slate-200 flex-1 min-w-0 text-left truncate hover:text-white">
+                                      {genre}
+                                    </button>
+                                    <span className="text-xs text-slate-600 shrink-0">{count}</span>
+                                    <button
+                                      onClick={() => toggleGenreTagTracks(genre)}
+                                      title={tagOpen ? "Hide tracks" : "Show tracks"}
+                                      className="text-slate-500 hover:text-slate-300 shrink-0 w-4 text-center text-xs"
+                                    >
+                                      {tagOpen ? "▾" : "▸"}
+                                    </button>
+                                  </div>
+                                  {tagOpen && (
+                                    <div className="pl-12 pr-3 pb-1.5 space-y-0.5">
+                                      {tagTracks === "loading" && (
+                                        <p className="text-xs text-slate-500 flex items-center gap-1.5 py-1"><Spinner /> Loading tracks…</p>
+                                      )}
+                                      {tagTracks === "error" && (
+                                        <p className="text-xs text-red-400 py-1">Failed to load tracks.</p>
+                                      )}
+                                      {Array.isArray(tagTracks) && tagTracks.length === 0 && (
+                                        <p className="text-xs text-slate-600 py-1">No tracks.</p>
+                                      )}
+                                      {Array.isArray(tagTracks) && tagTracks.map(t => {
+                                        const excluded = excludedGenreTrackUris.has(t.uri);
+                                        return (
+                                          <div key={t.uri} className="flex items-center gap-2 py-0.5">
+                                            <input
+                                              type="checkbox"
+                                              checked={!excluded}
+                                              onChange={() => toggleGenreTrackExcluded(t.uri)}
+                                              title="Include this track as a remix candidate"
+                                              className="accent-purple-500 shrink-0"
+                                            />
+                                            <button
+                                              onClick={() => playGenreTrack(t.uri)}
+                                              title="Play in Spotify"
+                                              className={`text-xs flex-1 min-w-0 text-left truncate ${excluded ? "text-slate-600 line-through" : genreTrackPlayingUri === t.uri ? "text-orange-400" : "text-slate-300 hover:text-white"}`}
+                                            >
+                                              {t.name} <span className="text-slate-600">— {t.artist}</span>
+                                            </button>
+                                            {t.tempo != null && <span className="text-[11px] text-slate-600 shrink-0">{Math.round(t.tempo)} BPM</span>}
+                                            <button
+                                              onClick={() => void deleteGenreTrack(t)}
+                                              title="Delete this track from the library and active Spotify playlist"
+                                              className="text-slate-600 hover:text-red-400 shrink-0 text-xs px-1"
+                                            >
+                                              🗑
+                                            </button>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {allVisibleSelected && allTreeGenres.length > 0 && (
+                <p className="text-xs text-slate-600">Every genre currently shown is selected.</p>
+              )}
+              {excludedGenreTrackUris.size > 0 && (
+                <p className="text-xs text-slate-600">
+                  {excludedGenreTrackUris.size} individual track{excludedGenreTrackUris.size === 1 ? "" : "s"} excluded.{" "}
+                  <button onClick={() => setExcludedGenreTrackUris(new Set())} className="text-purple-300/80 hover:text-purple-200 underline">Clear</button>
+                </p>
+              )}
+
+              <button
+                onClick={runGenreRestrictedRemix}
+                disabled={selectedGenres.size === 0 || remixing}
+                className="w-full rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 text-black font-semibold text-sm px-3 py-1.5 transition-colors"
+              >
+                {remixing ? "Remixing…" : `🎧 Remix (${selectedGenres.size} genre${selectedGenres.size === 1 ? "" : "s"})`}
+              </button>
+            </div>
+          </div>
         );
       })()}
 

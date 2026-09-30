@@ -15,6 +15,7 @@ import { DeletedTracksReview, type RejectedTrack } from "@/components/DeletedTra
 import { openInSpotify, TrackRow } from "@/components/TrackRow";
 import { useRunningPlaylist, getRunningPlaylist } from "@/components/useRunningPlaylist";
 import { MixPaceChart, timelineToChartTracks } from "@/components/MixPaceChart";
+import { GenreExplorer } from "@/components/GenreExplorer";
 import type { TrackWithBPM } from "@/types";
 
 const ZONE_DETAILS = [
@@ -5531,6 +5532,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           ever mounted in THIS tab's panel, so this is also where the
           Playlist tab's own stat clicks land after switching tabs). */}
       {healStatus && renderMissingDataSummary()}
+
+      <GenreExplorer />
 
       {!!recentTracks?.length && (
         <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">

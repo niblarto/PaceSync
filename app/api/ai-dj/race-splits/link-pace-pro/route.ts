@@ -6,6 +6,7 @@ import { parsePaceProCsv, paceProSplitsToRaceSplits } from "@/lib/pace-pro";
 import { setRaceSplits, type RaceSplitsEntry } from "@/lib/race-splits";
 import { setPinnedRoute } from "@/lib/pinned-routes";
 import { loadGarminConfig } from "@/lib/garmin-config";
+import { saveTodaysRunEntry, timelineToHistoryTracks } from "@/lib/todays-run-history";
 import path from "path";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -41,6 +42,25 @@ export async function POST(req: NextRequest) {
     savedAt: new Date().toISOString(),
   };
   setRaceSplits(entry);
+
+  // A COMPLETED date (today or earlier) also gets the mix's tracklist saved
+  // into todays_run_history under this exact (date, title) — the same
+  // record every other Summary-card run's pacing/tracklist section reads
+  // (lib/todays-run-history.ts, via /api/garmin/run-pacing). Without this,
+  // linking only saved the SPLITS (for the pace chart) — the completed run
+  // still had no "Today's Run" mix on record, so its Summary row could never
+  // show a tracklist/pacing comparison the way a normally-saved run does.
+  // Skipped for a future date: claiming a mix "played" on a run that hasn't
+  // happened yet would wrongly feed getPlayedTracks()/play-count crediting.
+  const today = new Date().toISOString().slice(0, 10);
+  if (body.date <= today) {
+    saveTodaysRunEntry({
+      date: body.date,
+      workoutTitle: body.workoutTitle,
+      savedAt: new Date().toISOString(),
+      tracks: timelineToHistoryTracks(mix.timeline),
+    });
+  }
 
   let routeLinked = false;
   if (mix.activityId) {

@@ -269,6 +269,58 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
   const [activityLinks, setActivityLinks] = useState<Record<string, { garminId: string | number | null; stravaId: number | null } | null>>({});
   const [titleSync, setTitleSync] = useState<Record<string, { status: "syncing" | "done" | "error"; message?: string }>>({});
   const [garminSync, setGarminSync] = useState<{ status: "syncing" | "done" | "error"; message?: string } | null>(null);
+  // "Link a saved Pace Pro mix" for a COMPLETED run — own local copy of
+  // RunnaScheduleCard's same picker (that one lives in a separate component
+  // with its own state, so it can't be reused directly here). Lets a race
+  // whose own Runna VEVENT has already disappeared from the schedule (see
+  // reconcileWithGarmin in lib/runna-schedule.ts) still get its splits/route
+  // linked from the Summary card, not just from an upcoming workout card.
+  const [paceProLibrary, setPaceProLibrary] = useState<SavedPaceProMix[] | null>(null);
+  const [splitsLinking, setSplitsLinking] = useState<string | null>(null); // run date whose picker is open
+  const [splitsLinkBusy, setSplitsLinkBusy] = useState(false);
+  const [splitsLinkError, setSplitsLinkError] = useState<string | null>(null);
+  const [splitsLinkedMsg, setSplitsLinkedMsg] = useState<{ date: string; text: string } | null>(null);
+
+  function openSplitsLinkPicker(date: string) {
+    setSplitsLinking(date);
+    setSplitsLinkError(null);
+    if (paceProLibrary === null) {
+      fetch("/api/settings/pace-pro-saved")
+        .then(r => r.json())
+        .then((d: { mixes?: SavedPaceProMix[] }) => setPaceProLibrary(d.mixes ?? []))
+        .catch(() => setPaceProLibrary([]));
+    }
+  }
+
+  async function linkPaceProMix(target: { date: string; title: string }, mixId: string) {
+    setSplitsLinkBusy(true);
+    setSplitsLinkError(null);
+    try {
+      const res = await fetch("/api/ai-dj/race-splits/link-pace-pro", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date: target.date, workoutTitle: target.title, mixId }),
+      });
+      const d = await res.json() as { error?: string; splits?: RaceSplitsEntry; routeLinked?: boolean };
+      if (!res.ok || d.error) throw new Error(d.error ?? "Failed to link mix");
+      setSplitsLinking(null);
+      setSplitsLinkedMsg({ date: target.date, text: `Linked to "${target.title}" — splits${d.routeLinked ? " and route" : ""} saved.` });
+      // fetchPacing's own cache is keyed by DATE alone (see its own
+      // `if (pacing[date] && !force) return`) — this row was already
+      // expanded once before the link (when there was nothing to find yet),
+      // so pacing[date] is already populated with that earlier "none: true"
+      // result and a plain fetchPacing call would just return early and
+      // keep showing it. force=true bypasses that so the newly-linked
+      // mix's tracklist/pacing section actually appears without a manual
+      // collapse+reopen (confirmed: this was exactly why a completed link
+      // still showed no pacing section at all).
+      fetchPacing(target.date, target.title, true);
+    } catch (e) {
+      setSplitsLinkError(e instanceof Error ? e.message : "Failed to link mix");
+    } finally {
+      setSplitsLinkBusy(false);
+    }
+  }
 
   // Manual GarminDB sync for a Rest day that might actually be a run Runna
   // never reported as completed (e.g. cut short mid-workout, so Runna drops
@@ -547,6 +599,52 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                         )}
                       </div>
                     )}
+                    {/* Link a saved Pace Pro mix's splits (+ route, if any)
+                        onto this COMPLETED run — same picker the upcoming-
+                        workout race card uses, generalized to any past run
+                        (not just ones typed "race") since a completed race
+                        whose own Runna VEVENT disappeared shows up here as
+                        a plain "other_run"/orphan entry, not a "race" one
+                        (see reconcileWithGarmin in lib/runna-schedule.ts). */}
+                    <div onClick={e => e.stopPropagation()}>
+                      {splitsLinking === run.date ? (
+                        <div className="rounded-lg bg-slate-800/60 border border-white/10 p-2 space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[11px] text-slate-400">Link a saved Pace Pro mix</p>
+                            <button onClick={() => setSplitsLinking(null)} className="text-[11px] text-slate-500 hover:text-slate-300">✕</button>
+                          </div>
+                          {paceProLibrary === null && <p className="text-[11px] text-slate-600">Loading…</p>}
+                          {paceProLibrary?.length === 0 && <p className="text-[11px] text-slate-600">No saved Pace Pro mixes yet.</p>}
+                          <div className="max-h-32 overflow-y-auto no-scrollbar space-y-1">
+                            {paceProLibrary?.map(mix => (
+                              <button
+                                key={mix.id}
+                                onClick={() => void linkPaceProMix({ date: run.date, title: run.title }, mix.id)}
+                                disabled={splitsLinkBusy}
+                                className="w-full text-left text-[11px] rounded-md bg-slate-900/60 hover:bg-slate-900 disabled:opacity-40 px-2 py-1 text-slate-300 transition-colors flex items-center justify-between gap-2"
+                              >
+                                <span className="truncate">{mix.title}</span>
+                                {mix.activityId && <span className="text-emerald-400 shrink-0" title="Has a linked Garmin route">🗺</span>}
+                              </button>
+                            ))}
+                          </div>
+                          {splitsLinkError && <p className="text-[11px] text-red-400">{splitsLinkError}</p>}
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => openSplitsLinkPicker(run.date)}
+                          className="text-[11px] text-purple-300 hover:text-purple-200 underline"
+                        >
+                          🔗 Link Pace Pro mix…
+                        </button>
+                      )}
+                      {splitsLinkedMsg?.date === run.date && (
+                        <p className="text-[11px] text-emerald-400 mt-1">
+                          {splitsLinkedMsg.text}{" "}
+                          <button onClick={() => setSplitsLinkedMsg(null)} className="text-slate-500 hover:text-slate-300 underline">Dismiss</button>
+                        </p>
+                      )}
+                    </div>
                     {run.laps.length > 0 && (
                       <div className="space-y-0.5">
                         <p className="text-xs text-slate-500 font-medium mb-1">Laps</p>
@@ -692,7 +790,7 @@ interface RunnaScheduleProps {
 // silently — the workout is looked up by date since that's what the
 // tracks card's aiDjMix state carries.
 export interface RunnaScheduleHandle {
-  remix: (date: string, avoidUris: string[], extraPlayCounts?: Record<string, number>) => Promise<void>;
+  remix: (date: string, avoidUris: string[], extraPlayCounts?: Record<string, number>, genreRestrictUris?: string[]) => Promise<void>;
   topUp: (
     date: string,
     avoidUris: string[],
@@ -972,6 +1070,11 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   const [paceProLibrary, setPaceProLibrary] = useState<SavedPaceProMix[] | null>(null);
   const [splitsLinking, setSplitsLinking] = useState<string | null>(null); // workout date whose picker is open
   const [splitsLinkBusy, setSplitsLinkBusy] = useState(false);
+  // Confirms a successful link on a past-run row (the upcoming-workout card
+  // doesn't need this — its own "Pinned route"/splits UI appears in place
+  // immediately, which is confirmation enough; a past run has no such
+  // always-visible slot to react, so this message is the only feedback).
+  const [splitsLinkedMsg, setSplitsLinkedMsg] = useState<string | null>(null);
 
   async function unpinMix(date: string, title: string) {
     setUnpinningDate(date);
@@ -1103,27 +1206,33 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     }
   }
 
-  async function linkPaceProMix(w: RunnaWorkout, mixId: string) {
+  // date/title only (not a full RunnaWorkout) so this also works for a
+  // completed PAST run row (RunnaPastRun) — e.g. a race whose own Runna
+  // VEVENT has already disappeared from the schedule (see
+  // reconcileWithGarmin in lib/runna-schedule.ts) still has a (date, title)
+  // to link a Pace Pro mix's splits/route onto.
+  async function linkPaceProMix(target: { date: string; title: string }, mixId: string) {
     setSplitsLinkBusy(true);
     setSplitsError(null);
     try {
       const res = await fetch("/api/ai-dj/race-splits/link-pace-pro", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date: w.date, workoutTitle: w.title, mixId }),
+        body: JSON.stringify({ date: target.date, workoutTitle: target.title, mixId }),
       });
       const d = await res.json() as { error?: string; splits?: RaceSplitsEntry; routeLinked?: boolean };
       if (!res.ok || d.error) throw new Error(d.error ?? "Failed to link mix");
-      setRaceSplits(s => ({ ...s, [w.date]: d.splits ?? null }));
+      setRaceSplits(s => ({ ...s, [target.date]: d.splits ?? null }));
       setSplitsLinking(null);
       setSplitsEditing(null);
+      setSplitsLinkedMsg(`Linked to "${target.title}" — splits${d.routeLinked ? " and route" : ""} saved.`);
       // The link may have also pinned a route (if the mix had one attached)
       // — re-fetch so the "📌 Pinned route" button appears immediately
       // instead of waiting for the next expand/routeMap-close refetch.
       if (d.routeLinked) {
-        fetch(`/api/garmin/pin-route?date=${w.date}&title=${encodeURIComponent(w.title)}`)
+        fetch(`/api/garmin/pin-route?date=${target.date}&title=${encodeURIComponent(target.title)}`)
           .then(r => r.json())
-          .then((rd: { route?: PinnedRouteInfo | null }) => setPinnedRoutes(s => ({ ...s, [w.date]: rd.route ?? null })))
+          .then((rd: { route?: PinnedRouteInfo | null }) => setPinnedRoutes(s => ({ ...s, [target.date]: rd.route ?? null })))
           .catch(() => {});
       }
     } catch (e) {
@@ -1302,6 +1411,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     seedAvoidUris?: string[],
     onResult?: (tracks: TrackWithBPM[], totalSec: number, timeline: AiDjTimelineSegment[], startedAtMs: number) => void,
     extraPlayCounts?: Record<string, number>,
+    segmentCandidateUris?: (string[] | null)[],
   ) {
     // A remix should sound different: send every track from every prior
     // build this session so the mixer demotes them (they only reappear if
@@ -1324,7 +1434,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       const mixRes = await fetch("/api/ai-dj/mix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w, raceSplits[w.date]), avoidUris, date: w.date, extraPlayCounts, startedAtMs }),
+        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w, raceSplits[w.date]), avoidUris, date: w.date, extraPlayCounts, startedAtMs, segmentCandidateUris }),
       });
       if (!mixRes.ok || !mixRes.body) {
         const err = await mixRes.json().catch(() => ({})) as { error?: string };
@@ -1420,11 +1530,14 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   }
 
   useImperativeHandle(ref, () => ({
-    remix(date, avoidUris, extraPlayCounts) {
+    remix(date, avoidUris, extraPlayCounts, genreRestrictUris) {
       const w = workouts.find(x => x.date === date);
       if (!w) return Promise.resolve();
       setExpanded(w.uid);
-      return buildMix(w, avoidUris, undefined, extraPlayCounts);
+      const segmentCandidateUris = genreRestrictUris
+        ? mixSegmentsFor(w, raceSplits[w.date]).map(() => genreRestrictUris)
+        : undefined;
+      return buildMix(w, avoidUris, undefined, extraPlayCounts, segmentCandidateUris);
     },
     topUp(date, avoidUris, onResult, extraPlayCounts) {
       const w = workouts.find(x => x.date === date);

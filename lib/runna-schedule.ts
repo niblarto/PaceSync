@@ -1,6 +1,7 @@
 import { loadRunnaUrl } from "@/lib/runna-config";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { getTodaysRunEntriesForDate } from "@/lib/todays-run-history";
+import { rememberWorkoutTitle, getRememberedWorkoutTitle } from "@/lib/workout-title-cache";
 import path from "path";
 
 export interface RunnaWorkout {
@@ -220,22 +221,30 @@ function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPast
 
     if (isCompletedRun(uid, rawDesc) && date >= lookback && date <= today) {
       const stats = parsePastRunStats(rawDesc);
+      const title = stripEmoji(rawSummary);
       pastRuns.push({
         uid,
         date,
-        title: stripEmoji(rawSummary),
+        title,
         type,
         distanceMi: parseDistance(rawSummary),
         ...stats,
         appUrl,
       });
+      // Remember this date's real title while Runna's feed still has it —
+      // see workout-title-cache.ts's own doc comment for why (this exact
+      // VEVENT can vanish from a later fetch even after being marked
+      // completed, and garminOrphanRun needs something better than
+      // Garmin's raw activity name to fall back to when it does).
+      rememberWorkoutTitle(date, title);
     } else if (!isCompletedRun(uid, rawDesc) && date >= today && date <= cutoff) {
       const segments = parseSegments(rawDesc);
+      const title = stripEmoji(rawSummary);
       workouts.push({
         uid,
         date,
         summary: rawSummary,
-        title: stripEmoji(rawSummary),
+        title,
         type,
         distanceMi: parseDistance(rawSummary),
         durationSec: parseInt(durStr) || 0,
@@ -243,10 +252,16 @@ function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPast
         appUrl,
         suggestedZone: suggestZone(type, segments),
       });
+      // An upcoming race's title ("🏁 Robin Hood Half Marathon") is exactly
+      // the one worth remembering NOW, before the day even arrives — by the
+      // time it's run and Runna's feed either drops the event or is slow to
+      // re-tag it completed, this is the only place that title still exists.
+      rememberWorkoutTitle(date, title);
     }
   }
 
   fillRestDays(workouts, pastRuns, lookback, cutoff);
+  reconcileWithGarmin(workouts, pastRuns, lookback, today);
 
   workouts.sort((a, b) => a.date.localeCompare(b.date));
   pastRuns.sort((a, b) => b.date.localeCompare(a.date)); // most recent first
@@ -316,10 +331,13 @@ function garminOrphanRun(date: string): RunnaPastRun | null {
     // and dropped from Runna's feed, this orphan entry needs the same title
     // or the Summary card's row can never find/confirm that tracklist,
     // silently breaking play-count crediting for the exact case this exists
-    // to fix. Falls back to the Garmin activity's own name only when no
-    // saved mix exists for the date at all.
+    // to fix. Next, the last REAL Runna title seen for this date (e.g. "🏁
+    // Robin Hood Half Marathon") — see workout-title-cache.ts — so a race
+    // whose VEVENT later vanished from the feed still shows its actual name
+    // instead of Garmin's generic location-based one. Only when neither
+    // exists does this fall back to Garmin's own activity name.
     const savedEntry = getTodaysRunEntriesForDate(date)[0];
-    const title = savedEntry?.workoutTitle || row.name?.trim() || "Garmin Run";
+    const title = savedEntry?.workoutTitle || getRememberedWorkoutTitle(date) || row.name?.trim() || "Garmin Run";
 
     return {
       uid: `GARMIN_ORPHAN_${date}`,
@@ -340,6 +358,69 @@ function garminOrphanRun(date: string): RunnaPastRun | null {
   }
 }
 
+// Belt-and-braces pass, run AFTER both the ICS parse and fillRestDays:
+// guarantees every date with a REAL Garmin running activity shows up in
+// pastRuns, no matter what Runna's own feed says for that date — not just
+// when Runna's feed has nothing at all for it (fillRestDays' orphan case).
+// Covers the gaps that check alone misses:
+//   - Runna's feed genuinely never had this date at all (a race outside
+//     the Runna plan, or dropped from the feed before this function's own
+//     date ever got scanned) — same as fillRestDays' case, re-checked here
+//     in case fillRestDays' window math (today < date, etc.) ever misses one.
+//   - Runna's feed still carries the date as an UPCOMING workout (not yet
+//     flagged COMPLETED_PLAN_WORKOUT) even though the run already happened
+//     — confirmed as a real failure mode: a race can finish, and Runna can
+//     take time to process/re-tag its own event, during which window this
+//     app would otherwise show it as a future workout on Schedule and
+//     nothing on Summary, exactly the reported "disappeared from both"
+//     symptom, just via a different mechanism than the orphan case.
+// Deliberately does NOT touch a date pastRuns already has a REAL Runna
+// completed entry for (uid not starting with GARMIN_ORPHAN_/SYNTHETIC_REST_)
+// — Runna's own Summary data (exact pace splits, laps, the original plan
+// text) is richer than the Garmin-DB fallback's bare distance/duration, so
+// a genuine Runna completion always wins over reconciling with Garmin.
+function reconcileWithGarmin(workouts: RunnaWorkout[], pastRuns: RunnaPastRun[], lookback: string, today: string) {
+  const config = loadGarminConfig();
+  if (!config) return;
+  let dates: string[];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+    const db = new Database(path.join(config.dbPath, "garmin_activities.db"), { readonly: true, fileMustExist: true });
+    db.pragma("busy_timeout = 30000");
+    const rows = db.prepare(`
+      SELECT DISTINCT DATE(start_time) AS date FROM activities
+      WHERE LOWER(sport) LIKE '%running%' AND DATE(start_time) BETWEEN ? AND ?
+    `).all(lookback, today) as { date: string }[];
+    db.close();
+    dates = rows.map(r => r.date);
+  } catch {
+    return; // no GarminDB reachable — nothing to reconcile against
+  }
+
+  const isRealRunnaCompletion = (r: RunnaPastRun) =>
+    !r.uid.startsWith("GARMIN_ORPHAN_") && !r.uid.startsWith("SYNTHETIC_REST_");
+
+  for (const date of dates) {
+    const existing = pastRuns.find(r => r.date === date);
+    if (existing && isRealRunnaCompletion(existing)) continue; // Runna's own data wins
+
+    const orphan = garminOrphanRun(date);
+    if (!orphan) continue; // shouldn't happen (the date came from this same table) but never crash reconciling
+    if (existing) {
+      pastRuns[pastRuns.indexOf(existing)] = orphan;
+    } else {
+      pastRuns.push(orphan);
+    }
+    // A same-date entry still sitting in the upcoming-workouts list (Runna
+    // hasn't re-tagged its event as completed yet) would otherwise show
+    // this run as BOTH an upcoming workout on Schedule and a completed run
+    // on Summary at once.
+    const staleIdx = workouts.findIndex(w => w.date === date);
+    if (staleIdx !== -1) workouts.splice(staleIdx, 1);
+  }
+}
+
 // Runna's calendar only emits an event for a day when something is actually
 // scheduled — a day with nothing planned has no VEVENT at all, not an
 // explicit rest entry. Without this, such days are just missing from both
@@ -357,7 +438,17 @@ function fillRestDays(workouts: RunnaWorkout[], pastRuns: RunnaPastRun[], lookba
     const date = d.toISOString().slice(0, 10);
     if (covered.has(date)) continue;
 
-    if (date < today) {
+    // date <= today, not just date < today: a run completed TODAY (e.g. a
+    // race) is just as eligible for the Garmin-orphan fallback as one from
+    // an earlier day. Confirmed live: Runna's feed can drop a race's own
+    // VEVENT the same way it drops a cut-short workout's (see
+    // garminOrphanRun's doc comment above), and with the old `date < today`
+    // check that meant TODAY's race fell into the `else` branch below
+    // instead — synthesized as an upcoming "Rest" workout rather than a
+    // past run, so it vanished from both the Schedule card (no longer
+    // "today's race", now "Rest") and the Summary card (which only reads
+    // pastRuns, never workouts) at once.
+    if (date <= today) {
       const orphan = garminOrphanRun(date);
       pastRuns.push(orphan ?? {
         uid: `SYNTHETIC_REST_${date}`,
