@@ -538,7 +538,7 @@ export function RaceDetailClient({ id }: { id: string }) {
 
             {(race.garminActivityId || race.garminCourseId) && (() => {
               const parsed = linkedMix ? parsePaceProCsv(linkedMix.splitsCsvText) : null;
-              const workoutSegments = parsed?.ok ? paceProSplitsToSegments(parsed.splits) : undefined;
+              const workoutSegments = parsed?.ok ? paceProSplitsToSegments(parsed.splits, 0) : undefined;
               const mixTracks: MapMixTrack[] | undefined = linkedMix
                 ? linkedMix.timeline.flatMap(s => s.tracks).map(t => {
                     const [mm, ss] = t.startsAt.split(":").map(Number);

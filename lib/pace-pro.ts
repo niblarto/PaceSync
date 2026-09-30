@@ -98,8 +98,21 @@ export function fmtPaceSec(sec: number): string {
 // ai_dj/workout.py's _segment_kind: no warmup/cooldown/easy keyword here,
 // so every split defaults to "work" - tight BPM tolerance, no upper limit,
 // matching a real race-pace plan's all-effort nature).
-export function paceProSplitsToSegments(splits: PaceProSplit[]): string[] {
-  return splits.map(s => `${s.distanceMi}mi at ${fmtPaceSec(s.paceSec)}/mi`);
+//
+// padSec (default 300 = 5min) appends one extra segment at the LAST split's
+// pace, sized to cover that much extra time — so the mix runs a bit past
+// the plan's own finish line rather than cutting off right at it (a race
+// rarely ends the exact instant the watch beeps). Expressed as distance at
+// the final pace (not a raw duration) so it reads to the mixer as just
+// another ordinary work split, needing no new segment syntax.
+export function paceProSplitsToSegments(splits: PaceProSplit[], padSec = 300): string[] {
+  const lines = splits.map(s => `${s.distanceMi}mi at ${fmtPaceSec(s.paceSec)}/mi`);
+  if (padSec > 0 && splits.length > 0) {
+    const last = splits[splits.length - 1];
+    const padMi = padSec / last.paceSec;
+    lines.push(`${padMi.toFixed(2)}mi at ${fmtPaceSec(last.paceSec)}/mi`);
+  }
+  return lines;
 }
 
 export function totalDistanceMi(splits: PaceProSplit[]): number {

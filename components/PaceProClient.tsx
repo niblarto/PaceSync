@@ -815,7 +815,7 @@ export function PaceProClient() {
           <RouteMapLightbox
             activityId={ppRouteMapMix.activityId!}
             label={ppRouteMapMix.title}
-            workoutSegments={parsed.ok ? paceProSplitsToSegments(parsed.splits) : undefined}
+            workoutSegments={parsed.ok ? paceProSplitsToSegments(parsed.splits, 0) : undefined}
             mixTracks={ppRouteMapMix.timeline.flatMap(s => s.tracks).map(t => {
               const [mm, ss] = t.startsAt.split(":").map(Number);
               return { uri: t.uri, name: t.name, artist: t.artist, startsAtSec: (mm || 0) * 60 + (ss || 0), durationSec: t.durationSec, tempo: t.tempo };
