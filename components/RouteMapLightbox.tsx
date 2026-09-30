@@ -13,6 +13,18 @@ import "leaflet/dist/leaflet.css";
 
 interface Props {
   activityId: string | number;
+  /** When set, the route is fetched from a Garmin Connect COURSE
+      (/api/garmin/course-route/[courseId]) instead of a GarminDB activity's
+      own recorded GPS (/api/garmin/route/[activityId]) — the Races page's
+      "link a course by URL/ID" flow. `activityId` is still required (kept
+      as a stable React key / pin-lookup no-op) but unused for the actual
+      fetch or the external Garmin link when this is set. A course has no
+      pace/timestamp data of its own, so speed/elapsed on every point come
+      back null — the route still draws, just without the pace-quartile
+      colouring or a workout-section overlay's timing axis (workoutSegments
+      isn't meaningful for a course anyway; callers shouldn't pass it
+      alongside this). */
+  courseId?: string | number;
   label: string;
   /** Raw Runna workout segment lines (e.g. "1.5mi at 8:35/mi") — when given,
       the route is colour-coded by workout section instead of measured pace,
@@ -121,7 +133,7 @@ function sectionTooltip(s: WorkoutSection): string {
   }
 }
 
-export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDate, workoutTitle, runDate, distanceMi, mixTracks, onClose }: Props) {
+export function RouteMapLightbox({ activityId, courseId, label, workoutSegments, workoutDate, workoutTitle, runDate, distanceMi, mixTracks, onClose }: Props) {
   const { data: session } = useSession();
   const mapRef = useRef<HTMLDivElement>(null);
   const [name, setName] = useState<string | null>(null);
@@ -211,7 +223,7 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
     (async () => {
       try {
         const [res, sectionsRes] = await Promise.all([
-          fetch(`/api/garmin/route/${activityId}`),
+          fetch(courseId != null ? `/api/garmin/course-route/${courseId}` : `/api/garmin/route/${activityId}`),
           workoutSegments?.length
             ? fetch("/api/runna/workout-segments", {
                 method: "POST",
@@ -313,6 +325,11 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
           const setSectionAnts = (idx: number, on: boolean) => {
             for (const layer of sectionLayersRef.current.get(idx) ?? []) {
               layer.setStyle({ dashArray: on ? "1,14" : undefined });
+              // A multi-lap route draws later laps' segments on top of
+              // earlier ones in z-order — without this, hovering an early
+              // section's highlight gets visually buried under a later
+              // lap's polyline covering the same ground.
+              if (on) layer.bringToFront();
               const el = layer.getElement();
               if (on) el?.classList.add("route-highlight-flash");
               else el?.classList.remove("route-highlight-flash");
@@ -417,7 +434,7 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
     })();
 
     return () => { cancelled = true; layersRef.current = null; pointsRef.current = null; map?.remove(); };
-  }, [activityId]);
+  }, [activityId, courseId]);
 
   // Swap the base tiles when the street/satellite toggle changes.
   useEffect(() => {
@@ -507,6 +524,7 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
     if (hoveredSectionIdx !== null) {
       for (const layer of sectionLayersRef.current.get(hoveredSectionIdx) ?? []) {
         layer.setStyle({ dashArray: "1,14" });
+        layer.bringToFront();
         layer.getElement()?.classList.add("route-highlight-flash");
       }
     }
@@ -551,7 +569,7 @@ export function RouteMapLightbox({ activityId, label, workoutSegments, workoutDa
               </button>
             </div>
             <a
-              href={`https://connect.garmin.com/app/activity/${activityId}`}
+              href={courseId != null ? `https://connect.garmin.com/app/course/${courseId}` : `https://connect.garmin.com/app/activity/${activityId}`}
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs text-slate-400 hover:text-slate-200 underline"

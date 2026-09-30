@@ -111,7 +111,9 @@ CREATE TABLE IF NOT EXISTS races (
   distance_mi REAL,
   notes TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  garmin_course_id TEXT,
+  garmin_course_name TEXT
 );
 
 -- User-given display title for a Garmin activity, overriding GarminDB's
@@ -274,6 +276,13 @@ function runColumnMigrations(conn: Database.Database): void {
   const pinnedRouteCols = conn.prepare("PRAGMA table_info(pinned_routes)").all() as { name: string }[];
   if (pinnedRouteCols.length > 0 && !pinnedRouteCols.some(c => c.name === "pace_pro_mix_id")) {
     conn.exec("ALTER TABLE pinned_routes ADD COLUMN pace_pro_mix_id TEXT");
+  }
+  const raceCols = conn.prepare("PRAGMA table_info(races)").all() as { name: string }[];
+  if (raceCols.length > 0 && !raceCols.some(c => c.name === "garmin_course_id")) {
+    conn.exec("ALTER TABLE races ADD COLUMN garmin_course_id TEXT");
+  }
+  if (raceCols.length > 0 && !raceCols.some(c => c.name === "garmin_course_name")) {
+    conn.exec("ALTER TABLE races ADD COLUMN garmin_course_name TEXT");
   }
 }
 

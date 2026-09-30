@@ -6,10 +6,13 @@ import Link from "next/link";
 // Dashboard -> Races page. See lib/races.ts's own doc comment for why this
 // is a durable, user-managed table rather than a live re-derivation of
 // Runna's schedule + GarminDB the way components/RunnaCard.tsx already
-// does (and keeps needing bug fixes for). Stage 1: list + add/edit/delete
-// upcoming and completed races. Linking a past Garmin activity as the
-// course source, suggesting races from the live Runna feed, Pace Pro
-// seeding and AI DJ mix-building are follow-up stages, not built yet.
+// does (and keeps needing bug fixes for).
+// Stage 1: list + add/edit/delete upcoming and completed races.
+// Stage 2: link a past Garmin activity as the course source; suggestions
+// pulled from the live Runna feed.
+// Each race's own title links to /races/[id] (components/RaceDetailClient.tsx)
+// — the course/route display, course-URL linking, and Pace Pro linking all
+// live THERE now, not on this list page, per explicit request.
 
 type RaceStatus = "upcoming" | "completed";
 
@@ -298,7 +301,7 @@ export function RacesClient() {
       style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.75), rgba(2,6,23,0.75)), url('/dashboard-hero.png')" }}
     >
       <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
+        <div className="max-w-[100rem] mx-auto px-4 h-14 flex items-center justify-between">
           <Link href="/dashboard" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">
             ← Dashboard
           </Link>
@@ -307,7 +310,7 @@ export function RacesClient() {
         </div>
       </header>
 
-      <div className="flex-1 max-w-5xl w-full mx-auto px-4 py-6 space-y-6">
+      <div className="flex-1 max-w-[100rem] w-full mx-auto px-4 py-6 space-y-6">
         {error && <div className="rounded-xl bg-red-950/50 border border-red-800/50 p-4 text-red-400 text-sm">{error}</div>}
 
         {visibleSuggestions.length > 0 && (
@@ -446,7 +449,9 @@ export function RacesClient() {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="text-sm font-medium text-slate-200 truncate">{r.name}</p>
+                        <Link href={`/races/${r.id}`} className="text-sm font-medium text-slate-200 hover:text-green-300 truncate block transition-colors">
+                          {r.name}
+                        </Link>
                         <p className="text-xs text-slate-500">
                           {fmtDate(r.raceDate)}{r.distanceMi ? ` · ${r.distanceMi}mi` : ""}
                           {r.notes ? ` · ${r.notes}` : ""}
@@ -512,6 +517,9 @@ export function RacesClient() {
                         🔗 Link a past run for the course…
                       </button>
                     )}
+                    <Link href={`/races/${r.id}`} className="text-[11px] text-slate-500 hover:text-slate-300 underline block">
+                      Open race page →
+                    </Link>
                   </div>
                 )}
               </div>
@@ -531,20 +539,24 @@ export function RacesClient() {
               <p className="text-sm text-slate-500 p-5 text-center">No completed races yet.</p>
             )}
             {completed.map(r => (
-              <div key={r.id} className="px-5 py-3 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-slate-200 truncate">{r.name}</p>
-                  <p className="text-xs text-slate-500">
-                    {fmtDate(r.raceDate)}{r.distanceMi ? ` · ${r.distanceMi}mi` : ""}
-                  </p>
-                </div>
-                <div className="flex items-center gap-3 shrink-0 text-xs">
-                  {r.garminActivityId && (
-                    <Link href={`/garmin/activity/${r.garminActivityId}`} className="text-sky-400 hover:text-sky-300 underline">
-                      View activity →
+              <div key={r.id} className="px-5 py-3 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <Link href={`/races/${r.id}`} className="text-sm font-medium text-slate-200 hover:text-green-300 truncate block transition-colors">
+                      {r.name}
                     </Link>
-                  )}
-                  <button onClick={() => deleteRace(r.id)} className="text-slate-500 hover:text-red-400">Delete</button>
+                    <p className="text-xs text-slate-500">
+                      {fmtDate(r.raceDate)}{r.distanceMi ? ` · ${r.distanceMi}mi` : ""}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0 text-xs">
+                    {r.garminActivityId && (
+                      <Link href={`/garmin/activity/${r.garminActivityId}`} className="text-sky-400 hover:text-sky-300 underline">
+                        View activity →
+                      </Link>
+                    )}
+                    <button onClick={() => deleteRace(r.id)} className="text-slate-500 hover:text-red-400">Delete</button>
+                  </div>
                 </div>
               </div>
             ))}

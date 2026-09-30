@@ -26,6 +26,13 @@ export interface Race {
   notes: string | null;
   createdAt: string;
   updatedAt: string;
+  // A Garmin Connect COURSE manually linked by URL/ID (app/api/garmin/
+  // course-route/[courseId]) — the route source when there's no linked
+  // past activity to pull real GPS from yet. Mutually informative, not
+  // exclusive, with garminActivityId: an upcoming race typically only has
+  // one or the other, but nothing here enforces that.
+  garminCourseId: string | null;
+  garminCourseName: string | null;
 }
 
 interface Row {
@@ -40,6 +47,8 @@ interface Row {
   notes: string | null;
   created_at: string;
   updated_at: string;
+  garmin_course_id: string | null;
+  garmin_course_name: string | null;
 }
 
 function rowToRace(r: Row): Race {
@@ -55,6 +64,8 @@ function rowToRace(r: Row): Race {
     notes: r.notes,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    garminCourseId: r.garmin_course_id,
+    garminCourseName: r.garmin_course_name,
   };
 }
 
@@ -86,14 +97,16 @@ export interface CreateRaceInput {
   paceProMixId?: string | null;
   distanceMi?: number | null;
   notes?: string | null;
+  garminCourseId?: string | null;
+  garminCourseName?: string | null;
 }
 
 export function createRace(input: CreateRaceInput): Race {
   const id = `rc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
   getDb().prepare(`
-    INSERT INTO races (id, name, race_date, status, garmin_activity_id, runna_uid, pace_pro_mix_id, distance_mi, notes, created_at, updated_at)
-    VALUES (@id, @name, @raceDate, @status, @garminActivityId, @runnaUid, @paceProMixId, @distanceMi, @notes, @createdAt, @updatedAt)
+    INSERT INTO races (id, name, race_date, status, garmin_activity_id, runna_uid, pace_pro_mix_id, distance_mi, notes, created_at, updated_at, garmin_course_id, garmin_course_name)
+    VALUES (@id, @name, @raceDate, @status, @garminActivityId, @runnaUid, @paceProMixId, @distanceMi, @notes, @createdAt, @updatedAt, @garminCourseId, @garminCourseName)
   `).run({
     id,
     name: input.name.trim(),
@@ -106,6 +119,8 @@ export function createRace(input: CreateRaceInput): Race {
     notes: input.notes ?? null,
     createdAt: now,
     updatedAt: now,
+    garminCourseId: input.garminCourseId ?? null,
+    garminCourseName: input.garminCourseName ?? null,
   });
   return getRace(id)!;
 }
@@ -124,11 +139,14 @@ export function updateRace(id: string, patch: UpdateRaceInput): Race | null {
     paceProMixId: patch.paceProMixId !== undefined ? patch.paceProMixId : existing.paceProMixId,
     distanceMi: patch.distanceMi !== undefined ? patch.distanceMi : existing.distanceMi,
     notes: patch.notes !== undefined ? patch.notes : existing.notes,
+    garminCourseId: patch.garminCourseId !== undefined ? patch.garminCourseId : existing.garminCourseId,
+    garminCourseName: patch.garminCourseName !== undefined ? patch.garminCourseName : existing.garminCourseName,
   };
   getDb().prepare(`
     UPDATE races SET name = @name, race_date = @raceDate, status = @status,
       garmin_activity_id = @garminActivityId, runna_uid = @runnaUid, pace_pro_mix_id = @paceProMixId,
-      distance_mi = @distanceMi, notes = @notes, updated_at = @updatedAt
+      distance_mi = @distanceMi, notes = @notes, updated_at = @updatedAt,
+      garmin_course_id = @garminCourseId, garmin_course_name = @garminCourseName
     WHERE id = @id
   `).run({ id, updatedAt: new Date().toISOString(), ...next });
   return getRace(id);

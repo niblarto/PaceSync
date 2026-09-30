@@ -5,6 +5,14 @@ import { getRace, updateRace, deleteRace, type RaceStatus } from "@/lib/races";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+  const session = await getServerSession(authOptions);
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const race = getRace(params.id);
+  if (!race) return NextResponse.json({ error: "Race not found" }, { status: 404 });
+  return NextResponse.json({ race });
+}
+
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -16,6 +24,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     name?: string; raceDate?: string | null; status?: RaceStatus;
     garminActivityId?: string | null; runnaUid?: string | null; paceProMixId?: string | null;
     distanceMi?: number | null; notes?: string | null;
+    garminCourseId?: string | null; garminCourseName?: string | null;
   };
   if (body.name !== undefined && !body.name.trim()) {
     return NextResponse.json({ error: "name cannot be blank" }, { status: 400 });
