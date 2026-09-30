@@ -87,6 +87,47 @@ CREATE TABLE IF NOT EXISTS race_splits (
   PRIMARY KEY (date, workout_title)
 );
 
+-- User-managed race registry (Dashboard -> Races page) — separate from
+-- Runna's own upcoming/completed feed (lib/runna-schedule.ts), which only
+-- looks 8 days back / 28 days forward and can drop a race's VEVENT
+-- entirely once Runna's own processing lags (see reconcileWithGarmin's own
+-- doc comment). A row here is the durable, user-controlled record of a
+-- race: it survives Runna forgetting about it, and it's how a completed
+-- Garmin activity that was never in Runna at all (or a race further out
+-- than Runna's 28-day window) gets tracked. id is generated in JS
+-- ("rc_<ts>_<rand>", matching saved_pace_pro_mixes' own id convention) —
+-- no auto-increment/rowid dependence, consistent with every other
+-- JS-generated-id table here. No foreign keys (matches this DB's existing
+-- convention throughout) — garmin_activity_id/pace_pro_mix_id are plain
+-- nullable references, validated at the application layer, not the DB.
+CREATE TABLE IF NOT EXISTS races (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  race_date TEXT,
+  status TEXT NOT NULL,
+  garmin_activity_id TEXT,
+  runna_uid TEXT,
+  pace_pro_mix_id TEXT,
+  distance_mi REAL,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- User-given display title for a Garmin activity, overriding GarminDB's
+-- own activities.name at READ time only — never writes to
+-- garmin_activities.db itself, which is periodically re-synced/rewritten
+-- by the Garmin sync cron and would silently discard an in-place edit
+-- there (confirmed by lib/garmin-cache.ts's whole cache invalidating
+-- whenever that DB's mtime changes — it's rewritten wholesale, not
+-- patched). Keyed by activity_id alone, the same identifier every Garmin
+-- route already uses.
+CREATE TABLE IF NOT EXISTS garmin_activity_titles (
+  activity_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS removed_tracks (
   date TEXT NOT NULL,
   workout_title TEXT NOT NULL,

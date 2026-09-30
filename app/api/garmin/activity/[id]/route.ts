@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { garminCacheGet, garminCacheSet } from "@/lib/garmin-cache";
+import { getActivityTitleOverride } from "@/lib/garmin-activity-titles";
 import path from "path";
 
 function queryDb(dbPath: string, sql: string, params: unknown[] = []) {
@@ -123,12 +124,20 @@ export async function GET(
   const actDb = path.join(base, "garmin_activities.db");
   const id = params.id;
 
-  const cached = garminCacheGet<object>(`activity-${id}`, base);
-  if (cached) return NextResponse.json(cached);
+  // Title override (garmin_activity_titles) is applied fresh on every
+  // response, cached or not — see /api/garmin/data's applyTitleOverrides
+  // for why (the in-process cache here invalidates only on GarminDB's own
+  // mtime change, so an edit wouldn't show until the next sync otherwise).
+  const titleOverride = getActivityTitleOverride(id);
+  const withTitleOverride = <T extends { activity?: { name?: string | null } | null }>(result: T): T =>
+    titleOverride && result.activity ? { ...result, activity: { ...result.activity, name: titleOverride } } : result;
+
+  const cached = garminCacheGet<{ activity?: { name?: string | null } | null }>(`activity-${id}`, base);
+  if (cached) return NextResponse.json(withTitleOverride(cached));
 
   try {
     const activity = queryDbOne(actDb,
-      `SELECT * FROM activities WHERE activity_id = ?`, [id]);
+      `SELECT * FROM activities WHERE activity_id = ?`, [id]) as { name?: string | null } | null;
 
     if (!activity) return NextResponse.json({ error: "Activity not found" }, { status: 404 });
 
@@ -150,9 +159,11 @@ export async function GET(
     const records = buildChartData(rawRecords);
 
     const recordsT0 = rawRecords.length ? rawRecords[0].timestamp : null;
+    // Cache the RAW activity (no override baked in), same reasoning as
+    // /api/garmin/data.
     const result = { activity, laps, steps, records, recordsT0 };
     garminCacheSet(`activity-${id}`, base, result);
-    return NextResponse.json(result);
+    return NextResponse.json(withTitleOverride(result));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `DB query failed: ${msg}` }, { status: 500 });

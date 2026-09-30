@@ -2927,6 +2927,9 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             <Link href="/pace-pro" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
               Pace Pro
             </Link>
+            <Link href="/races" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
+              Races
+            </Link>
             <Link href="/strava" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
               Strava
             </Link>

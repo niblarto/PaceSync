@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -121,7 +121,7 @@ function fmtDateTime(ts: string): string {
   // "2026-06-27 09:36:28.000000" → replace space with T for reliable parsing
   const d = new Date(ts.slice(0, 19).replace(" ", "T"));
   if (isNaN(d.getTime())) return ts.slice(0, 16);
-  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 function scoreColor(score: number | null): string {
@@ -197,6 +197,52 @@ export function GarminClient() {
   const [paceSpm, setPaceSpm] = useState<PaceSpmRow[] | null>(null);
   const router = useRouter();
   const activityScrollRef = useRef<HTMLDivElement>(null);
+
+  // Editable activity title (garmin_activity_titles override — see
+  // lib/garmin-activity-titles.ts) — which row's Name cell is in edit
+  // mode, and its in-progress text.
+  const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+  const [editingTitleText, setEditingTitleText] = useState("");
+  const [savingTitleId, setSavingTitleId] = useState<string | null>(null);
+
+  function startEditTitle(a: Activity, e: ReactMouseEvent) {
+    e.stopPropagation();
+    setEditingTitleId(String(a.activity_id));
+    setEditingTitleText(a.name ?? "");
+  }
+
+  // A blank save clears the override server-side (reverts to GarminDB's
+  // own name) — since this list doesn't have that original name handy
+  // once overridden, it just re-fetches that one row's true state instead
+  // of guessing what to show locally.
+  async function saveTitle(activityId: string) {
+    setSavingTitleId(activityId);
+    try {
+      await fetch("/api/garmin/activity-title", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ activityId, title: editingTitleText }),
+      });
+      const trimmed = editingTitleText.trim();
+      if (trimmed) {
+        setData(prev => prev && {
+          ...prev,
+          activities: prev.activities.map(a => String(a.activity_id) === activityId ? { ...a, name: trimmed } : a),
+        });
+      } else {
+        fetch("/api/garmin/data")
+          .then(r => r.json())
+          .then((d: { activities?: Activity[] }) => {
+            const fresh = d.activities?.find(a => String(a.activity_id) === activityId);
+            if (fresh) setData(prev => prev && { ...prev, activities: prev.activities.map(a => String(a.activity_id) === activityId ? fresh : a) });
+          })
+          .catch(() => {});
+      }
+      setEditingTitleId(null);
+    } finally {
+      setSavingTitleId(null);
+    }
+  }
 
   // Activities filter/sort — name search, sport-type checkboxes (all types
   // checked by default so nothing's hidden until the user actually
@@ -429,7 +475,42 @@ export function GarminClient() {
                       >
                         <td className={`${TD} text-slate-500 whitespace-nowrap`}>{fmtDateTime(a.start_time)}</td>
                         <td className={`${TD} font-medium ${sportColor(a)} whitespace-nowrap`}>{sportLabel(a)}</td>
-                        <td className={`${TD} text-slate-200`}>{a.name || "—"}</td>
+                        <td className={`${TD} text-slate-200`}>
+                          {editingTitleId === String(a.activity_id) ? (
+                            <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+                              <input
+                                type="text"
+                                value={editingTitleText}
+                                onChange={e => setEditingTitleText(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === "Enter") saveTitle(String(a.activity_id));
+                                  if (e.key === "Escape") setEditingTitleId(null);
+                                }}
+                                autoFocus
+                                className="min-w-0 w-40 rounded-md bg-slate-800/80 border border-white/10 text-xs px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+                              />
+                              <button
+                                onClick={() => saveTitle(String(a.activity_id))}
+                                disabled={savingTitleId === String(a.activity_id)}
+                                className="text-green-400 hover:text-green-300 text-xs disabled:opacity-40"
+                              >
+                                ✓
+                              </button>
+                              <button onClick={() => setEditingTitleId(null)} className="text-slate-500 hover:text-slate-300 text-xs">✗</button>
+                            </div>
+                          ) : (
+                            <span className="group inline-flex items-center gap-1.5">
+                              {a.name || "—"}
+                              <button
+                                onClick={e => startEditTitle(a, e)}
+                                title="Rename (local only — never changes GarminDB)"
+                                className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-slate-300 transition-opacity text-xs"
+                              >
+                                ✎
+                              </button>
+                            </span>
+                          )}
+                        </td>
                         <td className={TD}>{fmtDist(a.distance)}</td>
                         <td className={TD}>{fmtElapsed(a.elapsed_time)}</td>
                         <td className={TD}>{fmtPace(a.distance, a.elapsed_time)}</td>

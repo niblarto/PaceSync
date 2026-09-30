@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { garminCacheGet, garminCacheSet } from "@/lib/garmin-cache";
+import { getActivityTitleOverrides } from "@/lib/garmin-activity-titles";
 import path from "path";
 
 function queryDb(dbPath: string, sql: string, params: unknown[] = []) {
@@ -17,6 +18,27 @@ function queryDb(dbPath: string, sql: string, params: unknown[] = []) {
   }
 }
 
+interface ActivityRow {
+  activity_id: string | number;
+  name: string | null;
+  [key: string]: unknown;
+}
+
+// Applies garmin_activity_titles overrides on top of GarminDB's own
+// `name` — done on EVERY response (cached or freshly queried), not baked
+// into what garminCacheSet stores: the in-process cache invalidates only
+// when garmin_activities.db's own mtime changes (lib/garmin-cache.ts), so
+// a title edit saved via /api/garmin/activity-title would otherwise not
+// show up until the next Garmin sync rewrote that file.
+function applyTitleOverrides(activities: ActivityRow[]): ActivityRow[] {
+  const overrides = getActivityTitleOverrides(activities.map(a => String(a.activity_id)));
+  if (overrides.size === 0) return activities;
+  return activities.map(a => {
+    const override = overrides.get(String(a.activity_id));
+    return override ? { ...a, name: override } : a;
+  });
+}
+
 export async function GET() {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -28,8 +50,8 @@ export async function GET() {
 
   const base = config.dbPath;
 
-  const cached = garminCacheGet<object>("data", base);
-  if (cached) return NextResponse.json(cached);
+  const cached = garminCacheGet<{ activities: ActivityRow[] } & Record<string, unknown>>("data", base);
+  if (cached) return NextResponse.json({ ...cached, activities: applyTitleOverrides(cached.activities) });
 
   try {
     const daily = queryDb(
@@ -52,7 +74,7 @@ export async function GET() {
               distance, elapsed_time, avg_hr, max_hr, calories
        FROM activities
        ORDER BY start_time DESC`
-    );
+    ) as ActivityRow[];
 
     const weekly = queryDb(
       path.join(base, "garmin_summary.db"),
@@ -61,9 +83,13 @@ export async function GET() {
        ORDER BY first_day DESC LIMIT 12`
     );
 
+    // Cache the RAW GarminDB data (no overrides baked in) so the cache's
+    // mtime-based invalidation stays meaningful for the actual DB reads —
+    // overrides are applied fresh on every response instead, see
+    // applyTitleOverrides's own comment.
     const result = { daily, sleep, activities, weekly };
     garminCacheSet("data", base, result);
-    return NextResponse.json(result);
+    return NextResponse.json({ ...result, activities: applyTitleOverrides(activities) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `DB query failed: ${msg}` }, { status: 500 });

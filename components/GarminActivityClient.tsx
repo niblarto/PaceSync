@@ -276,6 +276,19 @@ export function GarminActivityClient({ id }: { id: string }) {
   const [paceProLibrary, setPaceProLibrary] = useState<SavedPaceProMixSummary[] | null>(null);
   const [selectedPaceProId, setSelectedPaceProId] = useState<string>("");
   const [paceProSplits, setPaceProSplits] = useState<PaceProSplit[] | null>(null);
+  // "🏁 Race" checkbox — Dashboard's Races page (lib/races.ts). Toggling
+  // creates/deletes a `races` row keyed to this activity_id, rather than
+  // relying on Runna's own feed to have classified this run as a race
+  // (which it often hasn't, once its "race" VEVENT has scrolled out of
+  // the feed's 8-day lookback — see reconcileWithGarmin's own comment).
+  const [isRace, setIsRace] = useState(false);
+  const [raceBusy, setRaceBusy] = useState(false);
+  // Editable activity title (garmin_activity_titles override — see
+  // lib/garmin-activity-titles.ts, and components/GarminClient.tsx's own
+  // copy of this same feature on the activities list).
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleText, setTitleText] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const { data: session } = useSession();
   const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
 
@@ -394,7 +407,74 @@ export function GarminActivityClient({ id }: { id: string }) {
       .then(r => r.json())
       .then((d: { votes?: { uri: string; paceSec: number; vote: "up" | "down" }[] }) => setVotes(d.votes ?? []))
       .catch(() => {});
+
+    fetch(`/api/races?garminActivityId=${encodeURIComponent(id)}`)
+      .then(r => r.json())
+      .then((d: { race?: { id: string } | null }) => setIsRace(!!d.race))
+      .catch(() => {});
   }, [id]);
+
+  // "🏁 Race" checkbox — creates (with this activity's own name/date/
+  // distance) or deletes the races row keyed to this activity_id.
+  function toggleIsRace() {
+    const next = !isRace;
+    setIsRace(next);
+    setRaceBusy(true);
+    const done = () => setRaceBusy(false);
+    if (next) {
+      fetch("/api/races", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: a?.name || "Race",
+          raceDate: a?.start_time?.slice(0, 10) ?? null,
+          status: "completed",
+          garminActivityId: id,
+          distanceMi: a?.distance ?? null,
+        }),
+      }).then(done).catch(done);
+    } else {
+      fetch(`/api/races?garminActivityId=${encodeURIComponent(id)}`)
+        .then(r => r.json())
+        .then((d: { race?: { id: string } | null }) => {
+          if (!d.race) return;
+          return fetch(`/api/races/${d.race.id}`, { method: "DELETE" });
+        })
+        .then(done)
+        .catch(done);
+    }
+  }
+
+  function startEditTitle() {
+    setTitleText(a?.name ?? "");
+    setEditingTitle(true);
+  }
+
+  // A blank save clears the override server-side (reverts to GarminDB's
+  // own name) — re-fetches the activity so the true underlying name shows
+  // again, same as GarminClient.tsx's own copy of this handler.
+  async function saveTitle() {
+    setSavingTitle(true);
+    try {
+      await fetch("/api/garmin/activity-title", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ activityId: id, title: titleText }),
+      });
+      const trimmed = titleText.trim();
+      if (trimmed) {
+        setData(prev => prev && { ...prev, activity: { ...prev.activity, name: trimmed } });
+      } else {
+        fetch(`/api/garmin/activity/${id}`)
+          .then(r => r.json())
+          .then((d: ActivityData) => setData(d))
+          .catch(() => {});
+      }
+      setEditingTitle(false);
+    } finally {
+      setSavingTitle(false);
+    }
+  }
 
   // Pace Pro library — loaded once, lazily, the first time the overlay
   // picker is opened (same pattern PaceProClient/RunnaCard already use for
@@ -631,19 +711,56 @@ export function GarminActivityClient({ id }: { id: string }) {
         {a && (
           <>
             {/* Title */}
-            <div>
-              <p className="text-xs text-slate-500 mb-1">{fmtDateTime(a.start_time)}</p>
-              <h1 className="text-xl font-semibold">
-                <a
-                  href={`https://connect.garmin.com/app/activity/${id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-slate-100 hover:text-green-400 transition-colors"
-                >
-                  {a.name || "Activity"}
-                </a>
-              </h1>
-              <p className="text-sm text-slate-500 capitalize mt-0.5">{a.sub_sport || a.sport}</p>
+            <div className="flex items-start justify-between gap-4 flex-wrap">
+              <div>
+                <p className="text-xs text-slate-500 mb-1">{fmtDateTime(a.start_time)}</p>
+                {editingTitle ? (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={titleText}
+                      onChange={e => setTitleText(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") saveTitle(); if (e.key === "Escape") setEditingTitle(false); }}
+                      autoFocus
+                      className="text-xl font-semibold bg-slate-800/60 border border-white/10 rounded-lg px-2 py-0.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+                    />
+                    <button onClick={saveTitle} disabled={savingTitle} className="text-green-400 hover:text-green-300 disabled:opacity-40">✓</button>
+                    <button onClick={() => setEditingTitle(false)} className="text-slate-500 hover:text-slate-300">✗</button>
+                  </div>
+                ) : (
+                  <h1 className="text-xl font-semibold group flex items-center gap-1.5">
+                    <a
+                      href={`https://connect.garmin.com/app/activity/${id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-slate-100 hover:text-green-400 transition-colors"
+                    >
+                      {a.name || "Activity"}
+                    </a>
+                    <button
+                      onClick={startEditTitle}
+                      title="Rename (local only — never changes GarminDB)"
+                      className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-slate-300 transition-opacity text-sm"
+                    >
+                      ✎
+                    </button>
+                  </h1>
+                )}
+                <p className="text-sm text-slate-500 capitalize mt-0.5">{a.sub_sport || a.sport}</p>
+              </div>
+              <label
+                className="shrink-0 flex items-center gap-1.5 text-sm text-slate-300 cursor-pointer select-none"
+                title="Flag this activity as a race — adds it to the Races page"
+              >
+                <input
+                  type="checkbox"
+                  checked={isRace}
+                  disabled={raceBusy}
+                  onChange={toggleIsRace}
+                  className="accent-amber-500"
+                />
+                🏁 Race
+              </label>
             </div>
 
             {/* Key stats */}
