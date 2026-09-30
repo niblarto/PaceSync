@@ -322,41 +322,24 @@ export function RouteMapLightbox({ activityId, courseId, label, workoutSegments,
           const sectionColors = assignSectionColors(sections);
           sectionColorsRef.current = sectionColors;
 
-          const setSectionAnts = (idx: number, on: boolean) => {
-            for (const layer of sectionLayersRef.current.get(idx) ?? []) {
-              layer.setStyle({ dashArray: on ? "1,14" : undefined });
-              // A multi-lap route draws later laps' segments on top of
-              // earlier ones in z-order — without this, hovering an early
-              // section's highlight gets visually buried under a later
-              // lap's polyline covering the same ground.
-              if (on) layer.bringToFront();
-              const el = layer.getElement();
-              if (on) el?.classList.add("route-highlight-flash");
-              else el?.classList.remove("route-highlight-flash");
-            }
-          };
-
           let batch: [number, number][] = [[points[0][0], points[0][1]]];
           let batchSection = sectionFor(points[0][4], 0);
           const flush = (pts: [number, number][], idx: number) => {
             if (pts.length < 2 || idx < 0) return;
             const section = sections[idx];
+            // No mouseover/mouseout on the polyline itself — the ants are
+            // driven only by the left-hand section list's hover
+            // (hoveredSectionIdx below), since a section's route can be
+            // several disjoint polylines (e.g. a multi-lap loop) and direct
+            // map hover across thin, non-adjacent lines was unreliable
+            // (fast mouse movement could drop a mouseout and leave the ants
+            // stuck on).
             const layer = L.polyline(pts, { color: sectionColors[idx], weight: 5, opacity: 0.9 })
               .addTo(map!)
               // offset nudges the tooltip clear of the cursor — sticky mode
               // otherwise centers it right under the pointer, where it stole
               // hover/click focus from the line and nearby map controls.
               .bindTooltip(sectionTooltip(section), { sticky: true, offset: [16, 0] });
-            // Walking-ants dash animation while hovered — same marching-ants
-            // CSS (app/globals.css) already used for the mix-track hover
-            // highlight, applied directly to this section's own polyline
-            // element instead of a separate overlay layer, and reset on
-            // mouseout since setStyle's dashArray persists otherwise. Shared
-            // with the left-hand section list below, which drives the same
-            // effect via hoveredSectionIdx for whichever layers belong to
-            // that section (a section's route can be non-contiguous).
-            layer.on("mouseover", () => setSectionAnts(idx, true));
-            layer.on("mouseout", () => setSectionAnts(idx, false));
             const existing = sectionLayersRef.current.get(idx) ?? [];
             existing.push(layer);
             sectionLayersRef.current.set(idx, existing);
