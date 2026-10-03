@@ -162,7 +162,7 @@ function mergePlayCounts(base: Record<string, number>, extra?: Record<string, nu
 // restricted list can't fill the segment's own time budget — see
 // ai_dj/workout.py's build_workout_playlist docstring. Used by Pace Pro to
 // hand the LLM exactly lib/pace-analysis.ts's "fits" list per split.
-export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[], extraPlayCounts?: Record<string, number>, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null)[]): Promise<AiDjMixResult> {
+export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[], extraPlayCounts?: Record<string, number>, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null)[], ignorePlayCounts?: boolean): Promise<AiDjMixResult> {
   const config = loadAiDjConfig();
   if (!config?.enabled) {
     return { ok: false, error: "AI DJ is not enabled in Settings" };
@@ -186,7 +186,13 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   const easyBias = computeEasyPaceBias();
   if (easyBias > 0) console.log(`[ai-dj] recent easy runs ran ~${easyBias}s/mi fast — easing easy segments`);
   const trackFeedback = getAllTrackVotes();
-  const playCounts = mergePlayCounts(getPlayCounts(), extraPlayCounts);
+  // Advanced AI DJ Mix's "ignore play count" toggle: an EMPTY playCounts
+  // object (not just omitting extraPlayCounts) fully disables _segment_pool's
+  // play-count tiering server-side (ai_dj/workout.py: `play_tiers = ... if
+  // play_counts else [None]`) — every track becomes eligible regardless of
+  // how many times it's already played, rather than just skipping the
+  // extra demotion weighting on top of the real counts.
+  const playCounts = ignorePlayCounts ? {} : mergePlayCounts(getPlayCounts(), extraPlayCounts);
 
   // Claude/Gemini run right here on the Pi via the on-Pi bridge — no
   // dependency on the separate Ollama service PC being on. Ollama-backed

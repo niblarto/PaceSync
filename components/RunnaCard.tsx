@@ -7,6 +7,7 @@ import type { TrackWithBPM } from "@/types";
 import type { RaceSplitsEntry } from "@/lib/race-splits";
 import type { SavedPaceProMix } from "@/lib/pace-pro-saved";
 import { RouteMapLightbox } from "./RouteMapLightbox";
+import { AdvancedMixModal } from "./AdvancedMixModal";
 import { openInSpotify } from "./TrackRow";
 
 interface PaceSpmRow { bucket: number; avg_spm: number; records: number; }
@@ -989,6 +990,9 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   const scrollRef = useRef<HTMLDivElement>(null);
   const paceSpm = usePaceSpm(garminConfigured);
   const [mixState, setMixState] = useState<Record<string, MixStatus>>({});
+  // Which workout's "⚙️ Advanced AI DJ Mix" modal is open, if any — uid keyed
+  // same as mixState, but only ever one open at a time.
+  const [advancedMixFor, setAdvancedMixFor] = useState<RunnaWorkout | null>(null);
   interface RoutePage { items: RouteActivity[]; offset: number; total: number; loading?: boolean }
   const [routes, setRoutes] = useState<Record<string, RoutePage>>({});
   interface RouteMixTrack { uri: string | null; name: string; artist: string; startsAtSec: number; durationSec?: number; tempo: number | null }
@@ -1412,6 +1416,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     onResult?: (tracks: TrackWithBPM[], totalSec: number, timeline: AiDjTimelineSegment[], startedAtMs: number) => void,
     extraPlayCounts?: Record<string, number>,
     segmentCandidateUris?: (string[] | null)[],
+    ignorePlayCounts?: boolean,
   ) {
     // A remix should sound different: send every track from every prior
     // build this session so the mixer demotes them (they only reappear if
@@ -1434,7 +1439,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       const mixRes = await fetch("/api/ai-dj/mix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w, raceSplits[w.date]), avoidUris, date: w.date, extraPlayCounts, startedAtMs, segmentCandidateUris }),
+        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w, raceSplits[w.date]), avoidUris, date: w.date, extraPlayCounts, startedAtMs, segmentCandidateUris, ignorePlayCounts }),
       });
       if (!mixRes.ok || !mixRes.body) {
         const err = await mixRes.json().catch(() => ({})) as { error?: string };
@@ -1751,6 +1756,14 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                               className="text-xs px-2.5 py-1 rounded-lg border bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25 disabled:opacity-60 disabled:cursor-wait transition-colors"
                             >
                               {st?.status === "building" ? "🎧 Mixing…" : hasExistingMix ? "🎧 Remix" : "🎧 AI DJ Mix"}
+                            </button>
+                            <button
+                              onClick={e => { e.stopPropagation(); if (st?.status !== "building") setAdvancedMixFor(w); }}
+                              disabled={st?.status === "building"}
+                              title="Override BPM range, genre, play-count and candidate selection for this mix"
+                              className="text-xs px-2.5 py-1 rounded-lg border bg-slate-700/40 border-slate-600/40 text-slate-300 hover:bg-slate-700/60 disabled:opacity-60 transition-colors"
+                            >
+                              ⚙️ Advanced AI DJ Mix
                             </button>
                             {st?.status === "building" && (
                               <MixProgressBar startedAt={st.startedAt ?? Date.now()} progress={st.progress} />
@@ -2144,6 +2157,25 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
           distanceMi={routeMap.distanceMi}
           mixTracks={routeMap.mixTracks}
           onClose={() => setRouteMap(null)}
+        />
+      )}
+
+      {advancedMixFor && (
+        <AdvancedMixModal
+          workoutTitle={advancedMixFor.title}
+          onClose={() => setAdvancedMixFor(null)}
+          onBuild={({ ignorePlayCounts, candidateUris }) => {
+            const w = advancedMixFor;
+            setAdvancedMixFor(null);
+            const snap = mixSnapshots[w.date];
+            const snapUris = snap?.tracks.map(t => t.uri).filter((u): u is string => !!u);
+            // Same shape useImperativeHandle's remix() already uses for its
+            // own genreRestrictUris — one identical candidate list per
+            // segment, restricting (not replacing) the mixer's own
+            // energy/BPM-tolerance/artist-dedup/play-count logic.
+            const segmentCandidateUris = mixSegmentsFor(w, raceSplits[w.date]).map(() => candidateUris);
+            buildMix(w, snapUris, undefined, undefined, segmentCandidateUris, ignorePlayCounts);
+          }}
         />
       )}
     </div>

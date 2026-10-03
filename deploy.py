@@ -163,6 +163,7 @@ FILES = [
     ('app/api/runna/workouts/route.ts',           'app/api/runna/workouts/route.ts'),
     ('app/api/runna/workout-segments/route.ts',   'app/api/runna/workout-segments/route.ts'),
     ('components/RunnaCard.tsx',                  'components/RunnaCard.tsx'),
+    ('components/AdvancedMixModal.tsx',           'components/AdvancedMixModal.tsx'),
     ('components/RunDetailClient.tsx',             'components/RunDetailClient.tsx'),
     ('app/run/[date]/page.tsx',                   'app/run/[date]/page.tsx'),
     ('lib/track-delete-client.ts',                'lib/track-delete-client.ts'),
