@@ -9,7 +9,7 @@ import { BbcBrowserCard } from "@/components/BbcBrowserCard";
 import { DedupCard } from "@/components/DedupCard";
 import { ImportLookupCsvPanel } from "@/components/ImportLookupCsvPanel";
 import { invalidateRunningPlaylistCache } from "@/components/useRunningPlaylist";
-import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
+import { freshSpotifyToken, spotifyFetch, subscribeSpotifyRateLimit, fmtRateLimitDuration, type RateLimitState } from "@/lib/spotify-browser";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 import { DeletedTracksReview, type RejectedTrack } from "@/components/DeletedTracksReview";
 import { openInSpotify, TrackRow } from "@/components/TrackRow";
@@ -460,6 +460,20 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [coverageDeleteMsg, setCoverageDeleteMsg] = useState<string | null>(null);
   const [coverageDeleteError, setCoverageDeleteError] = useState<string | null>(null);
   const [coverageDeleteConfirm, setCoverageDeleteConfirm] = useState(false);
+  // Main-account Spotify rate limit — this delete writes via the user's own
+  // OAuth session (spotifyFetch), the same lane the SpotifyRateLimitBanner's
+  // "Main account" row tracks. Mirrored here so the button itself can show a
+  // countdown and disable, rather than letting a click fire straight into an
+  // already-known-active 429.
+  const [mainRateLimitMs, setMainRateLimitMs] = useState<number | null>(null);
+  useEffect(() => subscribeSpotifyRateLimit((s: RateLimitState) => setMainRateLimitMs(s.main)), []);
+  const [nowForRateLimit, setNowForRateLimit] = useState(Date.now());
+  useEffect(() => {
+    if (mainRateLimitMs == null) return;
+    const id = setInterval(() => setNowForRateLimit(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [mainRateLimitMs]);
+  const mainRateLimitSecLeft = mainRateLimitMs != null ? Math.max(0, Math.ceil((mainRateLimitMs - nowForRateLimit) / 1000)) : 0;
 
   async function deleteNeverUsableTracks() {
     const outOfRangeUris = Array.from(new Set(
@@ -469,6 +483,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
     if (!coverageDeleteConfirm) { setCoverageDeleteConfirm(true); return; }
     setCoverageDeleteConfirm(false);
+
+    if (mainRateLimitMs != null && mainRateLimitMs > Date.now()) {
+      setCoverageDeleteError(`Spotify's main account is rate-limited for another ${fmtRateLimitDuration(mainRateLimitSecLeft)} — try again once that clears.`);
+      return;
+    }
 
     const token = await freshSpotifyToken();
     if (!token) { setCoverageDeleteError("Not signed in"); return; }
@@ -486,6 +505,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           body: JSON.stringify({ items: chunk.map(uri => ({ uri })) }),
         });
+        if (res.status === 429) {
+          throw new Error("Spotify rate-limited the main account mid-delete — see the countdown banner above; try again once it clears.");
+        }
         if (!res.ok) throw new Error(`[DELETE /playlists/${activePlaylistId}/items] Spotify ${res.status}: ${await res.text()}`);
       }
 
@@ -4013,14 +4035,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   {coverage.outOfRangeTracks > 0 && (
                     <button
                       onClick={deleteNeverUsableTracks}
-                      disabled={coverageDeleting}
+                      disabled={coverageDeleting || mainRateLimitSecLeft > 0}
+                      title={mainRateLimitSecLeft > 0 ? `Main Spotify account is rate-limited for another ${fmtRateLimitDuration(mainRateLimitSecLeft)}` : undefined}
                       className={`w-full rounded text-[10px] font-medium px-1.5 py-1 transition-colors disabled:opacity-40 ${
                         coverageDeleteConfirm
                           ? "bg-red-500 text-white hover:bg-red-400"
                           : "bg-red-500/20 text-red-300 hover:bg-red-500/30"
                       }`}
                     >
-                      {coverageDeleting ? "Deleting…" : coverageDeleteConfirm ? "Confirm delete?" : "Delete all"}
+                      {coverageDeleting ? "Deleting…" : mainRateLimitSecLeft > 0 ? `Rate-limited (${fmtRateLimitDuration(mainRateLimitSecLeft)})` : coverageDeleteConfirm ? "Confirm delete?" : "Delete all"}
                     </button>
                   )}
                 </div>

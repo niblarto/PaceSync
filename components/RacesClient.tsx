@@ -453,7 +453,7 @@ export function RacesClient() {
                           {r.name}
                         </Link>
                         <p className="text-xs text-slate-500">
-                          {fmtDate(r.raceDate)}{r.distanceMi ? ` · ${r.distanceMi}mi` : ""}
+                          {fmtDate(r.raceDate)}{r.distanceMi ? ` · ${r.distanceMi.toFixed(2)}mi` : ""}
                           {r.notes ? ` · ${r.notes}` : ""}
                         </p>
                       </div>
@@ -546,7 +546,7 @@ export function RacesClient() {
                       {r.name}
                     </Link>
                     <p className="text-xs text-slate-500">
-                      {fmtDate(r.raceDate)}{r.distanceMi ? ` · ${r.distanceMi}mi` : ""}
+                      {fmtDate(r.raceDate)}{r.distanceMi ? ` · ${r.distanceMi.toFixed(2)}mi` : ""}
                     </p>
                   </div>
                   <div className="flex items-center gap-3 shrink-0 text-xs">

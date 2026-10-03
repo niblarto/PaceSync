@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "path required, must start with /" }, { status: 400 });
   }
 
-  const blockedUntil = await getSpotifyBlockedUntil();
+  const blockedUntil = await getSpotifyBlockedUntil("main");
   if (blockedUntil) {
     const retryAfterSec = Math.max(0, Math.ceil((new Date(blockedUntil).getTime() - Date.now()) / 1000));
     return NextResponse.json({ status: 429, ok: false, retryAfterSec, data: null });
@@ -59,7 +59,7 @@ export async function POST(req: NextRequest) {
     if (res.status === 429) {
       retryAfterSec = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
       console.warn(`[spotify/proxy] 429 on ${method ?? "GET"} ${path} — retry-after ${retryAfterSec}s`);
-      await setSpotifyBlockedUntil(new Date(Date.now() + retryAfterSec * 1000).toISOString());
+      await setSpotifyBlockedUntil(new Date(Date.now() + retryAfterSec * 1000).toISOString(), "main");
     }
 
     // Spotify's responses are JSON except for a 204 (empty body) on some

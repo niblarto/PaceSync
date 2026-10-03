@@ -19,33 +19,62 @@ export async function freshSpotifyToken(): Promise<string | null> {
 // triggered the 429. A plain module-level subscriber list rather than React
 // context: this needs to work from plain async functions, not just inside
 // component render, and there's only ever one dashboard mounted at a time.
-type RateLimitListener = (retryAtMs: number | null) => void;
-let retryAtMs: number | null = null;
+//
+// Tracked per LANE (see lib/spotify-rate-limit.ts's own doc comment): "main"
+// is the user's own OAuth account (playlist add/remove/play, via this
+// module's own spotifyFetch below) and "search" is the query-only app-
+// credential apps the heal sweep/BBC matching/bulk import use. They're
+// independent Spotify apps with independent rate budgets, so the banner
+// needs to say which one is actually affected rather than implying every
+// Spotify-touching action is blocked when only one side is.
+export type RateLimitState = { main: number | null; search: number | null };
+type RateLimitListener = (state: RateLimitState) => void;
+let state: RateLimitState = { main: null, search: null };
 const listeners = new Set<RateLimitListener>();
 
-function setRetryAt(ms: number | null) {
-  retryAtMs = ms;
-  listeners.forEach(l => l(ms));
+function setRetryAt(ms: number | null, lane: "main" | "search" = "main") {
+  state = { ...state, [lane]: ms };
+  listeners.forEach(l => l(state));
 }
 
 export function subscribeSpotifyRateLimit(listener: RateLimitListener): () => void {
   listeners.add(listener);
-  listener(retryAtMs);
+  listener(state);
   return () => { listeners.delete(listener); };
 }
 
-// Seeds the banner from the persisted server-side sentinel (GET
+// Seeds the banner from the persisted server-side sentinels (GET
 // /api/spotify/rate-limit-status) on a fresh page load/refresh — this
-// module's own retryAtMs starts null every time, so without this a ban
-// that's already active server-side stayed invisible until the next live
-// spotifyFetch() call in THIS session happened to hit the same 429 again.
-// Only applies a later retryAtMs than whatever's already known, so this
-// can never clobber a fresher/longer 429 a live call just recorded.
-export function seedSpotifyRateLimitFromServer(ms: number | null): void {
-  if (ms != null && (retryAtMs == null || ms > retryAtMs)) setRetryAt(ms);
+// module's own state starts null every time, so without this a ban that's
+// already active server-side stayed invisible until the next live
+// spotifyFetch() call in THIS session happened to hit the same 429 again
+// (and the search lane never has a client-side fetch at all, so this is its
+// ONLY way to ever reach the banner). Only applies a later value than
+// whatever's already known for that lane, so this can never clobber a
+// fresher/longer 429 a live call just recorded.
+export function seedSpotifyRateLimitFromServer(ms: number | null, lane: "main" | "search" = "main"): void {
+  if (ms != null && (state[lane] == null || ms > state[lane]!)) setRetryAt(ms, lane);
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+// "1d 2h 3m 4s" / "2h 3m 4s" / "3m 4s" / "4s", trimming leading zero units —
+// a Spotify ban can run anywhere from a few seconds to many hours, so a
+// countdown shown only in raw seconds (e.g. "46526s") is unreadable at the
+// long end. Shared by SpotifyRateLimitBanner and any other UI (e.g. the
+// Library Coverage "Delete all" button) that shows this countdown.
+export function fmtRateLimitDuration(totalSec: number): string {
+  const d = Math.floor(totalSec / 86400);
+  const h = Math.floor((totalSec % 86400) / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const parts: string[] = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (d > 0 || h > 0) parts.push(`${h}h`);
+  if (d > 0 || h > 0 || m > 0) parts.push(`${m}m`);
+  parts.push(`${s}s`);
+  return parts.join(" ");
+}
 
 // Auto-retry only kicks in for a short wait — matches the CSV heal sweep's
 // own threshold (lib/csv-heal.ts, "wait > 10"), so both halves of the app

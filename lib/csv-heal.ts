@@ -422,7 +422,7 @@ async function doHealInner(): Promise<HealResult> {
   // the URI search below and the duration pass) until the persisted
   // cooldown clears, instead of re-requesting immediately and eating (and
   // resetting the clock on) another 429 every time the button is clicked.
-  const blockedUntil = await getSpotifyBlockedUntil();
+  const blockedUntil = await getSpotifyBlockedUntil("search");
   if (blockedUntil) {
     spotifyRetryAt = blockedUntil;
     addLog(`Spotify still rate-limited from an earlier sweep — skipping Spotify until ${new Date(blockedUntil).toLocaleTimeString()}, using Deezer/Last.fm only`);
@@ -478,7 +478,7 @@ async function doHealInner(): Promise<HealResult> {
           continue;
         }
         spotifyRetryAt = result.retryAt;
-        await setSpotifyBlockedUntil(result.retryAt);
+        await setSpotifyBlockedUntil(result.retryAt, "search");
         addLog(`Spotify rate-limited during URI search — pausing until ${new Date(result.retryAt).toLocaleTimeString()}, ${uriGaps.length - i} tracks left unsearched this sweep`);
         break;
       }
@@ -567,7 +567,7 @@ async function doHealInner(): Promise<HealResult> {
           addLog(`Spotify rate-limited on the ${wasUsingPrimary ? "primary" : "second"} app — switching apps for duration lookups`);
         } else {
           spotifyRetryAt = result.retryAt;
-          await setSpotifyBlockedUntil(result.retryAt);
+          await setSpotifyBlockedUntil(result.retryAt, "search");
           addLog(`Spotify rate-limited — pausing Spotify lookups until ${new Date(result.retryAt).toLocaleTimeString()}, continuing with Deezer/Last.fm only`);
         }
       } else {

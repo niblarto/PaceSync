@@ -53,7 +53,7 @@ export async function DELETE(req: NextRequest) {
   let spotifyError: string | null = null;
   if (unfollowSpotify) {
     const token = session.accessToken;
-    const blockedUntil = await getSpotifyBlockedUntil();
+    const blockedUntil = await getSpotifyBlockedUntil("main");
     if (!token) {
       spotifyError = "Not signed in to Spotify";
     } else if (blockedUntil) {
@@ -67,7 +67,7 @@ export async function DELETE(req: NextRequest) {
         if (res.status === 429) {
           const retryAfterSec = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
           console.warn(`[settings/playlists] 429 on DELETE /playlists/${id}/followers — retry-after ${retryAfterSec}s`);
-          await setSpotifyBlockedUntil(new Date(Date.now() + retryAfterSec * 1000).toISOString());
+          await setSpotifyBlockedUntil(new Date(Date.now() + retryAfterSec * 1000).toISOString(), "main");
         }
         if (!res.ok) spotifyError = `Spotify ${res.status}: ${await res.text()}`;
       } catch (e) {

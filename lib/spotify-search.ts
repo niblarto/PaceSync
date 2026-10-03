@@ -52,6 +52,21 @@ async function searchOnce(query: string, token: string): Promise<string | null |
   return data.tracks?.items?.[0]?.uri ?? null;
 }
 
+// A multi-artist CSV field ("Emery, Dreazz, Physics (Dnb)") joins every
+// collaborator with a comma, sometimes with a trailing genre/style tag in
+// brackets tacked on by the scrape source — neither belongs in Spotify's
+// `artist:` filter, which matches against ONE artist name. Searching with
+// the whole literal string ("artist:Emery, Dreazz, Physics (Dnb)") reliably
+// finds nothing even though the track is really on Spotify under any one of
+// those names. Strips a trailing "(...)"/"[...]" tag, then takes the first
+// comma-separated name — good enough for the search filter; the full
+// multi-artist string is still what gets stored/displayed, this is only
+// used to build the query.
+function primarySearchArtist(artist: string): string {
+  const noTag = artist.replace(/\s*[([][^)\]]*[)\]]\s*$/, "").trim();
+  return (noTag || artist).split(",")[0].trim();
+}
+
 // Finds a Spotify track URI for a row that has none. Prefers an exact ISRC
 // search (`isrc:{isrc}`) when the row has one — a precise single-recording
 // match, no fuzzy title/artist guessing — falling back to name + artist
@@ -66,15 +81,24 @@ async function searchOnce(query: string, token: string): Promise<string | null |
 // enough for the common case, same trade-off the BBC cron's search already
 // makes.
 export async function spotifySearchUri(name: string, artist: string, token: string, isrc?: string | null): Promise<string | null | SpotifyRateLimited> {
-  if (isrc) {
-    return searchOnce(encodeURIComponent(`isrc:${isrc}`), token);
+  // A "pending:<uuid>" isrc is the bulk-import's own placeholder (see
+  // app/api/tracks/import-lookup-csv/confirm/route.ts), written to the row
+  // when neither Deezer/ReccoBeats nor Spotify could resolve a real one at
+  // import time — never a genuine ISRC. Searching `isrc:pending:...` always
+  // returns nothing, and worse, short-circuits past the name+artist search
+  // below every time this row comes up in a later heal sweep, permanently
+  // stranding it with no URI. Treat it as absent instead.
+  const realIsrc = isrc && !isrc.startsWith("pending:") ? isrc : null;
+  if (realIsrc) {
+    return searchOnce(encodeURIComponent(`isrc:${realIsrc}`), token);
   }
-  const first = await searchOnce(encodeURIComponent(`track:${name} artist:${artist}`), token);
+  const searchArtist = primarySearchArtist(artist);
+  const first = await searchOnce(encodeURIComponent(`track:${name} artist:${searchArtist}`), token);
   if (first || isSpotifyRateLimited(first)) return first;
 
   const stripped = stripBracketedSuffix(name);
   if (!stripped) return first; // nothing left to try — first is null here
 
   await sleep(400); // same conservative gap the calling loops use between tracks
-  return searchOnce(encodeURIComponent(`track:${stripped} artist:${artist}`), token);
+  return searchOnce(encodeURIComponent(`track:${stripped} artist:${searchArtist}`), token);
 }

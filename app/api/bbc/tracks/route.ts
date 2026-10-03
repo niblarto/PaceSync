@@ -275,7 +275,13 @@ export async function GET(req: NextRequest) {
         // trigger one itself anymore.
         const spotifyResults: CacheEntry[] = [];
         let retryAfter: number | null = null;
-        const preflightBlocked = await getSpotifyBlockedUntil();
+        // Not tied to one lane — this route doesn't call Spotify Search
+        // itself (see comment above), so this is purely an informational
+        // preflight; either lane being blocked is worth surfacing here.
+        const [mainBlocked, searchBlocked] = await Promise.all([getSpotifyBlockedUntil("main"), getSpotifyBlockedUntil("search")]);
+        const preflightBlocked = mainBlocked && searchBlocked
+          ? (mainBlocked > searchBlocked ? mainBlocked : searchBlocked)
+          : (mainBlocked ?? searchBlocked);
         const burstWaitMs = getBurstCooldownRemainingMs();
         if (preflightBlocked || burstWaitMs > 0) {
           retryAfter = preflightBlocked

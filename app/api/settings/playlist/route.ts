@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
   const trimmed = name?.trim();
   if (!trimmed) return NextResponse.json({ error: "name required" }, { status: 400 });
 
-  const blockedUntil = await getSpotifyBlockedUntil();
+  const blockedUntil = await getSpotifyBlockedUntil("main");
   if (blockedUntil) {
     return NextResponse.json({ error: `Spotify rate-limited until ${blockedUntil}` }, { status: 429 });
   }
@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
       if (res.status === 429) {
         const retryAfterSec = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
         console.warn(`[settings/playlist] 429 on POST /me/playlists — retry-after ${retryAfterSec}s`);
-        await setSpotifyBlockedUntil(new Date(Date.now() + retryAfterSec * 1000).toISOString());
+        await setSpotifyBlockedUntil(new Date(Date.now() + retryAfterSec * 1000).toISOString(), "main");
       }
       if (!res.ok) throw new Error(`Create playlist ${res.status}: ${await res.text()}`);
       id = ((await res.json()) as { id: string }).id;

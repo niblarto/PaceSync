@@ -496,7 +496,7 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
 
                   {/* Actual stats */}
                   <span className="text-xs text-slate-400 shrink-0 tabular-nums">
-                    {run.distanceMi ? `${run.distanceMi}mi` : ""}
+                    {run.distanceMi ? `${run.distanceMi.toFixed(2)}mi` : ""}
                     {run.distanceMi && run.durationStr ? " · " : ""}
                     {run.durationStr ?? ""}
                   </span>
@@ -1634,7 +1634,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
 
                   {isRun && (
                     <span className="text-xs text-slate-500 shrink-0">
-                      {w.distanceMi ? `${w.distanceMi}mi` : ""}
+                      {w.distanceMi ? `${w.distanceMi.toFixed(2)}mi` : ""}
                       {w.distanceMi && w.durationSec ? " · " : ""}
                       {w.durationSec ? formatDuration(w.durationSec) : ""}
                     </span>

@@ -3,7 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import fs from "fs";
 import path from "path";
-import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest, getBurstCooldownRemainingMs } from "@/lib/spotify-rate-limit";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest, getBurstCooldownRemainingMs, SearchTokenSource } from "@/lib/spotify-rate-limit";
 
 const CACHE_FILE = path.join(process.cwd(), "spotify-cache.json");
 
@@ -61,26 +61,38 @@ function searchVariants(title: string, artist: string): { title: string; artist:
   return [exact, fallback];
 }
 
-async function searchSpotify(token: string, title: string, artist: string): Promise<{ result: CacheEntry; rateLimited: number | null }> {
+// This is a lookup (title/artist -> URI), never a playlist write, so it
+// runs on the query-only app-credential lane (SearchTokenSource) rather than
+// the user's own OAuth session — same split as csv-heal.ts's URI search and
+// the bulk-import confirm route, kept consistent so a 429 here never blocks
+// (or gets blocked by) an unrelated main-account playlist add/remove.
+async function searchSpotify(tokens: SearchTokenSource, title: string, artist: string): Promise<{ result: CacheEntry; rateLimited: number | null }> {
   for (const variant of searchVariants(title, artist)) {
     const q = encodeURIComponent(variant.artist ? `${variant.title} ${variant.artist}` : variant.title);
-    recordSpotifyRequest();
-    const res = await fetch(
-      `https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (res.status === 429) {
-      const retryAfter = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
-      await setSpotifyBlockedUntil(new Date(Date.now() + retryAfter * 1000).toISOString());
-      return { result: null, rateLimited: retryAfter };
-    }
-    if (!res.ok) continue;
-    const data = await res.json() as {
-      tracks?: { items?: { uri: string; name: string; artists: { name: string }[] }[] };
-    };
-    const item = data.tracks?.items?.[0];
-    if (item) {
-      return { result: { uri: item.uri, name: item.name, artistName: item.artists[0]?.name ?? artist }, rateLimited: null };
+    for (;;) {
+      const token = await tokens.current();
+      if (!token) return { result: null, rateLimited: null }; // nothing usable left
+      recordSpotifyRequest();
+      const res = await fetch(
+        `https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (res.status === 429) {
+        const retryAfter = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
+        const hasAnotherApp = await tokens.onRateLimited();
+        if (hasAnotherApp) continue; // retry this same variant on the other app
+        await setSpotifyBlockedUntil(new Date(Date.now() + retryAfter * 1000).toISOString(), "search");
+        return { result: null, rateLimited: retryAfter };
+      }
+      if (!res.ok) break; // try the next variant
+      const data = await res.json() as {
+        tracks?: { items?: { uri: string; name: string; artists: { name: string }[] }[] };
+      };
+      const item = data.tracks?.items?.[0];
+      if (item) {
+        return { result: { uri: item.uri, name: item.name, artistName: item.artists[0]?.name ?? artist }, rateLimited: null };
+      }
+      break; // no match on this variant — try the next
     }
     await sleep(200); // stay polite between variant attempts on the same track
   }
@@ -88,15 +100,14 @@ async function searchSpotify(token: string, title: string, artist: string): Prom
 }
 
 export async function POST(req: NextRequest) {
-  const authHeader = req.headers.get("Authorization");
-  const spotifyToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!spotifyToken) {
-    const session = await getServerSession(authOptions);
-    if (!session?.accessToken) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
-    }
+  // Still requires a real signed-in app session (same gate every other API
+  // route here uses) — just no longer requires/uses a Spotify access token
+  // of its own, since the actual Spotify calls below run on the query-only
+  // app-credential lane instead of the user's OAuth session.
+  const session = await getServerSession(authOptions);
+  if (!session) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
   }
-  const token = spotifyToken ?? (await getServerSession(authOptions))?.accessToken!;
 
   const body = await req.json() as { tracks?: { artist: string; title: string }[]; bypassCache?: boolean };
   const inputTracks = (body.tracks ?? []).filter(t => t.artist && t.title);
@@ -115,7 +126,7 @@ export async function POST(req: NextRequest) {
 
         send({ type: "start", total: inputTracks.length });
 
-        const preflightBlocked = await getSpotifyBlockedUntil();
+        const preflightBlocked = await getSpotifyBlockedUntil("search");
         if (preflightBlocked) {
           const waitSec = Math.max(0, Math.ceil((new Date(preflightBlocked).getTime() - Date.now()) / 1000));
           if (waitSec > 0) {
@@ -131,6 +142,7 @@ export async function POST(req: NextRequest) {
           await sleep(burstWaitMs);
         }
 
+        const tokens = new SearchTokenSource(!!preflightBlocked);
         const spotifyResults: CacheEntry[] = [];
         let retryAfter: number | null = null;
         const initialCacheSize = spotifyCache.size;
@@ -155,7 +167,7 @@ export async function POST(req: NextRequest) {
             continue;
           }
 
-          const { result, rateLimited } = await searchSpotify(token, t.title, t.artist);
+          const { result, rateLimited } = await searchSpotify(tokens, t.title, t.artist);
 
           if (rateLimited !== null) {
             retryAfter = rateLimited;

@@ -384,7 +384,7 @@ export function RaceDetailClient({ id }: { id: string }) {
                   <div className="min-w-0">
                     <h1 className="text-xl font-semibold text-slate-100">{race.name}</h1>
                     <p className="text-sm text-slate-500 mt-1">
-                      {fmtDate(race.raceDate)}{race.distanceMi ? ` · ${race.distanceMi}mi` : ""}
+                      {fmtDate(race.raceDate)}{race.distanceMi ? ` · ${race.distanceMi.toFixed(2)}mi` : ""}
                       {race.status === "completed" ? " · Completed" : " · Upcoming"}
                     </p>
                     {race.notes && <p className="text-sm text-slate-400 mt-1">{race.notes}</p>}

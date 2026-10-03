@@ -21,10 +21,13 @@ interface ParsedImportRow {
   previouslyDeleted: { name: string; artist: string; deletedAt: string } | null;
 }
 
-// Settings > Playlist Management's "Volumo Scrape" bulk import — for a bare
-// tracklist CSV (title/artist/bpm/genre columns, as scraped from Volumo,
-// e.g. copied from a forum or another DJ's set list) rather than a Spotify
-// Exportify export. Three steps:
+// Settings > Playlist Management's "Track List Import" bulk import — for a
+// bare tracklist CSV (title/artist/bpm/genre columns) rather than a Spotify
+// Exportify export. Source-agnostic by design: parseCsv's col() aliasing
+// already matches both a Volumo scrape's and a Beatport export's headers
+// (Beatport: title,mix,artist,bpm,key,genre,label,release_date — mix/key/
+// label/release_date are simply ignored, unused columns), so one panel
+// covers both rather than maintaining near-duplicate importers. Three steps:
 //
 //   1. Upload CSV -> POST /api/tracks/import-lookup-csv/dedup, which checks
 //      every row against the ACTIVE LIBRARY (loose name+artist match, so
@@ -160,11 +163,12 @@ export function ImportLookupCsvPanel() {
 
   return (
     <div className="space-y-2">
-      <label className="block text-sm font-medium text-slate-300">Volumo Scrape</label>
+      <label className="block text-sm font-medium text-slate-300">Track List Import (Volumo / Beatport)</label>
       <p className="text-xs text-slate-500">
         Upload a plain tracklist CSV — not a Spotify export — with title, artist, bpm and genre columns
-        (e.g. a set list copied from elsewhere). Checked against the library first so near-duplicates
-        aren&apos;t silently re-added; the online lookup for a fresh Spotify URI runs only after you confirm.
+        (a Volumo scrape, a Beatport export, or any set list copied from elsewhere). Checked against the
+        library first so near-duplicates aren&apos;t silently re-added; the online lookup for a fresh
+        Spotify URI runs only after you confirm.
       </p>
 
       <div className="flex items-center gap-3 flex-wrap">

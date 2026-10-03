@@ -2,6 +2,7 @@ import { loadRunnaUrl } from "@/lib/runna-config";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { getTodaysRunEntriesForDate } from "@/lib/todays-run-history";
 import { rememberWorkoutTitle, getRememberedWorkoutTitle } from "@/lib/workout-title-cache";
+import { getRaceByGarminActivity } from "@/lib/races";
 import path from "path";
 
 export interface RunnaWorkout {
@@ -316,14 +317,17 @@ function garminOrphanRun(date: string): RunnaPastRun | null {
     const db = new Database(path.join(config.dbPath, "garmin_activities.db"), { readonly: true, fileMustExist: true });
     db.pragma("busy_timeout = 30000");
     const row = db.prepare(`
-      SELECT name, distance, elapsed_time FROM activities
+      SELECT activity_id, name, distance, elapsed_time FROM activities
       WHERE LOWER(sport) LIKE '%running%' AND DATE(start_time) = ?
       ORDER BY distance DESC LIMIT 1
-    `).get(date) as { name: string | null; distance: number | null; elapsed_time: string | null } | undefined;
+    `).get(date) as { activity_id: string; name: string | null; distance: number | null; elapsed_time: string | null } | undefined;
     db.close();
     if (!row) return null;
 
-    // Prefer the title of a mix already saved into "Today's Run" for this
+    // Prefer the user's own race name (set on the Races page, e.g. "Robin
+    // Hood Half Marathon") over everything else — it's the one deliberate,
+    // explicit override here, so it should win even against a remembered
+    // Runna title. Then a mix already saved into "Today's Run" for this
     // date over Garmin's own activity name: the pacing-review confirm flow
     // (app/api/todays-run/history/route.ts) and creditConfirmedPlay look up
     // that saved tracklist by (date, title) — if a mix was pre-built or
@@ -334,10 +338,11 @@ function garminOrphanRun(date: string): RunnaPastRun | null {
     // to fix. Next, the last REAL Runna title seen for this date (e.g. "🏁
     // Robin Hood Half Marathon") — see workout-title-cache.ts — so a race
     // whose VEVENT later vanished from the feed still shows its actual name
-    // instead of Garmin's generic location-based one. Only when neither
-    // exists does this fall back to Garmin's own activity name.
+    // instead of Garmin's generic location-based one. Only when none of
+    // these exist does this fall back to Garmin's own activity name.
+    const linkedRace = getRaceByGarminActivity(String(row.activity_id));
     const savedEntry = getTodaysRunEntriesForDate(date)[0];
-    const title = savedEntry?.workoutTitle || getRememberedWorkoutTitle(date) || row.name?.trim() || "Garmin Run";
+    const title = linkedRace?.name || savedEntry?.workoutTitle || getRememberedWorkoutTitle(date) || row.name?.trim() || "Garmin Run";
 
     return {
       uid: `GARMIN_ORPHAN_${date}`,

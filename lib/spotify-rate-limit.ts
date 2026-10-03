@@ -1,27 +1,48 @@
 import { readFile, writeFile } from "fs/promises";
 import path from "path";
 
-// App-wide "Spotify is rate limited until X" sentinel, persisted to disk (not
-// just an in-memory var) so it survives a redeploy/restart mid-cooldown and
-// is shared across every caller — the CSV heal sweep, the dashboard's
-// spotifyFetch proxy, anything else that hits api.spotify.com. Without a
-// shared, persisted clock, two independent callers each re-request
+// "Spotify is rate limited until X" sentinel, persisted to disk (not just an
+// in-memory var) so it survives a redeploy/restart mid-cooldown — shared
+// across every caller that uses the same LANE. Without a shared, persisted
+// clock, two independent callers on the same lane each re-request
 // immediately after their own 429, each eating a fresh rate limit and
 // resetting the effective clear time later every time (this exact bug once
 // made csv-heal's retry-at drift later on every re-triggered sweep instead
 // of counting down — see its own comment history).
-const RATE_LIMIT_PATH = path.join(process.cwd(), "spotify-rate-limit.json");
+//
+// Keyed by lane rather than one global flag: "main" is the user's own OAuth
+// session token (playlist add/remove/play — app/api/spotify/proxy, settings
+// playlist routes, the BBC cron's playlist writes) and "search" is the two
+// query-only client-credentials apps SearchTokenSource rotates between
+// (lib/csv-heal.ts's duration/URI passes, the bulk-import confirm route).
+// These are different Spotify apps/tokens with independent rate budgets — a
+// 429 on the search apps during a heal sweep must NOT block a main-account
+// playlist delete, and vice versa (confirmed bug: the old single shared
+// sentinel did exactly that, surfacing as a 429 on an unrelated "Delete all
+// never-usable tracks" click while only the search lane was actually banned).
+export type SpotifyRateLane = "main" | "search";
 
-export async function getSpotifyBlockedUntil(): Promise<string | null> {
+function rateLimitPath(lane: SpotifyRateLane): string {
+  return path.join(process.cwd(), lane === "main" ? "spotify-rate-limit.json" : "spotify-rate-limit-search.json");
+}
+
+export async function getSpotifyBlockedUntil(lane: SpotifyRateLane = "main"): Promise<string | null> {
   try {
-    const raw = JSON.parse(await readFile(RATE_LIMIT_PATH, "utf8")) as { until?: string };
+    const raw = JSON.parse(await readFile(rateLimitPath(lane), "utf8")) as { until?: string };
     if (raw.until && new Date(raw.until).getTime() > Date.now()) return raw.until;
   } catch { /* no file yet, or expired */ }
   return null;
 }
 
-export async function setSpotifyBlockedUntil(until: string): Promise<void> {
-  try { await writeFile(RATE_LIMIT_PATH, JSON.stringify({ until }), "utf8"); } catch { /* best-effort */ }
+export async function setSpotifyBlockedUntil(until: string, lane: SpotifyRateLane = "main"): Promise<void> {
+  try { await writeFile(rateLimitPath(lane), JSON.stringify({ until }), "utf8"); } catch { /* best-effort */ }
+}
+
+// Both lanes at once — for a status endpoint/banner that wants to show which
+// one(s) are actually blocked, rather than a single merged flag.
+export async function getSpotifyBlockedUntilByLane(): Promise<{ main: string | null; search: string | null }> {
+  const [main, search] = await Promise.all([getSpotifyBlockedUntil("main"), getSpotifyBlockedUntil("search")]);
+  return { main, search };
 }
 
 export function parseRetryAfter(raw: string): number {

@@ -442,14 +442,17 @@ async function runUpdate(onProgress?: (current: number, total: number, name: str
 }> {
   const bbcPlaylists = loadBbcProgrammes();
 
-  // Pre-flight: honor a rate limit already in effect from ANYTHING that hits
-  // Spotify (a previous BBC run, csv-heal, the dashboard) — shared via
-  // lib/spotify-rate-limit.ts's persisted sentinel. A short remaining wait is
-  // absorbed here rather than aborting the whole update over a few seconds;
-  // a longer one skips the run entirely instead of guaranteeing every
-  // programme's first search call eats the same still-active 429.
+  // Pre-flight: honor a rate limit already in effect on the MAIN account —
+  // this cron run's own Spotify calls (inside processPlaylist) are playlist
+  // writes (add tracks, dedup) on the user's own OAuth token, the same lane
+  // the dashboard's playlist add/delete/save actions use, via
+  // lib/spotify-rate-limit.ts's persisted "main" sentinel. (BBC segment
+  // matching itself no longer calls Spotify Search at all — see the
+  // app/api/bbc/tracks comment — so this is no longer guarding search
+  // calls.) A short remaining wait is absorbed here rather than aborting the
+  // whole update over a few seconds; a longer one skips the run entirely.
   const SHORT_WAIT_MAX_SEC = 15;
-  const preflightBlocked = await getSpotifyBlockedUntil();
+  const preflightBlocked = await getSpotifyBlockedUntil("main");
   if (preflightBlocked) {
     const waitSec = Math.max(0, Math.ceil((new Date(preflightBlocked).getTime() - Date.now()) / 1000));
     if (waitSec > SHORT_WAIT_MAX_SEC) {
@@ -496,7 +499,7 @@ async function runUpdate(onProgress?: (current: number, total: number, name: str
     // programme's own search calls, instead of immediately eating a fresh
     // 429 for every remaining programme (what caused 4 separate rate-limit
     // hits in a single run previously).
-    const blockedUntil = await getSpotifyBlockedUntil();
+    const blockedUntil = await getSpotifyBlockedUntil("main");
     if (blockedUntil) {
       const waitSec = Math.max(0, Math.ceil((new Date(blockedUntil).getTime() - Date.now()) / 1000));
       if (waitSec > 0) {

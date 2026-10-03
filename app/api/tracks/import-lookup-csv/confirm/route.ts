@@ -156,7 +156,7 @@ export async function POST(req: NextRequest) {
         let spotifyResolved = 0;
         let spotifyResolvedSkippedDupeUri = 0;
         if (stillPending.length > 0) {
-          const blockedUntil = await getSpotifyBlockedUntil();
+          const blockedUntil = await getSpotifyBlockedUntil("search");
           const tokens = new SearchTokenSource(!!blockedUntil);
           send({ type: "phase", phase: "spotify", current: 0, total: stillPending.length });
           if (blockedUntil) {
@@ -175,7 +175,7 @@ export async function POST(req: NextRequest) {
               if (isSpotifyRateLimited(result)) {
                 const hasAnotherApp = await tokens.onRateLimited();
                 if (hasAnotherApp) { i--; continue; }
-                await setSpotifyBlockedUntil(result.retryAt);
+                await setSpotifyBlockedUntil(result.retryAt, "search");
                 send({ type: "log", text: `Spotify rate-limited — pausing, ${stillPending.length - i} tracks left unsearched this run` });
                 break;
               }
