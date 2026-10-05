@@ -65,24 +65,60 @@ function formatMs(ms: number) {
 // here bypassing the shared rate-limit sentinel was the leading suspect for
 // unlogged Spotify traffic possibly contributing to an unexplained ~20hr
 // rate-limit block.
+//
+// Module-level sequencing: two independent "play track X" calls fired close
+// together (e.g. clicking a second track before the first's request has
+// resolved) have no ordering guarantee once their PUT /me/player/play
+// requests are both in flight simultaneously — whichever one happens to
+// land on Spotify's servers LAST wins, which isn't necessarily the one the
+// user clicked last (confirmed live: clicking track B shortly after track A
+// sometimes left track A actually playing, because A's request — sent
+// first but slower to land — overtook B's on Spotify's own side).
+//
+// Fixed by SERIALIZING: every call waits for whatever play request is
+// already in flight to finish before sending its own, so Spotify's servers
+// only ever see one of these PUTs at a time, in the same order they were
+// clicked — no possible last-one-wins race. A ticket additionally lets a
+// now-superseded call skip its own follow-through (deep-link / app-open)
+// once it's finally its turn, in case several clicks queued up while the
+// user was deciding.
+let playTicketCounter = 0;
+let playQueue: Promise<void> = Promise.resolve();
+
 export async function playInSpotify(uri: string, token?: string | null): Promise<void> {
-  if (token) {
-    try {
-      const res = await spotifyFetch("https://api.spotify.com/v1/me/player/play", {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ uris: [uri] }),
-      });
-      if (res.ok) {
-        // Playback switched, but the app's main panel keeps showing whatever
-        // page was open (the API can't refresh it). Deep-link the track so
-        // the app comes forward showing what's now playing.
-        window.location.href = uri;
-        return;
-      }
-    } catch { /* fall through to opening the app */ }
-  }
-  openInSpotify(uri);
+  const ticket = ++playTicketCounter;
+  const isCurrent = () => ticket === playTicketCounter;
+
+  const run = async () => {
+    if (!isCurrent()) return; // superseded before this request even got its turn
+
+    if (token) {
+      try {
+        const res = await spotifyFetch("https://api.spotify.com/v1/me/player/play", {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ uris: [uri] }),
+        });
+        if (!isCurrent()) return; // a newer track was clicked while this request was in flight
+        if (res.ok) {
+          // Playback switched, but the app's main panel keeps showing
+          // whatever page was open (the API can't refresh it). Deep-link
+          // the track so the app comes forward showing what's now playing.
+          window.location.href = uri;
+          return;
+        }
+      } catch { /* fall through to opening the app */ }
+    }
+    if (!isCurrent()) return;
+    openInSpotify(uri);
+  };
+
+  // Chain onto the existing queue regardless of whether the previous call
+  // succeeded or failed, so one failed request can't permanently stall
+  // every later click.
+  const next = playQueue.then(run, run);
+  playQueue = next;
+  return next;
 }
 
 // Navigate to a spotify: URI (opens the desktop/mobile app); if the page
