@@ -272,6 +272,7 @@ FILES = [
     ('lib/pace-analysis.ts',                       'lib/pace-analysis.ts'),
     ('app/api/settings/pace-analysis/route.ts',    'app/api/settings/pace-analysis/route.ts'),
     ('app/api/settings/pace-analysis-batch/route.ts', 'app/api/settings/pace-analysis-batch/route.ts'),
+    ('app/api/settings/bpm-pace-chart/route.ts',    'app/api/settings/bpm-pace-chart/route.ts'),
     ('app/api/settings/pace-pro-image/route.ts',    'app/api/settings/pace-pro-image/route.ts'),
     ('app/api/settings/race-splits-image/route.ts', 'app/api/settings/race-splits-image/route.ts'),
     ('app/api/settings/pace-pro-pin/route.ts',     'app/api/settings/pace-pro-pin/route.ts'),

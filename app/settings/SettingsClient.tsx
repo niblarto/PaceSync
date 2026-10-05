@@ -311,6 +311,36 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     tracks: { uri: string | null; name: string; artist: string; tempo: number; targetPaceSec: number; segment: string; date: string; workoutTitle: string; fit: "fits" | "too-slow"; effectiveBpm: number; diff: number }[];
   } | null>(null);
 
+  // "Measured BPM -> pace" chart — real outcomes (GarminDB pace while each
+  // track actually played, across every confirmed run), not the theoretical
+  // pace-derived target the rest of this tab classifies against.
+  interface BpmPaceBucket {
+    targetPaceSec: number; kind: "easy" | "work"; sampleCount: number; avgActualPaceSec: number; smoothedPaceSec: number;
+    avgDiffSec: number; onCount: number; fastCount: number; slowCount: number;
+    avgBpm: number | null; smoothedBpm: number | null;
+    cadenceSampleCount: number; avgCadenceSpm: number | null; smoothedCadenceSpm: number | null;
+    avgStrideM: number | null; smoothedStrideM: number | null;
+    isExtrapolated: boolean;
+  }
+  const [bpmPaceChart, setBpmPaceChart] = useState<BpmPaceBucket[] | null>(null);
+  const [bpmPaceChartMinSamples, setBpmPaceChartMinSamples] = useState(5);
+  const [bpmPaceChartLoading, setBpmPaceChartLoading] = useState(false);
+  const [bpmPaceChartError, setBpmPaceChartError] = useState<string | null>(null);
+  const loadBpmPaceChart = useCallback(() => {
+    setBpmPaceChartLoading(true);
+    setBpmPaceChartError(null);
+    fetch("/api/settings/bpm-pace-chart")
+      .then(r => r.json())
+      .then((d: { buckets?: BpmPaceBucket[]; minReliableSamples?: number; error?: string }) => {
+        if (d.error) { setBpmPaceChartError(d.error); return; }
+        setBpmPaceChart(d.buckets ?? []);
+        if (d.minReliableSamples != null) setBpmPaceChartMinSamples(d.minReliableSamples);
+      })
+      .catch(e => setBpmPaceChartError(e instanceof Error ? e.message : "Failed to load"))
+      .finally(() => setBpmPaceChartLoading(false));
+  }, []);
+  useEffect(() => { loadBpmPaceChart(); }, [loadBpmPaceChart]);
+
   const [waking, setWaking] = useState(false);
   const [wakeMsg, setWakeMsg] = useState<string | null>(null);
   const wakePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -5761,7 +5791,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                           {t.uri === group.suggestedKeepUri && <span className="text-green-400 text-xs font-medium ml-2">Keep</span>}
                         </button>
                         <p className="text-xs text-slate-500">
-                          {Math.floor(t.durationMs / 60000)}:{String(Math.round((t.durationMs % 60000) / 1000)).padStart(2, "0")} · {t.bpm || "?"} BPM
+                          {(() => {
+                            const totalSec = Math.round(t.durationMs / 1000);
+                            return `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, "0")}`;
+                          })()} · {t.bpm || "?"} BPM
                         </p>
                       </div>
                       <div className="shrink-0 flex items-center gap-2">
@@ -6328,6 +6361,131 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           )}
         </div>
       )}
+
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="font-semibold text-base">Measured target pace → outcome</h2>
+            <p className="text-sm text-slate-400 mt-1">
+              Real outcomes from confirmed runs, by target pace — not the theoretical analyzer above.
+            </p>
+          </div>
+          <button
+            onClick={loadBpmPaceChart}
+            disabled={bpmPaceChartLoading}
+            className="shrink-0 rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 text-xs px-3 py-1.5 transition-colors"
+          >
+            {bpmPaceChartLoading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+
+        {bpmPaceChartError && <p className="text-sm text-red-400">{bpmPaceChartError}</p>}
+
+        {bpmPaceChart && bpmPaceChart.length === 0 && !bpmPaceChartLoading && (
+          <p className="text-sm text-slate-500">No confirmed runs with matching Garmin pace data yet.</p>
+        )}
+
+        {bpmPaceChart && bpmPaceChart.length > 0 && (["easy", "work"] as const).map(kind => {
+          // Work/intervals only matters at a genuinely hard pace — anything
+          // 9:00/mi or slower showing up as "work" is almost always a
+          // mislabeled/edge-case segment (same class of noise the pace-
+          // consistency filter above already catches some of), not a real
+          // interval worth seeing here.
+          const rows = bpmPaceChart.filter(b => b.kind === kind && (kind === "easy" || b.targetPaceSec < 540));
+          if (rows.length === 0) return null;
+          const fmtPace = (sec: number | null) => {
+            if (sec == null) return "—";
+            // Round to the nearest whole second FIRST, then split into m/s —
+            // rounding sec%60 independently of the floor(sec/60) above it
+            // could carry a 59.6s remainder up to a literal "60" (e.g.
+            // "8:60/mi" instead of "9:00/mi").
+            const total = Math.round(sec);
+            const m = Math.floor(total / 60), s = total % 60;
+            return `${m}:${String(s).padStart(2, "0")}/mi`;
+          };
+          return (
+            <div key={kind} className="space-y-1.5">
+              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide">
+                {kind === "easy" ? "Easy / warmup / cooldown" : "Work / intervals"}
+              </h3>
+              <div className="rounded-lg border border-white/10 divide-y divide-white/5 font-mono text-xs max-h-[24rem] overflow-y-auto no-scrollbar">
+                <div className="px-3 py-1.5 flex items-center gap-3 text-slate-500 sticky top-0 bg-slate-900/95 backdrop-blur-sm">
+                  <span className="w-24">Target pace</span>
+                  <span className="w-20 text-right" title="The mixer's real BPM target — measured cadence (SPM), same pipeline ai_dj.workout.pace_to_bpm uses">Target BPM</span>
+                  <span className="flex-1 min-w-0">Smoothed actual</span>
+                  <span className="flex-1 min-w-0">Raw actual</span>
+                  <span className="w-20 text-right">Diff</span>
+                  <span className="w-20 text-right" title="Effective tempo of tracks that actually played at this target pace — can differ slightly from Target BPM since the mixer picks the nearest AVAILABLE track, not necessarily an exact match">Track BPM</span>
+                  <span className="w-20 text-right">Stride</span>
+                  <span className="w-16 text-right">Samples</span>
+                </div>
+                {rows.map(b => {
+                  if (b.isExtrapolated) {
+                    return (
+                      <div
+                        key={b.targetPaceSec}
+                        className="px-3 py-2 flex items-center gap-3 text-red-400"
+                        title="No real samples at this target pace — every value in this row is interpolated/extrapolated from nearby real data, not measured"
+                      >
+                        <span className="w-24 font-semibold">{fmtPace(b.targetPaceSec)}</span>
+                        <span className="w-20 text-right">
+                          {b.smoothedCadenceSpm != null ? Math.round(b.smoothedCadenceSpm) : "—"}
+                        </span>
+                        <span className="flex-1 min-w-0">{fmtPace(b.smoothedPaceSec)}</span>
+                        <span className="flex-1 min-w-0">—</span>
+                        <span className="w-20 text-right">
+                          {b.avgDiffSec >= 0 ? "+" : ""}{Math.round(b.avgDiffSec)}s
+                        </span>
+                        <span className="w-20 text-right">
+                          {b.smoothedBpm != null ? Math.round(b.smoothedBpm) : "—"}
+                        </span>
+                        <span className="w-20 text-right">
+                          {b.smoothedStrideM != null ? `${b.smoothedStrideM.toFixed(2)}m` : "—"}
+                        </span>
+                        <span className="w-16 text-right">0</span>
+                      </div>
+                    );
+                  }
+                  const diffColor = Math.abs(b.avgDiffSec) <= 10 ? "text-green-400"
+                    : b.avgDiffSec < 0 ? "text-sky-400" // ran faster than target
+                    : "text-amber-400"; // ran slower than target
+                  const lowSample = b.sampleCount < bpmPaceChartMinSamples;
+                  const lowCadenceSample = b.cadenceSampleCount < bpmPaceChartMinSamples;
+                  return (
+                    <div key={b.targetPaceSec} className={`px-3 py-2 flex items-center gap-3 ${lowSample ? "opacity-40" : ""}`} title={lowSample ? `Only ${b.sampleCount} sample${b.sampleCount === 1 ? "" : "s"} — too little data to trust this row on its own` : undefined}>
+                      <span className="w-24 text-slate-200 font-semibold">{fmtPace(b.targetPaceSec)}</span>
+                      <span
+                        className={`w-20 text-right font-semibold ${lowCadenceSample ? "text-slate-600" : "text-purple-300"}`}
+                        title={b.smoothedCadenceSpm != null ? `${b.cadenceSampleCount} cadence sample${b.cadenceSampleCount === 1 ? "" : "s"}` : "No cadence data"}
+                      >
+                        {b.smoothedCadenceSpm != null ? Math.round(b.smoothedCadenceSpm) : "—"}
+                      </span>
+                      <span className="flex-1 min-w-0 text-green-300 font-semibold">{fmtPace(b.smoothedPaceSec)}</span>
+                      <span className="flex-1 min-w-0 text-slate-400">{fmtPace(b.avgActualPaceSec)}</span>
+                      <span className={`w-20 text-right ${diffColor}`}>
+                        {b.avgDiffSec >= 0 ? "+" : ""}{Math.round(b.avgDiffSec)}s
+                      </span>
+                      <span
+                        className={`w-20 text-right ${lowCadenceSample ? "text-slate-600" : "text-sky-300"}`}
+                        title="Effective tempo of tracks that actually played at this target pace"
+                      >
+                        {b.smoothedBpm != null ? Math.round(b.smoothedBpm) : "—"}
+                      </span>
+                      <span
+                        className={`w-20 text-right ${lowCadenceSample ? "text-slate-600" : "text-amber-200"}`}
+                        title={b.smoothedStrideM != null ? `${b.cadenceSampleCount} cadence sample${b.cadenceSampleCount === 1 ? "" : "s"} (derived: speed ÷ cadence — GarminDB has no native stride length field)` : "No cadence data"}
+                      >
+                        {b.smoothedStrideM != null ? `${b.smoothedStrideM.toFixed(2)}m` : "—"}
+                      </span>
+                      <span className="w-16 text-right text-slate-600">{b.sampleCount}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
 
     </div>
     </div>

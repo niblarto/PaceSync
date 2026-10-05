@@ -37,6 +37,7 @@ from ai_dj.workout import (  # noqa: E402
     build_flow_mix,
     build_workout_playlist,
     garmin_cadence_buckets,
+    garmin_cadence_buckets_by_kind,
     max_projected_duration,
     parse_workout,
 )
@@ -58,16 +59,34 @@ def _load_library(csv_path: str) -> pd.DataFrame:
     return df
 
 
-def _cadence_buckets() -> dict | None:
+def _garmin_db_path() -> str | None:
     try:
         with open(os.path.join(_APP_ROOT, "garmin-config.json"), encoding="utf-8") as f:
             cfg = json.load(f)
         db = os.path.join(cfg["dbPath"], "garmin_activities.db")
-        if os.path.exists(db):
-            return garmin_cadence_buckets(db)
+        return db if os.path.exists(db) else None
     except Exception:
-        pass
-    return None
+        return None
+
+
+def _cadence_buckets() -> dict | None:
+    db = _garmin_db_path()
+    if not db:
+        return None
+    try:
+        return garmin_cadence_buckets(db)
+    except Exception:
+        return None
+
+
+def _kind_cadence_buckets() -> dict | None:
+    db = _garmin_db_path()
+    if not db:
+        return None
+    try:
+        return garmin_cadence_buckets_by_kind(db, _APP_ROOT) or None
+    except Exception:
+        return None
 
 
 def _progress(done, total, label, detail=None, candidate_uris=None):
@@ -213,7 +232,7 @@ def main():
     try:
         playlist = build_workout_playlist(
             segments, library, model=model, use_llm=use_llm,
-            cadence_buckets=_cadence_buckets(), easy_bias_sec=easy_bias,
+            cadence_buckets=_cadence_buckets(), kind_cadence_buckets=_kind_cadence_buckets(), easy_bias_sec=easy_bias,
             track_feedback=feedback, played_tracks=played, play_counts=play_counts,
             bpm_overrides=bpm_overrides, avoid_tracks=avoid, effort=effort,
             min_total_sec=max_projected_duration(segments_text), progress=_progress,

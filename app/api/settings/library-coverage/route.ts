@@ -63,7 +63,7 @@ export async function GET() {
 
     const playedCounts = getPlayedCounts();
 
-    const bucketWidth = 2;
+    const bucketWidth = 1;
     const bucketTracks = new Map<number, BucketTrack[]>();
     let totalTracks = 0;
     let inRangeTracks = 0;

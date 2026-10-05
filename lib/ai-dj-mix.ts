@@ -2,7 +2,7 @@ import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { computeEasyPaceBias } from "@/lib/run-pace-bias";
 import { getAllTrackVotes } from "@/lib/track-feedback";
-import { getPlayedTracks, getLastEasyPaceSec } from "@/lib/todays-run-history";
+import { getPlayedTracks, getLastEasyPaceSec, getAllTodaysRunEntries } from "@/lib/todays-run-history";
 import { getPlayCounts } from "@/lib/play-counts";
 import { loadBpmOverrides } from "@/lib/bpm-overrides";
 import { join } from "path";
@@ -77,6 +77,145 @@ export function loadCadenceBuckets(): Record<string, number> | null {
     const buckets: Record<string, number> = {};
     rows.forEach(r => { buckets[String(r.bucket)] = r.avg_spm; });
     return buckets;
+  } catch {
+    return null;
+  }
+}
+
+// Same classification app/api/settings/bpm-pace-chart/route.ts's
+// isEasySegment and ai_dj/workout.py's _is_easy_segment_label use — kept in
+// sync by hand across all three copies.
+function isEasySegment(label: string): boolean {
+  const t = label.toLowerCase();
+  return (
+    t.includes("warm up") || t.includes("warmup") ||
+    t.includes("cool down") || t.includes("cooldown") ||
+    t.includes("conversational") || t.includes("easy") || t.includes("recovery") ||
+    t.includes("rest") || t.includes("walk")
+  );
+}
+
+const KIND_BUCKET_WIDTH_SEC = 5;
+const KIND_MAX_PACE_CV = 0.08;
+const KIND_ROLLING_WINDOW_BUCKETS = 2;
+const KIND_MIN_SAMPLES = 5;
+
+// Kind-aware cadence (sec/mi -> SPM, split into "easy" and "work" profiles)
+// for the REMOTE AI DJ service path — the on-Pi bridge (scripts/ai_dj_
+// bridge.py) computes this itself locally via ai_dj.workout.
+// garmin_cadence_buckets_by_kind, but the remote service (ai_dj/server.py,
+// typically a different machine entirely — e.g. a Windows PC with no access
+// to this app's own pacesync.db or GarminDB files) can't read either of
+// those files directly, so this server-side (Next.js, same host as both
+// DBs) computation is sent over the wire instead, same way loadCadenceBuckets
+// already sends the plain unfiltered version. SAME pipeline as that Python
+// function and the Pace Analysis chart (app/api/settings/bpm-pace-chart/
+// route.ts): bucketed by each track's own TARGET pace, a track's play
+// window is discarded if its pace wasn't steady throughout (pace-
+// consistency filter), and each bucket is smoothed via a sample-count-
+// weighted rolling average over its neighbors. Kept in sync BY HAND across
+// all three copies — if this drifts, the remote-service path's actual BPM
+// target will quietly diverge from what the chart displays again (exactly
+// the bug this function exists to fix: a mix via the remote/Ollama service
+// path was landing on the OLD unfiltered-bucket BPM regardless of the
+// on-Pi bridge's own fix, since that fix lived only in ai_dj.workout.py and
+// the remote service never received kind-aware buckets at all).
+export function loadKindCadenceBuckets(): Record<string, Record<string, number>> | null {
+  const config = loadGarminConfig();
+  if (!config) return null;
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+    const db = new Database(join(config.dbPath, "garmin_activities.db"), {
+      readonly: true,
+      fileMustExist: true,
+    });
+    db.pragma("busy_timeout = 30000");
+
+    const activityStmt = db.prepare(`
+      SELECT activity_id, start_time FROM activities
+      WHERE LOWER(sport) LIKE '%running%' AND DATE(start_time) = ?
+      ORDER BY distance DESC
+      LIMIT 1
+    `);
+    const recordsStmt = db.prepare(`
+      SELECT timestamp, speed, cadence FROM activity_records
+      WHERE activity_id = ? AND speed IS NOT NULL
+      ORDER BY timestamp
+    `);
+
+    const samplesByKindBucket = new Map<string, number[]>();
+    const key = (kind: "easy" | "work", bucket: number) => `${kind}:${bucket}`;
+
+    for (const entry of getAllTodaysRunEntries()) {
+      if (entry.approved === false) continue;
+      const activity = activityStmt.get(entry.date) as { activity_id: string | number; start_time: string } | undefined;
+      if (!activity) continue;
+
+      const records = recordsStmt.all(activity.activity_id) as { timestamp: string; speed: number; cadence: number | null }[];
+      if (records.length === 0) continue;
+
+      const startMs = new Date(activity.start_time.replace(" ", "T")).getTime();
+      const samples = records
+        .map(r => ({ t: (new Date(r.timestamp.replace(" ", "T")).getTime() - startMs) / 1000, mph: r.speed, cadence: r.cadence }))
+        .filter(s => !isNaN(s.t) && s.t >= 0);
+      if (samples.length === 0) continue;
+      const runEndSec = samples[samples.length - 1].t;
+
+      for (const t of entry.tracks) {
+        if (t.tempo == null || t.tempo <= 0 || t.targetPaceSec == null) continue;
+        const end = t.startsAtSec + (t.durationSec || 0);
+        if (!t.durationSec || t.startsAtSec >= runEndSec - 15) continue;
+        const windowEnd = Math.min(end, runEndSec);
+        const inWindow = samples.filter(s => s.t >= t.startsAtSec && s.t < windowEnd && s.mph > 0.5);
+        if (inWindow.length < 5) continue;
+
+        const instPaces = inWindow.map(s => 3600 / s.mph);
+        const meanPace = instPaces.reduce((a, p) => a + p, 0) / instPaces.length;
+        const variance = instPaces.reduce((a, p) => a + (p - meanPace) ** 2, 0) / instPaces.length;
+        const paceCV = Math.sqrt(variance) / meanPace;
+        if (paceCV > KIND_MAX_PACE_CV) continue;
+
+        const cadenceSamples = inWindow.filter(s => s.cadence != null && s.cadence > 10);
+        if (cadenceSamples.length < 5) continue;
+        const avgSpm = cadenceSamples.reduce((a, s) => a + s.cadence! * 2, 0) / cadenceSamples.length;
+
+        const kind = isEasySegment(t.segment) ? "easy" : "work";
+        const bucket = Math.round(t.targetPaceSec / KIND_BUCKET_WIDTH_SEC) * KIND_BUCKET_WIDTH_SEC;
+        const list = samplesByKindBucket.get(key(kind, bucket)) ?? [];
+        list.push(avgSpm);
+        samplesByKindBucket.set(key(kind, bucket), list);
+      }
+    }
+    db.close();
+
+    if (samplesByKindBucket.size === 0) return null;
+
+    const raw = new Map<string, number>();
+    const counts = new Map<string, number>();
+    for (const [k, spms] of Array.from(samplesByKindBucket.entries())) {
+      raw.set(k, spms.reduce((a, s) => a + s, 0) / spms.length);
+      counts.set(k, spms.length);
+    }
+
+    const result: Record<string, Record<string, number>> = { easy: {}, work: {} };
+    for (const [k, count] of Array.from(counts.entries())) {
+      if (count < KIND_MIN_SAMPLES) continue;
+      const [kind, bucketStr] = k.split(":") as ["easy" | "work", string];
+      const bucket = Number(bucketStr);
+      let weightedSum = 0, weightTotal = 0;
+      for (let d = -KIND_ROLLING_WINDOW_BUCKETS; d <= KIND_ROLLING_WINDOW_BUCKETS; d++) {
+        const nKey = key(kind, bucket + d * KIND_BUCKET_WIDTH_SEC);
+        const nSpm = raw.get(nKey);
+        const nCount = counts.get(nKey) ?? 0;
+        if (nSpm == null || nCount === 0) continue;
+        weightedSum += nSpm * nCount;
+        weightTotal += nCount;
+      }
+      result[kind][String(bucket)] = weightTotal > 0 ? weightedSum / weightTotal : raw.get(k)!;
+    }
+    return result;
   } catch {
     return null;
   }
@@ -207,7 +346,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
 
   const lastEasyPaceSec = getLastEasyPaceSec();
   const body = JSON.stringify({
-    title, segments, csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback,
+    title, segments, csv, cadenceBuckets: loadCadenceBuckets(), kindCadenceBuckets: loadKindCadenceBuckets(), easyBias, trackFeedback,
     playedTracks: getPlayedTracks(), playCounts, bpmOverrides: loadBpmOverrides(),
     avoidTracks: avoidUris?.length ? avoidUris : undefined,
     // Remote AI DJ service (ai_dj/server.py) expects "MM:SS", not seconds.
@@ -370,7 +509,7 @@ export async function simulateAiDjMix(segment: string, onProgress?: AiDjProgress
   }
 
   const body = JSON.stringify({
-    title: "Simulation", segments: [segment], csv, cadenceBuckets: loadCadenceBuckets(), easyBias, trackFeedback,
+    title: "Simulation", segments: [segment], csv, cadenceBuckets: loadCadenceBuckets(), kindCadenceBuckets: loadKindCadenceBuckets(), easyBias, trackFeedback,
     playedTracks: getPlayedTracks(), playCounts, bpmOverrides,
     easyPace: easyPaceSec != null ? `${Math.floor(easyPaceSec / 60)}:${String(Math.round(easyPaceSec % 60)).padStart(2, "0")}` : undefined,
     simulate: true,
@@ -519,6 +658,7 @@ export async function compareAiDjModels(
   const easyPaceSec = getLastEasyPaceSec() ?? undefined;
   const bpmOverrides = loadBpmOverrides();
   const cadenceBuckets = loadCadenceBuckets();
+  const kindCadenceBuckets = loadKindCadenceBuckets();
   const playedTracks = getPlayedTracks();
   const easyPace = easyPaceSec != null ? `${Math.floor(easyPaceSec / 60)}:${String(Math.round(easyPaceSec % 60)).padStart(2, "0")}` : undefined;
 
@@ -527,7 +667,7 @@ export async function compareAiDjModels(
     const model = models[i];
     onModelStart?.(model, i, models.length);
     const body = JSON.stringify({
-      title: "Model comparison", segments, csv, cadenceBuckets, easyBias, trackFeedback,
+      title: "Model comparison", segments, csv, cadenceBuckets, kindCadenceBuckets, easyBias, trackFeedback,
       playedTracks, playCounts, bpmOverrides, easyPace, model,
     });
     const start = Date.now();
