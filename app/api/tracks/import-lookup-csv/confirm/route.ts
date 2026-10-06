@@ -42,7 +42,7 @@ import { getDb } from "@/lib/db";
 // rejected/deduped row simply never appears in the placeholder-keyed
 // lookup below, rather than silently shifting every later row's index.
 
-interface ConfirmRow { title: string; artist: string; bpm: number | null; genre: string | null }
+interface ConfirmRow { title: string; artist: string; bpm: number | null; genre: string | null; uri?: string | null }
 
 const PLACEHOLDER_PREFIX = "pending:";
 
@@ -65,17 +65,30 @@ export async function POST(req: NextRequest) {
       try {
         controller.enqueue(encoder.encode(`: ${"x".repeat(1024)}\n\n`));
 
-        // ── Write every confirmed row as a pending track first ──
+        // ── Write every confirmed row ──
+        // A row whose source CSV already supplied a Spotify URI (e.g. a
+        // Chosic export's "Spotify URL" column) is written DIRECTLY with
+        // that URI — no placeholder, no Deezer/Spotify lookup needed at
+        // all, since the source already named the exact track. A fuzzy
+        // title/artist search can land on the wrong same-titled track
+        // (confirmed live: a "Clint Eastwood" mismatch), so a supplied URI
+        // is strictly more trustworthy than anything either lookup pass
+        // below could find. Only rows with no URI get the usual placeholder
+        // ISRC + pending-match treatment.
         send({ type: "phase", phase: "writing", current: 0, total: rows.length });
         const placeholders = rows.map(() => `${PLACEHOLDER_PREFIX}${randomUUID()}`);
+        const uriRowCount = rows.filter(r => r.uri).length;
         const { added } = await addTracksToLibrary(
-          rows.map((r, i) => ({
-            name: r.title, artist: r.artist,
-            tempo: r.bpm ?? undefined, genres: r.genre ?? undefined,
-            isrc: placeholders[i],
-          })),
+          rows.map((r, i) => r.uri
+            ? { name: r.title, artist: r.artist, tempo: r.bpm ?? undefined, genres: r.genre ?? undefined, uri: r.uri }
+            : { name: r.title, artist: r.artist, tempo: r.bpm ?? undefined, genres: r.genre ?? undefined, isrc: placeholders[i] }
+          ),
         );
-        send({ type: "log", text: `Added ${added} track${added === 1 ? "" : "s"} to the library (pending Spotify match)` });
+        send({
+          type: "log",
+          text: `Added ${added} track${added === 1 ? "" : "s"} to the library`
+            + (uriRowCount > 0 ? ` (${uriRowCount} with a Spotify URI already supplied by the CSV, matched directly)` : " (pending Spotify match)"),
+        });
 
         const csvFile = loadRunningPlaylistConfig().csvFile;
         const db = getDb();
@@ -207,6 +220,7 @@ export async function POST(req: NextRequest) {
         send({
           type: "done",
           added, resolvedOnline, spotifyResolved,
+          matchedByUri: uriRowCount,
           stillUnresolved: stillPending.length - spotifyResolved,
         });
       } catch (err) {

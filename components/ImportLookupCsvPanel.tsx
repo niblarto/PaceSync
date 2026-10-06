@@ -17,6 +17,9 @@ interface ParsedImportRow {
   artist: string;
   bpm: number | null;
   genre: string | null;
+  // Spotify URI the source CSV itself supplied (e.g. Chosic's "Spotify URL"
+  // column) — when set, /confirm uses it directly instead of searching.
+  uri: string | null;
   libraryMatches: { uri: string; name: string; artist: string }[];
   previouslyDeleted: { name: string; artist: string; deletedAt: string } | null;
 }
@@ -59,7 +62,7 @@ export function ImportLookupCsvPanel() {
   const [importing, setImporting] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
   const [log, setLog] = useState<string[]>([]);
-  const [result, setResult] = useState<{ added: number; resolvedOnline: number; spotifyResolved: number; stillUnresolved: number } | null>(null);
+  const [result, setResult] = useState<{ added: number; resolvedOnline: number; spotifyResolved: number; matchedByUri: number; stillUnresolved: number } | null>(null);
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -116,7 +119,7 @@ export function ImportLookupCsvPanel() {
       const res = await fetch("/api/tracks/import-lookup-csv/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows: picked.map(r => ({ title: r.title, artist: r.artist, bpm: r.bpm, genre: r.genre })) }),
+        body: JSON.stringify({ rows: picked.map(r => ({ title: r.title, artist: r.artist, bpm: r.bpm, genre: r.genre, uri: r.uri })) }),
       });
       if (!res.ok || !res.body) {
         const err = await res.json().catch(() => ({})) as { error?: string };
@@ -137,7 +140,7 @@ export function ImportLookupCsvPanel() {
           if (!dataLine) continue;
           const msg = JSON.parse(dataLine.slice(6)) as
             { type: string; phase?: string; current?: number; total?: number; resolved?: number; text?: string; error?: string;
-              added?: number; resolvedOnline?: number; spotifyResolved?: number; stillUnresolved?: number };
+              added?: number; resolvedOnline?: number; spotifyResolved?: number; matchedByUri?: number; stillUnresolved?: number };
           if (msg.type === "phase") {
             const label = msg.phase === "writing" ? "Writing tracks to library"
               : msg.phase === "deezer" ? "Resolving via Deezer/ReccoBeats"
@@ -148,7 +151,7 @@ export function ImportLookupCsvPanel() {
           } else if (msg.type === "error") {
             throw new Error(msg.error ?? "Import failed");
           } else if (msg.type === "done") {
-            setResult({ added: msg.added ?? 0, resolvedOnline: msg.resolvedOnline ?? 0, spotifyResolved: msg.spotifyResolved ?? 0, stillUnresolved: msg.stillUnresolved ?? 0 });
+            setResult({ added: msg.added ?? 0, resolvedOnline: msg.resolvedOnline ?? 0, spotifyResolved: msg.spotifyResolved ?? 0, matchedByUri: msg.matchedByUri ?? 0, stillUnresolved: msg.stillUnresolved ?? 0 });
             setRows(null);
           }
         }
@@ -166,9 +169,10 @@ export function ImportLookupCsvPanel() {
       <label className="block text-sm font-medium text-slate-300">Track List Import (Volumo / Beatport)</label>
       <p className="text-xs text-slate-500">
         Upload a plain tracklist CSV — not a Spotify export — with title, artist, bpm and genre columns
-        (a Volumo scrape, a Beatport export, or any set list copied from elsewhere). Checked against the
-        library first so near-duplicates aren&apos;t silently re-added; the online lookup for a fresh
-        Spotify URI runs only after you confirm.
+        (a Volumo scrape, a Beatport export, a Chosic export, or any set list copied from elsewhere).
+        Checked against the library first so near-duplicates aren&apos;t silently re-added. If the CSV
+        already includes a Spotify URL/URI column, that exact track is used directly — otherwise a
+        fresh Spotify URI is looked up online after you confirm.
       </p>
 
       <div className="flex items-center gap-3 flex-wrap">
@@ -235,6 +239,11 @@ export function ImportLookupCsvPanel() {
                     <p className="text-xs text-slate-500 flex items-center gap-2 flex-wrap">
                       {r.bpm != null && <span className="text-green-400">{r.bpm} BPM</span>}
                       {r.genre && <span className="text-slate-600">· {r.genre}</span>}
+                      {r.uri && (
+                        <span className="text-sky-400" title={`Matched directly from the CSV's own URI: ${r.uri}`}>
+                          · 🔗 exact Spotify match
+                        </span>
+                      )}
                     </p>
                     {r.previouslyDeleted && (
                       <p className="text-xs text-red-400 mt-0.5">
@@ -258,7 +267,9 @@ export function ImportLookupCsvPanel() {
       {result && (
         <div className="rounded-lg bg-green-500/10 border border-green-500/30 p-3">
           <p className="text-sm text-green-400">
-            ✓ Added {result.added} track{result.added === 1 ? "" : "s"} — {result.resolvedOnline} matched via Deezer/ReccoBeats,
+            ✓ Added {result.added} track{result.added === 1 ? "" : "s"}
+            {result.matchedByUri > 0 && ` — ${result.matchedByUri} matched directly from the CSV's own Spotify URI`}
+            {" "}— {result.resolvedOnline} matched via Deezer/ReccoBeats,
             {" "}{result.spotifyResolved} via Spotify search
             {result.stillUnresolved > 0 && `, ${result.stillUnresolved} still unresolved (will keep retrying on future heal sweeps)`}.
           </p>

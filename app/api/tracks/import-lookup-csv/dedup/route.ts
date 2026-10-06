@@ -33,10 +33,38 @@ export interface ParsedImportRow {
   artist: string;
   bpm: number | null;
   genre: string | null;
-  // Library tracks (by matchKey) this row appears to duplicate — empty if
-  // it looks new. Several pasted rows can point at the same library track.
+  // Spotify URI, when the source CSV supplied one (e.g. a Chosic export's
+  // "Spotify URL" column) — normalized to spotify:track:<id>. When present,
+  // /confirm uses this DIRECTLY instead of a fuzzy title/artist search,
+  // since the source already named the exact track (a search can land on
+  // the wrong same-titled track, confirmed live with a "Clint Eastwood" by
+  // Gorillaz mismatch — this sidesteps that failure mode entirely whenever
+  // the CSV already supplies ground truth).
+  uri: string | null;
+  // Library tracks (by matchKey, or by exact URI when the row has one —
+  // whichever finds more/better matches) this row appears to duplicate —
+  // empty if it looks new. Several pasted rows can point at the same
+  // library track.
   libraryMatches: { uri: string; name: string; artist: string }[];
   previouslyDeleted: { name: string; artist: string; deletedAt: string } | null;
+}
+
+// A Spotify track URL ("https://open.spotify.com/track/<id>?si=...") or a
+// bare "spotify:track:<id>" URI, as several export sources (Chosic, Exportify-
+// adjacent tools) include alongside title/artist — normalized to the
+// spotify:track:<id> form used everywhere else in this app.
+function parseSpotifyUriCell(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const urlMatch = trimmed.match(/open\.spotify\.com\/track\/([A-Za-z0-9]+)/);
+  if (urlMatch) return `spotify:track:${urlMatch[1]}`;
+  const uriMatch = trimmed.match(/^spotify:track:([A-Za-z0-9]+)$/);
+  if (uriMatch) return `spotify:track:${uriMatch[1]}`;
+  // A bare 22-char base62 id with nothing else recognizable — Spotify's own
+  // id length - accepted so a CSV with just an "id"/"Track ID" column (no
+  // full URL/URI) still works.
+  if (/^[A-Za-z0-9]{22}$/.test(trimmed)) return `spotify:track:${trimmed}`;
+  return null;
 }
 
 export async function POST(req: NextRequest) {
@@ -52,12 +80,13 @@ export async function POST(req: NextRequest) {
     artist: parsed.col("artist", "Artist", "Artist Name(s)"),
     bpm: parsed.col("bpm", "BPM", "Tempo"),
     genre: parsed.col("genre", "Genre", "Genres"),
+    uri: parsed.col("Spotify URL", "Spotify URI", "Track URI", "spotify url", "spotify uri", "uri", "url", "Track ID", "track id"),
   };
   if (idx.title === -1 || idx.artist === -1) {
     return NextResponse.json({ error: "CSV must have a title/track and artist column" }, { status: 400 });
   }
 
-  const rows: { title: string; artist: string; bpm: number | null; genre: string | null }[] = [];
+  const rows: { title: string; artist: string; bpm: number | null; genre: string | null; uri: string | null }[] = [];
   // Exact-duplicate collapse key: case/whitespace-insensitive title+artist,
   // WITHOUT matchKey's parenthetical-stripping — "New Way (Original Mix)"
   // and "New Way (Edit)" must stay distinct rows, only a truly identical
@@ -74,7 +103,8 @@ export async function POST(req: NextRequest) {
     const bpmRaw = idx.bpm !== -1 ? (r[idx.bpm] ?? "").trim() : "";
     const bpm = bpmRaw ? parseFloat(bpmRaw) : null;
     const genre = idx.genre !== -1 ? (r[idx.genre] ?? "").trim() || null : null;
-    rows.push({ title, artist, bpm: bpm != null && !isNaN(bpm) ? bpm : null, genre });
+    const uri = idx.uri !== -1 ? parseSpotifyUriCell(r[idx.uri] ?? "") : null;
+    rows.push({ title, artist, bpm: bpm != null && !isNaN(bpm) ? bpm : null, genre, uri });
   }
   if (rows.length === 0) {
     return NextResponse.json({ error: "No valid rows found in the CSV" }, { status: 400 });
@@ -83,27 +113,40 @@ export async function POST(req: NextRequest) {
   const csvFile = loadRunningPlaylistConfig().csvFile;
   const libraryRows = readAllTracks(csvFile);
   const libraryByKey = new Map<string, { uri: string; name: string; artist: string }[]>();
+  const libraryByUri = new Map<string, { uri: string; name: string; artist: string }>();
   for (const t of libraryRows) {
     if (!t.trackName || !t.artistNames || !t.uri) continue;
+    const entry = { uri: t.uri, name: t.trackName, artist: t.artistNames };
     const key = matchKey(t.trackName, t.artistNames);
     const list = libraryByKey.get(key) ?? [];
-    list.push({ uri: t.uri, name: t.trackName, artist: t.artistNames });
+    list.push(entry);
     libraryByKey.set(key, list);
+    libraryByUri.set(t.uri, entry);
   }
 
   const deletedHits = findPreviouslyDeletedByName(rows.map(r => ({ name: r.title, artist: r.artist })));
 
-  const result: ParsedImportRow[] = rows.map((r, i) => ({
-    index: i,
-    title: r.title,
-    artist: r.artist,
-    bpm: r.bpm,
-    genre: r.genre,
-    libraryMatches: libraryByKey.get(matchKey(r.title, r.artist)) ?? [],
-    previouslyDeleted: deletedHits.get(i)
-      ? { name: deletedHits.get(i)!.name, artist: deletedHits.get(i)!.artist, deletedAt: deletedHits.get(i)!.deletedAt }
-      : null,
-  }));
+  const result: ParsedImportRow[] = rows.map((r, i) => {
+    // A row with a supplied URI is matched by that URI FIRST (the
+    // authoritative signal — two different library rows can share a loose
+    // matchKey, e.g. "Clint Eastwood" by two different Gorillaz catalog
+    // entries, but a URI match is exact) and only falls back to the loose
+    // title/artist matchKey when the row has no URI of its own.
+    const byUri = r.uri ? libraryByUri.get(r.uri) : undefined;
+    const libraryMatches = byUri ? [byUri] : (libraryByKey.get(matchKey(r.title, r.artist)) ?? []);
+    return {
+      index: i,
+      title: r.title,
+      artist: r.artist,
+      bpm: r.bpm,
+      genre: r.genre,
+      uri: r.uri,
+      libraryMatches,
+      previouslyDeleted: deletedHits.get(i)
+        ? { name: deletedHits.get(i)!.name, artist: deletedHits.get(i)!.artist, deletedAt: deletedHits.get(i)!.deletedAt }
+        : null,
+    };
+  });
 
   return NextResponse.json({ rows: result });
 }
