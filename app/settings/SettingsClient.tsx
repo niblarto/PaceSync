@@ -228,6 +228,18 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [ntfyTesting, setNtfyTesting] = useState(false);
   const [ntfyTestMsg, setNtfyTestMsg] = useState<string | null>(null);
 
+  // ── Mobile app token state ───────────────────────────────────────────────
+  // One-time token generation for the Android companion app — never stored
+  // or shown again after this session, so there's no "current token" state
+  // to load, only the generation form + result.
+  const [mobileUsername, setMobileUsername] = useState("");
+  const [mobilePassword, setMobilePassword] = useState("");
+  const [mobileTotpCode, setMobileTotpCode] = useState("");
+  const [mobileTotpRequired, setMobileTotpRequired] = useState(false);
+  const [mobileGenerating, setMobileGenerating] = useState(false);
+  const [mobileError, setMobileError] = useState<string | null>(null);
+  const [mobileToken, setMobileToken] = useState<string | null>(null);
+
   // ── AI DJ state ────────────────────────────────────────────────────────────
   const [aiDjUrl, setAiDjUrl] = useState("");
   const [aiDjEnabled, setAiDjEnabled] = useState(false);
@@ -2621,6 +2633,36 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setNtfyError("Failed to save — try again.");
     } finally {
       setNtfySaving(false);
+    }
+  }
+
+  async function generateMobileToken() {
+    setMobileGenerating(true);
+    setMobileError(null);
+    try {
+      const res = await fetch("/api/settings/mobile-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: mobileUsername.trim(),
+          password: mobilePassword,
+          totpCode: mobileTotpCode.trim() || undefined,
+        }),
+      });
+      const data = await res.json() as { token?: string; totpRequired?: boolean; error?: string };
+      if (!res.ok) throw new Error(data.error ?? "Failed to generate token");
+      if (data.totpRequired) {
+        setMobileTotpRequired(true);
+        return;
+      }
+      if (!data.token) throw new Error("No token returned");
+      setMobileToken(data.token);
+      setMobilePassword("");
+      setMobileTotpCode("");
+    } catch (e) {
+      setMobileError(e instanceof Error ? e.message : "Failed to generate token — try again.");
+    } finally {
+      setMobileGenerating(false);
     }
   }
 
@@ -5267,6 +5309,94 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             {ntfyTesting ? "Sending…" : "Send test"}
           </button>
         </div>
+      </div>
+
+      {/* Mobile App Token */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
+        <div>
+          <h3 className="font-semibold text-slate-200">Mobile App</h3>
+          <p className="text-sm text-slate-400 mt-1">
+            Generate a token to sign in on the PaceSync Android companion app. Re-enter your
+            password (and authenticator code, if 2FA is on) to confirm — the token is shown
+            once below and can&apos;t be retrieved again, so copy it into the app right away.
+            It stays valid for a year; generating a new one doesn&apos;t revoke the old one.
+          </p>
+        </div>
+
+        {!mobileToken ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="block text-sm font-medium text-slate-300">Username</label>
+                <input
+                  type="text"
+                  value={mobileUsername}
+                  onChange={e => setMobileUsername(e.target.value)}
+                  autoComplete="username"
+                  className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="block text-sm font-medium text-slate-300">Password</label>
+                <input
+                  type="password"
+                  value={mobilePassword}
+                  onChange={e => setMobilePassword(e.target.value)}
+                  autoComplete="current-password"
+                  className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
+                />
+              </div>
+            </div>
+            {mobileTotpRequired && (
+              <div className="space-y-1">
+                <label className="block text-sm font-medium text-slate-300">Authenticator code</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={mobileTotpCode}
+                  onChange={e => setMobileTotpCode(e.target.value)}
+                  placeholder="123456"
+                  className="w-40 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-2 text-slate-100 font-mono focus:outline-none focus:ring-1 focus:ring-green-500"
+                />
+              </div>
+            )}
+            {mobileError && <p className="text-sm text-red-400">{mobileError}</p>}
+            <button
+              onClick={generateMobileToken}
+              disabled={mobileGenerating || !mobileUsername.trim() || !mobilePassword}
+              className="rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 font-medium text-sm px-5 py-2 transition-colors"
+            >
+              {mobileGenerating ? "Generating…" : "Generate token"}
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-sm text-amber-400">
+              ⚠ This token won&apos;t be shown again — copy it into the app now.
+            </p>
+            <textarea
+              readOnly
+              value={mobileToken}
+              onFocus={e => e.currentTarget.select()}
+              rows={3}
+              className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-xs px-3 py-2 text-slate-100 font-mono resize-none focus:outline-none focus:ring-1 focus:ring-green-500"
+            />
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => navigator.clipboard?.writeText(mobileToken)}
+                className="rounded-lg border border-white/10 hover:border-green-500/40 hover:text-green-300 text-slate-300 font-medium text-sm px-5 py-2 transition-colors"
+              >
+                Copy
+              </button>
+              <button
+                onClick={() => { setMobileToken(null); setMobileTotpRequired(false); }}
+                className="rounded-lg border border-white/10 hover:border-white/20 text-slate-400 font-medium text-sm px-5 py-2 transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
     </div>

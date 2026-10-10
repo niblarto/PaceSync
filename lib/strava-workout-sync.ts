@@ -124,9 +124,11 @@ async function syncStrength(token: string, activity: StravaActivityDetail, worko
 //   - Run: title appended with the workout name; description prepended with
 //     the workout name + planned steps ("12mi Progressive Long Run\n4mi at a
 //     conversational pace\n4mi at 9:00/mi\n...").
-//   - Strength ("Workout" sport_type): same, but the plan comes from Runna's
-//     upcoming-events feed (never marked "completed" the way runs are) and
-//     lists the exercise sets instead of pace steps.
+//   - Strength (sport_type "Workout", "WeightTraining", or "HighIntensity-
+//     IntervalTraining" — Strava's own upload tag plus Garmin's auto-sync
+//     mapping for Strength Training / HIIT activities): same, but the plan
+//     comes from Runna's upcoming-events feed (never marked "completed" the
+//     way runs are) and lists the exercise sets instead of pace steps.
 // The AI DJ tracklist is deliberately NOT written here: it's appended later
 // by appendTracksToStravaActivity, once the user has confirmed on the pacing
 // review that this really was the playlist they worked out to.
@@ -147,7 +149,13 @@ export async function syncWorkoutToStravaActivity(activityId: number | string, o
   }
 
   const date = activity.start_date_local.slice(0, 10);
-  const isStrength = activity.sport_type === "Workout";
+  // Strava's own upload tagging ("Workout") and Garmin's auto-sync mapping
+  // (Strength Training -> "WeightTraining", HIIT -> "HighIntensityInterval-
+  // Training") are all genuinely strength/HIIT sessions as far as Runna's
+  // schedule is concerned — treat them all the same as the "Workout" case
+  // already handled (title/exercise-list sync from Runna's strength entry).
+  const STRENGTH_SPORT_TYPES = new Set(["Workout", "WeightTraining", "HighIntensityIntervalTraining"]);
+  const isStrength = STRENGTH_SPORT_TYPES.has(activity.sport_type);
   if (!isStrength && activity.sport_type !== "Run") {
     return { ok: true, updated: false, reason: `Unhandled sport_type "${activity.sport_type}"` };
   }

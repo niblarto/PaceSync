@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -78,9 +77,8 @@ async function fetchCourseDetail(token: string, courseId: string): Promise<Respo
   });
 }
 
-export async function GET(_req: NextRequest, { params }: { params: { courseId: string } }) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export async function GET(req: NextRequest, { params }: { params: { courseId: string } }) {
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const courseId = params.courseId.trim();
   if (!/^\d+$/.test(courseId)) return NextResponse.json({ error: "Invalid course id" }, { status: 400 });

@@ -1,13 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { getPinnedRoute, setPinnedRoute, removePinnedRoute } from "@/lib/pinned-routes";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const date = req.nextUrl.searchParams.get("date") ?? "";
   const title = req.nextUrl.searchParams.get("title") ?? "";
   if (!DATE_RE.test(date) || !title) {
@@ -17,8 +15,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await req.json() as {
     date?: string;
@@ -45,8 +42,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { date, title } = await req.json() as { date?: string; title?: string };
   if (!date || !DATE_RE.test(date) || !title) {
     return NextResponse.json({ error: "date and title required" }, { status: 400 });

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Minimal placeholder launcher glyph — swap for real app artwork later.
+     Adaptive icon foreground canvas is 108x108dp with safe content in the
+     inner 66x66dp circle; this emerald running-figure glyph is centered
+     and scaled to stay within that safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#34D399"
+        android:pathData="M60,33c4.4,0 8,-3.6 8,-8s-3.6,-8 -8,-8 -8,3.6 -8,8 3.6,8 8,8zM45,48l-11,57h9l7,-32 8,8v24h8v-30l-8,-8 2.4,-12C55,59 63,63 72,63v-8c-7.6,0 -14,-4 -17.2,-9.6l-4,-6.4c-1.6,-2.4 -4,-4 -6.8,-4 -1.2,0 -2,0.4 -3.2,0.4L27,39v18h8v-13.6l7.2,-2.8"/>
+</vector>

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { garminCacheGet, garminCacheSet } from "@/lib/garmin-cache";
 import path from "path";
@@ -20,11 +19,10 @@ function haversineMi(lat1: number, lng1: number, lat2: number, lng2: number): nu
 }
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const config = loadGarminConfig();
   if (!config) return NextResponse.json({ error: "Garmin DB not configured" }, { status: 404 });

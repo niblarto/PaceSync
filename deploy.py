@@ -57,6 +57,10 @@ if lastfm_key and not env.get('LASTFM_API_KEY'):
 if not lastfm_key:
     print('  WARNING: LASTFM_API_KEY not found — song suggestions will fall back to Deezer only')
 
+# NOTE: android/ (the native companion app) is its OWN Gradle project with a
+# separate build pipeline (./gradlew assembleDebug, run locally/in Android
+# Studio) — it is never referenced here and must never be added to FILES.
+# This script only ever deploys the Next.js backend to the Pi.
 FILES = [
     ('package.json',                              'package.json'),
     ('next.config.mjs',                           'next.config.mjs'),
@@ -327,6 +331,13 @@ FILES = [
     ('app/api/local-auth/logout/route.ts',        'app/api/local-auth/logout/route.ts'),
     ('app/api/local-auth/totp/route.ts',          'app/api/local-auth/totp/route.ts'),
     ('local-auth.json',                           'local-auth.json'),
+    # Android companion app — bearer-token auth for JSON API routes
+    ('lib/mobile-auth.ts',                        'lib/mobile-auth.ts'),
+    ('app/api/settings/mobile-token/route.ts',    'app/api/settings/mobile-token/route.ts'),
+    # Android companion app — FCM push (parallel to ntfy during migration)
+    ('lib/fcm-config.ts',                         'lib/fcm-config.ts'),
+    ('lib/push.ts',                               'lib/push.ts'),
+    ('app/api/settings/fcm-token/route.ts',       'app/api/settings/fcm-token/route.ts'),
     ('lib/ai-dj-config.ts',                       'lib/ai-dj-config.ts'),
     ('lib/ai-dj-mix.ts',                          'lib/ai-dj-mix.ts'),
     ('lib/ai-dj-prebuild.ts',                      'lib/ai-dj-prebuild.ts'),

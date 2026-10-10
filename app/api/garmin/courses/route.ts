@@ -1,6 +1,5 @@
-import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { NextRequest, NextResponse } from "next/server";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -74,9 +73,8 @@ async function fetchCourseList(token: string): Promise<Response> {
   });
 }
 
-export async function GET() {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export async function GET(req: NextRequest) {
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) {
     return NextResponse.json({ courses: cache.courses });

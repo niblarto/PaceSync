@@ -1,14 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { fetchRunnaSchedule } from "@/lib/runna-schedule";
 import { pruneStalePinsAgainstSchedule } from "@/lib/pinned-mixes";
+import { hasApiAccess } from "@/lib/mobile-auth";
 
 export type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/lib/runna-schedule";
 
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const force = req.nextUrl.searchParams.get("force") === "1";
   const result = await fetchRunnaSchedule(force);
