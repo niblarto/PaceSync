@@ -208,17 +208,57 @@ fun PaceChartScreen(api: PaceSyncApi, date: String, title: String, onBack: () ->
                 )
             }
 
-            // Segment color strip — same visible window as the chart above.
-            Canvas(Modifier.fillMaxWidth().height(26.dp).padding(top = 6.dp)) {
-                val span = (visibleEnd - visibleStart).toDouble().coerceAtLeast(0.001)
+            // Segment strip — ONE merged, labeled block per segment (which
+            // can span several tracks underneath), not one block per track.
+            // Confirmed against the web chart: "6mi at a conversational
+            // pace" is a single wide block covering all its tracks, with
+            // the segment's own description as its label — the prior
+            // per-track-colored-rectangle version drew N same-colored
+            // blocks instead of one merged, labeled one.
+            val mergedSegments = remember(resolvedTracks) {
+                val result = mutableListOf<Triple<String, Double, Double>>() // (segment, startSec, endSec)
                 resolvedTracks.forEach { t ->
-                    val tStart = (t.startsAtSec - visibleStart).coerceAtLeast(0.0)
-                    val tEnd = (t.startsAtSec + t.durationSec - visibleStart).coerceAtMost(span)
+                    val segName = t.segment ?: ""
+                    val tEnd = t.startsAtSec + t.durationSec
+                    val last = result.lastOrNull()
+                    if (last != null && last.first == segName) {
+                        result[result.lastIndex] = Triple(segName, last.second, tEnd)
+                    } else {
+                        result.add(Triple(segName, t.startsAtSec, tEnd))
+                    }
+                }
+                result
+            }
+            val segLabelColor = Color.White
+            Canvas(Modifier.fillMaxWidth().height(30.dp).padding(top = 6.dp)) {
+                val span = (visibleEnd - visibleStart).toDouble().coerceAtLeast(0.001)
+                mergedSegments.forEach { (segName, segStart, segEnd) ->
+                    val tStart = (segStart - visibleStart).coerceAtLeast(0.0)
+                    val tEnd = (segEnd - visibleStart).coerceAtMost(span)
                     if (tEnd <= 0 || tStart >= span) return@forEach
                     val x0 = (tStart / span).toFloat() * size.width
                     val x1 = (tEnd / span).toFloat() * size.width
-                    val color = SEGMENT_COLORS[segments.indexOf(t.segment ?: "").coerceAtLeast(0) % SEGMENT_COLORS.size]
-                    drawRect(color.copy(alpha = 0.55f), topLeft = Offset(x0, 0f), size = Size((x1 - x0).coerceAtLeast(1f), size.height))
+                    val w = (x1 - x0).coerceAtLeast(1f)
+                    val segColor = SEGMENT_COLORS[segments.indexOf(segName).coerceAtLeast(0) % SEGMENT_COLORS.size]
+                    drawRect(segColor.copy(alpha = 0.55f), topLeft = Offset(x0, 0f), size = Size(w, size.height))
+                    // A thin divider between adjacent segments so merged
+                    // blocks read as distinct spans, not one continuous bar.
+                    drawLine(Color.Black.copy(alpha = 0.3f), Offset(x0, 0f), Offset(x0, size.height), strokeWidth = 2f)
+
+                    if (segName.isNotEmpty()) {
+                        clipRect(x0, 0f, x1, size.height) {
+                            drawContext.canvas.nativeCanvas.apply {
+                                val labelPaint = android.graphics.Paint().apply {
+                                    color = segLabelColor.toArgb()
+                                    textSize = 22f
+                                    isFakeBoldText = true
+                                    isAntiAlias = true
+                                    textAlign = android.graphics.Paint.Align.CENTER
+                                }
+                                drawText(segName, (x0 + x1) / 2, size.height / 2 + 8f, labelPaint)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -446,8 +486,11 @@ private fun PaceBpmChart(
         }
 
         fun xFor(t: Double): Float = leftPad + ((t - visibleStart) / span).toFloat() * plotWidth
-        // Pace is reversed: faster (lower sec) = higher on screen.
-        fun yForPace(p: Double): Float = topPad + ((paceMax - p) / (paceMax - paceMin)).toFloat().coerceIn(0f, 1f) * plotHeight
+        // Pace is reversed: faster (lower sec/mi) plots HIGHER on screen,
+        // matching the web chart (its Y axis shows 8:05 at top, 9:10 at
+        // bottom) — confirmed backwards in a prior build (this comment said
+        // the right thing, the formula did the opposite).
+        fun yForPace(p: Double): Float = topPad + ((p - paceMin) / (paceMax - paceMin)).toFloat().coerceIn(0f, 1f) * plotHeight
         fun yForBpm(b: Double): Float = topPad + ((bpmMax - b) / (bpmMax - bpmMin)).toFloat().coerceIn(0f, 1f) * plotHeight
 
         fun drawStepLine(stops: List<Pair<Double, Double>>, color: Color, yFor: (Double) -> Float) {
@@ -482,9 +525,11 @@ private fun PaceBpmChart(
                 textSize = 24f
                 textAlign = android.graphics.Paint.Align.LEFT
             }
-            drawText("${fmtPace(paceMax)}", leftPad - 6f, topPad + 8f, paceLabelPaint)
+            // Top of the plot is now the FASTEST pace (paceMin) per the
+            // flipped yForPace above — labels swapped to match.
+            drawText("${fmtPace(paceMin)}", leftPad - 6f, topPad + 8f, paceLabelPaint)
             drawText("${fmtPace((paceMax + paceMin) / 2)}", leftPad - 6f, topPad + plotHeight / 2 + 8f, paceLabelPaint)
-            drawText("${fmtPace(paceMin)}", leftPad - 6f, topPad + plotHeight, paceLabelPaint)
+            drawText("${fmtPace(paceMax)}", leftPad - 6f, topPad + plotHeight, paceLabelPaint)
             drawText("${bpmMax.roundToInt()}", leftPad + plotWidth + 6f, topPad + 8f, bpmLabelPaint)
             drawText("${((bpmMax + bpmMin) / 2).roundToInt()}", leftPad + plotWidth + 6f, topPad + plotHeight / 2 + 8f, bpmLabelPaint)
             drawText("${bpmMin.roundToInt()}", leftPad + plotWidth + 6f, topPad + plotHeight, bpmLabelPaint)
