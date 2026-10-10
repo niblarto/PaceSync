@@ -1,17 +1,29 @@
 package com.pacesync.app.ui.detail
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -19,6 +31,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -27,8 +40,11 @@ import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.HistoryTrack
 import com.pacesync.app.network.dto.RunnaPastRun
 import com.pacesync.app.network.dto.RunnaWorkout
+import com.pacesync.app.network.dto.UnpinMixRequest
+import com.pacesync.app.network.dto.UnpinRouteRequest
 import com.pacesync.app.ui.routes.RouteMapView
 import com.pacesync.app.util.withWeekday
+import kotlinx.coroutines.launch
 
 // Tapping an activity card (Summary's past runs or Schedule's upcoming
 // workouts — both link here) shows the day's summary + pinned route +
@@ -41,12 +57,23 @@ import com.pacesync.app.util.withWeekday
 // it is a two-step call, same as the web app's own RunnaCard.tsx. Both the
 // route and tracklist sections degrade gracefully to "nothing yet" for an
 // upcoming (not-yet-run) Schedule entry, rather than erroring.
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ActivityDetailScreen(api: PaceSyncApi, date: String, title: String) {
+fun ActivityDetailScreen(
+    api: PaceSyncApi,
+    date: String,
+    title: String,
+    onPickRoute: (distanceMi: Double) -> Unit = {},
+    onBuildMix: () -> Unit = {},
+    onShowPaceChart: () -> Unit = {},
+) {
     var summary by remember { mutableStateOf<Any?>(null) } // RunnaWorkout or RunnaPastRun
     var tracks by remember { mutableStateOf<List<HistoryTrack>>(emptyList()) }
     var routePoints by remember { mutableStateOf<List<com.pacesync.app.network.dto.RoutePoint>?>(null) }
     var loading by remember { mutableStateOf(true) }
+    var routeMenuOpen by remember { mutableStateOf(false) }
+    var tracklistMenuOpen by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(date, title) {
         loading = true
@@ -97,13 +124,42 @@ fun ActivityDetailScreen(api: PaceSyncApi, date: String, title: String) {
 
         item {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Route", style = MaterialTheme.typography.titleMedium)
+                Box {
+                    SectionHeader(
+                        "Route",
+                        interactive = routePoints != null,
+                        onLongPress = { routeMenuOpen = true },
+                    )
+                    DropdownMenu(expanded = routeMenuOpen, onDismissRequest = { routeMenuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Unpin route") },
+                            onClick = {
+                                routeMenuOpen = false
+                                scope.launch {
+                                    runCatching { api.unpinRoute(UnpinRouteRequest(date = date, title = title)) }
+                                        .onSuccess { resp -> if (resp.isSuccessful) routePoints = null }
+                                }
+                            },
+                        )
+                    }
+                }
                 if (routePoints == null) {
                     Text("No pinned route for this day.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.secondary)
+                    // Only a scheduled (not-yet-run) workout can have a
+                    // route picked/pinned from here — a completed run's
+                    // route is historical record, matching the web app.
+                    val workout = summary as? RunnaWorkout
+                    if (workout != null && workout.distanceMi != null) {
+                        Button(onClick = { onPickRoute(workout.distanceMi) }) { Text("Pick a route") }
+                    }
                 } else {
                     // Clipped to rounded corners with an explicit card
                     // boundary so the map reads as its own section rather
-                    // than bleeding into the text above/below it.
+                    // than bleeding into the text above/below it. The
+                    // osmdroid MapView consumes its own touch events for
+                    // pan/zoom, so long-press lives on the title above
+                    // instead of on the map itself (confirmed it never
+                    // reaches Compose's gesture detector through the map).
                     Card {
                         RouteMapView(routePoints!!, modifier = Modifier.fillMaxWidth().height(260.dp))
                     }
@@ -112,11 +168,49 @@ fun ActivityDetailScreen(api: PaceSyncApi, date: String, title: String) {
         }
 
         item {
-            Text("Tracklist", style = MaterialTheme.typography.titleMedium)
+            Box {
+                SectionHeader(
+                    "Tracklist",
+                    interactive = tracks.isNotEmpty(),
+                    onLongPress = { tracklistMenuOpen = true },
+                )
+                DropdownMenu(expanded = tracklistMenuOpen, onDismissRequest = { tracklistMenuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Unpin mix") },
+                        onClick = {
+                            tracklistMenuOpen = false
+                            scope.launch {
+                                runCatching { api.unpinMix(UnpinMixRequest(date = date, title = title)) }
+                                    .onSuccess { resp -> if (resp.isSuccessful) tracks = emptyList() }
+                            }
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Remix") },
+                        onClick = {
+                            tracklistMenuOpen = false
+                            onBuildMix()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Pace Chart") },
+                        onClick = {
+                            tracklistMenuOpen = false
+                            onShowPaceChart()
+                        },
+                    )
+                }
+            }
         }
         if (tracks.isEmpty()) {
             item {
-                Text("No tracklist for this day.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.secondary)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("No tracklist for this day.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.secondary)
+                    val workout = summary as? RunnaWorkout
+                    if (workout != null) {
+                        Button(onClick = onBuildMix) { Text("AI DJ Mix") }
+                    }
+                }
             }
         } else {
             items(tracks, key = { "${it.uri}-${it.startsAtSec}" }) { track ->
@@ -125,6 +219,35 @@ fun ActivityDetailScreen(api: PaceSyncApi, date: String, title: String) {
                     HorizontalDivider(Modifier.padding(top = 8.dp))
                 }
             }
+        }
+    }
+}
+
+// A section title styled like something tappable — a rounded pill with a
+// subtle fill plus a "⋮" overflow hint — rather than plain text, since
+// there's no other visual cue that long-pressing it opens a menu.
+// `interactive` controls whether the hint/long-press is shown at all (no
+// point suggesting a menu before there's a route/mix to unpin).
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SectionHeader(text: String, interactive: Boolean, onLongPress: () -> Unit) {
+    val background = if (interactive) MaterialTheme.colorScheme.surfaceVariant else androidx.compose.ui.graphics.Color.Transparent
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(background)
+            .let { if (interactive) it.combinedClickable(onClick = {}, onLongClick = onLongPress) else it }
+            .padding(horizontal = if (interactive) 12.dp else 0.dp, vertical = if (interactive) 6.dp else 0.dp),
+    ) {
+        Text(text, style = MaterialTheme.typography.titleMedium)
+        if (interactive) {
+            Icon(
+                Icons.Filled.MoreVert,
+                contentDescription = "Options",
+                modifier = Modifier.padding(start = 4.dp),
+                tint = MaterialTheme.colorScheme.secondary,
+            )
         }
     }
 }
@@ -143,14 +266,8 @@ private fun SummaryDetails(summary: Any?) {
     if (details.isNotEmpty()) {
         Text(details.joinToString(" · "), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.secondary)
     }
-    // Laps (real per-split pace, e.g. "5.00 mi @ 8:47 /mi") come before the
-    // Workout/plan-steps section, matching the web app's own card order.
-    if (summary is RunnaPastRun && summary.laps.isNotEmpty()) {
-        Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("Laps", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
-            summary.laps.forEach { lap -> Text(lap, style = MaterialTheme.typography.bodySmall) }
-        }
-    }
+    // Workout (the planned steps) comes first, Laps (real per-split pace,
+    // e.g. "5.00 mi @ 8:47 /mi") underneath — per explicit user request.
     if (summary is RunnaWorkout && summary.segments.isNotEmpty()) {
         Column(Modifier.padding(top = 8.dp)) {
             summary.segments.forEach { seg -> Text("• $seg", style = MaterialTheme.typography.bodySmall) }
@@ -160,6 +277,12 @@ private fun SummaryDetails(summary: Any?) {
         Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text("Workout", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
             summary.planSteps.forEach { seg -> Text(seg, style = MaterialTheme.typography.bodySmall) }
+        }
+    }
+    if (summary is RunnaPastRun && summary.laps.isNotEmpty()) {
+        Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("Laps", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
+            summary.laps.forEach { lap -> Text(lap, style = MaterialTheme.typography.bodySmall) }
         }
     }
 }

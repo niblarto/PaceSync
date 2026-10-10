@@ -5,14 +5,20 @@ import com.pacesync.app.network.dto.CronJobsResponse
 import com.pacesync.app.network.dto.FcmTokenRequest
 import com.pacesync.app.network.dto.MobileTokenRequest
 import com.pacesync.app.network.dto.MobileTokenResponse
+import com.pacesync.app.network.dto.PinMixRequest
+import com.pacesync.app.network.dto.PinRouteRequest
 import com.pacesync.app.network.dto.PinnedRouteResponse
 import com.pacesync.app.network.dto.RouteResponse
+import com.pacesync.app.network.dto.SimilarActivitiesResponse
 import com.pacesync.app.network.dto.TodaysRunHistoryResponse
+import com.pacesync.app.network.dto.UnpinMixRequest
+import com.pacesync.app.network.dto.UnpinRouteRequest
 import com.pacesync.app.network.dto.UpdateCronJobsRequest
 import com.pacesync.app.network.dto.WorkoutsResponse
 import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.HTTP
 import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -39,6 +45,27 @@ interface PaceSyncApi {
 
     @GET("api/todays-run/history")
     suspend fun getTodaysRunHistory(@Query("date") date: String, @Query("title") title: String): Response<TodaysRunHistoryResponse>
+
+    // Route picker (scheduled workout, no pinned route yet) — recent
+    // GarminDB activities at a matching distance, same source the web app's
+    // "Runs at the distance…" chips use.
+    @GET("api/garmin/similar-activities")
+    suspend fun getSimilarActivities(@Query("distanceMi") distanceMi: Double, @Query("offset") offset: Int = 0): Response<SimilarActivitiesResponse>
+
+    @POST("api/garmin/pin-route")
+    suspend fun pinRoute(@Body body: PinRouteRequest): Response<Unit>
+
+    @HTTP(method = "DELETE", path = "api/garmin/pin-route", hasBody = true)
+    suspend fun unpinRoute(@Body body: UnpinRouteRequest): Response<Unit>
+
+    // AI DJ mix — saving/pinning a built mix. The build itself (api/ai-dj/mix)
+    // is SSE-streamed and NOT called through this interface — see
+    // MixBuildClient, which issues that POST directly via OkHttp.
+    @POST("api/ai-dj/pin")
+    suspend fun pinMix(@Body body: PinMixRequest): Response<Unit>
+
+    @HTTP(method = "DELETE", path = "api/ai-dj/pin", hasBody = true)
+    suspend fun unpinMix(@Body body: UnpinMixRequest): Response<Unit>
 
     // Auth / push registration — no bearer token needed for mint (session-
     // gated on the server instead), but the app never has a browser session,

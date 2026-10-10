@@ -15,26 +15,38 @@ object ApiClient {
 
     @Volatile private var retrofit: Retrofit? = null
 
+    // Shared with MixBuildClient so the SSE mix-build request goes out with
+    // the same AuthInterceptor-attached bearer token — built once, same as
+    // Retrofit's own client.
+    @Volatile private var sharedHttpClient: OkHttpClient? = null
+
     fun create(tokenStore: TokenStore): PaceSyncApi {
         val existing = retrofit
         val r = existing ?: buildRetrofit(tokenStore).also { retrofit = it }
         return r.create(PaceSyncApi::class.java)
     }
 
-    private fun buildRetrofit(tokenStore: TokenStore): Retrofit {
+    fun httpClient(tokenStore: TokenStore): OkHttpClient {
+        val existing = sharedHttpClient
+        return existing ?: buildHttpClient(tokenStore).also { sharedHttpClient = it }
+    }
+
+    private fun buildHttpClient(tokenStore: TokenStore): OkHttpClient {
         val logging = HttpLoggingInterceptor().apply {
             level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC else HttpLoggingInterceptor.Level.NONE
         }
-        val client = OkHttpClient.Builder()
+        return OkHttpClient.Builder()
             .addInterceptor(AuthInterceptor(tokenStore))
             .addInterceptor(logging)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .build()
+    }
 
+    private fun buildRetrofit(tokenStore: TokenStore): Retrofit {
         return Retrofit.Builder()
             .baseUrl(BuildConfig.API_BASE_URL)
-            .client(client)
+            .client(httpClient(tokenStore))
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()
     }

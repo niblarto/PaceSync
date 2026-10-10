@@ -21,6 +21,9 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.pacesync.app.data.AppContainer
 import com.pacesync.app.ui.detail.ActivityDetailScreen
+import com.pacesync.app.ui.detail.MixBuildScreen
+import com.pacesync.app.ui.detail.PaceChartScreen
+import com.pacesync.app.ui.detail.RoutePickerScreen
 import com.pacesync.app.ui.schedule.ScheduleScreen
 import com.pacesync.app.ui.settings.SettingsScreen
 import com.pacesync.app.ui.summary.SummaryScreen
@@ -42,33 +45,42 @@ private val bottomDestinations = listOf(Dest.Summary, Dest.Schedule, Dest.Settin
 fun PaceSyncApp(container: AppContainer) {
     val navController = rememberNavController()
 
+    val backStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = backStackEntry?.destination?.route
+    // Hidden on the Pace Chart screen — it's forced landscape and already
+    // vertically cramped; the bottom nav was eating into the chart's own
+    // space (confirmed from a real screenshot: the chip strip was pushed
+    // under the nav bar) with nothing useful to offer there anyway (Back
+    // already returns to the activity detail screen).
+    val showBottomBar = currentRoute?.startsWith("pace-chart/") != true
+
     Scaffold(
         bottomBar = {
-            NavigationBar {
-                val backStackEntry by navController.currentBackStackEntryAsState()
-                val currentDestination = backStackEntry?.destination
-                bottomDestinations.forEach { dest ->
-                    NavigationBarItem(
-                        selected = currentDestination?.hierarchy?.any { it.route == dest.route } == true,
-                        onClick = {
-                            navController.navigate(dest.route) {
-                                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                launchSingleTop = true
-                                restoreState = true
-                            }
-                        },
-                        icon = {
-                            Icon(
-                                when (dest) {
-                                    Dest.Summary -> Icons.Filled.Home
-                                    Dest.Schedule -> Icons.Filled.DateRange
-                                    Dest.Settings -> Icons.Filled.Settings
-                                },
-                                contentDescription = dest.label,
-                            )
-                        },
-                        label = { Text(dest.label) },
-                    )
+            if (showBottomBar) {
+                NavigationBar {
+                    bottomDestinations.forEach { dest ->
+                        NavigationBarItem(
+                            selected = backStackEntry?.destination?.hierarchy?.any { it.route == dest.route } == true,
+                            onClick = {
+                                navController.navigate(dest.route) {
+                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            },
+                            icon = {
+                                Icon(
+                                    when (dest) {
+                                        Dest.Summary -> Icons.Filled.Home
+                                        Dest.Schedule -> Icons.Filled.DateRange
+                                        Dest.Settings -> Icons.Filled.Settings
+                                    },
+                                    contentDescription = dest.label,
+                                )
+                            },
+                            label = { Text(dest.label) },
+                        )
+                    }
                 }
             }
         },
@@ -91,7 +103,37 @@ fun PaceSyncApp(container: AppContainer) {
             composable("detail/{date}/{title}") { backStackEntry ->
                 val date = backStackEntry.arguments?.getString("date") ?: ""
                 val title = URLDecoder.decode(backStackEntry.arguments?.getString("title") ?: "", "UTF-8")
-                ActivityDetailScreen(container.api, date = date, title = title)
+                val encodedTitle = URLEncoder.encode(title, "UTF-8")
+                ActivityDetailScreen(
+                    container.api,
+                    date = date,
+                    title = title,
+                    onPickRoute = { distanceMi -> navController.navigate("route-picker/$date/$encodedTitle/$distanceMi") },
+                    onBuildMix = { navController.navigate("mix-build/$date/$encodedTitle") },
+                    onShowPaceChart = { navController.navigate("pace-chart/$date/$encodedTitle") },
+                )
+            }
+            composable("pace-chart/{date}/{title}") { backStackEntry ->
+                val date = backStackEntry.arguments?.getString("date") ?: ""
+                val title = URLDecoder.decode(backStackEntry.arguments?.getString("title") ?: "", "UTF-8")
+                PaceChartScreen(container.api, date = date, title = title) {
+                    navController.popBackStack()
+                }
+            }
+            composable("route-picker/{date}/{title}/{distanceMi}") { backStackEntry ->
+                val date = backStackEntry.arguments?.getString("date") ?: ""
+                val title = URLDecoder.decode(backStackEntry.arguments?.getString("title") ?: "", "UTF-8")
+                val distanceMi = backStackEntry.arguments?.getString("distanceMi")?.toDoubleOrNull() ?: 0.0
+                RoutePickerScreen(container.api, date = date, title = title, distanceMi = distanceMi) {
+                    navController.popBackStack()
+                }
+            }
+            composable("mix-build/{date}/{title}") { backStackEntry ->
+                val date = backStackEntry.arguments?.getString("date") ?: ""
+                val title = URLDecoder.decode(backStackEntry.arguments?.getString("title") ?: "", "UTF-8")
+                MixBuildScreen(container.api, container.mixBuildClient, date = date, title = title) {
+                    navController.popBackStack()
+                }
             }
             composable(Dest.Settings.route) { SettingsScreen(container.tokenStore, container.api) }
         }

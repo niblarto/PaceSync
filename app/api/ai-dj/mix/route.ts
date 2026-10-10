@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { buildAiDjMix } from "@/lib/ai-dj-mix";
 import { scanActiveCsv } from "@/lib/csv-heal";
 import { getRecentBuildUris, recordMixBuild } from "@/lib/recent-mix-builds";
@@ -10,9 +9,9 @@ import { setMixCandidates } from "@/lib/mix-candidates";
 // workout segment builds, then {"type":"done",...mix} or {"type":"error"}.
 // The mix build is a long blocking call (remote LLM service or on-Pi
 // fallback), so a plain JSON response left the UI with no progress signal.
+// hasApiAccess so the Android app's own MixBuildScreen can trigger this too.
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const { title, segments, avoidUris, date, extraPlayCounts, strictPaceTolerance, segmentCandidateUris, ignorePlayCounts } = await req.json() as {
     title: string; segments: string[]; avoidUris?: string[]; date?: string; extraPlayCounts?: Record<string, number>;

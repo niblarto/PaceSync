@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { getPinnedMix, setPinnedMix, removePinnedMix } from "@/lib/pinned-mixes";
 import { getTodaysRunEntry, removeTodaysRunEntry, type HistoryTrack } from "@/lib/todays-run-history";
 import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
@@ -30,8 +29,7 @@ function historyTracksToTimeline(tracks: HistoryTrack[]): AiDjMixResponse["timel
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const date = req.nextUrl.searchParams.get("date") ?? "";
   const title = req.nextUrl.searchParams.get("title") ?? "";
   if (!DATE_RE.test(date) || !title) {
@@ -42,8 +40,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const body = await req.json() as {
     date?: string; workoutTitle?: string; totalSec?: number;
     timeline?: AiDjMixResponse["timeline"]; startedAtMs?: number;
@@ -82,8 +79,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { date, title, atMs } = await req.json() as { date?: string; title?: string; atMs?: number };
   if (!date || !DATE_RE.test(date) || !title) {
     return NextResponse.json({ error: "date and title required" }, { status: 400 });

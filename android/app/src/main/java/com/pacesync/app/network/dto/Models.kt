@@ -207,3 +207,94 @@ data class CronJobUpdate(
 
 @Serializable
 data class UpdateCronJobsRequest(val jobs: List<CronJobUpdate>)
+
+// Mirrors app/api/garmin/similar-activities/route.ts's response — recent
+// GarminDB activities at a matching distance, for the route picker.
+@Serializable
+data class SimilarActivity(
+    val activity_id: String,
+    val name: String? = null,
+    val start_time: String,
+    val distance: Double,
+    val elapsed_time: String? = null,
+    val avg_hr: Double? = null,
+)
+
+@Serializable
+data class SimilarActivitiesResponse(
+    val activities: List<SimilarActivity> = emptyList(),
+    val total: Int = 0,
+    val offset: Int = 0,
+)
+
+@Serializable
+data class PinRouteRequest(
+    val date: String,
+    val workoutTitle: String,
+    val activityId: String,
+    val name: String? = null,
+    val distanceMi: Double? = null,
+    val runDate: String? = null,
+)
+
+@Serializable
+data class UnpinRouteRequest(val date: String, val title: String)
+
+// Request body for POST api/ai-dj/mix — mirrors RunnaCard.tsx's buildMix()
+// call. Only the fields Android sends; the rest (avoidUris etc.) are
+// optional server-side and simply omitted.
+@Serializable
+data class MixBuildRequest(
+    val title: String,
+    val segments: List<String>,
+    val date: String? = null,
+)
+
+// Shape of the SSE "done" event's track/timeline data — mirrors
+// lib/ai-dj-mix.ts's AiDjMixResponse["timeline"]. All numeric fields are
+// Double, not Int: the server types them as plain TS `number`, which
+// includes non-whole values (e.g. targetPaceSec/durationSec/totalSec can
+// carry fractional seconds) — kotlinx.serialization throws decoding a JSON
+// float into an Int field, which silently broke the whole "done" event
+// (caught by a runCatching upstream, leaving the UI stuck on the last
+// progress text forever). Round to Int only when displaying.
+@Serializable
+data class MixTrack(
+    val uri: String,
+    val name: String,
+    val artist: String,
+    val startsAt: String,
+    val durationSec: Double = 0.0,
+    val tempo: Double = 0.0,
+    val camelot: String? = null,
+    val energy: Double = 0.0,
+)
+
+@Serializable
+data class MixTimelineSegment(
+    val segment: String,
+    val targetBpm: Double? = null,
+    val targetPaceSec: Double? = null,
+    val tracks: List<MixTrack> = emptyList(),
+)
+
+@Serializable
+data class MixDoneEvent(
+    val trackUris: List<String> = emptyList(),
+    val totalSec: Double = 0.0,
+    val timeline: List<MixTimelineSegment> = emptyList(),
+)
+
+@Serializable
+data class PinMixRequest(
+    val date: String,
+    val workoutTitle: String,
+    val totalSec: Double,
+    val timeline: List<MixTimelineSegment>,
+)
+
+// Mirrors app/api/ai-dj/pin/route.ts's DELETE body — unpinning a mix also
+// deletes the underlying "Today's Run" history entry server-side (not just
+// the pin flag), so this is a genuine full remove, not a soft-unpin.
+@Serializable
+data class UnpinMixRequest(val date: String, val title: String)

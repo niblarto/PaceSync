@@ -1,17 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { garminCacheGet, garminCacheSet } from "@/lib/garmin-cache";
 import path from "path";
 
 // Past runs whose distance falls between a scheduled workout's distance and
-// +0.5 miles — used by the Runna Schedule card to offer recent routes that
-// fit the session.
+// +0.5 miles — used by the Runna Schedule card (and the Android app's route
+// picker) to offer recent routes that fit the session.
 
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const distanceMi = parseFloat(req.nextUrl.searchParams.get("distanceMi") ?? "");
   if (!distanceMi || distanceMi <= 0) {
