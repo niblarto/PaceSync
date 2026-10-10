@@ -1,23 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { getCronJobs, updateCronJobs, type CronJobUpdate } from "@/lib/cron-schedule";
 import { getCronLog } from "@/lib/cron-log";
 
 export const dynamic = "force-dynamic";
 
-const VALID_KEYS = ["garmin", "weekly", "aidj", "aidjRetry"];
+const VALID_KEYS = ["garmin", "weekly", "aidj", "aidjRetry", "digest"];
 const TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 
-export async function GET() {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+// hasApiAccess (session OR mobile bearer token) — the Android Settings
+// tab's digest time/enabled control calls this with its bearer token, same
+// as the other routes the app reads/writes.
+export async function GET(req: NextRequest) {
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   return NextResponse.json({ ...getCronJobs(), log: getCronLog() });
 }
 
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await req.json() as { jobs?: CronJobUpdate[] };
   const jobs = body.jobs ?? [];

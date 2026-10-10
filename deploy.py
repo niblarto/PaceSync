@@ -299,6 +299,7 @@ FILES = [
     ('app/api/settings/ai-dj/llm-log/route.ts',   'app/api/settings/ai-dj/llm-log/route.ts'),
     ('app/api/cron/ai-dj/route.ts',               'app/api/cron/ai-dj/route.ts'),
     ('app/api/cron/ai-dj-retry/route.ts',          'app/api/cron/ai-dj-retry/route.ts'),
+    ('app/api/cron/digest/route.ts',               'app/api/cron/digest/route.ts'),
     ('lib/cron-schedule.ts',                      'lib/cron-schedule.ts'),
     ('lib/cron-log.ts',                           'lib/cron-log.ts'),
     ('lib/todays-run-history.ts',                 'lib/todays-run-history.ts'),
@@ -338,6 +339,7 @@ FILES = [
     ('lib/fcm-config.ts',                         'lib/fcm-config.ts'),
     ('lib/push.ts',                               'lib/push.ts'),
     ('app/api/settings/fcm-token/route.ts',       'app/api/settings/fcm-token/route.ts'),
+    ('app/api/settings/push-test/route.ts',       'app/api/settings/push-test/route.ts'),
     ('lib/ai-dj-config.ts',                       'lib/ai-dj-config.ts'),
     ('lib/ai-dj-mix.ts',                          'lib/ai-dj-mix.ts'),
     ('lib/ai-dj-prebuild.ts',                      'lib/ai-dj-prebuild.ts'),
@@ -592,6 +594,15 @@ ai_dj_retry_cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/ai-dj-retry' || {{ (crontab -l 2>/dev/null; echo '{ai_dj_retry_cron_line}') | crontab -; }}""")
+
+print('  Ensuring cron job (daily digest push, default 06:30)...')
+digest_cron_log = f'/home/{PI["user"]}/cron-digest.log'
+digest_cron_line = (
+    f'30 6 * * * curl -s -o {digest_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/digest '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/digest' || {{ (crontab -l 2>/dev/null; echo '{digest_cron_line}') | crontab -; }}""")
 
 # Garmin sync completion notification: sftp doesn't carry the exec bit (and a
 # Windows checkout may add CRLFs), so normalise the script, then append it to

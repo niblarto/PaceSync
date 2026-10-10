@@ -134,3 +134,76 @@ data class MobileTokenResponse(
 
 @Serializable
 data class FcmTokenRequest(val fcmToken: String)
+
+// Mirrors lib/pinned-routes.ts's PinnedRoute — a pointer (activityId) to a
+// Garmin activity, not GPS data itself; the activity-detail screen follows
+// up with getActivityRoute(activityId) when this is non-null (same two-step
+// fetch the web app's own RunnaCard.tsx already does).
+@Serializable
+data class PinnedRoute(
+    val date: String,
+    val workoutTitle: String,
+    val activityId: String,
+    val name: String? = null,
+    val distanceMi: Double? = null,
+    val runDate: String? = null,
+    val pinnedAt: String? = null,
+    val paceProMixId: String? = null,
+)
+
+@Serializable
+data class PinnedRouteResponse(val route: PinnedRoute? = null)
+
+// Mirrors lib/todays-run-history.ts's HistoryTrack.
+@Serializable
+data class HistoryTrack(
+    val uri: String? = null,
+    val name: String,
+    val artist: String,
+    val startsAtSec: Double = 0.0,
+    val durationSec: Double = 0.0,
+    val targetPaceSec: Double? = null,
+    val segment: String? = null,
+    val tempo: Double? = null,
+    val energy: Double? = null,
+)
+
+@Serializable
+data class TodaysRunEntry(
+    val date: String,
+    val workoutTitle: String,
+    val savedAt: String? = null,
+    val tracks: List<HistoryTrack> = emptyList(),
+    val pinned: Boolean? = null,
+    val approved: Boolean? = null,
+)
+
+@Serializable
+data class TodaysRunHistoryResponse(val entry: TodaysRunEntry? = null)
+
+// Mirrors lib/cron-schedule.ts's CronJobState.
+@Serializable
+data class CronJobState(
+    val key: String,
+    val installed: Boolean,
+    val enabled: Boolean,
+    val time: String, // "HH:MM" 24h
+    val day: Int? = null, // 0-6, Sunday=0; null = every day
+)
+
+@Serializable
+data class CronJobsResponse(
+    val available: Boolean = false,
+    val jobs: List<CronJobState> = emptyList(),
+)
+
+@Serializable
+data class CronJobUpdate(
+    val key: String,
+    val enabled: Boolean,
+    val time: String,
+    val day: Int? = null,
+)
+
+@Serializable
+data class UpdateCronJobsRequest(val jobs: List<CronJobUpdate>)

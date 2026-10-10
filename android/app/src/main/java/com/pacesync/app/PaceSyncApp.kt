@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -21,20 +20,23 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.pacesync.app.data.AppContainer
-import com.pacesync.app.ui.routes.RouteMapScreen
-import com.pacesync.app.ui.routes.RoutesScreen
+import com.pacesync.app.ui.detail.ActivityDetailScreen
 import com.pacesync.app.ui.schedule.ScheduleScreen
 import com.pacesync.app.ui.settings.SettingsScreen
 import com.pacesync.app.ui.summary.SummaryScreen
+import java.net.URLDecoder
+import java.net.URLEncoder
 
+// No standalone Routes tab — a run's route is already reachable from its
+// Summary/Schedule card via the activity-detail screen, so a separate
+// course-picker tab was redundant (per explicit user request).
 private sealed class Dest(val route: String, val label: String) {
     data object Summary : Dest("summary", "Summary")
     data object Schedule : Dest("schedule", "Schedule")
-    data object Routes : Dest("routes", "Routes")
     data object Settings : Dest("settings", "Settings")
 }
 
-private val bottomDestinations = listOf(Dest.Summary, Dest.Schedule, Dest.Routes, Dest.Settings)
+private val bottomDestinations = listOf(Dest.Summary, Dest.Schedule, Dest.Settings)
 
 @Composable
 fun PaceSyncApp(container: AppContainer) {
@@ -60,7 +62,6 @@ fun PaceSyncApp(container: AppContainer) {
                                 when (dest) {
                                     Dest.Summary -> Icons.Filled.Home
                                     Dest.Schedule -> Icons.Filled.DateRange
-                                    Dest.Routes -> Icons.Filled.Map
                                     Dest.Settings -> Icons.Filled.Settings
                                 },
                                 contentDescription = dest.label,
@@ -77,16 +78,20 @@ fun PaceSyncApp(container: AppContainer) {
             startDestination = Dest.Summary.route,
             modifier = Modifier.padding(padding),
         ) {
-            composable(Dest.Summary.route) { SummaryScreen(container.api) }
-            composable(Dest.Schedule.route) { ScheduleScreen(container.api) }
-            composable(Dest.Routes.route) {
-                RoutesScreen(container.api) { course ->
-                    navController.navigate("route/${course.id}")
+            composable(Dest.Summary.route) {
+                SummaryScreen(container.api) { date, title ->
+                    navController.navigate("detail/$date/${URLEncoder.encode(title, "UTF-8")}")
                 }
             }
-            composable("route/{courseId}") { backStackEntry ->
-                val courseId = backStackEntry.arguments?.getString("courseId")
-                RouteMapScreen(container.api, courseId = courseId)
+            composable(Dest.Schedule.route) {
+                ScheduleScreen(container.api) { date, title ->
+                    navController.navigate("detail/$date/${URLEncoder.encode(title, "UTF-8")}")
+                }
+            }
+            composable("detail/{date}/{title}") { backStackEntry ->
+                val date = backStackEntry.arguments?.getString("date") ?: ""
+                val title = URLDecoder.decode(backStackEntry.arguments?.getString("title") ?: "", "UTF-8")
+                ActivityDetailScreen(container.api, date = date, title = title)
             }
             composable(Dest.Settings.route) { SettingsScreen(container.tokenStore, container.api) }
         }

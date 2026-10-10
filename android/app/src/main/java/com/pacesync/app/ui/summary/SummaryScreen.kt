@@ -1,9 +1,11 @@
 package com.pacesync.app.ui.summary
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -23,9 +25,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.RunnaPastRun
+import com.pacesync.app.util.withWeekday
 
 @Composable
-fun SummaryScreen(api: PaceSyncApi) {
+fun SummaryScreen(api: PaceSyncApi, onSelect: (date: String, title: String) -> Unit = { _, _ -> }) {
     var pastRuns by remember { mutableStateOf<List<RunnaPastRun>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -55,16 +58,19 @@ fun SummaryScreen(api: PaceSyncApi) {
             modifier = Modifier.fillMaxSize().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            items(pastRuns!!, key = { it.uid }) { run -> PastRunCard(run) }
+            items(pastRuns!!, key = { it.uid }) { run -> PastRunCard(run, onClick = { onSelect(run.date, run.title) }) }
         }
     }
 }
 
 @Composable
-private fun PastRunCard(run: RunnaPastRun) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+private fun PastRunCard(run: RunnaPastRun, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
         Column(Modifier.padding(14.dp)) {
-            Text(run.date, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            Text(withWeekday(run.date), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             Text(run.title, style = MaterialTheme.typography.titleMedium)
             val details = listOfNotNull(
                 run.distanceMi?.let { "%.1fmi".format(it) },

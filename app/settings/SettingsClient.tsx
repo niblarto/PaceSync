@@ -239,6 +239,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [mobileGenerating, setMobileGenerating] = useState(false);
   const [mobileError, setMobileError] = useState<string | null>(null);
   const [mobileToken, setMobileToken] = useState<string | null>(null);
+  const [pushTesting, setPushTesting] = useState(false);
+  const [pushTestMsg, setPushTestMsg] = useState<string | null>(null);
+  const [pushTestError, setPushTestError] = useState<string | null>(null);
 
   // ── AI DJ state ────────────────────────────────────────────────────────────
   const [aiDjUrl, setAiDjUrl] = useState("");
@@ -2663,6 +2666,22 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setMobileError(e instanceof Error ? e.message : "Failed to generate token — try again.");
     } finally {
       setMobileGenerating(false);
+    }
+  }
+
+  async function testPushNotification() {
+    setPushTesting(true);
+    setPushTestMsg(null);
+    setPushTestError(null);
+    try {
+      const res = await fetch("/api/settings/push-test", { method: "POST" });
+      const data = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(data.error ?? "Test failed");
+      setPushTestMsg("Test sent — check your phone.");
+    } catch (e) {
+      setPushTestError(e instanceof Error ? e.message : "Test failed — try again.");
+    } finally {
+      setPushTesting(false);
     }
   }
 
@@ -5397,6 +5416,22 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             </div>
           </div>
         )}
+
+        <div className="pt-2 border-t border-white/5 space-y-2">
+          <p className="text-sm text-slate-400">
+            Once the app has registered for push (Settings tab → Save token &amp; register for push), send a
+            test notification to confirm delivery without waiting for a real event.
+          </p>
+          {pushTestError && <p className="text-sm text-red-400">{pushTestError}</p>}
+          {pushTestMsg && <p className="text-sm text-green-400">{pushTestMsg}</p>}
+          <button
+            onClick={testPushNotification}
+            disabled={pushTesting}
+            className="rounded-lg border border-white/10 hover:border-green-500/40 hover:text-green-300 disabled:opacity-40 text-slate-300 font-medium text-sm px-5 py-2 transition-colors"
+          >
+            {pushTesting ? "Sending…" : "Send test push"}
+          </button>
+        </div>
       </div>
 
     </div>
@@ -5425,6 +5460,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               { key: "weekly", label: "BBC playlist refresh", desc: "Re-fetches BBC programme tracks and removes duplicates" },
               { key: "aidj", label: "AI DJ pre-build", desc: "Builds tomorrow's mix and saves it to “Today's Run”" },
               { key: "aidjRetry", label: "AI DJ morning retry", desc: "Catches today's mix if the evening pre-build missed it" },
+              { key: "digest", label: "Daily digest", desc: "Push notification with today's schedule + first track of the playlist" },
             ] as const).map(meta => {
               const job = cronJobs.find(j => j.key === meta.key);
               if (!job) return null;

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { saveTodaysRunEntry, timelineToHistoryTracks, getTodaysRunEntry, setTodaysRunApproval, removeTodaysRunEntry } from "@/lib/todays-run-history";
 import { getPinnedMix, setPinnedMix, removePinnedMix } from "@/lib/pinned-mixes";
 import { appendTracksToStravaActivity } from "@/lib/strava-workout-sync";
@@ -10,12 +11,16 @@ import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 // Records which mix "Today's Run" held for a workout date+title (see
 // lib/workout-key.ts — called after a manual "Save to Today's Running
 // Playlist"); GET returns the snapshot.
+//
+// GET is hasApiAccess-gated (session OR mobile bearer token) so the Android
+// companion app's activity-detail screen can read a day's tracklist —
+// POST/DELETE/PATCH stay session-only: they're write actions nothing in the
+// app calls, and widening write access to the bearer token wasn't asked for.
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const date = req.nextUrl.searchParams.get("date") ?? "";
   const title = req.nextUrl.searchParams.get("title") ?? "";
   if (!DATE_RE.test(date) || !title) {
