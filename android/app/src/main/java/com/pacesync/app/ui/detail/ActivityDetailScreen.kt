@@ -1,8 +1,7 @@
 package com.pacesync.app.ui.detail
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -57,7 +56,6 @@ import kotlinx.coroutines.launch
 // it is a two-step call, same as the web app's own RunnaCard.tsx. Both the
 // route and tracklist sections degrade gracefully to "nothing yet" for an
 // upcoming (not-yet-run) Schedule entry, rather than erroring.
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ActivityDetailScreen(
     api: PaceSyncApi,
@@ -128,7 +126,7 @@ fun ActivityDetailScreen(
                     SectionHeader(
                         "Route",
                         interactive = routePoints != null,
-                        onLongPress = { routeMenuOpen = true },
+                        onPress = { routeMenuOpen = true },
                     )
                     DropdownMenu(expanded = routeMenuOpen, onDismissRequest = { routeMenuOpen = false }) {
                         DropdownMenuItem(
@@ -172,7 +170,7 @@ fun ActivityDetailScreen(
                 SectionHeader(
                     "Tracklist",
                     interactive = tracks.isNotEmpty(),
-                    onLongPress = { tracklistMenuOpen = true },
+                    onPress = { tracklistMenuOpen = true },
                 )
                 DropdownMenu(expanded = tracklistMenuOpen, onDismissRequest = { tracklistMenuOpen = false }) {
                     DropdownMenuItem(
@@ -228,16 +226,15 @@ fun ActivityDetailScreen(
 // there's no other visual cue that long-pressing it opens a menu.
 // `interactive` controls whether the hint/long-press is shown at all (no
 // point suggesting a menu before there's a route/mix to unpin).
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SectionHeader(text: String, interactive: Boolean, onLongPress: () -> Unit) {
+private fun SectionHeader(text: String, interactive: Boolean, onPress: () -> Unit) {
     val background = if (interactive) MaterialTheme.colorScheme.surfaceVariant else androidx.compose.ui.graphics.Color.Transparent
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .clip(RoundedCornerShape(20.dp))
             .background(background)
-            .let { if (interactive) it.combinedClickable(onClick = {}, onLongClick = onLongPress) else it }
+            .let { if (interactive) it.clickable(onClick = onPress) else it }
             .padding(horizontal = if (interactive) 12.dp else 0.dp, vertical = if (interactive) 6.dp else 0.dp),
     ) {
         Text(text, style = MaterialTheme.typography.titleMedium)

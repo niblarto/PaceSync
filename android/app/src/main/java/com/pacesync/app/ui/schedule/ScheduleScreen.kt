@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.RunnaWorkout
+import com.pacesync.app.ui.common.ScrollingBackground
 import com.pacesync.app.util.withWeekday
 
 @Composable
@@ -44,39 +45,51 @@ fun ScheduleScreen(api: PaceSyncApi, onSelect: (date: String, title: String) -> 
             .onFailure { error = it.message ?: "Network error" }
     }
 
-    when {
-        error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(error!!, color = MaterialTheme.colorScheme.error)
-        }
-        workouts == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
-        }
-        workouts!!.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Nothing scheduled in the next 28 days.")
-        }
-        else -> LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            items(workouts!!, key = { it.uid }) { w -> WorkoutCard(w, onClick = { onSelect(w.date, w.title) }) }
+    ScrollingBackground { bgModifier ->
+        when {
+            error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(error!!, color = MaterialTheme.colorScheme.error)
+            }
+            workouts == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+            workouts!!.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Nothing scheduled in the next 28 days.")
+            }
+            else -> LazyColumn(
+                modifier = bgModifier.fillMaxSize().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(workouts!!, key = { it.uid }) { w -> WorkoutCard(w, onClick = { onSelect(w.date, w.title) }) }
+            }
         }
     }
 }
 
+// Shows only date + title + the workout's own one-line summary (e.g.
+// "Long Run · 12mi · 1h40m - 1h50m") — NOT the full plan/segment detail,
+// which stays hidden until the user taps into the activity-detail screen.
+// This matches the web app's own card-collapsed state and avoids dumping
+// a strength workout's entire exercise list onto the Schedule list.
+//
+// The summary line is segments[0] — Runna's own ICS description always
+// starts with a "<Type> • <distance> • <duration range>" line before the
+// real plan steps (confirmed against the raw feed, e.g.
+// "Easy Run • 5mi • 40m - 50m"), so the first segment IS this summary,
+// not a plan step — lib/runna-schedule.ts's parseSegments() keeps it as
+// segments[0] rather than stripping it out server-side.
 @Composable
 private fun WorkoutCard(workout: RunnaWorkout, onClick: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        // Semi-transparent so the scrolling background shows through.
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)),
     ) {
         Column(Modifier.padding(14.dp)) {
             Text(withWeekday(workout.date), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             Text(workout.title, style = MaterialTheme.typography.titleMedium)
-            workout.distanceMi?.let {
-                Text("%.1fmi".format(it), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.secondary)
-            }
-            workout.segments.forEach { seg ->
-                Text("• $seg", style = MaterialTheme.typography.bodySmall)
+            workout.segments.firstOrNull()?.let { summaryLine ->
+                Text(summaryLine, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.secondary)
             }
         }
     }

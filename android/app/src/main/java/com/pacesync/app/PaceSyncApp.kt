@@ -5,11 +5,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -33,14 +38,21 @@ import java.net.URLEncoder
 // No standalone Routes tab — a run's route is already reachable from its
 // Summary/Schedule card via the activity-detail screen, so a separate
 // course-picker tab was redundant (per explicit user request).
+//
+// Schedule is listed/started first (per explicit user request) — it's the
+// forward-looking "what's coming up" view, treated as the app's default
+// landing tab instead of Summary (the backward-looking history view).
 private sealed class Dest(val route: String, val label: String) {
-    data object Summary : Dest("summary", "Summary")
     data object Schedule : Dest("schedule", "Schedule")
+    data object Summary : Dest("summary", "Summary")
     data object Settings : Dest("settings", "Settings")
 }
 
-private val bottomDestinations = listOf(Dest.Summary, Dest.Schedule, Dest.Settings)
+// Settings is reached via the top-bar cog (top right), not a bottom tab —
+// per explicit user request.
+private val bottomDestinations = listOf(Dest.Schedule, Dest.Summary)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PaceSyncApp(container: AppContainer) {
     val navController = rememberNavController()
@@ -53,8 +65,39 @@ fun PaceSyncApp(container: AppContainer) {
     // under the nav bar) with nothing useful to offer there anyway (Back
     // already returns to the activity detail screen).
     val showBottomBar = currentRoute?.startsWith("pace-chart/") != true
+    // A static title bar is only meaningful on the bottom-tab screens — the
+    // detail/picker/chart screens either have their own in-content heading
+    // or (Pace Chart) deliberately have no header at all to save vertical
+    // space on a cramped landscape layout.
+    val topBarTitle = when {
+        currentRoute == Dest.Schedule.route -> "Schedule"
+        currentRoute == Dest.Summary.route -> "Summary"
+        currentRoute == Dest.Settings.route -> "Settings"
+        else -> null
+    }
 
     Scaffold(
+        topBar = {
+            if (topBarTitle != null) {
+                TopAppBar(
+                    title = { Text(topBarTitle) },
+                    actions = {
+                        if (currentRoute != Dest.Settings.route) {
+                            IconButton(onClick = {
+                                navController.navigate(Dest.Settings.route) {
+                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            }) {
+                                Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                            }
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+                )
+            }
+        },
         bottomBar = {
             if (showBottomBar) {
                 NavigationBar {
@@ -73,7 +116,7 @@ fun PaceSyncApp(container: AppContainer) {
                                     when (dest) {
                                         Dest.Summary -> Icons.Filled.Home
                                         Dest.Schedule -> Icons.Filled.DateRange
-                                        Dest.Settings -> Icons.Filled.Settings
+                                        else -> Icons.Filled.Settings
                                     },
                                     contentDescription = dest.label,
                                 )
@@ -87,7 +130,7 @@ fun PaceSyncApp(container: AppContainer) {
     ) { padding ->
         NavHost(
             navController = navController,
-            startDestination = Dest.Summary.route,
+            startDestination = Dest.Schedule.route,
             modifier = Modifier.padding(padding),
         ) {
             composable(Dest.Summary.route) {

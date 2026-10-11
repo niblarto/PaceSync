@@ -327,7 +327,7 @@ private fun TrackStrip(tracks: List<HistoryTrack>, visibleStart: Double, visible
         Canvas(
             Modifier
                 .fillMaxWidth()
-                .height(64.dp)
+                .height(48.dp)
                 .padding(top = 6.dp)
                 .pointerInput(tracks, visibleStart, visibleEnd) {
                     detectTapGestures(
@@ -376,12 +376,16 @@ private fun TrackStrip(tracks: List<HistoryTrack>, visibleStart: Double, visible
                             isAntiAlias = true
                         }
                         val textX = x0 + 10f
-                        drawText(t.name, textX, 28f, namePaint)
+                        // Baselines sized to fit a 48dp-tall strip snugly —
+                        // was a fixed 64dp with these same two lines at
+                        // y=28/54, leaving a visibly empty band below the
+                        // text (confirmed from a real screenshot).
+                        drawText(t.name, textX, 22f, namePaint)
                         val details = listOfNotNull(
                             t.targetPaceSec?.let { "${fmtPace(it)}/mi" },
                             t.tempo?.let { "${chartBpm(it)} BPM" },
                         ).joinToString(" · ")
-                        if (details.isNotEmpty()) drawText(details, textX, 54f, detailPaint)
+                        if (details.isNotEmpty()) drawText(details, textX, 44f, detailPaint)
                     }
                 }
             }

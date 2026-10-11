@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -27,11 +29,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.google.firebase.messaging.FirebaseMessaging
+import com.pacesync.app.R
 import com.pacesync.app.data.TokenStore
 import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.CronJobUpdate
 import com.pacesync.app.network.dto.FcmTokenRequest
 import com.pacesync.app.network.dto.UpdateCronJobsRequest
+import com.pacesync.app.ui.common.ScrollingBackground
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
@@ -74,8 +78,10 @@ fun SettingsScreen(tokenStore: TokenStore, api: PaceSyncApi) {
         }
     }
 
+    val scrollState = rememberScrollState()
+    ScrollingBackground(scrollState, imageRes = R.drawable.apk_background_settings) {
     Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(scrollState).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Paste the mobile token generated from the PaceSync Settings page (Notifications tab → Mobile App).", style = MaterialTheme.typography.bodyMedium)
@@ -164,6 +170,7 @@ fun SettingsScreen(tokenStore: TokenStore, api: PaceSyncApi) {
             }
             digestStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         }
+    }
     }
 
     // Toast is a side effect — must run from an effect, not inline during
