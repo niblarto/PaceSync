@@ -1,9 +1,7 @@
 package com.pacesync.app.ui.detail
 
 import android.app.Activity
-import android.content.Intent
 import android.content.pm.ActivityInfo
-import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -33,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,6 +50,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.toSize
 import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.HistoryTrack
+import com.pacesync.app.network.dto.PlayRequest
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 // Target-pace-vs-song-BPM chart for a mix's tracklist — a port of the web
@@ -271,7 +272,7 @@ fun PaceChartScreen(api: PaceSyncApi, date: String, title: String, onBack: () ->
             // give a clean way to both size AND position a child at an
             // arbitrary start offset within a Box, and raw Canvas drawing
             // has already proven reliable elsewhere in this screen.
-            TrackStrip(resolvedTracks, visibleStart.toDouble(), visibleEnd.toDouble(), context)
+            TrackStrip(resolvedTracks, visibleStart.toDouble(), visibleEnd.toDouble(), context, api)
         }
         }
     }
@@ -291,12 +292,20 @@ private fun LegendDot(color: Color, label: String) {
     }
 }
 
-// Opens a Spotify track URI directly — Android routes spotify:track:<id> to
-// the Spotify app if installed, falling back to the Play Store/browser
-// otherwise, same as any other app-link Intent.
-private fun playInSpotify(context: android.content.Context, uri: String) {
-    runCatching {
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+// Starts the track on the user's active Spotify device via the backend's
+// Web-API-backed play endpoint — NOT an Intent.ACTION_VIEW launch of the
+// Spotify app, which would bring Spotify to the foreground and push
+// PaceSync behind it. Requires Spotify already open somewhere (the Web API
+// can only command an existing session, not launch the app) — surfaced to
+// the user as a toast if there's no active device.
+private suspend fun playOnActiveDevice(context: android.content.Context, api: PaceSyncApi, uri: String) {
+    val result = runCatching { api.playTrack(PlayRequest(uri)) }
+    val message = result.fold(
+        onSuccess = { resp -> if (resp.isSuccessful) null else "Open Spotify on a device first" },
+        onFailure = { "Couldn't reach PaceSync server" },
+    )
+    message?.let {
+        android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -306,7 +315,7 @@ private fun playInSpotify(context: android.content.Context, uri: String) {
 // stay in lockstep under zoom/pan. Long-pressing a chip opens a small menu
 // anchored at the press point with a "Play in Spotify" action.
 @Composable
-private fun TrackStrip(tracks: List<HistoryTrack>, visibleStart: Double, visibleEnd: Double, context: android.content.Context) {
+private fun TrackStrip(tracks: List<HistoryTrack>, visibleStart: Double, visibleEnd: Double, context: android.content.Context, api: PaceSyncApi) {
     val chipColor = MaterialTheme.colorScheme.surfaceVariant
     val textColor = MaterialTheme.colorScheme.onSurface
     // MaterialTheme.colorScheme.secondary is a muted accent and read as
@@ -315,6 +324,7 @@ private fun TrackStrip(tracks: List<HistoryTrack>, visibleStart: Double, visible
     // themed "secondary" color was ever going to.
     val secondaryColor = Color(0xFFD1D5DB)
     val span = (visibleEnd - visibleStart).coerceAtLeast(0.001)
+    val scope = rememberCoroutineScope()
 
     // Rects are recomputed every frame inside the Canvas draw call (cheap —
     // only as many tracks as are currently visible), but long-press needs
@@ -402,7 +412,9 @@ private fun TrackStrip(tracks: List<HistoryTrack>, visibleStart: Double, visible
                         enabled = track.uri != null,
                         onClick = {
                             menuTrack = null
-                            track.uri?.let { playInSpotify(context, it) }
+                            track.uri?.let { uri ->
+                                scope.launch { playOnActiveDevice(context, api, uri) }
+                            }
                         },
                     )
                 }

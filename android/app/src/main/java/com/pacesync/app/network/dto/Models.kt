@@ -298,3 +298,8 @@ data class PinMixRequest(
 // the pin flag), so this is a genuine full remove, not a soft-unpin.
 @Serializable
 data class UnpinMixRequest(val date: String, val title: String)
+
+// Mirrors app/api/spotify/play/route.ts's body — a spotify:track:<id> URI
+// to start playing on the user's active Spotify device via the Web API.
+@Serializable
+data class PlayRequest(val uri: String)

@@ -8,6 +8,7 @@ import com.pacesync.app.network.dto.MobileTokenResponse
 import com.pacesync.app.network.dto.PinMixRequest
 import com.pacesync.app.network.dto.PinRouteRequest
 import com.pacesync.app.network.dto.PinnedRouteResponse
+import com.pacesync.app.network.dto.PlayRequest
 import com.pacesync.app.network.dto.RouteResponse
 import com.pacesync.app.network.dto.SimilarActivitiesResponse
 import com.pacesync.app.network.dto.TodaysRunHistoryResponse
@@ -87,4 +88,10 @@ interface PaceSyncApi {
 
     @POST("api/settings/cron")
     suspend fun updateCronJobs(@Body body: UpdateCronJobsRequest): Response<CronJobsResponse>
+
+    // Starts playback on the user's active Spotify device via the Web API,
+    // rather than launching the Spotify app's own UI — keeps PaceSync in
+    // the foreground instead of switching to Spotify.
+    @POST("api/spotify/play")
+    suspend fun playTrack(@Body body: PlayRequest): Response<Unit>
 }
