@@ -86,16 +86,17 @@ private const val MIN_SPAN_SEC = 30.0
 
 @Composable
 fun PaceChartScreen(api: PaceSyncApi, date: String, title: String, onBack: () -> Unit) {
-    // Force landscape for this screen only — restored to the system default
-    // (SCREEN_ORIENTATION_UNSPECIFIED, i.e. follow the device/sensor again)
-    // when the screen leaves composition.
+    // Force landscape for this screen only — every other screen is locked
+    // to portrait (manifest android:screenOrientation="portrait"), restored
+    // explicitly back to portrait here when this screen leaves composition
+    // rather than "previous" (which could read back as UNSPECIFIED on some
+    // API levels instead of the manifest's actual portrait lock).
     val context = LocalContext.current
     DisposableEffect(Unit) {
         val activity = context as? Activity
-        val previous = activity?.requestedOrientation
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         onDispose {
-            activity?.requestedOrientation = previous ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
     }
 
