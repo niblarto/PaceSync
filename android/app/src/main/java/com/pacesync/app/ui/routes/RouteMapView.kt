@@ -1,6 +1,7 @@
 package com.pacesync.app.ui.routes
 
 import android.graphics.Color as AndroidColor
+import android.view.View
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -17,6 +18,8 @@ import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Polyline
+
+private const val FIT_BORDER_PX = 64
 
 // Shared polyline-on-OSM renderer, factored out of RouteMapScreen so the
 // activity-detail screen (ui/detail/ActivityDetailScreen.kt) can embed the
@@ -41,6 +44,10 @@ fun RouteMapView(points: List<RoutePoint>, modifier: Modifier = Modifier.fillMax
             }
         },
         update = { mapView ->
+            // update runs on every recomposition — only rebuild/re-fit when
+            // the route itself changes.
+            if (mapView.tag === points) return@AndroidView
+            mapView.tag = points
             val geoPoints = points.map { GeoPoint(it.lat, it.lng) }
             mapView.overlays.clear()
             mapView.overlays.add(
@@ -50,9 +57,33 @@ fun RouteMapView(points: List<RoutePoint>, modifier: Modifier = Modifier.fillMax
                     outlinePaint.strokeWidth = 8f
                 },
             )
-            val bbox = BoundingBox.fromGeoPointsSafe(geoPoints)
-            mapView.post { mapView.zoomToBoundingBox(bbox, false, 64) }
+            fitWhenLaidOut(mapView, BoundingBox.fromGeoPointsSafe(geoPoints))
             mapView.invalidate()
         },
+        onRelease = { it.onDetach() },
     )
+}
+
+// osmdroid's zoomToBoundingBox spins forever (Projection.getCloserPixel)
+// when the map has no real size yet or the box has zero span — confirmed
+// as the cause of the app freezing/being killed (ANR) around the Pace
+// Chart's rotation, which detaches and re-lays-out this view.
+private fun fitWhenLaidOut(map: MapView, bbox: BoundingBox) {
+    fun sized() = map.isAttachedToWindow && map.width > FIT_BORDER_PX * 2 && map.height > FIT_BORDER_PX * 2
+    fun fit() {
+        if (bbox.latitudeSpan < 1e-6 || bbox.longitudeSpanWithDateLine < 1e-6) {
+            map.controller.setZoom(16.0)
+            map.controller.setCenter(bbox.centerWithDateLine)
+        } else {
+            map.zoomToBoundingBox(bbox, false, FIT_BORDER_PX)
+        }
+    }
+    if (sized()) { fit(); return }
+    map.addOnLayoutChangeListener(object : View.OnLayoutChangeListener {
+        override fun onLayoutChange(v: View, l: Int, t: Int, r: Int, b: Int, ol: Int, ot: Int, or: Int, ob: Int) {
+            if (!sized()) return
+            map.removeOnLayoutChangeListener(this)
+            fit()
+        }
+    })
 }

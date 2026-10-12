@@ -924,7 +924,7 @@ private fun LegendDot(color: Color, label: String) {
 // the foreground just this once) purely to register it as an active
 // device; every call after that one goes through the remote endpoint and
 // PaceSync stays in front.
-private suspend fun playOnActiveDevice(context: android.content.Context, api: PaceSyncApi, uri: String) {
+internal suspend fun playOnActiveDevice(context: android.content.Context, api: PaceSyncApi, uri: String) {
     val result = runCatching { api.playTrack(PlayRequest(uri)) }
     val response = result.getOrNull()
     when {

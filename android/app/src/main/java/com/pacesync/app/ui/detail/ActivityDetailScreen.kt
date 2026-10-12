@@ -7,7 +7,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -80,21 +82,62 @@ fun ActivityDetailScreen(
 
     // Same calls as the web dashboard's "Save to Spotify" / "Save to Today's
     // Running Playlist" (DashboardClient.tsx savePlaylist / saveTodaysRun).
-    fun saveToSpotify(name: String, description: String, onSaved: suspend () -> Unit = {}) {
+    // Creates the playlist, or replaces an existing one's tracks so it always
+    // matches this tracklist. Returns the playlist id, or null (after a
+    // toast) on failure.
+    suspend fun upsertPlaylist(name: String, description: String): String? {
         val uris = tracks.mapNotNull { it.uri }
-        if (uris.isEmpty() || savingPlaylist) return
+        if (uris.isEmpty()) return null
+        val resp = runCatching { api.createPlaylist(com.pacesync.app.network.dto.CreatePlaylistRequest(name, description, uris)) }
+            .getOrElse { toast(it.message ?: "Save failed"); return null }
+        val body = resp.body()
+        return when {
+            !resp.isSuccessful || body?.error != null -> { toast(body?.error ?: "Save failed (${resp.code()})"); null }
+            body?.tracksAdded == false -> { toast("Playlist created, but Spotify blocked adding the tracks"); null }
+            else -> body?.playlistId ?: body?.url?.substringAfterLast("/")?.substringBefore("?")
+        }
+    }
+
+    val mixPlaylistName = date.split("-").let { (y, m, d) -> "$d-$m-${y.takeLast(2)} $title" }
+    val mixPlaylistDescription = "AI DJ mix for Runna workout \"$title\" — pace-matched to each segment"
+
+    fun saveToSpotify(name: String, description: String, onSaved: suspend () -> Unit = {}) {
+        if (savingPlaylist) return
         savingPlaylist = true
         scope.launch {
-            runCatching { api.createPlaylist(com.pacesync.app.network.dto.CreatePlaylistRequest(name, description, uris)) }
-                .onSuccess { resp ->
-                    val body = resp.body()
-                    when {
-                        !resp.isSuccessful || body?.error != null -> toast(body?.error ?: "Save failed (${resp.code()})")
-                        body?.tracksAdded == false -> toast("Playlist created, but Spotify blocked adding the tracks")
-                        else -> { onSaved(); toast("Saved \"$name\" to Spotify") }
+            if (upsertPlaylist(name, description) != null) { onSaved(); toast("Saved \"$name\" to Spotify") }
+            savingPlaylist = false
+        }
+    }
+
+    // Saves the mix playlist (create or refresh) then plays it from track 1
+    // with shuffle off. If no Spotify device is active, opens Spotify on the
+    // playlist once to register this phone, then retries so shuffle-off and
+    // the start position still get applied.
+    fun playTracklistInSpotify() {
+        if (savingPlaylist) return
+        savingPlaylist = true
+        scope.launch {
+            val playlistId = upsertPlaylist(mixPlaylistName, mixPlaylistDescription)
+            if (playlistId != null) {
+                val contextUri = "spotify:playlist:$playlistId"
+                val request = com.pacesync.app.network.dto.PlayRequest(contextUri = contextUri)
+                val first = runCatching { api.playTrack(request) }.getOrNull()
+                when {
+                    first?.isSuccessful == true -> toast("Playing \"$mixPlaylistName\"")
+                    first?.code() == 409 -> {
+                        runCatching {
+                            context.startActivity(
+                                android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(contextUri))
+                                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }
+                        kotlinx.coroutines.delay(4000)
+                        runCatching { api.playTrack(request) }
                     }
+                    else -> toast("Couldn't start playback")
                 }
-                .onFailure { toast(it.message ?: "Save failed") }
+            }
             savingPlaylist = false
         }
     }
@@ -224,6 +267,14 @@ fun ActivityDetailScreen(
                 )
                 DropdownMenu(expanded = tracklistMenuOpen, onDismissRequest = { tracklistMenuOpen = false }) {
                     DropdownMenuItem(
+                        text = { Text("Play in Spotify") },
+                        enabled = !savingPlaylist,
+                        onClick = {
+                            tracklistMenuOpen = false
+                            playTracklistInSpotify()
+                        },
+                    )
+                    DropdownMenuItem(
                         text = { Text("Unpin mix") },
                         onClick = {
                             tracklistMenuOpen = false
@@ -241,13 +292,6 @@ fun ActivityDetailScreen(
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("Pace Chart") },
-                        onClick = {
-                            tracklistMenuOpen = false
-                            onShowPaceChart()
-                        },
-                    )
-                    DropdownMenuItem(
                         text = { Text("Save to Today's Run") },
                         enabled = !savingPlaylist,
                         onClick = {
@@ -261,11 +305,14 @@ fun ActivityDetailScreen(
                         enabled = !savingPlaylist,
                         onClick = {
                             tracklistMenuOpen = false
-                            val (y, m, d) = date.split("-")
-                            saveToSpotify(
-                                "$d-$m-${y.takeLast(2)} $title",
-                                "AI DJ mix for Runna workout \"$title\" — pace-matched to each segment",
-                            )
+                            saveToSpotify(mixPlaylistName, mixPlaylistDescription)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Pace Chart") },
+                        onClick = {
+                            tracklistMenuOpen = false
+                            onShowPaceChart()
                         },
                     )
                 }
@@ -286,7 +333,17 @@ fun ActivityDetailScreen(
             }
         } else {
             items(tracks, key = { "${it.uri}-${it.startsAtSec}" }) { track ->
-                Column {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .pointerInput(track.uri) {
+                            detectTapGestures(onDoubleTap = {
+                                val uri = track.uri ?: return@detectTapGestures
+                                scope.launch { playOnActiveDevice(context, api, uri) }
+                                toast("Playing ${track.name}")
+                            })
+                        },
+                ) {
                     Text("${track.name} — ${track.artist}", style = MaterialTheme.typography.bodyMedium)
                     HorizontalDivider(Modifier.padding(top = 8.dp))
                 }

@@ -13,25 +13,34 @@ const BASE = "https://api.spotify.com/v1";
 export async function POST(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json().catch(() => null) as { uri?: string } | null;
+  // Either a single track (uri) or a whole playlist (contextUri). A
+  // playlist always plays from track 1 with shuffle off, so the tracklist
+  // runs in its built order.
+  const body = await req.json().catch(() => null) as { uri?: string; contextUri?: string } | null;
   const uri = body?.uri;
-  if (!uri || !uri.startsWith("spotify:track:")) {
-    return NextResponse.json({ error: "uri (spotify:track:<id>) required" }, { status: 400 });
+  const contextUri = body?.contextUri;
+  const isPlaylist = !!contextUri?.startsWith("spotify:playlist:");
+  if (!isPlaylist && !uri?.startsWith("spotify:track:")) {
+    return NextResponse.json({ error: "uri (spotify:track:<id>) or contextUri (spotify:playlist:<id>) required" }, { status: 400 });
   }
 
   const token = await getFreshToken();
   if (!token.ok) {
     return NextResponse.json({ error: `No Spotify token available (${token.reason})` }, { status: 502 });
   }
+  const auth = { Authorization: `Bearer ${token.token}` };
+  // Best-effort — fails harmlessly (404) when no device is active yet.
+  const shuffleOff = () => fetch(`${BASE}/me/player/shuffle?state=false`, { method: "PUT", headers: auth }).catch(() => null);
 
+  if (isPlaylist) await shuffleOff();
   const res = await fetch(`${BASE}/me/player/play`, {
     method: "PUT",
-    headers: {
-      Authorization: `Bearer ${token.token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ uris: [uri] }),
+    headers: { ...auth, "Content-Type": "application/json" },
+    body: JSON.stringify(isPlaylist ? { context_uri: contextUri, offset: { position: 0 } } : { uris: [uri] }),
   });
+  // Spotify can re-apply the device's shuffle setting as a new context
+  // starts — turn it off again once playback is running.
+  if (isPlaylist && res.status === 204) await shuffleOff();
 
   if (res.status === 204) {
     return NextResponse.json({ ok: true });

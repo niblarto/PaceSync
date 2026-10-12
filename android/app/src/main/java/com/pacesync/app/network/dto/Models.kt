@@ -374,7 +374,7 @@ data class UnpinMixRequest(val date: String, val title: String)
 data class CreatePlaylistRequest(val name: String, val description: String, val trackUris: List<String>)
 
 @Serializable
-data class CreatePlaylistResponse(val url: String? = null, val tracksAdded: Boolean? = null, val error: String? = null)
+data class CreatePlaylistResponse(val playlistId: String? = null, val url: String? = null, val tracksAdded: Boolean? = null, val error: String? = null)
 
 // Mirrors app/api/todays-run/history/route.ts's POST body.
 @Serializable
@@ -383,7 +383,7 @@ data class SaveTodaysRunRequest(val date: String, val workoutTitle: String, val 
 // Mirrors app/api/spotify/play/route.ts's body — a spotify:track:<id> URI
 // to start playing on the user's active Spotify device via the Web API.
 @Serializable
-data class PlayRequest(val uri: String)
+data class PlayRequest(val uri: String? = null, val contextUri: String? = null)
 
 // Mirrors app/api/spotify/playback/route.ts's body — "pause"/"resume" on
 // whatever Spotify device is currently active, or "seek" (with positionMs)
