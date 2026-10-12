@@ -1,15 +1,20 @@
 package com.pacesync.app.ui.detail
 
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,9 +23,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -50,8 +60,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.toSize
 import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.HistoryTrack
+import com.pacesync.app.network.dto.PlaybackActionRequest
 import com.pacesync.app.network.dto.PlayRequest
+import com.pacesync.app.network.dto.RemixDoneEvent
+import com.pacesync.app.network.dto.RemixRequest
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.math.roundToInt
 
 // Target-pace-vs-song-BPM chart for a mix's tracklist — a port of the web
@@ -72,6 +89,13 @@ private const val DOUBLETIME_THRESHOLD = 95.0
 private fun effectiveTempo(tempo: Double): Double = if (tempo < DOUBLETIME_THRESHOLD) tempo * 2 else tempo
 private fun chartBpm(tempo: Double): Int = effectiveTempo(tempo).roundToInt()
 
+private fun fmtMs(ms: Long): String {
+    val totalSec = ms / 1000
+    val m = totalSec / 60
+    val s = totalSec % 60
+    return "$m:${s.toString().padStart(2, '0')}"
+}
+
 private fun fmtPace(secs: Double): String {
     val m = (secs / 60).toInt()
     val s = (secs % 60).roundToInt()
@@ -83,10 +107,34 @@ private val SEGMENT_COLORS = listOf(
     Color(0xFFF472B6), Color(0xFFA78BFA), Color(0xFF38BDF8),
 )
 
+// Rebuilds a pin-shaped timeline (grouped by segment) from a flat,
+// post-splice HistoryTrack list — the inverse of flattening a timeline into
+// HistoryTrack rows, same approach the server's own
+// historyTracksToTimeline (app/api/ai-dj/pin/route.ts) uses, kept here
+// since the Android client needs to build the POST body itself.
+private fun buildTimelineFromTracks(tracks: List<HistoryTrack>): List<com.pacesync.app.network.dto.MixTimelineSegment> {
+    val result = mutableListOf<com.pacesync.app.network.dto.MixTimelineSegment>()
+    for (t in tracks) {
+        val segName = t.segment ?: ""
+        val mixTrack = com.pacesync.app.network.dto.MixTrack(
+            uri = t.uri ?: "", name = t.name, artist = t.artist,
+            startsAt = "${(t.startsAtSec / 60).toInt().toString().padStart(2, '0')}:${(t.startsAtSec % 60).toInt().toString().padStart(2, '0')}",
+            durationSec = t.durationSec, tempo = t.tempo ?: 0.0, camelot = null, energy = t.energy ?: 0.0,
+        )
+        val last = result.lastOrNull()
+        if (last != null && last.segment == segName) {
+            result[result.lastIndex] = last.copy(tracks = last.tracks + mixTrack)
+        } else {
+            result.add(com.pacesync.app.network.dto.MixTimelineSegment(segment = segName, targetBpm = null, targetPaceSec = t.targetPaceSec, tracks = listOf(mixTrack)))
+        }
+    }
+    return result
+}
+
 private const val MIN_SPAN_SEC = 30.0
 
 @Composable
-fun PaceChartScreen(api: PaceSyncApi, date: String, title: String, onBack: () -> Unit) {
+fun PaceChartScreen(api: PaceSyncApi, mixBuildClient: com.pacesync.app.network.MixBuildClient, date: String, title: String, onBack: () -> Unit) {
     // Force landscape for this screen only — every other screen is locked
     // to portrait (manifest android:screenOrientation="portrait"), restored
     // explicitly back to portrait here when this screen leaves composition
@@ -127,6 +175,235 @@ fun PaceChartScreen(api: PaceSyncApi, date: String, title: String, onBack: () ->
     val totalSec = resolvedTracks.maxOf { it.startsAtSec + it.durationSec }
     val segments = remember(resolvedTracks) { resolvedTracks.map { it.segment ?: "" }.distinct() }
 
+    // Multi-select for "AI Remix" — mirrors DashboardClient.tsx's
+    // chartSelectedUris: tapping a chip while in select mode toggles it,
+    // 2+ selected enables remix. The selection must be a CONTIGUOUS run of
+    // tracks (same constraint as web) since the remix replaces one
+    // start..end span in place — a gap would silently fold an unselected
+    // track's duration into the budget sent to the mixer.
+    var selectMode by remember { mutableStateOf(false) }
+    var selectedUris by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var remixBpmPrompt by remember { mutableStateOf(false) }
+    var multiQuickSwapBpmPrompt by remember { mutableStateOf(false) }
+    var remixing by remember { mutableStateOf(false) }
+    var remixStatus by remember { mutableStateOf<String?>(null) }
+    var remixError by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    // Edits (AI Remix, Quick Swap) apply to local state immediately but are
+    // NOT auto-saved — an explicit Save (top-bar icon) is required, per the
+    // user's explicit choice, matching "amend then save" rather than every
+    // edit silently persisting on its own.
+    var dirty by remember { mutableStateOf(false) }
+    val remixScope = rememberCoroutineScope()
+
+    fun saveMix(tracksToSave: List<HistoryTrack>) {
+        saving = true
+        remixScope.launch {
+            runCatching {
+                val totalSecSave = tracksToSave.maxOf { it.startsAtSec + it.durationSec }
+                val timeline = buildTimelineFromTracks(tracksToSave)
+                api.pinMix(com.pacesync.app.network.dto.PinMixRequest(date = date, workoutTitle = title, totalSec = totalSecSave, timeline = timeline))
+            }.onSuccess { resp ->
+                if (resp.isSuccessful) {
+                    dirty = false
+                } else {
+                    remixError = "Save failed (${resp.code()})"
+                }
+            }.onFailure { remixError = it.message ?: "Save failed" }
+            saving = false
+        }
+    }
+
+    // Splices a picked track list (from either AI Remix or multi-swap) into
+    // the flat list in place of [startIdx, endIdx], recomputing
+    // startsAtSec for everything after the splice point — same net effect
+    // as the web app's spliceMixTracks, flattened for HistoryTrack's
+    // non-segmented shape.
+    fun spliceTracks(startIdx: Int, endIdx: Int, picked: List<com.pacesync.app.network.dto.MixTrack>): List<HistoryTrack> {
+        val before = resolvedTracks.subList(0, startIdx)
+        val after = resolvedTracks.subList(endIdx + 1, resolvedTracks.size)
+        val replacedSegment = resolvedTracks[startIdx].segment
+        var cursorSec = before.lastOrNull()?.let { it.startsAtSec + it.durationSec } ?: 0.0
+        val spliced = picked.map { t ->
+            val track = HistoryTrack(
+                uri = t.uri, name = t.name, artist = t.artist,
+                startsAtSec = cursorSec, durationSec = t.durationSec,
+                targetPaceSec = resolvedTracks[startIdx].targetPaceSec,
+                segment = replacedSegment, tempo = t.tempo, energy = t.energy,
+            )
+            cursorSec += t.durationSec
+            track
+        }
+        val shiftedAfter = after.map { t ->
+            val shifted = t.copy(startsAtSec = cursorSec)
+            cursorSec += t.durationSec
+            shifted
+        }
+        return before + spliced + shiftedAfter
+    }
+
+    // Returns the selected tracks' [startIdx, endIdx] span, or null (with
+    // remixError set) if the selection isn't a contiguous run — shared by
+    // AI Remix and multi-select Quick Swap, both of which replace one
+    // start..end span in place.
+    fun contiguousSelectionSpan(actionLabel: String): Pair<Int, Int>? {
+        val indices = resolvedTracks.mapIndexedNotNull { i, t -> if (t.uri != null && selectedUris.contains(t.uri)) i else null }
+        if (indices.isEmpty()) return null
+        val startIdx = indices.min()
+        val endIdx = indices.max()
+        if (endIdx - startIdx + 1 != indices.size) {
+            remixError = "$actionLabel needs a contiguous selection (no un-selected track skipped in between) — select a run of adjacent tracks and try again."
+            return null
+        }
+        return startIdx to endIdx
+    }
+
+    fun runRemix(targetBpm: Int) {
+        val (startIdx, endIdx) = contiguousSelectionSpan("AI Remix") ?: return
+        val budgetMs = (startIdx..endIdx).sumOf { (resolvedTracks[it].durationSec * 1000).toLong() }
+        val avoidUris = resolvedTracks.mapNotNull { it.uri }
+
+        remixing = true
+        remixError = null
+        remixStatus = "Starting…"
+        remixScope.launch {
+            val json = Json { ignoreUnknownKeys = true }
+            var done: RemixDoneEvent? = null
+            var warning: String? = null
+            runCatching {
+                mixBuildClient.remix(RemixRequest(targetBpm = targetBpm, budgetMs = budgetMs, avoidUris = avoidUris)) { type, element ->
+                    when (type) {
+                        "progress" -> remixStatus = element.jsonObject["detail"]?.jsonPrimitive?.content
+                            ?: element.jsonObject["segment"]?.jsonPrimitive?.content ?: remixStatus
+                        "warning" -> warning = element.jsonObject["error"]?.jsonPrimitive?.content
+                        "error" -> error(element.jsonObject["error"]?.jsonPrimitive?.content ?: "AI Remix failed")
+                        "done" -> {
+                            done = runCatching { json.decodeFromJsonElement(RemixDoneEvent.serializer(), element) }.getOrNull()
+                        }
+                    }
+                }
+            }.onFailure { remixError = it.message ?: "AI Remix failed" }
+
+            val picked = done?.timeline?.flatMap { it.tracks } ?: emptyList()
+            if (picked.isEmpty()) {
+                if (remixError == null) remixError = "The AI DJ didn't return any tracks for this BPM/length."
+                remixing = false
+                return@launch
+            }
+
+            tracks = spliceTracks(startIdx, endIdx, picked)
+            dirty = true
+            selectedUris = emptySet()
+            selectMode = false
+            if (warning != null) remixError = warning
+            remixing = false
+            remixStatus = null
+        }
+    }
+
+    // Multi-select Quick Swap — the non-AI, deterministic counterpart to AI
+    // Remix: fills the selection's combined duration with exact-BPM
+    // library tracks (api/tracks/replace-candidates-budget), rather than
+    // an LLM picking replacements. Same contiguous-selection requirement
+    // and splice-in-place as AI Remix.
+    fun runMultiQuickSwap(targetBpm: Int) {
+        val (startIdx, endIdx) = contiguousSelectionSpan("Quick Swap") ?: return
+        val budgetMs = (startIdx..endIdx).sumOf { (resolvedTracks[it].durationSec * 1000).toLong() }
+        val excludeUris = resolvedTracks.mapNotNull { it.uri }
+
+        remixing = true
+        remixError = null
+        remixStatus = "Searching…"
+        remixScope.launch {
+            val json = Json { ignoreUnknownKeys = true }
+            var done: com.pacesync.app.network.dto.ReplaceCandidatesBudgetDoneEvent? = null
+            runCatching {
+                mixBuildClient.replaceCandidatesBudget(
+                    com.pacesync.app.network.dto.ReplaceCandidatesBudgetRequest(targetBpm = targetBpm, budgetMs = budgetMs, excludeUris = excludeUris),
+                ) { type, element ->
+                    when (type) {
+                        "error" -> error(element.jsonObject["error"]?.jsonPrimitive?.content ?: "Quick Swap failed")
+                        "done" -> done = runCatching { json.decodeFromJsonElement(com.pacesync.app.network.dto.ReplaceCandidatesBudgetDoneEvent.serializer(), element) }.getOrNull()
+                    }
+                }
+            }.onFailure { remixError = it.message ?: "Quick Swap failed" }
+
+            val picked = done?.tracks?.mapNotNull { c ->
+                val uri = c.uri ?: return@mapNotNull null
+                com.pacesync.app.network.dto.MixTrack(
+                    uri = uri, name = c.name, artist = c.artist, startsAt = "00:00",
+                    durationSec = (c.durationMs ?: 0L) / 1000.0, tempo = c.tempo, camelot = null, energy = 0.0,
+                )
+            } ?: emptyList()
+            if (picked.isEmpty()) {
+                if (remixError == null) remixError = "No library tracks found at this BPM to fill the selection."
+                remixing = false
+                remixStatus = null
+                return@launch
+            }
+
+            tracks = spliceTracks(startIdx, endIdx, picked)
+            dirty = true
+            selectedUris = emptySet()
+            selectMode = false
+            done?.warning?.let { remixError = it }
+            remixing = false
+            remixStatus = null
+        }
+    }
+
+    // Quick Swap — single-track, library-only exact-BPM replacement
+    // (DashboardClient.tsx's QuickSwapModal default: no artist/genre
+    // search, no online top-up). Picking a candidate replaces that one
+    // track in place and marks the mix dirty, same as a remix edit.
+    var quickSwapTarget by remember { mutableStateOf<HistoryTrack?>(null) }
+    var quickSwapCandidates by remember { mutableStateOf<List<com.pacesync.app.network.dto.ReplaceCandidate>?>(null) }
+    var quickSwapLoading by remember { mutableStateOf(false) }
+    var quickSwapError by remember { mutableStateOf<String?>(null) }
+
+    fun openQuickSwap(track: HistoryTrack) {
+        val uri = track.uri ?: return
+        val tempo = track.tempo ?: return
+        quickSwapTarget = track
+        quickSwapCandidates = null
+        quickSwapError = null
+        quickSwapLoading = true
+        remixScope.launch {
+            val json = Json { ignoreUnknownKeys = true }
+            var done: com.pacesync.app.network.dto.ReplaceCandidatesDoneEvent? = null
+            runCatching {
+                mixBuildClient.replaceCandidates(
+                    com.pacesync.app.network.dto.ReplaceCandidatesRequest(
+                        targetBpm = chartBpm(tempo),
+                        targetUri = uri,
+                        excludeUris = resolvedTracks.mapNotNull { it.uri },
+                        originalDurationMs = (track.durationSec * 1000).toLong(),
+                    ),
+                ) { type, element ->
+                    when (type) {
+                        "error" -> error(element.jsonObject["error"]?.jsonPrimitive?.content ?: "Search failed")
+                        "done" -> done = runCatching { json.decodeFromJsonElement(com.pacesync.app.network.dto.ReplaceCandidatesDoneEvent.serializer(), element) }.getOrNull()
+                    }
+                }
+            }.onFailure { quickSwapError = it.message ?: "Search failed" }
+            quickSwapCandidates = done?.candidates ?: emptyList()
+            quickSwapLoading = false
+        }
+    }
+
+    fun applyQuickSwap(candidate: com.pacesync.app.network.dto.ReplaceCandidate) {
+        val target = quickSwapTarget ?: return
+        val uri = candidate.uri ?: return
+        tracks = resolvedTracks.map { t ->
+            if (t === target) {
+                t.copy(uri = uri, name = candidate.name, artist = candidate.artist, tempo = candidate.tempo)
+            } else t
+        }
+        dirty = true
+        quickSwapTarget = null
+        quickSwapCandidates = null
+    }
+
     // No in-app back control at all — the phone's own system back gesture/
     // button already pops the nav stack, and every row of header chrome
     // steals space the chart/strips badly need on a short landscape screen
@@ -146,25 +423,173 @@ fun PaceChartScreen(api: PaceSyncApi, date: String, title: String, onBack: () ->
         // hover position invalidating the old one.
         var tapTimeSec by remember { mutableStateOf<Double?>(null) }
 
+        // Play/pause control, right-aligned on the legend row — mirrors
+        // whatever's actually happening on the active Spotify device
+        // (polled, since the Web API has no push notification for this),
+        // rather than assuming local app state matches remote reality.
+        val headerScope = rememberCoroutineScope()
+        var isPlaying by remember { mutableStateOf(false) }
+        var hasDevice by remember { mutableStateOf(false) }
+        var playingTrackUri by remember { mutableStateOf<String?>(null) }
+        var progressMs by remember { mutableStateOf(0L) }
+        var durationMs by remember { mutableStateOf(0L) }
+        // While the user is actively dragging/tapping the seek box, the
+        // next poll's progressMs would otherwise overwrite their gesture
+        // with stale server data before the seek call lands — suppressed
+        // for a short window after a seek is sent.
+        var seekSuppressedUntil by remember { mutableStateOf(0L) }
+        LaunchedEffect(Unit) {
+            while (true) {
+                runCatching { api.getPlaybackState() }
+                    .onSuccess { resp ->
+                        resp.body()?.let {
+                            isPlaying = it.isPlaying
+                            hasDevice = it.hasDevice
+                            playingTrackUri = it.trackUri
+                            if (System.currentTimeMillis() >= seekSuppressedUntil) {
+                                progressMs = it.progressMs
+                                durationMs = it.durationMs
+                            }
+                        }
+                    }
+                delay(2000)
+            }
+        }
+
+        // Local progress ticker — advances between polls via elapsed time
+        // (the server is only polled every 2s, which would otherwise look
+        // visibly stepped rather than a smooth bar), resynced to the
+        // server's real progressMs on every poll.
+        var localProgressMs by remember(progressMs) { mutableStateOf(progressMs) }
+        LaunchedEffect(progressMs, isPlaying) {
+            val tickStart = System.currentTimeMillis()
+            while (isPlaying) {
+                delay(100)
+                localProgressMs = (progressMs + (System.currentTimeMillis() - tickStart)).coerceAtMost(durationMs)
+            }
+        }
+        val showSeekBar = isPlaying && hasDevice && playingTrackUri != null && durationMs > 0
+
         // Fixed height — TextButton has more built-in padding than the
         // plain LegendDot row, so without a fixed height the whole chart
         // below would shift down the moment "Reset zoom" appears (confirmed
         // from a real screenshot: the header visibly grew on zoom).
         Row(
-            modifier = Modifier.height(32.dp),
+            modifier = Modifier.height(32.dp).fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            LegendDot(MaterialTheme.colorScheme.primary, "Target pace")
-            LegendDot(Color(0xFFF59E0B), "BPM")
-            if (visibleStart > 0f || visibleEnd < totalSec.toFloat()) {
-                TextButton(
-                    onClick = { visibleStart = 0f; visibleEnd = totalSec.toFloat() },
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                ) {
-                    Text("Reset zoom", style = MaterialTheme.typography.labelLarge)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                LegendDot(MaterialTheme.colorScheme.primary, "Target pace")
+                LegendDot(Color(0xFFF59E0B), "BPM")
+                if (visibleStart > 0f || visibleEnd < totalSec.toFloat()) {
+                    TextButton(
+                        onClick = { visibleStart = 0f; visibleEnd = totalSec.toFloat() },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Text("Reset zoom", style = MaterialTheme.typography.labelLarge)
+                    }
                 }
             }
+
+            // Now-playing seek bar — inline between "Reset zoom" and the
+            // play/pause icon, only while a track is actually playing (a
+            // paused/no-device state has nothing meaningful to show or
+            // seek). Time labels at each end show elapsed/total.
+            if (showSeekBar) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f).padding(horizontal = 12.dp),
+                ) {
+                    Text(fmtMs(localProgressMs), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(20.dp)
+                            .pointerInput(durationMs) {
+                                detectTapGestures { pos ->
+                                    val frac = (pos.x / size.width).coerceIn(0f, 1f)
+                                    val targetMs = (frac * durationMs).toLong()
+                                    localProgressMs = targetMs
+                                    seekSuppressedUntil = System.currentTimeMillis() + 2500
+                                    headerScope.launch {
+                                        runCatching { api.playbackAction(PlaybackActionRequest("seek", positionMs = targetMs)) }
+                                            .onSuccess { resp -> if (resp.isSuccessful) progressMs = targetMs }
+                                    }
+                                }
+                            },
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(MaterialTheme.colorScheme.outlineVariant),
+                        ) {
+                            val frac = (localProgressMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                            Box(
+                                Modifier
+                                    .fillMaxWidth(frac)
+                                    .fillMaxHeight()
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(MaterialTheme.colorScheme.primary),
+                            )
+                        }
+                    }
+                    Text(fmtMs(durationMs), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                }
+            }
+
+            // Save — only shown once an edit (AI Remix, Quick Swap) has
+            // made the in-memory tracklist diverge from what's pinned
+            // server-side. Explicit tap required; edits are never
+            // auto-saved.
+            if (dirty) {
+                Icon(
+                    Icons.Filled.Save,
+                    contentDescription = "Save changes",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .padding(end = 10.dp)
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable(enabled = !saving) { saveMix(resolvedTracks) },
+                )
+            }
+
+            // Always shown, even with no active device yet — hiding it
+            // entirely until a device appears looked like the control was
+            // just missing/broken. With no device, resume has nothing to
+            // resume, so that case surfaces a toast instead of silently
+            // doing nothing.
+            //
+            // A plain clickable Icon, not IconButton — IconButton enforces
+            // a 48dp minimum touch target internally regardless of any
+            // size() modifier passed to it, which inside this row's fixed
+            // 32dp height was causing it to not lay out at all (confirmed
+            // from a real screenshot: totally blank space where the icon
+            // should be, not just misplaced).
+            Icon(
+                if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                contentDescription = if (isPlaying) "Pause" else "Play",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable {
+                        headerScope.launch {
+                            if (!hasDevice) {
+                                android.widget.Toast.makeText(context, "Open Spotify on a device first", android.widget.Toast.LENGTH_SHORT).show()
+                                return@launch
+                            }
+                            val action = if (isPlaying) "pause" else "resume"
+                            runCatching { api.playbackAction(PlaybackActionRequest(action)) }
+                                .onSuccess { resp -> if (resp.isSuccessful) isPlaying = !isPlaying }
+                        }
+                    },
+            )
         }
 
         // Pinch-to-zoom (two fingers) and drag-to-pan (one finger), applied
@@ -272,8 +697,205 @@ fun PaceChartScreen(api: PaceSyncApi, date: String, title: String, onBack: () ->
             // give a clean way to both size AND position a child at an
             // arbitrary start offset within a Box, and raw Canvas drawing
             // has already proven reliable elsewhere in this screen.
-            TrackStrip(resolvedTracks, visibleStart.toDouble(), visibleEnd.toDouble(), context, api)
+            TrackStrip(
+                resolvedTracks, visibleStart.toDouble(), visibleEnd.toDouble(), context, api,
+                playingTrackUri = if (isPlaying) playingTrackUri else null,
+                selectMode = selectMode,
+                selectedUris = selectedUris,
+                onToggleSelect = { uri ->
+                    selectedUris = if (selectedUris.contains(uri)) selectedUris - uri else selectedUris + uri
+                },
+                onEnterSelectMode = { uri -> selectMode = true; selectedUris = setOf(uri) },
+                onExitSelectMode = { selectMode = false; selectedUris = emptySet() },
+                onRequestRemix = { remixBpmPrompt = true },
+                onRequestMultiQuickSwap = { multiQuickSwapBpmPrompt = true },
+                onQuickSwap = { track -> openQuickSwap(track) },
+            )
         }
+        }
+
+        if (remixBpmPrompt) {
+            RemixBpmDialog(
+                selectedCount = selectedUris.size,
+                title = "AI Remix",
+                description = "The AI DJ will pick library tracks at this BPM to fill these tracks' combined length.",
+                onDismiss = { remixBpmPrompt = false },
+                onConfirm = { bpm -> remixBpmPrompt = false; runRemix(bpm) },
+            )
+        }
+
+        if (multiQuickSwapBpmPrompt) {
+            RemixBpmDialog(
+                selectedCount = selectedUris.size,
+                title = "Quick Swap",
+                description = "Searches your library for exact-BPM tracks to fill these tracks' combined length (no AI — closest-fit match).",
+                onDismiss = { multiQuickSwapBpmPrompt = false },
+                onConfirm = { bpm -> multiQuickSwapBpmPrompt = false; runMultiQuickSwap(bpm) },
+            )
+        }
+
+        if (quickSwapTarget != null) {
+            QuickSwapDialog(
+                target = quickSwapTarget!!,
+                candidates = quickSwapCandidates,
+                loading = quickSwapLoading,
+                error = quickSwapError,
+                onDismiss = { quickSwapTarget = null; quickSwapCandidates = null },
+                onPick = ::applyQuickSwap,
+            )
+        }
+
+        if (remixing || saving) {
+            Box(Modifier.align(Alignment.BottomEnd).padding(16.dp)) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text(remixStatus ?: if (saving) "Saving…" else "AI DJ is picking tracks…", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        remixError?.let { err ->
+            Box(Modifier.align(Alignment.BottomEnd).padding(16.dp)) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(err, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Text(
+                        "Dismiss",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable { remixError = null },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemixBpmDialog(selectedCount: Int, title: String, description: String, onDismiss: () -> Unit, onConfirm: (Int) -> Unit) {
+    var bpmText by remember { mutableStateOf("") }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(16.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("$title $selectedCount tracks", style = MaterialTheme.typography.titleSmall)
+                androidx.compose.material3.OutlinedTextField(
+                    value = bpmText,
+                    onValueChange = { bpmText = it.filter(Char::isDigit) },
+                    label = { Text("Target BPM") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                    singleLine = true,
+                )
+                Text(
+                    description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+                androidx.compose.material3.Button(
+                    onClick = { bpmText.toIntOrNull()?.takeIf { it > 0 }?.let(onConfirm) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(title)
+                }
+            }
+        }
+    }
+}
+
+// Library-only quick-swap picker — DashboardClient.tsx's QuickSwapModal
+// default behavior (no artist/genre search, no online top-up): a list of
+// exact-BPM, duration-matched library candidates for the one selected
+// track, tap one to swap it in.
+@Composable
+private fun QuickSwapDialog(
+    target: HistoryTrack,
+    candidates: List<com.pacesync.app.network.dto.ReplaceCandidate>?,
+    loading: Boolean,
+    error: String?,
+    onDismiss: () -> Unit,
+    onPick: (com.pacesync.app.network.dto.ReplaceCandidate) -> Unit,
+) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(16.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Quick Swap — ${target.name}", style = MaterialTheme.typography.titleSmall)
+                when {
+                    loading -> Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                    error != null -> Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    candidates.isNullOrEmpty() -> Text(
+                        "No library tracks found at this exact BPM / duration.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                    )
+                    else -> {
+                        val originalMs = (target.durationSec * 1000).toLong()
+                        val sorted = candidates.sortedBy { c -> c.durationMs?.let { kotlin.math.abs(it - originalMs) } ?: Long.MAX_VALUE }
+                        androidx.compose.foundation.lazy.LazyColumn(
+                            Modifier.fillMaxWidth().height(260.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            items(sorted) { c ->
+                                val diffSec = c.durationMs?.let { ((it - originalMs) / 1000.0).roundToInt() }
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                                        .clickable { onPick(c) }
+                                        .padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(c.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                                        Text(
+                                            "${c.artist} · ${c.effectiveBpm.roundToInt()} BPM",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.secondary,
+                                            maxLines = 1,
+                                        )
+                                    }
+                                    if (diffSec != null) {
+                                        Text(
+                                            when {
+                                                diffSec == 0 -> "±0s"
+                                                diffSec > 0 -> "+${diffSec}s"
+                                                else -> "${diffSec}s"
+                                            },
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(start = 8.dp),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -295,29 +917,58 @@ private fun LegendDot(color: Color, label: String) {
 // Starts the track on the user's active Spotify device via the backend's
 // Web-API-backed play endpoint — NOT an Intent.ACTION_VIEW launch of the
 // Spotify app, which would bring Spotify to the foreground and push
-// PaceSync behind it. Requires Spotify already open somewhere (the Web API
-// can only command an existing session, not launch the app) — surfaced to
-// the user as a toast if there's no active device.
+// PaceSync behind it. The Web API can only command an EXISTING Spotify
+// session though, not launch the app itself — on first use (nothing
+// playing anywhere yet) the server replies 409 ("no active device"). That
+// specific case falls back to a one-time local launch (bringing Spotify to
+// the foreground just this once) purely to register it as an active
+// device; every call after that one goes through the remote endpoint and
+// PaceSync stays in front.
 private suspend fun playOnActiveDevice(context: android.content.Context, api: PaceSyncApi, uri: String) {
     val result = runCatching { api.playTrack(PlayRequest(uri)) }
-    val message = result.fold(
-        onSuccess = { resp -> if (resp.isSuccessful) null else "Open Spotify on a device first" },
-        onFailure = { "Couldn't reach PaceSync server" },
-    )
-    message?.let {
-        android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_SHORT).show()
+    val response = result.getOrNull()
+    when {
+        response?.isSuccessful == true -> Unit
+        response?.code() == 409 -> {
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+            android.widget.Toast.makeText(context, "Opening Spotify to start playback…", android.widget.Toast.LENGTH_SHORT).show()
+        }
+        else -> android.widget.Toast.makeText(context, "Couldn't reach PaceSync server", android.widget.Toast.LENGTH_SHORT).show()
     }
 }
 
 // Draws each track's name + pace/BPM inside a block whose x-position and
 // width exactly match its span on the chart/segment strip above it — same
 // visible-window math as PaceBpmChart and the segment strip, so all three
-// stay in lockstep under zoom/pan. Long-pressing a chip opens a small menu
-// anchored at the press point with a "Play in Spotify" action.
+// stay in lockstep under zoom/pan.
+//
+// Two interaction modes: normal (tap a chip -> long-press-equivalent menu
+// with Play in Spotify / Select), and select mode (tap a chip toggles its
+// selection with a highlighted ring, matching the web chart's ctrl/cmd-click
+// multi-select — entered via the menu's "Select" item, exited via "Done" or
+// by emptying the selection).
 @Composable
-private fun TrackStrip(tracks: List<HistoryTrack>, visibleStart: Double, visibleEnd: Double, context: android.content.Context, api: PaceSyncApi) {
+private fun TrackStrip(
+    tracks: List<HistoryTrack>,
+    visibleStart: Double,
+    visibleEnd: Double,
+    context: android.content.Context,
+    api: PaceSyncApi,
+    playingTrackUri: String?,
+    selectMode: Boolean,
+    selectedUris: Set<String>,
+    onToggleSelect: (String) -> Unit,
+    onEnterSelectMode: (String) -> Unit,
+    onExitSelectMode: () -> Unit,
+    onRequestRemix: () -> Unit,
+    onRequestMultiQuickSwap: () -> Unit,
+    onQuickSwap: (HistoryTrack) -> Unit,
+) {
     val chipColor = MaterialTheme.colorScheme.surfaceVariant
     val textColor = MaterialTheme.colorScheme.onSurface
+    val selectedColor = MaterialTheme.colorScheme.primary
     // MaterialTheme.colorScheme.secondary is a muted accent and read as
     // low-contrast against the dark chip background (confirmed from a real
     // screenshot) — a plain light gray reads far more clearly here than a
@@ -327,9 +978,9 @@ private fun TrackStrip(tracks: List<HistoryTrack>, visibleStart: Double, visible
     val scope = rememberCoroutineScope()
 
     // Rects are recomputed every frame inside the Canvas draw call (cheap —
-    // only as many tracks as are currently visible), but long-press needs
-    // them available from the gesture-detector callback too, so they're
-    // kept in a small side list updated alongside drawing.
+    // only as many tracks as are currently visible), but tap/long-press
+    // needs them available from the gesture-detector callback too, so
+    // they're kept in a small side list updated alongside drawing.
     var trackRects by remember { mutableStateOf<List<Pair<HistoryTrack, androidx.compose.ui.geometry.Rect>>>(emptyList()) }
     var menuTrack by remember { mutableStateOf<HistoryTrack?>(null) }
     var menuOffset by remember { mutableStateOf(Offset.Zero) }
@@ -340,8 +991,24 @@ private fun TrackStrip(tracks: List<HistoryTrack>, visibleStart: Double, visible
                 .fillMaxWidth()
                 .height(48.dp)
                 .padding(top = 6.dp)
-                .pointerInput(tracks, visibleStart, visibleEnd) {
+                .pointerInput(tracks, visibleStart, visibleEnd, selectMode) {
                     detectTapGestures(
+                        onTap = { pos ->
+                            val hit = trackRects.firstOrNull { (_, rect) -> rect.contains(pos) }
+                            if (hit == null) return@detectTapGestures
+                            if (selectMode) {
+                                hit.first.uri?.let(onToggleSelect)
+                            } else {
+                                menuTrack = hit.first
+                                menuOffset = pos
+                            }
+                        },
+                        // Long-press always opens the menu, even while in
+                        // select mode — a normal tap there is claimed for
+                        // toggling selection, so long-press is the only way
+                        // back to "AI Remix"/"Done selecting"/etc without
+                        // this (confirmed real bug: select mode had no path
+                        // to any other menu item once entered).
                         onLongPress = { pos ->
                             val hit = trackRects.firstOrNull { (_, rect) -> rect.contains(pos) }
                             if (hit != null) {
@@ -363,12 +1030,35 @@ private fun TrackStrip(tracks: List<HistoryTrack>, visibleStart: Double, visible
                 val w = (x1 - x0 - gapPx).coerceAtLeast(1f)
                 rects.add(t to androidx.compose.ui.geometry.Rect(Offset(x0, 0f), Size(w, size.height)))
 
+                val isSelected = t.uri != null && selectedUris.contains(t.uri)
+                val isPlayingTrack = t.uri != null && t.uri == playingTrackUri
                 drawRoundRect(
                     chipColor,
                     topLeft = Offset(x0, 0f),
                     size = Size(w, size.height),
                     cornerRadius = androidx.compose.ui.geometry.CornerRadius(12f, 12f),
                 )
+                if (isSelected) {
+                    drawRoundRect(
+                        selectedColor,
+                        topLeft = Offset(x0, 0f),
+                        size = Size(w, size.height),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(12f, 12f),
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f),
+                    )
+                }
+                // Now-playing border — drawn on top of (and independent
+                // from) the selection ring, so a track can show both at
+                // once without one hiding the other.
+                if (isPlayingTrack) {
+                    drawRoundRect(
+                        Color(0xFFF97316),
+                        topLeft = Offset(x0, 0f),
+                        size = Size(w, size.height),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(12f, 12f),
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f),
+                    )
+                }
 
                 // Clip text drawing to this chip's own bounds so a long
                 // track name never bleeds into the next chip when zoomed in.
@@ -417,6 +1107,56 @@ private fun TrackStrip(tracks: List<HistoryTrack>, visibleStart: Double, visible
                             }
                         },
                     )
+                    if (!selectMode) {
+                        DropdownMenuItem(
+                            text = { Text("Quick Swap") },
+                            enabled = track.uri != null && track.tempo != null,
+                            onClick = {
+                                menuTrack = null
+                                onQuickSwap(track)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Select") },
+                            enabled = track.uri != null,
+                            onClick = {
+                                menuTrack = null
+                                track.uri?.let(onEnterSelectMode)
+                            },
+                        )
+                    } else {
+                        DropdownMenuItem(
+                            text = { Text(if (selectedUris.contains(track.uri)) "Deselect" else "Select") },
+                            enabled = track.uri != null,
+                            onClick = {
+                                menuTrack = null
+                                track.uri?.let(onToggleSelect)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("AI Remix (${selectedUris.size} selected)") },
+                            enabled = selectedUris.size >= 2,
+                            onClick = {
+                                menuTrack = null
+                                onRequestRemix()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Quick Swap (${selectedUris.size} selected)") },
+                            enabled = selectedUris.size >= 2,
+                            onClick = {
+                                menuTrack = null
+                                onRequestMultiQuickSwap()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Done selecting") },
+                            onClick = {
+                                menuTrack = null
+                                onExitSelectMode()
+                            },
+                        )
+                    }
                 }
             }
         }

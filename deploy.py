@@ -262,6 +262,7 @@ FILES = [
     ('app/api/ai-dj/wake/route.ts',               'app/api/ai-dj/wake/route.ts'),
     ('app/api/ai-dj/pin/route.ts',                'app/api/ai-dj/pin/route.ts'),
     ('app/api/spotify/play/route.ts',             'app/api/spotify/play/route.ts'),
+    ('app/api/spotify/playback/route.ts',         'app/api/spotify/playback/route.ts'),
     ('app/api/ai-dj/race-splits/route.ts',        'app/api/ai-dj/race-splits/route.ts'),
     ('app/api/ai-dj/race-splits/link-pace-pro/route.ts', 'app/api/ai-dj/race-splits/link-pace-pro/route.ts'),
     ('lib/race-splits.ts',                        'lib/race-splits.ts'),

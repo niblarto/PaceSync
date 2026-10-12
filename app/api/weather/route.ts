@@ -67,6 +67,10 @@ const WEATHER_CODES: Record<number, { description: string; emoji: string }> = {
 let cache: { at: number; days: Record<string, DayWeather> } | null = null;
 const CACHE_TTL_MS = 30 * 60_000;
 
+function localDateKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 // Usual run start: midday on weekdays, 10:00 at the weekend.
 function runHourFor(date: Date): number {
   const dow = date.getDay();
@@ -100,8 +104,7 @@ export async function GET() {
     const days: Record<string, DayWeather> = {};
     const byDate = new Map<string, TimeStep[]>();
     for (const s of steps) {
-      const local = new Date(s.time);
-      const key = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, "0")}-${String(local.getDate()).padStart(2, "0")}`;
+      const key = localDateKey(new Date(s.time));
       if (!byDate.has(key)) byDate.set(key, []);
       byDate.get(key)!.push(s);
     }
@@ -114,9 +117,15 @@ export async function GET() {
         const delta = Math.abs(local.getHours() + local.getMinutes() / 60 - target);
         if (delta < bestDelta) { bestDelta = delta; best = s; }
       }
-      // Don't report a "run time" forecast from a step hours away (e.g. the
-      // tail end of today when the run hour has already passed).
-      if (!best || bestDelta > 1.6) continue;
+      // Don't report a "run time" forecast from a step hours away — except
+      // today, where the run hour may already be past: show the nearest
+      // upcoming step instead (sampledAt makes the time clear).
+      const isToday = date === localDateKey(new Date());
+      if (isToday && (!best || bestDelta > 1.6)) {
+        const now = Date.now();
+        best = daySteps.find(s => new Date(s.time).getTime() >= now - 90 * 60_000) ?? daySteps[daySteps.length - 1] ?? null;
+      } else if (!best || bestDelta > 1.6) continue;
+      if (!best) continue;
       const code = best.significantWeatherCode ?? -1;
       const meta = WEATHER_CODES[code] ?? { description: "", emoji: "🌡️" };
       const localBest = new Date(best.time);

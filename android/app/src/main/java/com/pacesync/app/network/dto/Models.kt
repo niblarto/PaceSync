@@ -293,6 +293,75 @@ data class PinMixRequest(
     val timeline: List<MixTimelineSegment>,
 )
 
+// Mirrors app/api/ai-dj/remix/route.ts's body — a multi-select "AI Remix"
+// request for a contiguous span of tracks (DashboardClient.tsx's
+// aiRemixSelectedChartTracks): targetBpm is user-entered, budgetMs is the
+// selected tracks' own combined duration (not the span between first/last
+// selected index — a gap would otherwise inflate the budget), avoidUris is
+// every track currently in the mix so the AI DJ never picks a duplicate.
+@Serializable
+data class RemixRequest(
+    val targetBpm: Int,
+    val budgetMs: Long,
+    val avoidUris: List<String>,
+)
+
+// Shape of api/ai-dj/remix's SSE "done" event — same track/timeline shape
+// as the full mix build (MixTrack/MixTimelineSegment), just one synthetic
+// segment's worth of replacement tracks.
+@Serializable
+data class RemixDoneEvent(
+    val trackUris: List<String> = emptyList(),
+    val timeline: List<MixTimelineSegment> = emptyList(),
+)
+
+// Mirrors app/api/tracks/replace-candidates/route.ts's body — a library-
+// only "Quick Swap" request (no artistName/searchMode/forceOnline sent,
+// same subset DashboardClient.tsx's QuickSwapModal uses by default, which
+// keeps the server-side online top-up from ever triggering).
+@Serializable
+data class ReplaceCandidatesRequest(
+    val targetBpm: Int,
+    val targetUri: String,
+    val excludeUris: List<String>,
+    val originalDurationMs: Long? = null,
+)
+
+// Mirrors app/api/tracks/replace-candidates/route.ts's ReplaceCandidate —
+// only the fields the Android quick-swap list actually displays/uses are
+// declared; the rest (key/mode/danceability/valence/genres) are omitted
+// since ignoreUnknownKeys silently drops them.
+@Serializable
+data class ReplaceCandidate(
+    val source: String,
+    val uri: String? = null,
+    val name: String,
+    val artist: String,
+    val tempo: Double,
+    val effectiveBpm: Double,
+    val durationMs: Long? = null,
+)
+
+@Serializable
+data class ReplaceCandidatesDoneEvent(val candidates: List<ReplaceCandidate> = emptyList())
+
+// Mirrors app/api/tracks/replace-candidates-budget/route.ts's body — the
+// multi-select "quick swap" equivalent: fills one combined time budget
+// with as many exact-BPM library tracks as fit closest, rather than
+// swapping each selected slot 1-for-1 (same reasoning the web app's non-AI
+// "Remix…" button uses). No artistNames/seedUris sent from Android — the
+// server treats a missing/empty artistNames as "skip the online top-up",
+// same library-only behavior as the single-track Quick Swap.
+@Serializable
+data class ReplaceCandidatesBudgetRequest(
+    val targetBpm: Int,
+    val budgetMs: Long,
+    val excludeUris: List<String>,
+)
+
+@Serializable
+data class ReplaceCandidatesBudgetDoneEvent(val tracks: List<ReplaceCandidate> = emptyList(), val warning: String? = null)
+
 // Mirrors app/api/ai-dj/pin/route.ts's DELETE body — unpinning a mix also
 // deletes the underlying "Today's Run" history entry server-side (not just
 // the pin flag), so this is a genuine full remove, not a soft-unpin.
@@ -303,3 +372,19 @@ data class UnpinMixRequest(val date: String, val title: String)
 // to start playing on the user's active Spotify device via the Web API.
 @Serializable
 data class PlayRequest(val uri: String)
+
+// Mirrors app/api/spotify/playback/route.ts's body — "pause"/"resume" on
+// whatever Spotify device is currently active, or "seek" (with positionMs)
+// to jump to a specific offset in the currently playing track.
+@Serializable
+data class PlaybackActionRequest(val action: String, val positionMs: Long? = null)
+
+// Mirrors app/api/spotify/playback/route.ts's GET response.
+@Serializable
+data class PlaybackStateResponse(
+    val isPlaying: Boolean = false,
+    val hasDevice: Boolean = false,
+    val trackUri: String? = null,
+    val progressMs: Long = 0,
+    val durationMs: Long = 0,
+)

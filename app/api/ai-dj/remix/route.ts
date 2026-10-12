@@ -1,16 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { buildAiDjRemix } from "@/lib/ai-dj-mix";
 
 // SSE: Dashboard chart's multi-select "🤖 AI Remix…" — streams
 // {"type":"progress",...} while the LLM picks tracks, then {"type":"done",
 // trackUris} (the single segment's tracks, in the order the mixer chose)
 // or {"type":"error"}. Same shape as /api/ai-dj/mix, just for one synthetic
-// BPM+duration segment instead of a whole workout's worth.
+// BPM+duration segment instead of a whole workout's worth. Also called from
+// the Android app's Pace Chart multi-select "AI Remix" menu action.
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const { targetBpm, budgetMs, avoidUris } = await req.json() as {
     targetBpm?: number; budgetMs?: number; avoidUris?: string[];

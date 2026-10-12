@@ -9,6 +9,8 @@ import com.pacesync.app.network.dto.PinMixRequest
 import com.pacesync.app.network.dto.PinRouteRequest
 import com.pacesync.app.network.dto.PinnedRouteResponse
 import com.pacesync.app.network.dto.PlayRequest
+import com.pacesync.app.network.dto.PlaybackActionRequest
+import com.pacesync.app.network.dto.PlaybackStateResponse
 import com.pacesync.app.network.dto.RouteResponse
 import com.pacesync.app.network.dto.SimilarActivitiesResponse
 import com.pacesync.app.network.dto.TodaysRunHistoryResponse
@@ -94,4 +96,12 @@ interface PaceSyncApi {
     // the foreground instead of switching to Spotify.
     @POST("api/spotify/play")
     suspend fun playTrack(@Body body: PlayRequest): Response<Unit>
+
+    // Pause/resume whatever's already playing + current play state, for
+    // the Pace Chart screen's play/pause control.
+    @POST("api/spotify/playback")
+    suspend fun playbackAction(@Body body: PlaybackActionRequest): Response<Unit>
+
+    @GET("api/spotify/playback")
+    suspend fun getPlaybackState(): Response<PlaybackStateResponse>
 }

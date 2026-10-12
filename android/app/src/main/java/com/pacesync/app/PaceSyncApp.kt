@@ -159,7 +159,7 @@ fun PaceSyncApp(container: AppContainer) {
             composable("pace-chart/{date}/{title}") { backStackEntry ->
                 val date = backStackEntry.arguments?.getString("date") ?: ""
                 val title = URLDecoder.decode(backStackEntry.arguments?.getString("title") ?: "", "UTF-8")
-                PaceChartScreen(container.api, date = date, title = title) {
+                PaceChartScreen(container.api, container.mixBuildClient, date = date, title = title) {
                     navController.popBackStack()
                 }
             }

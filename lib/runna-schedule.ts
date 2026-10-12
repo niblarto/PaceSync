@@ -41,6 +41,18 @@ function unescapeIcs(s: string): string {
   return s.replace(/\\n/g, "\n").replace(/\\,/g, ",").replace(/\\;/g, ";").replace(/\\\\/g, "\\");
 }
 
+// Server-local calendar date (the Pi runs on UK time). toISOString() is UTC,
+// which during BST puts 00:00-01:00 on the previous day.
+function localDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function localDateOffset(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return localDate(d);
+}
+
 function parseDate(s: string): string {
   const d = s.replace(/[TZ].*$/, "").trim();
   if (d.length === 8) return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
@@ -191,9 +203,9 @@ function parsePastRunStats(description: string): Pick<RunnaPastRun, "durationStr
 
 function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPastRun[] } {
   const blocks = text.split("BEGIN:VEVENT").slice(1);
-  const today = new Date().toISOString().slice(0, 10);
-  const lookback = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const cutoff = new Date(Date.now() + 28 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const today = localDate(new Date());
+  const lookback = localDateOffset(-8);
+  const cutoff = localDateOffset(28);
 
   const workouts: RunnaWorkout[] = [];
   const pastRuns: RunnaPastRun[] = [];
@@ -434,13 +446,13 @@ function reconcileWithGarmin(workouts: RunnaWorkout[], pastRuns: RunnaPastRun[],
 // today for the Summary card, today through cutoff for Schedule) that has
 // neither an upcoming workout nor a past run.
 function fillRestDays(workouts: RunnaWorkout[], pastRuns: RunnaPastRun[], lookback: string, cutoff: string) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDate(new Date());
   const covered = new Set([...workouts.map(w => w.date), ...pastRuns.map(r => r.date)]);
 
   const d = new Date(lookback + "T00:00:00");
   const end = new Date(cutoff + "T00:00:00");
   for (; d <= end; d.setDate(d.getDate() + 1)) {
-    const date = d.toISOString().slice(0, 10);
+    const date = localDate(d);
     if (covered.has(date)) continue;
 
     // date <= today, not just date < today: a run completed TODAY (e.g. a
@@ -455,6 +467,12 @@ function fillRestDays(workouts: RunnaWorkout[], pastRuns: RunnaPastRun[], lookba
     // pastRuns, never workouts) at once.
     if (date <= today) {
       const orphan = garminOrphanRun(date);
+      // Today's rest day belongs on the Schedule (not Summary) for the whole
+      // calendar day — the web Schedule card hides any date Summary has.
+      if (!orphan && date === today) {
+        workouts.push(syntheticRestWorkout(date));
+        continue;
+      }
       pastRuns.push(orphan ?? {
         uid: `SYNTHETIC_REST_${date}`,
         date,
@@ -468,20 +486,24 @@ function fillRestDays(workouts: RunnaWorkout[], pastRuns: RunnaPastRun[], lookba
         appUrl: null,
       });
     } else {
-      workouts.push({
-        uid: `SYNTHETIC_REST_${date}`,
-        date,
-        summary: "Rest",
-        title: "Rest",
-        type: "rest",
-        distanceMi: null,
-        durationSec: 0,
-        segments: [],
-        appUrl: null,
-        suggestedZone: null,
-      });
+      workouts.push(syntheticRestWorkout(date));
     }
   }
+}
+
+function syntheticRestWorkout(date: string): RunnaWorkout {
+  return {
+    uid: `SYNTHETIC_REST_${date}`,
+    date,
+    summary: "Rest",
+    title: "Rest",
+    type: "rest",
+    distanceMi: null,
+    durationSec: 0,
+    segments: [],
+    appUrl: null,
+    suggestedZone: null,
+  };
 }
 
 // ── Fetch + parse ────────────────────────────────────────────────────────────

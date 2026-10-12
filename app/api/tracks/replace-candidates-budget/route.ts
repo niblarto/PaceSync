@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { readAllTracks } from "@/lib/tracks-store";
 import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
 import { resolveByIsrc, sleep } from "@/lib/track-enrich";
@@ -95,8 +94,7 @@ export interface BudgetFillTrack {
 // enough to need this — a plain JSON response left the UI with no signal
 // during a multi-candidate ReccoBeats resolution.
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await req.json() as {
     targetBpm?: number; artistNames?: string[]; seedUris?: string[]; excludeUris?: string[]; budgetMs?: number;

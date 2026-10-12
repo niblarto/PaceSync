@@ -48,18 +48,24 @@ fun RoutePickerScreen(api: PaceSyncApi, date: String, title: String, distanceMi:
     var error by remember { mutableStateOf<String?>(null) }
     var previewing by remember { mutableStateOf<SimilarActivity?>(null) }
 
+    var loadingMore by remember { mutableStateOf(false) }
+
+    // Pages are appended rather than replaced, so every match stays in one
+    // scrollable list with a "Load more" row at the end.
     LaunchedEffect(offset) {
+        loadingMore = true
         runCatching { api.getSimilarActivities(distanceMi, offset) }
             .onSuccess { resp ->
                 if (resp.isSuccessful) {
                     val body = resp.body()
-                    activities = body?.activities ?: emptyList()
+                    activities = (activities ?: emptyList()) + (body?.activities ?: emptyList())
                     total = body?.total ?: 0
                 } else {
                     error = "Failed to load (${resp.code()})"
                 }
             }
             .onFailure { error = it.message ?: "Network error" }
+        loadingMore = false
     }
 
     val preview = previewing
@@ -87,6 +93,13 @@ fun RoutePickerScreen(api: PaceSyncApi, date: String, title: String, distanceMi:
         }
         else -> Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                item {
+                    Text(
+                        "${activities!!.size} of $total runs near %.1fmi".format(distanceMi),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                    )
+                }
                 items(activities!!, key = { it.activity_id }) { activity ->
                     Card(
                         modifier = Modifier.fillMaxWidth().clickable { previewing = activity },
@@ -105,11 +118,16 @@ fun RoutePickerScreen(api: PaceSyncApi, date: String, title: String, distanceMi:
                         }
                     }
                 }
-            }
-            if (total > 3) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Button(onClick = { if (offset >= 3) offset -= 3 }, enabled = offset > 0) { Text("Previous") }
-                    Button(onClick = { if (offset + 3 < total) offset += 3 }, enabled = offset + 3 < total) { Text("Next") }
+                if (activities!!.size < total) {
+                    item {
+                        Button(
+                            onClick = { offset = activities!!.size },
+                            enabled = !loadingMore,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(if (loadingMore) "Loading…" else "Load more")
+                        }
+                    }
                 }
             }
         }

@@ -10,6 +10,10 @@ const SPOTIFY_SCOPES = [
   "playlist-modify-public",
   "playlist-modify-private",
   "user-modify-playback-state",
+  // Needed for GET /me/player (api/spotify/playback's playback-state
+  // poll) — user-modify-playback-state alone only covers play/pause/
+  // resume, not reading whether something's currently playing.
+  "user-read-playback-state",
 ].join(" ");
 
 export const authOptions: NextAuthOptions = {
