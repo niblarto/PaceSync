@@ -97,6 +97,12 @@ interface PaceSyncApi {
     @POST("api/spotify/play")
     suspend fun playTrack(@Body body: PlayRequest): Response<Unit>
 
+    @POST("api/spotify/create-playlist")
+    suspend fun createPlaylist(@Body body: com.pacesync.app.network.dto.CreatePlaylistRequest): Response<com.pacesync.app.network.dto.CreatePlaylistResponse>
+
+    @POST("api/todays-run/history")
+    suspend fun saveTodaysRunHistory(@Body body: com.pacesync.app.network.dto.SaveTodaysRunRequest): Response<Unit>
+
     // Pause/resume whatever's already playing + current play state, for
     // the Pace Chart screen's play/pause control.
     @POST("api/spotify/playback")

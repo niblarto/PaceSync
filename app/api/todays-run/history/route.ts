@@ -12,10 +12,9 @@ import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 // lib/workout-key.ts — called after a manual "Save to Today's Running
 // Playlist"); GET returns the snapshot.
 //
-// GET is hasApiAccess-gated (session OR mobile bearer token) so the Android
-// companion app's activity-detail screen can read a day's tracklist —
-// POST/DELETE/PATCH stay session-only: they're write actions nothing in the
-// app calls, and widening write access to the bearer token wasn't asked for.
+// GET and POST are hasApiAccess-gated (session OR mobile bearer token) — the
+// Android app reads a day's tracklist and saves "Today's Run" through them.
+// DELETE/PATCH stay session-only.
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -44,8 +43,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await req.json() as {
     date?: string;

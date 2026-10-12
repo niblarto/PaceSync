@@ -71,7 +71,42 @@ fun ActivityDetailScreen(
     var loading by remember { mutableStateOf(true) }
     var routeMenuOpen by remember { mutableStateOf(false) }
     var tracklistMenuOpen by remember { mutableStateOf(false) }
+    var confirmTodaysRun by remember { mutableStateOf(false) }
+    var savingPlaylist by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    fun toast(msg: String) = android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+
+    // Same calls as the web dashboard's "Save to Spotify" / "Save to Today's
+    // Running Playlist" (DashboardClient.tsx savePlaylist / saveTodaysRun).
+    fun saveToSpotify(name: String, description: String, onSaved: suspend () -> Unit = {}) {
+        val uris = tracks.mapNotNull { it.uri }
+        if (uris.isEmpty() || savingPlaylist) return
+        savingPlaylist = true
+        scope.launch {
+            runCatching { api.createPlaylist(com.pacesync.app.network.dto.CreatePlaylistRequest(name, description, uris)) }
+                .onSuccess { resp ->
+                    val body = resp.body()
+                    when {
+                        !resp.isSuccessful || body?.error != null -> toast(body?.error ?: "Save failed (${resp.code()})")
+                        body?.tracksAdded == false -> toast("Playlist created, but Spotify blocked adding the tracks")
+                        else -> { onSaved(); toast("Saved \"$name\" to Spotify") }
+                    }
+                }
+                .onFailure { toast(it.message ?: "Save failed") }
+            savingPlaylist = false
+        }
+    }
+
+    fun saveTodaysRun() {
+        val (y, m, d) = date.split("-")
+        saveToSpotify("Today's Run", "$title - $d-$m-$y") {
+            runCatching {
+                api.saveTodaysRunHistory(com.pacesync.app.network.dto.SaveTodaysRunRequest(date, title, buildTimelineFromTracks(tracks)))
+            }
+        }
+    }
 
     LaunchedEffect(date, title) {
         loading = true
@@ -109,6 +144,21 @@ fun ActivityDetailScreen(
     if (loading) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         return
+    }
+
+    if (confirmTodaysRun) {
+        val (y, m, d) = date.split("-")
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmTodaysRun = false },
+            title = { Text("Save to Today's Run?") },
+            text = { Text("This mix was built for $d-$m-$y (\"$title\"), not today — save it as today's run anyway?") },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { confirmTodaysRun = false; saveTodaysRun() }) { Text("Save") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { confirmTodaysRun = false }) { Text("Cancel") }
+            },
+        )
     }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -197,8 +247,32 @@ fun ActivityDetailScreen(
                             onShowPaceChart()
                         },
                     )
+                    DropdownMenuItem(
+                        text = { Text("Save to Today's Run") },
+                        enabled = !savingPlaylist,
+                        onClick = {
+                            tracklistMenuOpen = false
+                            val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+                            if (date == today) saveTodaysRun() else confirmTodaysRun = true
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Save to Spotify") },
+                        enabled = !savingPlaylist,
+                        onClick = {
+                            tracklistMenuOpen = false
+                            val (y, m, d) = date.split("-")
+                            saveToSpotify(
+                                "$d-$m-${y.takeLast(2)} $title",
+                                "AI DJ mix for Runna workout \"$title\" — pace-matched to each segment",
+                            )
+                        },
+                    )
                 }
             }
+        }
+        if (savingPlaylist) {
+            item { Text("Saving to Spotify…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary) }
         }
         if (tracks.isEmpty()) {
             item {

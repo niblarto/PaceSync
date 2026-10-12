@@ -112,7 +112,7 @@ private val SEGMENT_COLORS = listOf(
 // HistoryTrack rows, same approach the server's own
 // historyTracksToTimeline (app/api/ai-dj/pin/route.ts) uses, kept here
 // since the Android client needs to build the POST body itself.
-private fun buildTimelineFromTracks(tracks: List<HistoryTrack>): List<com.pacesync.app.network.dto.MixTimelineSegment> {
+internal fun buildTimelineFromTracks(tracks: List<HistoryTrack>): List<com.pacesync.app.network.dto.MixTimelineSegment> {
     val result = mutableListOf<com.pacesync.app.network.dto.MixTimelineSegment>()
     for (t in tracks) {
         val segName = t.segment ?: ""

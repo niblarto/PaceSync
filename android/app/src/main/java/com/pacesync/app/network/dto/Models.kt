@@ -368,6 +368,18 @@ data class ReplaceCandidatesBudgetDoneEvent(val tracks: List<ReplaceCandidate> =
 @Serializable
 data class UnpinMixRequest(val date: String, val title: String)
 
+// Mirrors app/api/spotify/create-playlist/route.ts — creates the named
+// playlist or replaces an existing one's tracks.
+@Serializable
+data class CreatePlaylistRequest(val name: String, val description: String, val trackUris: List<String>)
+
+@Serializable
+data class CreatePlaylistResponse(val url: String? = null, val tracksAdded: Boolean? = null, val error: String? = null)
+
+// Mirrors app/api/todays-run/history/route.ts's POST body.
+@Serializable
+data class SaveTodaysRunRequest(val date: String, val workoutTitle: String, val timeline: List<MixTimelineSegment>)
+
 // Mirrors app/api/spotify/play/route.ts's body — a spotify:track:<id> URI
 // to start playing on the user's active Spotify device via the Web API.
 @Serializable
