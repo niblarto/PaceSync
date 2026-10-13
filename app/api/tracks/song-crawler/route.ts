@@ -16,7 +16,9 @@ import { healActiveCsv } from "@/lib/csv-heal";
 
 const DOUBLETIME_THRESHOLD = 95; // mirrors MixPaceChart / replace-candidates
 const BPM_TOLERANCE = 1;
-const MAX_ARTISTS = 150;
+// Once this many distinct artists have been found (seed included), no new
+// ones are queued — the crawl finishes the ones already queued, then ends.
+const MAX_ARTISTS = 50;
 const RADIO_LIMIT = 25;
 const DEEZER_GAP_MS = 150; // Deezer allows 50 req/5s; stay well under
 
@@ -79,21 +81,20 @@ export async function POST(req: NextRequest) {
         let artistsCrawled = 0;
 
         while (queue.length > 0 && !stopped()) {
-          if (artistsCrawled >= MAX_ARTISTS) {
-            log(`Reached the ${MAX_ARTISTS}-artist limit — stopping.`, "warn");
-            break;
-          }
           const current = queue.shift()!;
           artistsCrawled++;
-          log(`[${artistsCrawled}] Artist radio: ${current.name} (${queue.length} artists queued)`);
+          log(`[${artistsCrawled}/${queuedArtists.size}] Artist radio: ${current.name} (${queue.length} still queued)`);
 
           const radio = await deezer<{ data?: DeezerRadioTrack[] }>(`/artist/${current.id}/radio?limit=${RADIO_LIMIT}`);
           if (!radio?.data?.length) { log(`  no radio for ${current.name}`, "warn"); continue; }
 
           for (const t of radio.data) {
             if (stopped()) break;
-            if (!queuedArtists.has(t.artist.id)) {
+            if (!queuedArtists.has(t.artist.id) && queuedArtists.size < MAX_ARTISTS) {
               queuedArtists.add(t.artist.id);
+              if (queuedArtists.size === MAX_ARTISTS) {
+                log(`Reached ${MAX_ARTISTS} artists — no more will be added; finishing the ${queue.length + 1} still queued.`, "warn");
+              }
               queue.push({ id: t.artist.id, name: t.artist.name });
             }
             if (seenTracks.has(t.id)) continue;

@@ -1,4 +1,4 @@
-import { execSync, spawnSync } from "child_process";
+import { execSync, spawn, spawnSync } from "child_process";
 
 // Reads and rewrites the Pi user's crontab for the app's scheduled jobs.
 // Jobs are identified by a stable substring of their command; disabling a
@@ -97,4 +97,20 @@ export function updateCronJobs(updates: CronJobUpdate[]): void {
   if (res.status !== 0) {
     throw new Error(`crontab update failed: ${res.stderr || res.error?.message || `exit ${res.status}`}`);
   }
+}
+
+// "Run now" — fires the job's own crontab command immediately, exactly as
+// cron would (same command line, same log file), detached so the request
+// returns at once rather than waiting out a long job like the Garmin sync.
+// Works whether or not the job is currently enabled.
+export function runCronJobNow(key: CronJobKey): void {
+  const lines = readCrontabLines();
+  if (lines === null) throw new Error("crontab is not available on this machine");
+  const idx = findJobLine(lines, key);
+  if (idx < 0) throw new Error(`"${key}" isn't installed in the crontab`);
+  const raw = lines[idx];
+  const m = LINE_RE.exec(raw.startsWith(OFF_PREFIX) ? raw.slice(OFF_PREFIX.length) : raw);
+  if (!m) throw new Error(`Couldn't read the "${key}" crontab line`);
+  const child = spawn("/bin/sh", ["-c", m[6]], { detached: true, stdio: "ignore" });
+  child.unref();
 }

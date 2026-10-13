@@ -1902,7 +1902,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   useEffect(() => {
     fetch("/api/settings/cron")
       .then(r => r.json())
-      .then((d: { available?: boolean; jobs?: { key: string; installed: boolean; enabled: boolean; time: string; day: number | null }[]; log?: { ts: string; job: string; message: string }[] }) => {
+      .then((d: { available?: boolean; jobs?: { key: string; installed: boolean; enabled: boolean; time: string; day: number | null }[]; log?: { ts: string; job: string; message: string }[]; serverNow?: number; serverTimeZone?: string }) => {
+        if (d.serverNow) setPiClock({ offsetMs: d.serverNow - Date.now(), timeZone: d.serverTimeZone ?? null });
         setCronAvailable(d.available ?? false);
         setCronJobs(d.jobs ?? []);
         setCronLog(d.log ?? []);
@@ -1949,6 +1950,36 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [cronSaved, setCronSaved] = useState(false);
   const [cronJobsError, setCronJobsError] = useState<string | null>(null);
   const [cronLog, setCronLog] = useState<{ ts: string; job: string; message: string }[]>([]);
+  // The Pi's clock: offset from this browser's clock + the Pi's time zone,
+  // so the shown time is what the crontab schedule actually runs against.
+  const [piClock, setPiClock] = useState<{ offsetMs: number; timeZone: string | null } | null>(null);
+  const [piNow, setPiNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setPiNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const [cronRunNow, setCronRunNow] = useState<Record<string, { state: "starting" | "started" | "error"; msg?: string }>>({});
+
+  async function runCronJobNow(key: string) {
+    setCronRunNow(prev => ({ ...prev, [key]: { state: "starting" } }));
+    try {
+      const res = await fetch("/api/settings/cron", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runNow: key }),
+      });
+      const d = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Failed to start");
+      setCronRunNow(prev => ({ ...prev, [key]: { state: "started" } }));
+      setTimeout(() => setCronRunNow(prev => {
+        const next = { ...prev };
+        if (next[key]?.state === "started") delete next[key];
+        return next;
+      }), 8000);
+    } catch (e) {
+      setCronRunNow(prev => ({ ...prev, [key]: { state: "error", msg: e instanceof Error ? e.message : "Failed to start" } }));
+    }
+  }
 
   // ── Known playlists (switch / delete) ──────────────────────────────────────
   const [knownPlaylists, setKnownPlaylists] = useState<{ name: string; id: string; csvFile: string; trackCount?: number | null }[]>([]);
@@ -5541,11 +5572,24 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
       {/* Scheduled jobs */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
-        <div>
-          <h2 className="font-semibold text-base">⏰ Scheduled Jobs</h2>
-          <p className="text-sm text-slate-400 mt-1">
-            The automatic jobs on the Pi&apos;s crontab — set when each runs, or switch them off.
-          </p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="font-semibold text-base">⏰ Scheduled Jobs</h2>
+            <p className="text-sm text-slate-400 mt-1">
+              The automatic jobs on the Pi&apos;s crontab — set when each runs, or switch them off.
+            </p>
+          </div>
+          {piClock && (
+            <div className="shrink-0 text-right rounded-lg bg-slate-800/60 border border-white/10 px-3 py-1.5" title="The Pi's own clock — the schedule below runs on this time">
+              <p className="font-mono text-lg text-sky-300 leading-tight">
+                {new Date(piNow + piClock.offsetMs).toLocaleTimeString("en-GB", { timeZone: piClock.timeZone ?? undefined, hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+              </p>
+              <p className="text-[10px] text-slate-500">
+                Pi time · {new Date(piNow + piClock.offsetMs).toLocaleDateString("en-GB", { timeZone: piClock.timeZone ?? undefined, weekday: "short", day: "numeric", month: "short" })}
+                {piClock.timeZone ? ` · ${piClock.timeZone}` : ""}
+              </p>
+            </div>
+          )}
         </div>
         {!cronAvailable ? (
           <p className="text-sm text-slate-500">
@@ -5607,9 +5651,23 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                         disabled={!job.enabled || cronSaving}
                         className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-2 py-1.5 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-sky-500"
                       />
+                      <button
+                        onClick={() => runCronJobNow(job.key)}
+                        disabled={cronRunNow[job.key]?.state === "starting"}
+                        title="Run this job now, exactly as the schedule would"
+                        className="ml-auto rounded-lg border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 disabled:opacity-40 text-sky-300 font-medium text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
+                      >
+                        {cronRunNow[job.key]?.state === "starting" ? "Starting…" : "▶ Run now"}
+                      </button>
                     </div>
                   ) : (
                     <p className="text-xs text-slate-600">Not installed on this machine&apos;s crontab.</p>
+                  )}
+                  {cronRunNow[job.key]?.state === "started" && (
+                    <p className="text-xs text-sky-400">Started — running in the background on the Pi.</p>
+                  )}
+                  {cronRunNow[job.key]?.state === "error" && (
+                    <p className="text-xs text-red-400">{cronRunNow[job.key]?.msg}</p>
                   )}
                 </div>
               );
