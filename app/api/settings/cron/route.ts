@@ -5,7 +5,7 @@ import { getCronLog } from "@/lib/cron-log";
 
 export const dynamic = "force-dynamic";
 
-const VALID_KEYS = ["garmin", "weekly", "aidj", "aidjRetry", "digest"];
+const VALID_KEYS = ["garmin", "weekly", "aidj", "aidjRetry", "digest", "librarySync"];
 const TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 
 // hasApiAccess (session OR mobile bearer token) — the Android Settings

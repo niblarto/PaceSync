@@ -5559,6 +5559,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               { key: "aidj", label: "AI DJ pre-build", desc: "Builds tomorrow's mix and saves it to “Today's Run”" },
               { key: "aidjRetry", label: "AI DJ morning retry", desc: "Catches today's mix if the evening pre-build missed it" },
               { key: "digest", label: "Daily digest", desc: "Push notification with today's schedule + first track of the playlist" },
+              { key: "librarySync", label: "Library ↔ Spotify sync", desc: "Two-way sync of the library and its Spotify playlist (deleted tracks are removed, new ones added both ways)" },
             ] as const).map(meta => {
               const job = cronJobs.find(j => j.key === meta.key);
               if (!job) return null;

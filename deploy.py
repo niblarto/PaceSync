@@ -303,6 +303,8 @@ FILES = [
     ('app/api/cron/ai-dj/route.ts',               'app/api/cron/ai-dj/route.ts'),
     ('app/api/cron/ai-dj-retry/route.ts',          'app/api/cron/ai-dj-retry/route.ts'),
     ('app/api/cron/digest/route.ts',               'app/api/cron/digest/route.ts'),
+    ('app/api/cron/library-sync/route.ts',         'app/api/cron/library-sync/route.ts'),
+    ('lib/spotify-library-sync.ts',                'lib/spotify-library-sync.ts'),
     ('lib/cron-schedule.ts',                      'lib/cron-schedule.ts'),
     ('lib/cron-log.ts',                           'lib/cron-log.ts'),
     ('lib/todays-run-history.ts',                 'lib/todays-run-history.ts'),
@@ -606,6 +608,17 @@ digest_cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/digest' || {{ (crontab -l 2>/dev/null; echo '{digest_cron_line}') | crontab -; }}""")
+
+# Daily library <-> Spotify playlist sync — default an hour before the AI DJ
+# pre-build (17:30), so the pre-build sees an up-to-date library.
+print('  Ensuring cron job (library <-> Spotify sync, default daily 16:30)...')
+library_sync_cron_log = f'/home/{PI["user"]}/cron-library-sync.log'
+library_sync_cron_line = (
+    f'30 16 * * * curl -s -o {library_sync_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/library-sync '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/library-sync' || {{ (crontab -l 2>/dev/null; echo '{library_sync_cron_line}') | crontab -; }}""")
 
 # Garmin sync completion notification: sftp doesn't carry the exec bit (and a
 # Windows checkout may add CRLFs), so normalise the script, then append it to
