@@ -29,6 +29,9 @@ export interface LibraryTrack {
   name: string;
   artist: string;
   bpm: number; // Math.round(tempo), 0 = missing
+  // Effective tempo, rounded: a half-time track (<95) counts at double, the
+  // same way the mixer, Library Coverage and the Tracklist filter count it.
+  effBpm: number;
 }
 
 // Max candidates the mixer's LLM step actually looks at (ai_dj/selector.py's
@@ -86,6 +89,7 @@ function parseLibraryCsv(text: string): LibraryTrack[] {
       name: row[idxName]?.trim() || "Unknown",
       artist: idxArtist !== -1 ? (row[idxArtist]?.trim() || "Unknown") : "Unknown",
       bpm: !isNaN(bpm) && bpm > 0 ? Math.round(bpm) : 0,
+      effBpm: !isNaN(bpm) && bpm > 0 ? Math.round(bpm < 95 ? bpm * 2 : bpm) : 0,
     });
   }
   return tracks;
@@ -188,8 +192,8 @@ export function AdvancedMixModal({ workoutTitle, onClose, onBuild }: Props) {
     const min = minBpm ? parseFloat(minBpm) : null;
     const max = maxBpm ? parseFloat(maxBpm) : null;
     return tracks.filter(t => {
-      if (min != null && (t.bpm === 0 || t.bpm < min)) return false;
-      if (max != null && (t.bpm === 0 || t.bpm > max)) return false;
+      if (min != null && (t.effBpm === 0 || t.effBpm < min)) return false;
+      if (max != null && (t.effBpm === 0 || t.effBpm > max)) return false;
       if (genreUris != null && !genreUris.has(t.uri)) return false;
       return true;
     });
