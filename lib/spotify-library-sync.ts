@@ -84,7 +84,7 @@ export async function syncLibraryWithSpotify(): Promise<LibrarySyncResult> {
   const result: LibrarySyncResult = { ...base, ok: true, libraryCount: libraryUris.size, spotifyCount: spotify.size };
 
   // 1. Library-only -> Spotify.
-  const toAdd = [...libraryUris].filter(u => !spotify.has(u));
+  const toAdd = Array.from(libraryUris).filter(u => !spotify.has(u));
   for (let i = 0; i < toAdd.length; i += 100) {
     const chunk = toAdd.slice(i, i + 100);
     const res = await spotifyCall(token.token, `${API}/playlists/${config.id}/items`, {
@@ -95,7 +95,7 @@ export async function syncLibraryWithSpotify(): Promise<LibrarySyncResult> {
   }
 
   // 2. Spotify-only: deleted from the library -> remove; otherwise import.
-  const spotifyOnly = [...spotify.keys()].filter(u => !libraryUris.has(u));
+  const spotifyOnly = Array.from(spotify.keys()).filter(u => !libraryUris.has(u));
   const deleted = findPreviouslyDeleted(spotifyOnly);
   const toRemove = spotifyOnly.filter(u => deleted[u]);
   const toImport = spotifyOnly.filter(u => !deleted[u]);
