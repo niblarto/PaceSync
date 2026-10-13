@@ -680,6 +680,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // Optional upper bound — set (with crawlerBpm as the lower) by the run-type
   // buttons; blank means "just this one BPM".
   const [crawlerBpmMax, setCrawlerBpmMax] = useState("");
+  // How many distinct artists a crawl may discover before it stops queuing.
+  const [crawlerMaxArtists, setCrawlerMaxArtists] = useState("50");
   // What the log below is from — kept with the log so a reload still says
   // which crawl it was.
   const [crawlerSeed, setCrawlerSeed] = useState<{ artist: string; bpm: number; bpmMax?: number | null; startedAt: string } | null>(null);
@@ -1095,7 +1097,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       const res = await fetch("/api/tracks/song-crawler", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(bpmMax ? { artist, bpmMin: bpm, bpmMax } : { artist, bpm }),
+        body: JSON.stringify({
+          artist,
+          ...(bpmMax ? { bpmMin: bpm, bpmMax } : { bpm }),
+          maxArtists: parseInt(crawlerMaxArtists, 10) > 0 ? parseInt(crawlerMaxArtists, 10) : 50,
+        }),
         signal: abort.signal,
       });
       if (!res.ok || !res.body) {
@@ -1142,13 +1148,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     try {
       const raw = localStorage.getItem(CRAWLER_STORE_KEY);
       if (!raw) return;
-      const saved = JSON.parse(raw) as { seed?: typeof crawlerSeed; log?: CrawlerLine[]; added?: number; artist?: string; bpm?: string; bpmMax?: string };
+      const saved = JSON.parse(raw) as { seed?: typeof crawlerSeed; log?: CrawlerLine[]; added?: number; artist?: string; bpm?: string; bpmMax?: string; maxArtists?: string };
       if (saved.seed) setCrawlerSeed(saved.seed);
       if (saved.log) setCrawlerLog(saved.log);
       if (typeof saved.added === "number") setCrawlerAdded(saved.added);
       if (saved.artist) setCrawlerArtist(saved.artist);
       if (saved.bpm) setCrawlerBpm(saved.bpm);
       if (saved.bpmMax) setCrawlerBpmMax(saved.bpmMax);
+      if (saved.maxArtists) setCrawlerMaxArtists(saved.maxArtists);
     } catch { /* storage unavailable — start empty */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1156,12 +1163,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     const id = setTimeout(() => {
       try {
         localStorage.setItem(CRAWLER_STORE_KEY, JSON.stringify({
-          seed: crawlerSeed, log: crawlerLog, added: crawlerAdded, artist: crawlerArtist, bpm: crawlerBpm, bpmMax: crawlerBpmMax,
+          seed: crawlerSeed, log: crawlerLog, added: crawlerAdded, artist: crawlerArtist, bpm: crawlerBpm, bpmMax: crawlerBpmMax, maxArtists: crawlerMaxArtists,
         }));
       } catch { /* storage full/unavailable — the log just won't persist */ }
     }, 800);
     return () => clearTimeout(id);
-  }, [crawlerSeed, crawlerLog, crawlerAdded, crawlerArtist, crawlerBpm, crawlerBpmMax]);
+  }, [crawlerSeed, crawlerLog, crawlerAdded, crawlerArtist, crawlerBpm, crawlerBpmMax, crawlerMaxArtists]);
 
   // Keep the log scrolled to the newest line.
   useEffect(() => {
@@ -6528,6 +6535,20 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
               disabled={crawlerRunning}
               placeholder="—"
+              className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 font-mono disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500"
+            />
+          </label>
+          <label className="text-xs text-slate-500 space-y-1 w-24" title="Stop queuing new artists once this many have been found (the queued ones are still finished)">
+            <span className="block">Max artists</span>
+            <input
+              type="number"
+              min={1}
+              max={500}
+              value={crawlerMaxArtists}
+              onChange={e => setCrawlerMaxArtists(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
+              disabled={crawlerRunning}
+              placeholder="50"
               className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 font-mono disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500"
             />
           </label>

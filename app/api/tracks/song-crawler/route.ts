@@ -18,7 +18,9 @@ const DOUBLETIME_THRESHOLD = 95; // mirrors MixPaceChart / replace-candidates
 const BPM_TOLERANCE = 1;
 // Once this many distinct artists have been found (seed included), no new
 // ones are queued — the crawl finishes the ones already queued, then ends.
-const MAX_ARTISTS = 50;
+// Set per crawl from the Settings field; this is the default and cap.
+const DEFAULT_MAX_ARTISTS = 50;
+const MAX_ARTISTS_CAP = 500;
 const RADIO_LIMIT = 25;
 const DEEZER_GAP_MS = 150; // Deezer allows 50 req/5s; stay well under
 
@@ -33,7 +35,8 @@ export async function POST(req: NextRequest) {
   // Either one BPM (matched ±BPM_TOLERANCE) or a min–max range (e.g. a run
   // type's limits from Settings > BPM). Compared on effective tempo, so a
   // half-time track counts at double tempo — same rule as the BPM limits.
-  const { artist, bpm, bpmMin, bpmMax } = await req.json() as { artist?: string; bpm?: number; bpmMin?: number; bpmMax?: number };
+  const { artist, bpm, bpmMin, bpmMax, maxArtists } = await req.json() as { artist?: string; bpm?: number; bpmMin?: number; bpmMax?: number; maxArtists?: number };
+  const MAX_ARTISTS = Math.min(Math.max(Math.round(Number(maxArtists) || DEFAULT_MAX_ARTISTS), 1), MAX_ARTISTS_CAP);
   const isRange = !!bpmMin && !!bpmMax && bpmMin > 0 && bpmMax >= bpmMin;
   if (!artist || (!isRange && !(bpm && bpm > 0))) {
     return NextResponse.json({ error: "artist and a bpm (or bpmMin/bpmMax range) required" }, { status: 400 });
