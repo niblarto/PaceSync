@@ -57,6 +57,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.toSize
 import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.HistoryTrack
@@ -88,6 +89,16 @@ import kotlin.math.roundToInt
 private const val DOUBLETIME_THRESHOLD = 95.0
 private fun effectiveTempo(tempo: Double): Double = if (tempo < DOUBLETIME_THRESHOLD) tempo * 2 else tempo
 private fun chartBpm(tempo: Double): Int = effectiveTempo(tempo).roundToInt()
+
+// Cumulative mix time: m:ss, or h:mm:ss from an hour in.
+private fun fmtElapsed(secs: Double): String {
+    val total = secs.roundToInt()
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val s = total % 60
+    return if (h > 0) "$h:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}"
+    else "$m:${s.toString().padStart(2, '0')}"
+}
 
 private fun fmtMs(ms: Long): String {
     val totalSec = ms / 1000
@@ -132,6 +143,11 @@ internal fun buildTimelineFromTracks(tracks: List<HistoryTrack>): List<com.paces
 }
 
 private const val MIN_SPAN_SEC = 30.0
+
+// Horizontal inset shared by the chart's plot area and the segment/track
+// strips so all three use one x axis. Zero: everything runs edge to edge,
+// with the pace/BPM axis labels drawn over the plot.
+private const val CHART_SIDE_PAD = 0f
 
 @Composable
 fun PaceChartScreen(api: PaceSyncApi, mixBuildClient: com.pacesync.app.network.MixBuildClient, date: String, title: String, onBack: () -> Unit) {
@@ -605,12 +621,12 @@ fun PaceChartScreen(api: PaceSyncApi, mixBuildClient: com.pacesync.app.network.M
                     detectTransformGestures { centroid, pan, zoom, _ ->
                         tapTimeSec = null
                         val spanNow = visibleEnd - visibleStart
-                        val widthPx = size.width.toFloat().takeIf { it > 0 } ?: return@detectTransformGestures
+                        val widthPx = (size.width - 2 * CHART_SIDE_PAD).takeIf { it > 0 } ?: return@detectTransformGestures
                         // Convert the centroid's screen-space x into a
                         // seconds-space anchor so zoom keeps that point
                         // stationary (pinch-zoom should zoom toward where
                         // your fingers are, not always the left edge).
-                        val anchorSec = visibleStart + (centroid.x / widthPx) * spanNow
+                        val anchorSec = visibleStart + ((centroid.x - CHART_SIDE_PAD) / widthPx).coerceIn(0f, 1f) * spanNow
                         var newSpan = (spanNow / zoom.coerceAtLeast(0.01f)).coerceIn(MIN_SPAN_SEC.toFloat(), totalSec.toFloat())
                         val anchorFrac = (anchorSec - visibleStart) / spanNow.coerceAtLeast(0.001f)
                         var newStart = anchorSec - anchorFrac * newSpan
@@ -663,8 +679,8 @@ fun PaceChartScreen(api: PaceSyncApi, mixBuildClient: com.pacesync.app.network.M
                     val tStart = (segStart - visibleStart).coerceAtLeast(0.0)
                     val tEnd = (segEnd - visibleStart).coerceAtMost(span)
                     if (tEnd <= 0 || tStart >= span) return@forEach
-                    val x0 = (tStart / span).toFloat() * size.width
-                    val x1 = (tEnd / span).toFloat() * size.width
+                    val x0 = CHART_SIDE_PAD + (tStart / span).toFloat() * (size.width - 2 * CHART_SIDE_PAD)
+                    val x1 = CHART_SIDE_PAD + (tEnd / span).toFloat() * (size.width - 2 * CHART_SIDE_PAD)
                     val w = (x1 - x0).coerceAtLeast(1f)
                     val segColor = SEGMENT_COLORS[segments.indexOf(segName).coerceAtLeast(0) % SEGMENT_COLORS.size]
                     drawRect(segColor.copy(alpha = 0.55f), topLeft = Offset(x0, 0f), size = Size(w, size.height))
@@ -976,6 +992,8 @@ private fun TrackStrip(
     val secondaryColor = Color(0xFFD1D5DB)
     val span = (visibleEnd - visibleStart).coerceAtLeast(0.001)
     val scope = rememberCoroutineScope()
+    // Same ordering the segment strip uses to pick SEGMENT_COLORS.
+    val segmentNames = remember(tracks) { tracks.map { it.segment ?: "" }.distinct() }
 
     // Rects are recomputed every frame inside the Canvas draw call (cheap —
     // only as many tracks as are currently visible), but tap/long-press
@@ -1020,30 +1038,56 @@ private fun TrackStrip(
                 },
         ) {
             val gapPx = 3f
+            val corner = androidx.compose.ui.geometry.CornerRadius(5.dp.toPx(), 5.dp.toPx())
+            // Sizes/baselines in dp/sp scaled to the chip height — raw pixel
+            // values crammed both lines into the top of the chip on a
+            // high-density screen, overlapping each other.
+            val nameSizePx = 11.sp.toPx()
+            val detailSizePx = 9.5.sp.toPx()
+            val nameBaseline = size.height * 0.42f
+            val detailBaseline = size.height * 0.80f
             val rects = mutableListOf<Pair<HistoryTrack, androidx.compose.ui.geometry.Rect>>()
             tracks.forEach { t ->
                 val tStart = (t.startsAtSec - visibleStart).coerceAtLeast(0.0)
                 val tEnd = (t.startsAtSec + t.durationSec - visibleStart).coerceAtMost(span)
                 if (tEnd <= 0 || tStart >= span) return@forEach
-                val x0 = (tStart / span).toFloat() * size.width
-                val x1 = (tEnd / span).toFloat() * size.width
+                val x0 = CHART_SIDE_PAD + (tStart / span).toFloat() * (size.width - 2 * CHART_SIDE_PAD)
+                val x1 = CHART_SIDE_PAD + (tEnd / span).toFloat() * (size.width - 2 * CHART_SIDE_PAD)
                 val w = (x1 - x0 - gapPx).coerceAtLeast(1f)
                 rects.add(t to androidx.compose.ui.geometry.Rect(Offset(x0, 0f), Size(w, size.height)))
 
                 val isSelected = t.uri != null && selectedUris.contains(t.uri)
                 val isPlayingTrack = t.uri != null && t.uri == playingTrackUri
+                // Diagonal gradient tinted with the track's segment colour
+                // (same palette as the segment strip above), plus a faint
+                // light outline so adjacent chips read as separate buttons.
+                val segColor = SEGMENT_COLORS[segmentNames.indexOf(t.segment ?: "").coerceAtLeast(0) % SEGMENT_COLORS.size]
                 drawRoundRect(
-                    chipColor,
+                    brush = androidx.compose.ui.graphics.Brush.linearGradient(
+                        listOf(
+                            androidx.compose.ui.graphics.lerp(segColor, chipColor, 0.45f),
+                            androidx.compose.ui.graphics.lerp(segColor, Color(0xFF0F172A), 0.82f),
+                        ),
+                        start = Offset(x0, 0f),
+                        end = Offset(x0 + w, size.height),
+                    ),
                     topLeft = Offset(x0, 0f),
                     size = Size(w, size.height),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(12f, 12f),
+                    cornerRadius = corner,
+                )
+                drawRoundRect(
+                    Color.White.copy(alpha = 0.12f),
+                    topLeft = Offset(x0, 0f),
+                    size = Size(w, size.height),
+                    cornerRadius = corner,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx()),
                 )
                 if (isSelected) {
                     drawRoundRect(
                         selectedColor,
                         topLeft = Offset(x0, 0f),
                         size = Size(w, size.height),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(12f, 12f),
+                        cornerRadius = corner,
                         style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f),
                     )
                 }
@@ -1055,7 +1099,7 @@ private fun TrackStrip(
                         Color(0xFFF97316),
                         topLeft = Offset(x0, 0f),
                         size = Size(w, size.height),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(12f, 12f),
+                        cornerRadius = corner,
                         style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f),
                     )
                 }
@@ -1066,27 +1110,22 @@ private fun TrackStrip(
                     drawContext.canvas.nativeCanvas.apply {
                         val namePaint = android.graphics.Paint().apply {
                             color = textColor.toArgb()
-                            textSize = 30f
+                            textSize = nameSizePx
                             isFakeBoldText = true
                             isAntiAlias = true
                         }
                         val detailPaint = android.graphics.Paint().apply {
                             color = secondaryColor.toArgb()
-                            textSize = 26f
-                            isFakeBoldText = true
+                            textSize = detailSizePx
                             isAntiAlias = true
                         }
-                        val textX = x0 + 10f
-                        // Baselines sized to fit a 48dp-tall strip snugly —
-                        // was a fixed 64dp with these same two lines at
-                        // y=28/54, leaving a visibly empty band below the
-                        // text (confirmed from a real screenshot).
-                        drawText(t.name, textX, 22f, namePaint)
+                        val textX = x0 + 8.dp.toPx()
+                        drawText(t.name, textX, nameBaseline, namePaint)
                         val details = listOfNotNull(
                             t.targetPaceSec?.let { "${fmtPace(it)}/mi" },
                             t.tempo?.let { "${chartBpm(it)} BPM" },
                         ).joinToString(" · ")
-                        if (details.isNotEmpty()) drawText(details, textX, 44f, detailPaint)
+                        if (details.isNotEmpty()) drawText(details, textX, detailBaseline, detailPaint)
                     }
                 }
             }
@@ -1220,8 +1259,8 @@ private fun PaceBpmChart(
                 detectTapGestures { pos ->
                     // Same leftPad/plotWidth math as the draw pass below —
                     // kept in sync by using identical constants.
-                    val leftPad = 56f
-                    val rightPad = 56f
+                    val leftPad = CHART_SIDE_PAD
+                    val rightPad = CHART_SIDE_PAD
                     val plotWidth = size.width - leftPad - rightPad
                     if (plotWidth <= 0) return@detectTapGestures
                     val frac = ((pos.x - leftPad) / plotWidth).coerceIn(0f, 1f)
@@ -1229,10 +1268,12 @@ private fun PaceBpmChart(
                 }
             },
     ) {
-        val leftPad = 56f
-        val rightPad = 56f
+        val leftPad = CHART_SIDE_PAD
+        val rightPad = CHART_SIDE_PAD
         val topPad = 16f
-        val bottomPad = 16f
+        val timeLabelSize = 9.sp.toPx()
+        // Room under the plot for the cumulative-time labels.
+        val bottomPad = 16f + timeLabelSize + 4.dp.toPx()
         val plotWidth = size.width - leftPad - rightPad
         val plotHeight = size.height - topPad - bottomPad
         if (plotWidth <= 0 || plotHeight <= 0 || totalSec <= 0) return@Canvas
@@ -1275,21 +1316,51 @@ private fun PaceBpmChart(
             val paceLabelPaint = android.graphics.Paint().apply {
                 color = paceColor.toArgb()
                 textSize = 24f
-                textAlign = android.graphics.Paint.Align.RIGHT
+                textAlign = android.graphics.Paint.Align.LEFT
             }
             val bpmLabelPaint = android.graphics.Paint().apply {
                 color = bpmColor.toArgb()
                 textSize = 24f
-                textAlign = android.graphics.Paint.Align.LEFT
+                textAlign = android.graphics.Paint.Align.RIGHT
             }
             // Top of the plot is now the FASTEST pace (paceMin) per the
             // flipped yForPace above — labels swapped to match.
-            drawText("${fmtPace(paceMin)}", leftPad - 6f, topPad + 8f, paceLabelPaint)
-            drawText("${fmtPace((paceMax + paceMin) / 2)}", leftPad - 6f, topPad + plotHeight / 2 + 8f, paceLabelPaint)
-            drawText("${fmtPace(paceMax)}", leftPad - 6f, topPad + plotHeight, paceLabelPaint)
-            drawText("${bpmMax.roundToInt()}", leftPad + plotWidth + 6f, topPad + 8f, bpmLabelPaint)
-            drawText("${((bpmMax + bpmMin) / 2).roundToInt()}", leftPad + plotWidth + 6f, topPad + plotHeight / 2 + 8f, bpmLabelPaint)
-            drawText("${bpmMin.roundToInt()}", leftPad + plotWidth + 6f, topPad + plotHeight, bpmLabelPaint)
+            drawText("${fmtPace(paceMin)}", leftPad + 6f, topPad + 8f, paceLabelPaint)
+            drawText("${fmtPace((paceMax + paceMin) / 2)}", leftPad + 6f, topPad + plotHeight / 2 + 8f, paceLabelPaint)
+            drawText("${fmtPace(paceMax)}", leftPad + 6f, topPad + plotHeight, paceLabelPaint)
+            drawText("${bpmMax.roundToInt()}", leftPad + plotWidth - 6f, topPad + 8f, bpmLabelPaint)
+            drawText("${((bpmMax + bpmMin) / 2).roundToInt()}", leftPad + plotWidth - 6f, topPad + plotHeight / 2 + 8f, bpmLabelPaint)
+            drawText("${bpmMin.roundToInt()}", leftPad + plotWidth - 6f, topPad + plotHeight, bpmLabelPaint)
+
+            // Cumulative time at each track boundary, along the x axis.
+            // Labels that would collide with the previous one are skipped —
+            // zooming in reveals them.
+            val timePaint = android.graphics.Paint().apply {
+                color = Color(0xFF9CA3AF).toArgb()
+                textSize = timeLabelSize
+                textAlign = android.graphics.Paint.Align.CENTER
+                isAntiAlias = true
+            }
+            val tickPaint = android.graphics.Paint().apply {
+                color = Color(0xFF9CA3AF).toArgb()
+                strokeWidth = 1.dp.toPx()
+            }
+            val axisY = topPad + plotHeight
+            val labelY = axisY + 6.dp.toPx() + timeLabelSize * 0.8f
+            val minGap = 6.dp.toPx()
+            var lastRight = Float.NEGATIVE_INFINITY
+            val boundaries = (tracks.map { it.startsAtSec } + totalSec).distinct()
+            for (t in boundaries) {
+                if (t < visibleStart || t > visibleEnd) continue
+                val x = xFor(t)
+                drawLine(x, axisY, x, axisY + 4.dp.toPx(), tickPaint)
+                val label = fmtElapsed(t)
+                val half = timePaint.measureText(label) / 2
+                val cx = x.coerceIn(leftPad + half, leftPad + plotWidth - half)
+                if (cx - half < lastRight + minGap) continue
+                drawText(label, cx, labelY, timePaint)
+                lastRight = cx + half
+            }
         }
 
         // Tap-to-inspect overlay — vertical reference line from the plot's
