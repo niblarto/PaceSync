@@ -672,7 +672,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // adding same-BPM finds to the library (app/api/tracks/song-crawler).
   // Stop = abort the streaming request, which ends the crawl server-side.
   interface CrawlerLine { level: "info" | "match" | "warn" | "error"; msg: string; at: string }
-  const [crawlerSeed, setCrawlerSeed] = useState<{ uri: string; label: string; bpm: number } | null>(null);
+  const [crawlerArtist, setCrawlerArtist] = useState("");
+  const [crawlerBpm, setCrawlerBpm] = useState("");
+  // Optional upper bound — set (with crawlerBpm as the lower) by the run-type
+  // buttons; blank means "just this one BPM".
+  const [crawlerBpmMax, setCrawlerBpmMax] = useState("");
+  // What the log below is from — kept with the log so a reload still says
+  // which crawl it was.
+  const [crawlerSeed, setCrawlerSeed] = useState<{ artist: string; bpm: number; bpmMax?: number | null; startedAt: string } | null>(null);
   const [crawlerRunning, setCrawlerRunning] = useState(false);
   const [crawlerLog, setCrawlerLog] = useState<CrawlerLine[]>([]);
   const [crawlerAdded, setCrawlerAdded] = useState(0);
@@ -1065,28 +1072,26 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setCrawlerLog(prev => [...prev, { level, msg, at }].slice(-2000));
   }
 
-  async function startSongCrawler(track: ManagedTrack) {
+  async function startSongCrawler() {
     if (crawlerRunning) return;
-    if (!track.bpm) {
-      setCrawlerSeed({ uri: track.uri, label: `${track.name} — ${track.artist}`, bpm: 0 });
-      setCrawlerLog([]);
-      crawlerAppend("error", "This track has no BPM to match against.");
-      return;
-    }
+    const artist = crawlerArtist.trim();
+    const bpm = parseFloat(crawlerBpm);
+    const bpmMaxRaw = parseFloat(crawlerBpmMax);
+    const bpmMax = bpmMaxRaw > 0 && bpmMaxRaw > bpm ? bpmMaxRaw : null;
+    if (!artist || !bpm || bpm <= 0) return;
     const abort = new AbortController();
     crawlerAbortRef.current = abort;
-    setCrawlerSeed({ uri: track.uri, label: `${track.name} — ${track.artist}`, bpm: track.bpm });
+    setCrawlerSeed({ artist, bpm, bpmMax, startedAt: new Date().toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) });
     setCrawlerLog([]);
     setCrawlerAdded(0);
     setCrawlerRunning(true);
-    crawlerAppend("info", `Starting from "${track.name}" by ${track.artist} (${Math.round(track.bpm)} BPM)`);
+    crawlerAppend("info", `Crawling from ${artist} for ${bpmMax ? `${Math.round(bpm)}–${Math.round(bpmMax)}` : Math.round(bpm)} BPM`);
     let added = 0;
     try {
       const res = await fetch("/api/tracks/song-crawler", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // First artist only — a "A, B" multi-artist credit isn't a Deezer artist name.
-        body: JSON.stringify({ artist: track.artist.split(",")[0].trim(), bpm: track.bpm }),
+        body: JSON.stringify(bpmMax ? { artist, bpmMin: bpm, bpmMax } : { artist, bpm }),
         signal: abort.signal,
       });
       if (!res.ok || !res.body) {
@@ -1126,6 +1131,34 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     crawlerAbortRef.current?.abort();
   }
 
+  // Last crawl's log survives reloads (this browser only). Loaded once on
+  // mount, saved shortly after it changes.
+  const CRAWLER_STORE_KEY = "pacesync.songCrawler.last";
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(CRAWLER_STORE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as { seed?: typeof crawlerSeed; log?: CrawlerLine[]; added?: number; artist?: string; bpm?: string; bpmMax?: string };
+      if (saved.seed) setCrawlerSeed(saved.seed);
+      if (saved.log) setCrawlerLog(saved.log);
+      if (typeof saved.added === "number") setCrawlerAdded(saved.added);
+      if (saved.artist) setCrawlerArtist(saved.artist);
+      if (saved.bpm) setCrawlerBpm(saved.bpm);
+      if (saved.bpmMax) setCrawlerBpmMax(saved.bpmMax);
+    } catch { /* storage unavailable — start empty */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    const id = setTimeout(() => {
+      try {
+        localStorage.setItem(CRAWLER_STORE_KEY, JSON.stringify({
+          seed: crawlerSeed, log: crawlerLog, added: crawlerAdded, artist: crawlerArtist, bpm: crawlerBpm, bpmMax: crawlerBpmMax,
+        }));
+      } catch { /* storage full/unavailable — the log just won't persist */ }
+    }, 800);
+    return () => clearTimeout(id);
+  }, [crawlerSeed, crawlerLog, crawlerAdded, crawlerArtist, crawlerBpm, crawlerBpmMax]);
+
   // Keep the log scrolled to the newest line.
   useEffect(() => {
     const el = crawlerLogRef.current;
@@ -1160,6 +1193,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     : [];
   const allArtists = tracklist
     ? Array.from(new Set(tracklist.map(t => t.artist).filter(Boolean))).sort()
+    : [];
+  // Single artist names for the Song Crawler's artist field — library
+  // credits like "Blur;Adrian Sherwood" split into their own names.
+  const crawlerArtistOptions = tracklist
+    ? Array.from(new Set(tracklist.flatMap(t => t.artist.split(/[;,]/).map(a => a.trim())).filter(Boolean))).sort((a, b) => a.localeCompare(b))
     : [];
 
   // Near-duplicate groups: same song (by dupMatchKey) appearing under two-plus
@@ -6327,8 +6365,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     onSimilar={() => router.push(`/dashboard?similar=${encodeURIComponent(t.uri)}`)}
                     onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=style`)}
                     onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=tempo`)}
-                    onSongCrawler={() => startSongCrawler(t)}
-                    crawling={crawlerRunning && crawlerSeed?.uri === t.uri}
                   />
                   {genres.length > 0 && (
                     <div className="flex flex-wrap gap-1 pl-[3.25rem] pr-3 pb-2 -mt-1">
@@ -6421,56 +6457,146 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         )}
       </div>
 
-      {crawlerSeed && (
-        <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <h3 className="font-semibold text-slate-100 flex items-center gap-2">
-                <span className="text-teal-400">🕸</span> Song Crawler
-                {crawlerRunning && <span className="inline-block w-2 h-2 rounded-full bg-teal-400 animate-pulse" />}
-              </h3>
-              <p className="text-xs text-slate-500 truncate">
-                Seed: {crawlerSeed.label}{crawlerSeed.bpm ? ` · ${Math.round(crawlerSeed.bpm)} BPM` : ""} · {crawlerAdded} added
-              </p>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              {crawlerRunning ? (
-                <button
-                  onClick={stopSongCrawler}
-                  className="text-xs rounded-lg border border-red-500/40 bg-red-500/15 hover:bg-red-500/25 text-red-300 font-semibold px-3 py-1.5 transition-colors"
-                >
-                  ■ Stop
-                </button>
-              ) : (
-                <button
-                  onClick={() => { setCrawlerSeed(null); setCrawlerLog([]); }}
-                  className="text-xs rounded-lg border border-white/10 hover:border-white/20 text-slate-400 hover:text-slate-200 px-3 py-1.5 transition-colors"
-                >
-                  Close
-                </button>
-              )}
-            </div>
-          </div>
-          <div
-            ref={crawlerLogRef}
-            className="h-72 overflow-y-auto rounded-lg border border-white/10 bg-slate-950/70 p-3 font-mono text-[11px] leading-relaxed"
-          >
-            {crawlerLog.map((line, i) => (
-              <div
-                key={i}
-                className={
-                  line.level === "match" ? "text-teal-300 font-semibold"
-                    : line.level === "warn" ? "text-amber-400"
-                    : line.level === "error" ? "text-red-400"
-                    : "text-slate-400"
-                }
-              >
-                <span className="text-slate-600">{line.at}</span> {line.msg}
-              </div>
-            ))}
+      {/* ── Song Crawler ── always shown; the last crawl's log is kept. */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h3 className="font-semibold text-slate-100 flex items-center gap-2">
+              <span className="text-teal-400">🕸</span> Song Crawler
+              {crawlerRunning && <span className="inline-block w-2 h-2 rounded-full bg-teal-400 animate-pulse" />}
+            </h3>
+            <p className="text-xs text-slate-500">
+              Walks Deezer artist radio from an artist, adding tracks at the BPM (±1) or within the range to the library. Half-time tracks count at double tempo.
+            </p>
           </div>
         </div>
-      )}
+
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="text-xs text-slate-500 space-y-1 flex-1 min-w-[12rem]">
+            <span className="block">Artist</span>
+            <input
+              list="crawler-artist-options"
+              value={crawlerArtist}
+              onChange={e => setCrawlerArtist(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
+              disabled={crawlerRunning}
+              placeholder="Type to filter artists…"
+              className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500"
+            />
+            <datalist id="crawler-artist-options">
+              {crawlerArtistOptions.map(a => <option key={a} value={a} />)}
+            </datalist>
+          </label>
+          <label className="text-xs text-slate-500 space-y-1 w-24">
+            <span className="block">BPM</span>
+            <input
+              type="number"
+              min={1}
+              value={crawlerBpm}
+              onChange={e => setCrawlerBpm(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
+              disabled={crawlerRunning}
+              placeholder="e.g. 170"
+              className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 font-mono disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500"
+            />
+          </label>
+          <span className="text-xs text-slate-600 pb-2">to</span>
+          <label className="text-xs text-slate-500 space-y-1 w-24">
+            <span className="block">Max (optional)</span>
+            <input
+              type="number"
+              min={1}
+              value={crawlerBpmMax}
+              onChange={e => setCrawlerBpmMax(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
+              disabled={crawlerRunning}
+              placeholder="—"
+              className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 font-mono disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500"
+            />
+          </label>
+          <button
+            onClick={() => void startSongCrawler()}
+            disabled={crawlerRunning || !crawlerArtist.trim() || !(parseFloat(crawlerBpm) > 0)}
+            className="rounded-lg bg-teal-500 hover:bg-teal-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-2 transition-colors"
+          >
+            🕸 Crawl
+          </button>
+          <button
+            onClick={stopSongCrawler}
+            disabled={!crawlerRunning}
+            className="rounded-lg border border-red-500/40 bg-red-500/15 hover:bg-red-500/25 disabled:opacity-30 disabled:cursor-not-allowed text-red-300 font-semibold text-xs px-4 py-2 transition-colors"
+          >
+            ■ Stop
+          </button>
+          <button
+            onClick={() => { setCrawlerLog([]); setCrawlerSeed(null); setCrawlerAdded(0); }}
+            disabled={crawlerRunning || crawlerLog.length === 0}
+            className="rounded-lg border border-white/10 hover:border-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-slate-400 hover:text-slate-200 text-xs px-3 py-2 transition-colors"
+          >
+            Clear log
+          </button>
+        </div>
+
+        {/* Run-type ranges from "Run BPM limits" (Settings > BPM) — fills
+            the BPM / Max fields; a type with no limits set is disabled. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-slate-500 mr-1">Run type:</span>
+          {([
+            ["warmup", "Warm up"],
+            ["work", "Work"],
+            ["easy", "Easy"],
+            ["cooldown", "Cool down"],
+            ["rest", "Rest"],
+          ] as [string, string][]).map(([kind, label]) => {
+            const min = Number(bpmOv[kind]?.min.trim() || NaN);
+            const max = Number(bpmOv[kind]?.max.trim() || NaN);
+            const valid = min > 0 && max >= min;
+            const active = valid && Number(crawlerBpm) === min && Number(crawlerBpmMax) === max;
+            return (
+              <button
+                key={kind}
+                onClick={() => { setCrawlerBpm(String(min)); setCrawlerBpmMax(String(max)); }}
+                disabled={!valid || crawlerRunning}
+                title={valid ? `${label}: ${min}–${max} BPM` : `${label} has no BPM limits set (Settings → BPM)`}
+                className={`text-xs rounded-lg border px-2.5 py-1 transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
+                  active
+                    ? "border-teal-500/50 bg-teal-500/15 text-teal-300"
+                    : "border-white/10 text-slate-400 hover:text-slate-200 hover:border-white/20"
+                }`}
+              >
+                {label}{valid ? ` ${min}–${max}` : ""}
+              </button>
+            );
+          })}
+        </div>
+
+        {crawlerSeed && (
+          <p className="text-xs text-slate-500">
+            {crawlerRunning ? "Running" : "Last crawl"}: {crawlerSeed.artist} · {crawlerSeed.bpmMax ? `${Math.round(crawlerSeed.bpm)}–${Math.round(crawlerSeed.bpmMax)}` : Math.round(crawlerSeed.bpm)} BPM · started {crawlerSeed.startedAt} · {crawlerAdded} added
+          </p>
+        )}
+
+        <div
+          ref={crawlerLogRef}
+          className="h-72 overflow-y-auto rounded-lg border border-white/10 bg-slate-950/70 p-3 font-mono text-[11px] leading-relaxed"
+        >
+          {crawlerLog.length === 0 ? (
+            <p className="text-slate-600">No crawl yet — pick an artist and BPM, then press Crawl.</p>
+          ) : crawlerLog.map((line, i) => (
+            <div
+              key={i}
+              className={
+                line.level === "match" ? "text-teal-300 font-semibold"
+                  : line.level === "warn" ? "text-amber-400"
+                  : line.level === "error" ? "text-red-400"
+                  : "text-slate-400"
+              }
+            >
+              <span className="text-slate-600">{line.at}</span> {line.msg}
+            </div>
+          ))}
+        </div>
+      </div>
 
     </div>
     </div>

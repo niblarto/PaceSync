@@ -19,10 +19,6 @@ interface Props {
   onSuggestStyle?: () => void;
   onSuggestTempo?: () => void;
   onSuggestArtist?: () => void;
-  /** Song Crawler — crawls Deezer artist radio for same-BPM tracks. */
-  onSongCrawler?: () => void;
-  /** True while a Song Crawler run seeded from THIS track is in progress. */
-  crawling?: boolean;
   /** Which suggest search is currently running for THIS track (shows a spinner on that icon) */
   suggestBusy?: "style" | "tempo" | "artist" | null;
   /** Confirmed "Today's Run" mixes this track has featured in, if any */
@@ -199,17 +195,6 @@ export function ArtistIcon() {
   );
 }
 
-// Spider-web glyph for the Song Crawler.
-export function CrawlerIcon() {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" className="w-3.5 h-3.5">
-      <path d="M10 2v16M2 10h16M4.3 4.3l11.4 11.4M15.7 4.3L4.3 15.7" />
-      <path d="M10 6.2l2.7 1.1 1.1 2.7-1.1 2.7-2.7 1.1-2.7-1.1-1.1-2.7 1.1-2.7z" />
-      <path d="M10 3.6l4.5 1.9 1.9 4.5-1.9 4.5-4.5 1.9-4.5-1.9-1.9-4.5 1.9-4.5z" />
-    </svg>
-  );
-}
-
 export function EjectIcon() {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
@@ -253,7 +238,7 @@ export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string)
   }
 }
 
-export function TrackRow({ track, index, onDelete, onRemoveFromMix, onReplace, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, onSongCrawler, crawling, suggestBusy, playedCount, showStats = true, isPlaying, onPlay, reorderable, onDragHandleStart }: Props) {
+export function TrackRow({ track, index, onDelete, onRemoveFromMix, onReplace, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, showStats = true, isPlaying, onPlay, reorderable, onDragHandleStart }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(track.name)}`;
@@ -361,19 +346,6 @@ export function TrackRow({ track, index, onDelete, onRemoveFromMix, onReplace, o
           title="Search more by this artist (most popular)"
         >
           {suggestBusy === "artist" ? <MiniSpinner /> : <ArtistIcon />}
-        </button>
-      )}
-      {onSongCrawler && (
-        <button
-          onClick={onSongCrawler}
-          className={`p-1.5 transition-all shrink-0 rounded ${
-            crawling
-              ? "opacity-100 text-teal-400"
-              : "opacity-0 group-hover:opacity-100 text-slate-600 hover:text-teal-400"
-          }`}
-          title="Song Crawler — find same-BPM tracks via Deezer artist radio"
-        >
-          {crawling ? <MiniSpinner /> : <CrawlerIcon />}
         </button>
       )}
       {onReplace && (

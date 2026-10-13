@@ -30,9 +30,17 @@ interface DeezerRadioTrack { id: number; title: string; artist: { id: number; na
 export async function POST(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { artist, bpm } = await req.json() as { artist?: string; bpm?: number };
-  if (!artist || !bpm || bpm <= 0) return NextResponse.json({ error: "artist and bpm required" }, { status: 400 });
-  const target = effective(bpm);
+  // Either one BPM (matched ±BPM_TOLERANCE) or a min–max range (e.g. a run
+  // type's limits from Settings > BPM). Compared on effective tempo, so a
+  // half-time track counts at double tempo — same rule as the BPM limits.
+  const { artist, bpm, bpmMin, bpmMax } = await req.json() as { artist?: string; bpm?: number; bpmMin?: number; bpmMax?: number };
+  const isRange = !!bpmMin && !!bpmMax && bpmMin > 0 && bpmMax >= bpmMin;
+  if (!artist || (!isRange && !(bpm && bpm > 0))) {
+    return NextResponse.json({ error: "artist and a bpm (or bpmMin/bpmMax range) required" }, { status: 400 });
+  }
+  const lo = isRange ? effective(bpmMin!) : effective(bpm!) - BPM_TOLERANCE;
+  const hi = isRange ? effective(bpmMax!) : effective(bpm!) + BPM_TOLERANCE;
+  const targetLabel = isRange ? `${Math.round(lo)}–${Math.round(hi)} BPM` : `${Math.round(effective(bpm!))} BPM (±${BPM_TOLERANCE})`;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -73,7 +81,7 @@ export async function POST(req: NextRequest) {
           send({ type: "done", added });
           return;
         }
-        log(`Seed artist: ${seed.name} — looking for ${Math.round(target)} BPM (±${BPM_TOLERANCE}, half/double-time aware)`);
+        log(`Seed artist: ${seed.name} — looking for ${targetLabel}, half-time tracks counted at double tempo`);
 
         const queue: { id: number; name: string }[] = [seed];
         const queuedArtists = new Set<number>([seed.id]);
@@ -115,7 +123,8 @@ export async function POST(req: NextRequest) {
             }
             if (tempo == null) { log(`  ${label}: no BPM available`); continue; }
 
-            const matches = Math.abs(effective(tempo) - target) <= BPM_TOLERANCE;
+            const eff = effective(tempo);
+            const matches = eff >= lo && eff <= hi;
             if (!matches) { log(`  ${label}: ${Math.round(tempo)} BPM`); continue; }
 
             if (!isrc) { log(`  ${label}: ${Math.round(tempo)} BPM matches, but no ISRC to resolve on Spotify`, "warn"); continue; }
