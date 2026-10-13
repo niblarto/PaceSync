@@ -247,6 +247,7 @@ FILES = [
     ('app/api/tracks/genre-uris/route.ts',         'app/api/tracks/genre-uris/route.ts'),
     ('app/api/tracks/move-genre/route.ts',         'app/api/tracks/move-genre/route.ts'),
     ('app/api/tracks/replace-candidates-budget/route.ts', 'app/api/tracks/replace-candidates-budget/route.ts'),
+    ('app/api/tracks/song-crawler/route.ts',     'app/api/tracks/song-crawler/route.ts'),
     ('app/api/tracks/lookup-list/route.ts',        'app/api/tracks/lookup-list/route.ts'),
     ('app/api/tracks/lookup-fit/route.ts',         'app/api/tracks/lookup-fit/route.ts'),
     ('lib/fit-budget.ts',                          'lib/fit-budget.ts'),

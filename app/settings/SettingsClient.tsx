@@ -91,6 +91,12 @@ interface ModelCompareResult {
   mix?: { trackUris: string[]; totalSec: number; timeline: ModelCompareTimelineSegment[]; llmFailures?: string[] };
 }
 
+// 406133 -> "6:46"
+function fmtDurationMs(ms: number): string {
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
 function calcZones(maxHR: number, restingHR: number): ZoneRow[] {
   const hrr = maxHR - restingHR;
   const pcts = [0.60, 0.70, 0.80, 0.90, 1.00];
@@ -661,6 +667,17 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [tracklistVisibleCount, setTracklistVisibleCount] = useState(100);
   const tracklistContainerRef = useRef<HTMLDivElement>(null);
   const tracklistSentinelRef = useRef<HTMLDivElement>(null);
+
+  // ── Song Crawler ── crawls Deezer artist radio from a track's artist,
+  // adding same-BPM finds to the library (app/api/tracks/song-crawler).
+  // Stop = abort the streaming request, which ends the crawl server-side.
+  interface CrawlerLine { level: "info" | "match" | "warn" | "error"; msg: string; at: string }
+  const [crawlerSeed, setCrawlerSeed] = useState<{ uri: string; label: string; bpm: number } | null>(null);
+  const [crawlerRunning, setCrawlerRunning] = useState(false);
+  const [crawlerLog, setCrawlerLog] = useState<CrawlerLine[]>([]);
+  const [crawlerAdded, setCrawlerAdded] = useState(0);
+  const crawlerAbortRef = useRef<AbortController | null>(null);
+  const crawlerLogRef = useRef<HTMLDivElement>(null);
   const [bulkDeleteArtist, setBulkDeleteArtist] = useState("");
   const [bulkDeleteTarget, setBulkDeleteTarget] = useState<{ kind: "genre" | "artist"; value: string; tracks: ManagedTrack[] } | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -862,13 +879,21 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   async function saveFieldEdit(uri: string, header: string) {
     const key = FIELD_TO_KEY[header];
     if (!key) return;
+    // Duration can be typed as m:ss (how the Tracklist shows it); a plain
+    // number is still taken as milliseconds.
+    let value = editingValue;
+    if (header === "Duration (ms)" && value.includes(":")) {
+      const m = value.trim().match(/^(\d+):(\d{1,2})$/);
+      if (!m || Number(m[2]) > 59) { setEditingError("Use m:ss, e.g. 3:45"); return; }
+      value = String((Number(m[1]) * 60 + Number(m[2])) * 1000);
+    }
     setEditingSaving(true);
     setEditingError(null);
     try {
       const res = await fetch("/api/tracks/update-field", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uri, field: key, value: editingValue }),
+        body: JSON.stringify({ uri, field: key, value }),
       });
       const d = await res.json() as { error?: string };
       if (!res.ok) throw new Error(d.error ?? "Failed to save");
@@ -1033,6 +1058,79 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setTracklistLoading(false);
     }
   }, []);
+
+  function crawlerAppend(level: CrawlerLine["level"], msg: string) {
+    const at = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    // Capped so a long crawl doesn't grow the log without bound.
+    setCrawlerLog(prev => [...prev, { level, msg, at }].slice(-2000));
+  }
+
+  async function startSongCrawler(track: ManagedTrack) {
+    if (crawlerRunning) return;
+    if (!track.bpm) {
+      setCrawlerSeed({ uri: track.uri, label: `${track.name} — ${track.artist}`, bpm: 0 });
+      setCrawlerLog([]);
+      crawlerAppend("error", "This track has no BPM to match against.");
+      return;
+    }
+    const abort = new AbortController();
+    crawlerAbortRef.current = abort;
+    setCrawlerSeed({ uri: track.uri, label: `${track.name} — ${track.artist}`, bpm: track.bpm });
+    setCrawlerLog([]);
+    setCrawlerAdded(0);
+    setCrawlerRunning(true);
+    crawlerAppend("info", `Starting from "${track.name}" by ${track.artist} (${Math.round(track.bpm)} BPM)`);
+    let added = 0;
+    try {
+      const res = await fetch("/api/tracks/song-crawler", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // First artist only — a "A, B" multi-artist credit isn't a Deezer artist name.
+        body: JSON.stringify({ artist: track.artist.split(",")[0].trim(), bpm: track.bpm }),
+        signal: abort.signal,
+      });
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `Song Crawler failed (${res.status})`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const msg = JSON.parse(dataLine.slice(6)) as { type: string; level?: CrawlerLine["level"]; msg?: string; error?: string };
+          if (msg.type === "log" && msg.msg) crawlerAppend(msg.level ?? "info", msg.msg);
+          else if (msg.type === "added") { added++; setCrawlerAdded(n => n + 1); }
+          else if (msg.type === "error") crawlerAppend("error", msg.error ?? "Song Crawler failed");
+        }
+      }
+    } catch (e) {
+      if (abort.signal.aborted) crawlerAppend("warn", `Stopped by you. ${added} track${added === 1 ? "" : "s"} added.`);
+      else crawlerAppend("error", e instanceof Error ? e.message : "Song Crawler failed");
+    } finally {
+      crawlerAbortRef.current = null;
+      setCrawlerRunning(false);
+      if (added > 0) loadTracklist();
+    }
+  }
+
+  function stopSongCrawler() {
+    crawlerAbortRef.current?.abort();
+  }
+
+  // Keep the log scrolled to the newest line.
+  useEffect(() => {
+    const el = crawlerLogRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [crawlerLog]);
 
   async function deleteManagedTrack(track: ManagedTrack, skipDeletedLog?: boolean) {
     setTracklistDeletingUris(prev => new Set(prev).add(track.uri));
@@ -6170,6 +6268,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     onSimilar={() => router.push(`/dashboard?similar=${encodeURIComponent(t.uri)}`)}
                     onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=style`)}
                     onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=tempo`)}
+                    onSongCrawler={() => startSongCrawler(t)}
+                    crawling={crawlerRunning && crawlerSeed?.uri === t.uri}
                   />
                   {genres.length > 0 && (
                     <div className="flex flex-wrap gap-1 pl-[3.25rem] pr-3 pb-2 -mt-1">
@@ -6203,19 +6303,22 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                       ["Genres", t.genre || null],
                     ] as [string, number | string | null][]).map(([field, value]) => {
                       const editKey = `${t.uri}::${field}`;
+                      const isDuration = field === "Duration (ms)";
+                      const shown = isDuration && typeof value === "number" ? fmtDurationMs(value) : value;
+                      const label = isDuration ? "Duration" : field;
                       if (editingField === editKey) {
                         return (
                           <span key={field} className="text-xs flex items-center gap-1.5">
                             <input
                               autoFocus
-                              type={field === "Genres" ? "text" : "number"}
+                              type={field === "Genres" || isDuration ? "text" : "number"}
                               value={editingValue}
                               onChange={e => setEditingValue(e.target.value)}
                               onKeyDown={e => {
                                 if (e.key === "Enter") saveFieldEdit(t.uri, field);
                                 if (e.key === "Escape") { setEditingField(null); setEditingError(null); }
                               }}
-                              placeholder={field}
+                              placeholder={isDuration ? "m:ss" : field}
                               className="w-20 rounded bg-slate-800/80 border border-white/20 text-xs px-1.5 py-0.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500"
                             />
                             <button
@@ -6238,11 +6341,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                       return (
                         <span
                           key={field}
-                          onClick={() => { setEditingField(editKey); setEditingValue(value != null ? String(value) : ""); setEditingError(null); }}
-                          title={`Click to edit ${field}`}
+                          onClick={() => { setEditingField(editKey); setEditingValue(shown != null ? String(shown) : ""); setEditingError(null); }}
+                          title={`Click to edit ${label}`}
                           className={`text-xs flex items-center gap-1 cursor-pointer hover:underline ${value != null ? "text-slate-400 hover:text-slate-200" : "text-red-400"}`}
                         >
-                          {field}: {value ?? "—"}
+                          {label}: {shown ?? "—"}
                         </span>
                       );
                     })}
@@ -6258,6 +6361,57 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </div>
         )}
       </div>
+
+      {crawlerSeed && (
+        <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h3 className="font-semibold text-slate-100 flex items-center gap-2">
+                <span className="text-teal-400">🕸</span> Song Crawler
+                {crawlerRunning && <span className="inline-block w-2 h-2 rounded-full bg-teal-400 animate-pulse" />}
+              </h3>
+              <p className="text-xs text-slate-500 truncate">
+                Seed: {crawlerSeed.label}{crawlerSeed.bpm ? ` · ${Math.round(crawlerSeed.bpm)} BPM` : ""} · {crawlerAdded} added
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {crawlerRunning ? (
+                <button
+                  onClick={stopSongCrawler}
+                  className="text-xs rounded-lg border border-red-500/40 bg-red-500/15 hover:bg-red-500/25 text-red-300 font-semibold px-3 py-1.5 transition-colors"
+                >
+                  ■ Stop
+                </button>
+              ) : (
+                <button
+                  onClick={() => { setCrawlerSeed(null); setCrawlerLog([]); }}
+                  className="text-xs rounded-lg border border-white/10 hover:border-white/20 text-slate-400 hover:text-slate-200 px-3 py-1.5 transition-colors"
+                >
+                  Close
+                </button>
+              )}
+            </div>
+          </div>
+          <div
+            ref={crawlerLogRef}
+            className="h-72 overflow-y-auto rounded-lg border border-white/10 bg-slate-950/70 p-3 font-mono text-[11px] leading-relaxed"
+          >
+            {crawlerLog.map((line, i) => (
+              <div
+                key={i}
+                className={
+                  line.level === "match" ? "text-teal-300 font-semibold"
+                    : line.level === "warn" ? "text-amber-400"
+                    : line.level === "error" ? "text-red-400"
+                    : "text-slate-400"
+                }
+              >
+                <span className="text-slate-600">{line.at}</span> {line.msg}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
     </div>
     </div>
