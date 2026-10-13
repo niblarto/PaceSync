@@ -637,6 +637,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   interface ManagedTrack {
     id: string; name: string; artist: string; genre: string;
     uri: string; bpm: number; energy: number; durationMs: number;
+    // Unrounded tempo — the BPM filter doubles THIS (not the rounded bpm) so
+    // it lands in the same bucket as Settings > BPM's Library Coverage.
+    bpmExact?: number;
     addedAt: string | null; // ISO timestamp from the CSV's "Added At" column, if present
     // Carried through for the Tracklist page's own inline field editing
     // (separate from "Tracks with errors", which already edits these same
@@ -1035,6 +1038,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         genre: idxGenre !== -1 ? (row[idxGenre]?.trim() ?? "") : "",
         uri,
         bpm: !isNaN(bpm) && bpm > 0 ? Math.round(bpm) : 0,
+        bpmExact: !isNaN(bpm) && bpm > 0 ? bpm : 0,
         energy: idxEnergy !== -1 ? (parseFloat(row[idxEnergy]) || 0) : 0,
         durationMs: idxDuration !== -1 ? (parseInt(row[idxDuration], 10) || 0) : 0,
         addedAt: idxAdded !== -1 ? (row[idxAdded]?.trim() || null) : null,
@@ -1240,8 +1244,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     const artistQ = bulkDeleteArtist.trim().toLowerCase();
     let result = tracklist.filter(t => {
       if (q && !t.name.toLowerCase().includes(q) && !t.artist.toLowerCase().includes(q)) return false;
-      if (min != null && (t.bpm === 0 || t.bpm < min)) return false;
-      if (max != null && (t.bpm === 0 || t.bpm > max)) return false;
+      // Effective BPM — a half-time track (<95) counts at double tempo, the
+      // same way the AI DJ and Library Coverage count it.
+      const effBpm = t.bpm === 0 ? 0 : Math.round(effectiveBpm(t.bpmExact || t.bpm));
+      if (min != null && (effBpm === 0 || effBpm < min)) return false;
+      if (max != null && (effBpm === 0 || effBpm > max)) return false;
       if (tracklistGenre && !t.genre.toLowerCase().includes(tracklistGenre.toLowerCase())) return false;
       if (tracklistOnlyMissingGenre && t.genre.trim() !== "") return false;
       // The bulk-delete artist field previews live as you type, same as
@@ -6195,6 +6202,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           {!!tracklist?.length && (
             <span className="shrink-0 text-xs text-slate-500 whitespace-nowrap">
               {filteredTracklist?.length ?? 0} of {tracklist.length} tracks
+              {(() => {
+                if (!filteredTracklist || !(tracklistBpmMin || tracklistBpmMax)) return null;
+                const half = filteredTracklist.filter(t => t.bpm > 0 && (t.bpmExact || t.bpm) < 95).length;
+                return half > 0 ? ` (incl. ${half} half-time)` : null;
+              })()}
             </span>
           )}
         </div>
@@ -6399,7 +6411,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     ] as [string, number | string | null][]).map(([field, value]) => {
                       const editKey = `${t.uri}::${field}`;
                       const isDuration = field === "Duration (ms)";
-                      const shown = isDuration && typeof value === "number" ? fmtDurationMs(value) : value;
+                      const isHalfTime = field === "Tempo" && typeof value === "number" && value > 0 && (t.bpmExact || value) < 95;
+                      const shown = isDuration && typeof value === "number"
+                        ? fmtDurationMs(value)
+                        : isHalfTime
+                          ? `${value} (×2 = ${Math.round(effectiveBpm(t.bpmExact || (value as number)))})`
+                          : value;
                       const label = isDuration ? "Duration" : field;
                       if (editingField === editKey) {
                         return (
@@ -6436,7 +6453,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                       return (
                         <span
                           key={field}
-                          onClick={() => { setEditingField(editKey); setEditingValue(shown != null ? String(shown) : ""); setEditingError(null); }}
+                          onClick={() => { setEditingField(editKey); setEditingValue((isDuration ? shown : value) != null ? String(isDuration ? shown : value) : ""); setEditingError(null); }}
                           title={`Click to edit ${label}`}
                           className={`text-xs flex items-center gap-1 cursor-pointer hover:underline ${value != null ? "text-slate-400 hover:text-slate-200" : "text-red-400"}`}
                         >
@@ -6517,9 +6534,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           <button
             onClick={() => void startSongCrawler()}
             disabled={crawlerRunning || !crawlerArtist.trim() || !(parseFloat(crawlerBpm) > 0)}
-            className="rounded-lg bg-teal-500 hover:bg-teal-400 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs px-4 py-2 transition-colors"
+            className="rounded-lg bg-teal-600 hover:bg-teal-500 disabled:bg-slate-700 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-sm px-5 py-2 shadow-sm transition-colors"
           >
-            🕸 Crawl
+            Crawl
           </button>
           <button
             onClick={stopSongCrawler}
