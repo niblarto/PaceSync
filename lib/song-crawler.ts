@@ -74,6 +74,9 @@ export interface CrawlJob {
   startedAt: string;
   finishedAt: string | null;
   added: number;
+  // Songs this crawl added (shown beside the log; removed from here when
+  // deleted from the library via that list).
+  addedTracks: { uri: string; name: string; artist: string; bpm: number }[];
   crawled: number;      // artists whose radio has been processed
   totalArtists: number; // distinct artists found so far (seed included)
   nextSeq: number;
@@ -125,6 +128,21 @@ export function getCrawl(sinceSeq = 0): { job: Omit<CrawlJob, "log"> | null; lin
   return { job: meta, lines: lines.filter(l => l.seq >= sinceSeq) };
 }
 
+// Drops a song from the crawl's added list and notes it in the log —
+// either deleted from the library, or accepted (kept, just reviewed).
+export function removeCrawlAddedTrack(uri: string, reason: "deleted" | "accepted" = "deleted"): boolean {
+  load();
+  const job = store.job;
+  if (!job?.addedTracks) return false;
+  const i = job.addedTracks.findIndex(t => t.uri === uri);
+  if (i < 0) return false;
+  const [t] = job.addedTracks.splice(i, 1);
+  if (reason === "accepted") log(`  ✓ Accepted ${t.name} — ${t.artist} (kept in the library)`);
+  else log(`  ✗ Deleted ${t.name} — ${t.artist} from the library`, "warn");
+  persist(true);
+  return true;
+}
+
 export function isCrawlRunning(): boolean {
   load();
   return !!store.job && ["running", "stopping", "healing"].includes(store.job.status);
@@ -149,7 +167,7 @@ export function startCrawl(params: CrawlParams): { ok: true; id: string } | { ok
   store.job = {
     id: randomUUID(), params, status: "running",
     startedAt: new Date().toISOString(), finishedAt: null,
-    added: 0, crawled: 0, totalArtists: 0, nextSeq: 0, log: [],
+    added: 0, addedTracks: [], crawled: 0, totalArtists: 0, nextSeq: 0, log: [],
   };
   persist(true);
   void runCrawl(store.job).catch(e => {
@@ -259,6 +277,7 @@ async function runCrawl(job: CrawlJob) {
     knownIsrcs.add(isrc);
     if (result.added > 0) {
       job.added++;
+      job.addedTracks.push({ uri: resolved.uri, name: t.title, artist: t.artist.name, bpm: Math.round(tempo) });
       log(`  ✓ ADDED ${label} (${Math.round(tempo)} BPM)`, "match");
     } else {
       log(`  ${label}: matches, but was previously deleted from the library — skipped`, "warn");

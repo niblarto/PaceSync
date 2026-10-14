@@ -1,5 +1,6 @@
 "use client";
 
+import { createPortal } from "react-dom";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
@@ -12,7 +13,7 @@ import { invalidateRunningPlaylistCache } from "@/components/useRunningPlaylist"
 import { freshSpotifyToken, spotifyFetch, subscribeSpotifyRateLimit, fmtRateLimitDuration, type RateLimitState } from "@/lib/spotify-browser";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 import { DeletedTracksReview, type RejectedTrack } from "@/components/DeletedTracksReview";
-import { openInSpotify, TrackRow } from "@/components/TrackRow";
+import { openInSpotify, playInSpotify, TrackRow } from "@/components/TrackRow";
 import { useRunningPlaylist, getRunningPlaylist } from "@/components/useRunningPlaylist";
 import { MixPaceChart, timelineToChartTracks } from "@/components/MixPaceChart";
 import { GenreExplorer } from "@/components/GenreExplorer";
@@ -696,6 +697,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [crawlerStatusText, setCrawlerStatusText] = useState<string | null>(null);
   const [crawlerLog, setCrawlerLog] = useState<CrawlerLine[]>([]);
   const [crawlerAdded, setCrawlerAdded] = useState(0);
+  // Songs the current/last crawl added — the list beside the log.
+  const [crawlerAddedTracks, setCrawlerAddedTracks] = useState<{ uri: string; name: string; artist: string; bpm: number }[]>([]);
+  const [crawlerPlayingUri, setCrawlerPlayingUri] = useState<string | null>(null);
+  const [crawlerMenu, setCrawlerMenu] = useState<{ x: number; y: number; uri: string } | null>(null);
   const crawlerJobIdRef = useRef<string | null>(null);
   const crawlerSinceRef = useRef(0);
   const crawlerWasRunningRef = useRef(false);
@@ -1085,6 +1090,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   type CrawlJobMeta = {
     id: string; status: "running" | "stopping" | "healing" | "done" | "stopped" | "error" | "interrupted";
     startedAt: string; added: number; crawled: number; totalArtists: number;
+    addedTracks?: { uri: string; name: string; artist: string; bpm: number }[];
     params: { artist: string; bpm?: number; bpmMin?: number; bpmMax?: number };
   };
   const CRAWLER_STATUS_TEXT: Record<CrawlJobMeta["status"], string> = {
@@ -1123,6 +1129,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setCrawlerStopping(job.status === "stopping" || job.status === "healing");
       setCrawlerStatusText(CRAWLER_STATUS_TEXT[job.status]);
       setCrawlerAdded(job.added);
+      setCrawlerAddedTracks(job.addedTracks ?? []);
       setCrawlerProgress(job.totalArtists > 0 ? { crawled: job.crawled, total: job.totalArtists } : null);
       const p = job.params;
       const isRange = !!p.bpmMin && !!p.bpmMax;
@@ -1172,7 +1179,35 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     crawlerSinceRef.current = 0;
     crawlerWasRunningRef.current = true;
     setCrawlerLog([]);
+    setCrawlerAddedTracks([]);
     setCrawlerRunning(true);
+    void pollSongCrawler();
+  }
+
+  // Delete a crawled song from the library (and Spotify playlist) and drop
+  // it from the crawl's added list.
+  async function deleteCrawlerTrack(uri: string) {
+    setCrawlerMenu(null);
+    setCrawlerAddedTracks(prev => prev.filter(t => t.uri !== uri));
+    setTracklist(prev => prev?.filter(t => t.uri !== uri) ?? prev);
+    deleteTrackFromLibrary(uri, runningPlaylist.id);
+    await fetch("/api/tracks/song-crawler", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ removeAdded: uri }),
+    }).catch(() => null);
+    void pollSongCrawler();
+  }
+
+  // Accept: keep the song in the library, just take it off the review list.
+  async function acceptCrawlerTrack(uri: string) {
+    setCrawlerMenu(null);
+    setCrawlerAddedTracks(prev => prev.filter(t => t.uri !== uri));
+    await fetch("/api/tracks/song-crawler", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ removeAdded: uri, reason: "accepted" }),
+    }).catch(() => null);
     void pollSongCrawler();
   }
 
@@ -6616,7 +6651,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             {crawlerStopping ? "Stopping…" : "■ Stop"}
           </button>
           <button
-            onClick={() => { setCrawlerLog([]); setCrawlerSeed(null); setCrawlerAdded(0); setCrawlerProgress(null); setCrawlerStatusText(null); }}
+            onClick={() => { setCrawlerLog([]); setCrawlerSeed(null); setCrawlerAdded(0); setCrawlerProgress(null); setCrawlerStatusText(null); setCrawlerAddedTracks([]); }}
             disabled={crawlerRunning || crawlerLog.length === 0}
             className="rounded-lg border border-white/10 hover:border-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-slate-400 hover:text-slate-200 text-xs px-3 py-2 transition-colors"
           >
@@ -6685,26 +6720,88 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </p>
         )}
 
-        <div
-          ref={crawlerLogRef}
-          className="h-72 overflow-y-auto rounded-lg border border-white/10 bg-slate-950/70 p-3 font-mono text-[11px] leading-relaxed"
-        >
-          {crawlerLog.length === 0 ? (
-            <p className="text-slate-600">No crawl yet — pick an artist and BPM, then press Crawl.</p>
-          ) : crawlerLog.map((line, i) => (
-            <div
-              key={i}
-              className={
-                line.level === "match" ? "text-teal-300 font-semibold"
-                  : line.level === "warn" ? "text-amber-400"
-                  : line.level === "error" ? "text-red-400"
-                  : "text-slate-400"
-              }
-            >
-              <span className="text-slate-600">{line.at}</span> {line.msg}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+          <div
+            ref={crawlerLogRef}
+            className="md:col-span-3 h-[36rem] overflow-y-auto rounded-lg border border-white/10 bg-slate-950/70 p-3 font-mono text-[11px] leading-relaxed"
+          >
+            {crawlerLog.length === 0 ? (
+              <p className="text-slate-600">No crawl yet — pick an artist and BPM, then press Crawl.</p>
+            ) : crawlerLog.map((line, i) => (
+              <div
+                key={i}
+                className={
+                  line.level === "match" ? "text-teal-300 font-semibold"
+                    : line.level === "warn" ? "text-amber-400"
+                    : line.level === "error" ? "text-red-400"
+                    : "text-slate-400"
+                }
+              >
+                <span className="text-slate-600">{line.at}</span> {line.msg}
+              </div>
+            ))}
+          </div>
+
+          {/* Songs this crawl added — click to play, right-click to delete. */}
+          <div className="h-[36rem] flex flex-col rounded-lg border border-white/10 bg-slate-950/70 overflow-hidden">
+            <p className="px-3 py-2 text-xs font-semibold text-slate-300 border-b border-white/10 shrink-0">
+              Added this crawl <span className="text-slate-500 font-normal">({crawlerAddedTracks.length})</span>
+            </p>
+            <div className="flex-1 overflow-y-auto">
+              {crawlerAddedTracks.length === 0 ? (
+                <p className="px-3 py-2 text-xs text-slate-600">Songs the crawl adds appear here.</p>
+              ) : crawlerAddedTracks.map(t => (
+                <button
+                  key={t.uri}
+                  onClick={() => { setCrawlerPlayingUri(t.uri); void playInSpotify(t.uri, session?.accessToken); }}
+                  onContextMenu={e => { e.preventDefault(); setCrawlerMenu({ x: e.clientX, y: e.clientY, uri: t.uri }); }}
+                  title="Click to play · right-click to accept or delete"
+                  className={`w-full text-left px-3 py-1.5 border-b border-white/5 hover:bg-slate-800/60 transition-colors ${
+                    crawlerPlayingUri === t.uri ? "bg-teal-500/10" : ""
+                  }`}
+                >
+                  <span className={`block text-xs truncate ${crawlerPlayingUri === t.uri ? "text-teal-300" : "text-slate-200"}`}>{t.name}</span>
+                  <span className="block text-[10px] text-slate-500 truncate">{t.artist} · {t.bpm} BPM</span>
+                </button>
+              ))}
             </div>
-          ))}
+          </div>
         </div>
+
+        {/* Portalled to <body>: this panel's backdrop-blur makes it the
+            containing block for position:fixed, which put the menu at the
+            mouse position measured from the panel instead of the window
+            (off-screen). */}
+        {crawlerMenu && createPortal(
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setCrawlerMenu(null)} onContextMenu={e => { e.preventDefault(); setCrawlerMenu(null); }} />
+            <div
+              className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl py-1 w-40"
+              style={{ left: Math.min(crawlerMenu.x, window.innerWidth - 170), top: Math.min(crawlerMenu.y, window.innerHeight - 120) }}
+            >
+              <button
+                onClick={() => { const uri = crawlerMenu.uri; setCrawlerMenu(null); setCrawlerPlayingUri(uri); void playInSpotify(uri, session?.accessToken); }}
+                className="w-full text-left px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800 transition-colors"
+              >
+                ▶ Play
+              </button>
+              <button
+                onClick={() => void acceptCrawlerTrack(crawlerMenu.uri)}
+                title="Keep it in the library and remove it from this list"
+                className="w-full text-left px-3 py-1.5 text-sm text-emerald-400 hover:bg-emerald-500/15 transition-colors"
+              >
+                ✓ Accept
+              </button>
+              <button
+                onClick={() => void deleteCrawlerTrack(crawlerMenu.uri)}
+                className="w-full text-left px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/15 transition-colors"
+              >
+                🗑 Delete
+              </button>
+            </div>
+          </>,
+          document.body,
+        )}
       </div>
 
     </div>
