@@ -242,6 +242,7 @@ FILES = [
     ('app/api/bpm/enrich/route.ts',               'app/api/bpm/enrich/route.ts'),
     ('app/api/bpm/artist-top/route.ts',           'app/api/bpm/artist-top/route.ts'),
     ('lib/deezer-artist-top.ts',                  'lib/deezer-artist-top.ts'),
+    ('lib/deezer-bpm-crawl.ts',                   'lib/deezer-bpm-crawl.ts'),
     ('app/api/tracks/replace-candidates/route.ts', 'app/api/tracks/replace-candidates/route.ts'),
     ('app/api/tracks/genres/route.ts',             'app/api/tracks/genres/route.ts'),
     ('app/api/tracks/genre-uris/route.ts',         'app/api/tracks/genre-uris/route.ts'),

@@ -4767,6 +4767,23 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
   const [searchOverride, setSearchOverride] = useState<{ mode: "artist" | "genre"; value: string } | null>(null);
   const [forceOnline, setForceOnline] = useState(false);
   const [energyBand, setEnergyBand] = useState<EnergyBand | null>(null);
+  const [searchNote, setSearchNote] = useState<string | null>(null);
+  // Delete (library candidates only) is two clicks — Delete -> Confirm —
+  // same as Quick Swap's.
+  const [confirmDeleteUri, setConfirmDeleteUri] = useState<string | null>(null);
+
+  function deleteCandidate(c: ReplaceCandidate) {
+    if (!c.uri) return;
+    if (confirmDeleteUri !== c.uri) { setConfirmDeleteUri(c.uri); return; }
+    setConfirmDeleteUri(null);
+    setCandidates(prev => prev?.filter(x => x.uri !== c.uri) ?? prev);
+    deleteTrackFromLibrary(c.uri, null);
+    invalidateRunningPlaylistCache();
+  }
+  // Aborts the running search (and with it the server-side crawl) when a new
+  // search starts or the window closes.
+  const searchAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => searchAbortRef.current?.abort(), []);
 
   async function search() {
     const bpm = parseInt(bpmInput, 10);
@@ -4775,9 +4792,14 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
     setError(null);
     setCandidates(null);
     setOnlineStatus(null);
+    setSearchNote(null);
+    searchAbortRef.current?.abort();
+    const abort = new AbortController();
+    searchAbortRef.current = abort;
     try {
       const res = await fetch("/api/tracks/replace-candidates", {
         method: "POST",
+        signal: abort.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           targetBpm: bpm, artistName: target.artists[0]?.name, targetUri: target.uri, excludeUris: mixUris, originalDurationMs: target.duration_ms,
@@ -4803,24 +4825,35 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
           const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
           if (!dataLine) continue;
           const msg = JSON.parse(dataLine.slice(6)) as
-            { type: string; current?: number; total?: number; name?: string; artist?: string; hits?: number; candidates?: ReplaceCandidate[]; error?: string };
+            { type: string; current?: number; total?: number; name?: string; artist?: string; hits?: number; stage?: string; candidates?: ReplaceCandidate[]; error?: string };
           if (msg.type === "online-start") {
             setOnlineStatus("Online lookup starting…");
           } else if (msg.type === "progress") {
             const hitsText = msg.hits ? ` — ${msg.hits} match${msg.hits === 1 ? "" : "es"} found` : "";
-            setOnlineStatus(`Online lookup: checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""} (${msg.current}/${msg.total})${hitsText}`);
+            // Crawl-style search (artist catalogue, then radio) reports its
+            // stage and a running count instead of current/total.
+            setOnlineStatus(msg.stage
+              ? `${msg.stage} · checking "${msg.name}" — ${msg.artist} (${msg.current} checked)${hitsText}`
+              : `Online lookup: checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""} (${msg.current}/${msg.total})${hitsText}`);
           } else if (msg.type === "error") {
             throw new Error(msg.error ?? "Search failed");
-          } else if (msg.type === "done") {
+          } else if (msg.type === "warning") {
+            setSearchNote((msg as { message?: string }).message ?? null);
+          } else if (msg.type === "library" || msg.type === "match" || msg.type === "done") {
+            // Library matches show straight away; crawl matches are added
+            // as they're found.
             setCandidates(msg.candidates ?? []);
           }
         }
       }
     } catch (e) {
+      if (abort.signal.aborted) return;
       setError(e instanceof Error ? e.message : "Search failed");
     } finally {
-      setOnlineStatus(null);
-      setLoading(false);
+      if (!abort.signal.aborted) {
+        setOnlineStatus(null);
+        setLoading(false);
+      }
     }
   }
 
@@ -4888,6 +4921,7 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
         </p>
         <SearchModePicker value={searchOverride} onChange={setSearchOverride} forceOnline={forceOnline} onForceOnlineChange={setForceOnline} />
         <EnergyPicker value={energyBand} onChange={setEnergyBand} />
+        {searchNote && <p className="text-xs text-amber-400">{searchNote}</p>}
         {onlineStatus && (
           <p className="text-xs text-sky-400 flex items-center gap-1.5"><Spinner /> {onlineStatus}</p>
         )}
@@ -4931,6 +4965,20 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
                   >
                     {addingOnline !== null && addingOnline === (c.uri ?? c.isrc) ? "Adding…" : "Use this track"}
                   </button>
+                  {c.source === "library" && c.uri && (
+                    <button
+                      onClick={() => deleteCandidate(c)}
+                      onBlur={() => { if (confirmDeleteUri === c.uri) setConfirmDeleteUri(null); }}
+                      title="Delete from the library and the Spotify playlist"
+                      className={`shrink-0 rounded-lg border text-xs px-2.5 py-1.5 transition-colors ${
+                        confirmDeleteUri === c.uri
+                          ? "bg-red-500/30 border-red-500/60 text-red-200"
+                          : "bg-red-500/10 border-red-500/30 hover:bg-red-500/20 text-red-300"
+                      }`}
+                    >
+                      {confirmDeleteUri === c.uri ? "Confirm" : "Delete"}
+                    </button>
+                  )}
                 </div>
               );
             })}

@@ -7,6 +7,7 @@ import { deezerArtistTopTracks } from "@/lib/deezer-artist-top";
 import { artistsSharingGenre, parseGenres } from "@/lib/genre-artists";
 import { discogsArtistsForGenre } from "@/lib/discogs-artist-search";
 import { energyInBand, type EnergyBand } from "@/lib/energy-bands";
+import { crawlForBpm } from "@/lib/deezer-bpm-crawl";
 
 // Candidates to swap in for one track in a mix, by target BPM — Dashboard's
 // ♻ "replace by BPM" button. BPM match is exact, not closest-available: a
@@ -132,10 +133,15 @@ export async function POST(req: NextRequest) {
     originalDurationMs == null ? true : ms != null && Math.abs(ms - originalDurationMs) <= DURATION_TOLERANCE_SEC * 1000;
 
   const encoder = new TextEncoder();
+  // Set when the client goes away (Replace window closed) — ends the crawl.
+  let cancelled = false;
+  req.signal?.addEventListener("abort", () => { cancelled = true; });
   const stream = new ReadableStream({
+    cancel() { cancelled = true; },
     async start(controller) {
       const send = (data: object) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        if (cancelled) return;
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { cancelled = true; }
       };
       const heartbeat = setInterval(() => {
         try { controller.enqueue(encoder.encode(`: hb\n\n`)); } catch { /* stream closed */ }
@@ -195,6 +201,8 @@ export async function POST(req: NextRequest) {
           .map(({ _dist, ...c }) => c);
 
         const results: ReplaceCandidate[] = [...libraryCandidates];
+        // Library matches show straight away, before any online search.
+        send({ type: "library", candidates: results });
 
         // ── Online top-up (Deezer) ────────────────────────────────────
         // Only when the library alone didn't fill the list. Which artists
@@ -212,7 +220,49 @@ export async function POST(req: NextRequest) {
           : !!body.artistName;
         if (results.length < MAX_RESULTS && canSearchOnline) {
           send({ type: "online-start" });
-          try {
+          // Artist search (explicit override, or the replaced track's own
+          // artist by default) walks the Deezer catalogue the way the Song
+          // Crawler does: every track by the artist, then artist radio
+          // spreading to 10 artists (lib/deezer-bpm-crawl.ts). Genre search
+          // keeps the per-artist top-tracks walk below.
+          const crawlArtist = body.searchMode === "genre" ? null
+            : body.searchMode === "artist" ? body.searchValue ?? null
+            : body.artistName ?? null;
+          if (crawlArtist) {
+            try {
+              const libraryUris = new Set(allRows.map(t => t.uri).filter(Boolean));
+              const resultIsrcs = new Set(results.map(c => c.isrc).filter((x): x is string => !!x));
+              const libraryIsrcs = new Set(allRows.map(t => t.isrc).filter((x): x is string => !!x));
+              const need = MAX_RESULTS - results.length;
+              const summary = await crawlForBpm({
+                artist: crawlArtist,
+                isMatchBpm: tempo => isExactBpm(tempo, targetBpm),
+                durationOk: ms => durationOk(ms),
+                // Library tracks were already searched above; mix tracks would duplicate.
+                skipUri: uri => libraryUris.has(uri) || excludeUris.has(uri) || results.some(c => c.uri === uri),
+                skipIsrc: isrc => resultIsrcs.has(isrc) || libraryIsrcs.has(isrc),
+                accept: r => !body.energyBand || (r.energy != null && energyInBand(r.energy, body.energyBand)),
+                need,
+                maxArtists: MAX_ARTISTS_SEARCHED,
+                shouldStop: () => cancelled,
+                onProgress: p => send({ type: "progress", stage: p.stage, name: p.name, artist: p.artist, current: p.checked, total: 0, hits: results.length - libraryCandidates.length }),
+                onMatch: m => {
+                  resultIsrcs.add(m.isrc);
+                  results.push({
+                    source: "online", uri: m.resolved.uri, name: m.title, artist: m.artist,
+                    tempo: m.tempo, effectiveBpm: effectiveTempo(m.tempo), durationMs: m.durationMs, isrc: m.isrc,
+                    key: m.resolved.key, mode: m.resolved.mode, energy: m.resolved.energy,
+                    danceability: m.resolved.danceability, valence: m.resolved.valence, genres: null,
+                  });
+                  send({ type: "match", candidates: results });
+                },
+              });
+              console.log(`[replace-candidates] crawl "${crawlArtist}" @${targetBpm}: seedFound=${summary.seedFound} checked=${summary.checked} matched=${summary.matched}`);
+              if (!summary.seedFound) send({ type: "warning", message: `No Deezer artist found for "${crawlArtist}" — try Search online by Artist` });
+            } catch (err) {
+              console.log(`[replace-candidates] crawl threw: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          } else try {
             let artistNames: string[];
             if (body.searchMode === "artist" && body.searchValue) {
               artistNames = [body.searchValue];
@@ -354,7 +404,7 @@ export async function POST(req: NextRequest) {
         send({ type: "error", error: err instanceof Error ? err.message : "Search failed" });
       } finally {
         clearInterval(heartbeat);
-        controller.close();
+        try { controller.close(); } catch { /* already closed by the client */ }
       }
     },
   });
