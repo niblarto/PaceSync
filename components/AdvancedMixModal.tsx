@@ -46,9 +46,11 @@ interface Props {
   // The mix's segment lines, in order (RunnaCard's mixSegmentsFor).
   segments: string[];
   onClose: () => void;
-  // One entry per segment: a candidate URI list, or null = no restriction
-  // (the mixer's normal BPM targeting for that pace).
-  onBuild: (opts: { genres: string[]; ignorePlayCounts: boolean; segmentCandidateUris: (string[] | null)[] }) => void;
+  // One entry per restricted workout line ({ line, uris }) — keyed by line,
+  // not position, because the mixer turns a "3 reps of" block into several
+  // segments (ai_dj/workout.py's _resolve_line_candidates maps them back).
+  // Lines left out keep the mixer's normal BPM targeting for that pace.
+  onBuild: (opts: { genres: string[]; ignorePlayCounts: boolean; segmentCandidateUris: { line: string; uris: string[] }[] }) => void;
 }
 
 // What the mixer aims for on a segment when no range is entered
@@ -57,16 +59,22 @@ interface SegmentDefault {
   segment: string;
   kind: string;
   paceSec: number | null;
-  targetBpm: number | null;
+  paceBpm: number | null;   // cadence at the pace, before the Settings range
+  targetBpm: number | null; // what the mixer aims for (clamped into the range)
   min: number | null;
   max: number | null;
 }
 
-// The card's summary header ("Long Run • 12mi • 1h40m - 1h50m") travels in
-// the segment list so the mixer can read the run's target length, but it
-// isn't a step — same 2+ bullets rule as ai_dj/workout.py's _is_segment_line.
+// Lines that travel in the segment list but aren't steps: the card's
+// summary header ("Long Run • 12mi • 1h40m - 1h50m" — the mixer reads the
+// run's target length from it; same 2+ bullets rule as ai_dj/workout.py's
+// _is_segment_line), a repeat header ("3 reps of:" / "Repeat the following
+// 3x:") and a "-----" fence. The repeat body line below the header gets the
+// box, and its range applies to every rep.
+const REPEAT_HEADER_RE = /^\s*(?:\d+\s*(?:reps?|sets?|x)\s+of|repeat\s+the\s+following\s+\d+\s*x)\s*:?\s*$/i;
 function isHeaderLine(line: string): boolean {
-  return (line.match(/•/g) ?? []).length >= 2;
+  const t = line.trim();
+  return !t || (t.match(/•/g) ?? []).length >= 2 || REPEAT_HEADER_RE.test(t) || /^-{3,}$/.test(t);
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -257,12 +265,14 @@ export function AdvancedMixModal({ workoutTitle, segments, onClose, onBuild }: P
   const anyOverMax = segmentMatches.some(m => m != null && m.length > MAX_CANDIDATES);
 
   function handleBuild() {
-    // The mixer numbers only real steps (it skips the header line), so the
-    // header's slot is dropped to keep each list on its own segment.
-    const segmentCandidateUris = segmentMatches.filter((_, i) => !isHeaderLine(segments[i])).map(m => {
-      if (m == null) return null;
+    const segmentCandidateUris: { line: string; uris: string[] }[] = [];
+    segmentMatches.forEach((m, i) => {
+      if (m == null || isHeaderLine(segments[i])) return;
       const uris = m.map(t => t.uri);
-      return randomize && uris.length > MAX_CANDIDATES ? shuffle(uris).slice(0, MAX_CANDIDATES) : uris;
+      segmentCandidateUris.push({
+        line: segments[i],
+        uris: randomize && uris.length > MAX_CANDIDATES ? shuffle(uris).slice(0, MAX_CANDIDATES) : uris,
+      });
     });
     onBuild({ genres: Array.from(selectedGenres), ignorePlayCounts, segmentCandidateUris });
   }
@@ -301,12 +311,15 @@ export function AdvancedMixModal({ workoutTitle, segments, onClose, onBuild }: P
                 return (
                   <div key={i} className="rounded-lg border border-white/10 bg-slate-800/30 px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
                     <div className="flex-1 min-w-[12rem]">
-                      <p className="text-sm text-slate-200 truncate" title={seg}>{seg}</p>
+                      <p className="text-sm text-slate-200 truncate" title={seg}>{seg.trim().replace(/^•\s*/, "")}</p>
                       <p className="text-[11px] text-slate-500">
                         {d ? (
                           <>
                             {KIND_LABEL[d.kind] ?? d.kind}
                             {d.targetBpm != null && <> · default ≈ {d.targetBpm} BPM</>}
+                            {d.paceBpm != null && d.targetBpm != null && d.paceBpm !== d.targetBpm && (
+                              <span title="Your cadence at this pace, clamped into the Settings range"> (pace ≈ {d.paceBpm})</span>
+                            )}
                             {(d.min != null || d.max != null) && <> · range {d.min ?? "…"}–{d.max ?? "…"}</>}
                           </>
                         ) : "Loading default…"}

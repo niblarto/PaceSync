@@ -8,13 +8,16 @@ import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import { SpotifyRateLimitBanner } from "./SpotifyRateLimitBanner";
 import { MissingDataBanner } from "./MissingDataBanner";
 import { DuplicateTracksBanner } from "./DuplicateTracksBanner";
+import { BrokenTracklistsBanner } from "./BrokenTracklistsBanner";
+import { notifyTracklistsChanged, useBrokenTracklists } from "./useBrokenTracklists";
 import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
 import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArtError, MiniSpinner } from "./TrackRow";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
-import { useRunningPlaylist, getRunningPlaylist } from "./useRunningPlaylist";
+import { useRunningPlaylist, getRunningPlaylist, invalidateRunningPlaylistCache } from "./useRunningPlaylist";
+import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
 import type { EnergyBand } from "@/lib/energy-bands";
 
@@ -78,8 +81,11 @@ const ALL_ZONE: RunningZone = {
   textColor: "text-white",
 };
 
-function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, playedCounts }: {
+function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, playedCounts, deletedUris }: {
   tracks: TrackWithBPM[];
+  /** Tracks in the loaded mix that have been deleted from the library —
+      kept in place and highlighted until Quick Swapped. */
+  deletedUris?: Set<string>;
   onDelete?: (track: TrackWithBPM) => void;
   /** Drops a track from the currently-viewed AI DJ mix only (keeps it in the library) — only passed while an aiDjMix is active. */
   onRemoveFromMix?: (track: TrackWithBPM) => void;
@@ -270,6 +276,7 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReor
             onSuggestArtist={onSuggestArtist ? () => onSuggestArtist(track) : undefined}
             suggestBusy={suggestBusy?.trackId === track.id ? suggestBusy.mode : null}
             playedCount={playedCounts?.[track.uri]}
+            deleted={deletedUris?.has(track.uri)}
             isPlaying={lastPlayedUri === track.uri}
             onPlay={() => setLastPlayedUri(track.uri)}
             reorderable={!!onReorder}
@@ -538,6 +545,16 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [importBpmMsg, setImportBpmMsg] = useState<string | null>(null);
   const noBpmCsvInputRef = useRef<HTMLInputElement>(null);
   const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[]; originalCount: number; origin?: "pace-pro" } | null>(null);
+  // Deleted-from-library tracks in the loaded mix, highlighted until they're
+  // swapped: ones deleted this session plus any the broken-tracklist scan
+  // reports for saved mixes.
+  const [sessionDeletedUris, setSessionDeletedUris] = useState<Set<string>>(new Set());
+  const { missingUris: brokenMissingUris } = useBrokenTracklists();
+  const mixDeletedUris = useMemo(() => {
+    const out = new Set<string>();
+    for (const t of aiDjMix?.tracks ?? []) if (sessionDeletedUris.has(t.uri) || brokenMissingUris.has(t.uri)) out.add(t.uri);
+    return out;
+  }, [aiDjMix, sessionDeletedUris, brokenMissingUris]);
   // Mirrors aiDjMix for reading inside callbacks with an empty dependency
   // array (e.g. loadLibrary) without them going stale — those can't just
   // list aiDjMix as a dependency without changing identity/re-running on
@@ -2390,6 +2407,8 @@ export function DashboardClient({ spotifyUser }: Props) {
       return next;
     });
     setReplaceTarget(null);
+    // A swap may have repaired a broken tracklist — refresh the banner.
+    notifyTracklistsChanged();
   }
 
   // Splices one or more contiguous ranges of aiDjMix.tracks (by ORIGINAL
@@ -2757,30 +2776,11 @@ export function DashboardClient({ spotifyUser }: Props) {
     // Optimistically remove from local state immediately
     setAllTracks(prev => prev.filter(t => t.id !== track.id));
 
-    // Deleting a track out of an AI DJ mix invalidates it — the mix was
-    // built against a library that no longer exists. Mark it stale so the
-    // save buttons give way to a Remix button.
-    let hadTrack = false;
-    setAiDjMix(prev => {
-      if (!prev || !prev.tracks.some(t => t.id === track.id)) return prev;
-      hadTrack = true;
-      return {
-        ...prev,
-        tracks: prev.tracks.filter(t => t.id !== track.id),
-        timeline: removeUriFromTimeline(prev.timeline, track.uri),
-        stale: true,
-      };
-    });
-
-    // A pin only makes sense for the exact tracklist it was taken from —
-    // once a track it contained is deleted, the pinned tracklist no longer
-    // matches reality. /api/tracks/delete itself unpins ANY pinned mix
-    // (any date) containing the deleted track server-side, which is the
-    // authoritative fix — this just gives instant UI feedback for the
-    // CURRENTLY loaded mix's Pin button, and always bumps mixSavedNonce so
-    // the Runna Schedule card's "Pinned mix" panel refetches and drops a
-    // now-invalidated pin regardless of which mix (if any) is on screen.
-    if (hadTrack) setPinSaved(false);
+    setSessionDeletedUris(prev => new Set(prev).add(track.uri));
+    // A loaded mix keeps the deleted track in place (and stays pinned): the
+    // row is highlighted as deleted (mixDeletedUris) until it's Quick
+    // Swapped, and the broken-tracklist banner lists every saved mix that
+    // still contains it.
 
     const fullUri = track.uri.startsWith("spotify:") ? track.uri : `spotify:track:${track.uri}`;
 
@@ -2822,7 +2822,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ spotifyUri: fullUri }),
     })
-      .then(() => setMixSavedNonce(n => n + 1))
+      .then(() => { setMixSavedNonce(n => n + 1); notifyTracklistsChanged(); })
       .catch(() => {});
   }
 
@@ -2960,6 +2960,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
       <SpotifyRateLimitBanner />
       <MissingDataBanner />
       <DuplicateTracksBanner />
+      <BrokenTracklistsBanner />
 
       {/* Pace/BPM chart for the current AI DJ mix — full page width, sticky
           just below the header, so it stays maximally visible while dragging
@@ -2983,6 +2984,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               </div>
               <MixPaceChart
                 tracks={timelineToChartTracks(aiDjMix.timeline)}
+                deletedUris={mixDeletedUris}
                 onTrackClick={setChartHighlightUri}
                 onReorder={!aiDjMix.stale ? reorderMixTrackByUri : undefined}
                 onTrackContextMenu={(uri, x, y) => setChartTrackMenu({ uri, x, y })}
@@ -3631,6 +3633,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     <VirtualTrackList
                       key={singleTrackFilter ? `single-${singleTrackFilter}` : aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : missingFeaturesFilter ? `missing-${missingFeaturesFilter.join(",")}` : candidatesFilter ? `candidates-${candidatesFilter.segmentLabel}` : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : sprintBpmFilter !== null ? `sprint-${sprintBpmFilter}` : selectedZones.map(z=>z.number).sort().join("-")}
                       tracks={filteredTracks}
+                      deletedUris={aiDjMix ? mixDeletedUris : undefined}
                       onDelete={handleDeleteTrack}
                       onRemoveFromMix={aiDjMix ? removeTrackFromMix : undefined}
                       onReorder={aiDjMix && !aiDjMix.stale ? reorderMixTrack : undefined}
@@ -4959,6 +4962,18 @@ function QuickSwapModal({ target, mixUris, onClose, onConfirm }: {
   const [candidates, setCandidates] = useState<ReplaceCandidate[] | null>(null);
   const [addingUri, setAddingUri] = useState<string | null>(null);
   const [playingUri, setPlayingUri] = useState<string | null>(null);
+  // Delete is two clicks (Delete -> Confirm) — it sits right next to "Use
+  // this track" and removes the song from the library and Spotify playlist.
+  const [confirmDeleteUri, setConfirmDeleteUri] = useState<string | null>(null);
+
+  function deleteCandidate(c: ReplaceCandidate) {
+    if (!c.uri) return;
+    if (confirmDeleteUri !== c.uri) { setConfirmDeleteUri(c.uri); return; }
+    setConfirmDeleteUri(null);
+    setCandidates(prev => prev?.filter(x => x.uri !== c.uri) ?? prev);
+    deleteTrackFromLibrary(c.uri, null);
+    invalidateRunningPlaylistCache();
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -5123,6 +5138,18 @@ function QuickSwapModal({ target, mixUris, onClose, onConfirm }: {
                     className="shrink-0 rounded-lg bg-teal-500/15 border border-teal-500/40 hover:bg-teal-500/25 text-teal-300 text-xs px-2.5 py-1.5 transition-colors disabled:opacity-40"
                   >
                     {addingUri !== null && addingUri === c.uri ? "Adding…" : "Use this track"}
+                  </button>
+                  <button
+                    onClick={() => deleteCandidate(c)}
+                    onBlur={() => { if (confirmDeleteUri === c.uri) setConfirmDeleteUri(null); }}
+                    title="Delete from the library and the Spotify playlist"
+                    className={`shrink-0 rounded-lg border text-xs px-2.5 py-1.5 transition-colors ${
+                      confirmDeleteUri === c.uri
+                        ? "bg-red-500/30 border-red-500/60 text-red-200"
+                        : "bg-red-500/10 border-red-500/30 hover:bg-red-500/20 text-red-300"
+                    }`}
+                  >
+                    {confirmDeleteUri === c.uri ? "Confirm" : "Delete"}
                   </button>
                 </div>
               );

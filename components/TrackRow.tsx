@@ -23,6 +23,9 @@ interface Props {
   suggestBusy?: "style" | "tempo" | "artist" | null;
   /** Confirmed "Today's Run" mixes this track has featured in, if any */
   playedCount?: number;
+  /** Deleted from the library but still in the loaded mix — highlighted
+      until it's Quick Swapped. */
+  deleted?: boolean;
   /** Whether to show the BPM badge and track-length column. Defaults to true
       (desktop); the mobile dashboard passes false to save row width for the
       title on a narrow screen. */
@@ -238,13 +241,13 @@ export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string)
   }
 }
 
-export function TrackRow({ track, index, onDelete, onRemoveFromMix, onReplace, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, showStats = true, isPlaying, onPlay, reorderable, onDragHandleStart }: Props) {
+export function TrackRow({ track, index, onDelete, onRemoveFromMix, onReplace, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, deleted, showStats = true, isPlaying, onPlay, reorderable, onDragHandleStart }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(track.name)}`;
 
   return (
-    <div className="flex items-center group">
+    <div className={`flex items-center group ${deleted ? "rounded-lg bg-rose-500/10 ring-1 ring-rose-500/60" : ""}`}>
       {reorderable && (
         <span
           draggable
@@ -273,6 +276,11 @@ export function TrackRow({ track, index, onDelete, onRemoveFromMix, onReplace, o
         <div className="flex-1 min-w-0">
           <p className={`text-sm font-medium truncate transition-colors ${isPlaying ? "text-orange-400" : "group-hover:text-green-400"}`}>{track.name}</p>
           <p className="text-xs text-slate-500 truncate">
+            {deleted && (
+              <span className="text-rose-400 font-semibold" title="Deleted from the library — Quick Swap it to repair this tracklist">
+                Deleted — swap it{" · "}
+              </span>
+            )}
             {track.artists.map((a) => a.name).join(", ")}
             {!!playedCount && (
               <span className="text-purple-400/80" title={`Featured in ${playedCount} confirmed "Today's Run" mix${playedCount === 1 ? "" : "es"}`}>

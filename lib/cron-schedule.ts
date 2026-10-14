@@ -5,7 +5,7 @@ import { execSync, spawn, spawnSync } from "child_process";
 // job comments it out with a marker prefix so the original command survives
 // a round-trip and deploy.py's install-if-missing check still sees it.
 
-export type CronJobKey = "garmin" | "weekly" | "aidj" | "aidjRetry" | "digest" | "librarySync" | "heal";
+export type CronJobKey = "garmin" | "weekly" | "aidj" | "aidjRetry" | "digest" | "librarySync" | "heal" | "brokenCheck";
 
 export interface CronJobState {
   key: CronJobKey;
@@ -30,6 +30,7 @@ const JOB_MATCH: Record<CronJobKey, string> = {
   digest: "/api/cron/digest",
   librarySync: "/api/cron/library-sync",
   heal: "/api/cron/heal",
+  brokenCheck: "/api/cron/broken-tracklists",
 };
 
 const OFF_PREFIX = "#PACESYNC-OFF# ";
@@ -70,7 +71,7 @@ export function getCronJobs(): { available: boolean; jobs: CronJobState[] } {
   if (lines === null) {
     return { available: false, jobs: [] };
   }
-  const keys: CronJobKey[] = ["garmin", "weekly", "aidj", "aidjRetry", "digest", "librarySync", "heal"];
+  const keys: CronJobKey[] = ["garmin", "weekly", "aidj", "aidjRetry", "digest", "librarySync", "heal", "brokenCheck"];
   return { available: true, jobs: keys.map(k => parseJob(lines, k)) };
 }
 

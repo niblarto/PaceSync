@@ -310,6 +310,11 @@ FILES = [
     ('app/api/cron/library-sync/route.ts',         'app/api/cron/library-sync/route.ts'),
     ('app/api/cron/notify/route.ts',               'app/api/cron/notify/route.ts'),
     ('app/api/cron/heal/route.ts',                 'app/api/cron/heal/route.ts'),
+    ('app/api/cron/broken-tracklists/route.ts',    'app/api/cron/broken-tracklists/route.ts'),
+    ('app/api/tracklists/broken/route.ts',         'app/api/tracklists/broken/route.ts'),
+    ('lib/broken-tracklists.ts',                   'lib/broken-tracklists.ts'),
+    ('components/useBrokenTracklists.ts',          'components/useBrokenTracklists.ts'),
+    ('components/BrokenTracklistsBanner.tsx',      'components/BrokenTracklistsBanner.tsx'),
     ('lib/cron-notify.ts',                         'lib/cron-notify.ts'),
     ('lib/spotify-library-sync.ts',                'lib/spotify-library-sync.ts'),
     ('lib/cron-schedule.ts',                      'lib/cron-schedule.ts'),
@@ -636,6 +641,17 @@ heal_cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/heal' || {{ (crontab -l 2>/dev/null; echo '{heal_cron_line}') | crontab -; }}""")
+
+# Daily broken-tracklist check — notifies when an upcoming schedule / Pace Pro
+# tracklist still contains a deleted track.
+print('  Ensuring cron job (broken tracklist check, default daily 08:00)...')
+broken_cron_log = f'/home/{PI["user"]}/cron-broken-tracklists.log'
+broken_cron_line = (
+    f'0 8 * * * curl -s -o {broken_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/broken-tracklists '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/broken-tracklists' || {{ (crontab -l 2>/dev/null; echo '{broken_cron_line}') | crontab -; }}""")
 
 # Garmin sync completion notification: sftp doesn't carry the exec bit (and a
 # Windows checkout may add CRLFs), so normalise the script, then append it to

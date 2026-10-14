@@ -5840,6 +5840,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               { key: "digest", label: "Daily digest", desc: "Push notification with today's schedule + first track of the playlist" },
               { key: "heal", label: "Nightly library heal", desc: "Fills every gap it can — Spotify links, audio features, durations and genres — and reports what changed" },
               { key: "librarySync", label: "Library ↔ Spotify sync", desc: "Two-way sync of the library and its Spotify playlist (deleted tracks are removed, new ones added both ways)" },
+              { key: "brokenCheck", label: "Broken tracklist check", desc: "Notifies you when an upcoming schedule or Pace Pro tracklist still contains a deleted track" },
             ] as const).map(meta => {
               const job = cronJobs.find(j => j.key === meta.key);
               if (!job) return null;

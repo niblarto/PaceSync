@@ -9,6 +9,8 @@ import type { SavedPaceProMix } from "@/lib/pace-pro-saved";
 import { RouteMapLightbox } from "./RouteMapLightbox";
 import { AdvancedMixModal } from "./AdvancedMixModal";
 import { openInSpotify } from "./TrackRow";
+import { useSearchParams, useRouter } from "next/navigation";
+import { useBrokenTracklists } from "./useBrokenTracklists";
 
 interface PaceSpmRow { bucket: number; avg_spm: number; records: number; }
 
@@ -1048,6 +1050,16 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     pinned?: boolean;
   }
   const [mixSnapshots, setMixSnapshots] = useState<Record<string, MixSnapshot | null>>({});
+  // Tracks deleted from the library that saved mixes still contain —
+  // highlighted in each card's tracklist until swapped.
+  const { missingUris: brokenUris } = useBrokenTracklists();
+
+  // ?openMix=<date> (the broken-tracklist banner's links): expand that
+  // workout and load its saved tracklist into the dashboard's track list,
+  // where the deleted track can be Quick Swapped.
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const [pendingOpenDate, setPendingOpenDate] = useState<string | null>(null);
   const [unpinningDate, setUnpinningDate] = useState<string | null>(null);
   const [pinningDate, setPinningDate] = useState<string | null>(null);
   const [deletingDate, setDeletingDate] = useState<string | null>(null);
@@ -1127,6 +1139,27 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       setDeletingDate(null);
     }
   }
+
+  useEffect(() => {
+    const date = searchParams.get("openMix");
+    if (!date || workouts.length === 0) return;
+    router.replace("/dashboard");
+    const w = workouts.find(x => x.date === date);
+    if (!w) return;
+    setExpanded(w.uid);
+    setPendingOpenDate(date);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, workouts]);
+
+  useEffect(() => {
+    if (!pendingOpenDate) return;
+    const snap = mixSnapshots[pendingOpenDate];
+    if (snap === undefined) return; // still loading
+    const w = workouts.find(x => x.date === pendingOpenDate);
+    setPendingOpenDate(null);
+    if (w && snap) loadSnapshotIntoTracklist(w, snap);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingOpenDate, mixSnapshots, workouts]);
 
   // A save on the dashboard bumps mixSavedNonce — drop the cache so the
   // fetch effect below (which depends on mixSnapshots) re-reads fresh data.
@@ -1415,7 +1448,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     seedAvoidUris?: string[],
     onResult?: (tracks: TrackWithBPM[], totalSec: number, timeline: AiDjTimelineSegment[], startedAtMs: number) => void,
     extraPlayCounts?: Record<string, number>,
-    segmentCandidateUris?: (string[] | null)[],
+    segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[],
     ignorePlayCounts?: boolean,
   ) {
     // A remix should sound different: send every track from every prior
@@ -1849,6 +1882,19 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                                       {t.name} — <span className="text-slate-500">{t.artist}</span>
                                     </>
                                   );
+                                  if (t.uri && brokenUris.has(t.uri)) {
+                                    return (
+                                      <p key={i} className="text-[11px] text-rose-300 truncate rounded bg-rose-500/10 ring-1 ring-rose-500/50 px-1"
+                                        title="Deleted from the library — load this tracklist and Quick Swap it to repair">
+                                        <button
+                                          onClick={e => { e.stopPropagation(); loadSnapshotIntoTracklist(w, snap); }}
+                                          className="hover:text-rose-100 truncate text-left"
+                                        >
+                                          ⚠ Deleted · {label}
+                                        </button>
+                                      </p>
+                                    );
+                                  }
                                   return t.uri ? (
                                     <p key={i} className="text-[11px] text-slate-400 truncate">
                                       <button

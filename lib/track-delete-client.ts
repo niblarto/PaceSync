@@ -1,5 +1,6 @@
 import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import { getRunningPlaylist } from "@/components/useRunningPlaylist";
+import { notifyTracklistsChanged } from "@/components/useBrokenTracklists";
 
 // Shared client-side delete flow: removes a track from the live Spotify
 // "Running" playlist (best-effort — fire-and-forget, matching the original
@@ -49,5 +50,9 @@ export function deleteTrackFromLibrary(uri: string, playlistId: string | null, s
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ spotifyUri: uri, skipDeletedLog }),
-  }).catch(() => {});
+  })
+    // Mixes containing the track now show it as deleted — refresh the
+    // broken-tracklist banner.
+    .then(() => notifyTracklistsChanged())
+    .catch(() => {});
 }

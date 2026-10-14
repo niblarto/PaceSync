@@ -82,7 +82,17 @@ export function PaceProClient() {
       setPpSavedLoaded(true);
       fetch("/api/settings/pace-pro-saved")
         .then(r => r.json())
-        .then((d: { mixes?: SavedPaceProMix[] }) => setPpSavedMixes(d.mixes ?? []))
+        .then((d: { mixes?: SavedPaceProMix[] }) => {
+          setPpSavedMixes(d.mixes ?? []);
+          // ?openSaved=<id> (the broken-tracklist banner's link) opens that
+          // saved mix straight away.
+          const openId = new URLSearchParams(window.location.search).get("openSaved");
+          const target = openId ? (d.mixes ?? []).find(m => m.id === openId) : undefined;
+          if (target) {
+            window.history.replaceState(null, "", "/pace-pro");
+            loadSavedPaceProMix(target);
+          }
+        })
         .catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

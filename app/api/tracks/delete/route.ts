@@ -4,8 +4,7 @@ import { authOptions } from "@/lib/auth";
 import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
 import { readTracksByUris, deleteTracksByUri, regenerateCsvFile } from "@/lib/tracks-store";
 import { recordDeletedTracks } from "@/lib/deleted-tracks";
-import { unpinMixesContaining } from "@/lib/pinned-mixes";
-import { removeTodaysRunEntry } from "@/lib/todays-run-history";
+import { findBrokenTracklists } from "@/lib/broken-tracklists";
 
 // CSV-only deletion — Spotify removal is handled client-side with the browser token.
 // Accepts either a single spotifyUri (back-compat) or a spotifyUris batch, doing one
@@ -45,18 +44,16 @@ export async function DELETE(req: NextRequest) {
       if (!skipDeletedLog) {
         try { recordDeletedTracks(removedRows); } catch (e) { console.warn("[tracks/delete] deletion log failed:", e); }
       }
-      // A pinned mix containing a just-deleted track no longer matches
-      // reality — unpin it regardless of which mix (if any) happens to be
-      // loaded client-side, since the deleted track could belong to ANY
-      // pinned date's mix, not just whatever's currently on screen.
+      // Mixes containing the deleted track are left exactly as they are —
+      // no unpinning, no wiped tracklist. The track shows highlighted in
+      // them, and the broken-tracklist banner / daily check (lib/broken-
+      // tracklists.ts) list them until each is repaired with a swap.
+      // `affected` lets the caller show that straight away.
+      let affected: ReturnType<typeof findBrokenTracklists> = [];
       try {
-        const unpinned = await unpinMixesContaining(Array.from(fullUris), Date.now());
-        // removeTodaysRunEntry itself now unconditionally refuses to delete
-        // any past-or-today-dated row — a run's tracklist is a permanent
-        // record once it's happened, regardless of which caller asks.
-        for (const { date, title } of unpinned) removeTodaysRunEntry(date, title);
-      } catch (e) { console.warn("[tracks/delete] pin invalidation failed:", e); }
-      return NextResponse.json({ ok: true, csvRemoved: true, removed: removedRows.length });
+        affected = findBrokenTracklists().filter(b => b.missing.some(m => fullUris.has(m.uri)));
+      } catch (e) { console.warn("[tracks/delete] broken-tracklist scan failed:", e); }
+      return NextResponse.json({ ok: true, csvRemoved: true, removed: removedRows.length, affected });
     }
     return NextResponse.json({ ok: true, csvRemoved: false, removed: 0 });
   } catch (e) {

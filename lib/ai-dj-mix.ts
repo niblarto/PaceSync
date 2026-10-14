@@ -301,7 +301,7 @@ function mergePlayCounts(base: Record<string, number>, extra?: Record<string, nu
 // restricted list can't fill the segment's own time budget — see
 // ai_dj/workout.py's build_workout_playlist docstring. Used by Pace Pro to
 // hand the LLM exactly lib/pace-analysis.ts's "fits" list per split.
-export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[], extraPlayCounts?: Record<string, number>, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null)[], ignorePlayCounts?: boolean): Promise<AiDjMixResult> {
+export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[], extraPlayCounts?: Record<string, number>, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[], ignorePlayCounts?: boolean): Promise<AiDjMixResult> {
   const config = loadAiDjConfig();
   if (!config?.enabled) {
     return { ok: false, error: "AI DJ is not enabled in Settings" };
@@ -688,7 +688,7 @@ export async function compareAiDjModels(
 
 function buildMixLocally(
   segments: string[], easyBias = 0, trackFeedback: object[] = [], playCounts: Record<string, number> = {}, onProgress?: AiDjProgress, avoidUris?: string[],
-  model?: string, effort?: string, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null)[],
+  model?: string, effort?: string, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[],
 ): Promise<AiDjMixResult> {
   return runBridge({
     segments, easyBias, trackFeedback,

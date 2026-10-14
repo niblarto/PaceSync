@@ -8,6 +8,7 @@ import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import { SpotifyRateLimitBanner } from "./SpotifyRateLimitBanner";
 import { MissingDataBanner } from "./MissingDataBanner";
 import { DuplicateTracksBanner } from "./DuplicateTracksBanner";
+import { BrokenTracklistsBanner } from "./BrokenTracklistsBanner";
 import { TrackRow } from "./TrackRow";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
 import { NextRunPinned } from "./NextRunPinned";
@@ -361,6 +362,7 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
       <SpotifyRateLimitBanner />
       <MissingDataBanner />
       <DuplicateTracksBanner />
+      <BrokenTracklistsBanner />
 
       <div className="flex-1 flex flex-col min-h-0">
         <div className={tab === "tracks" ? "flex-1 min-h-0 flex flex-col" : "hidden"}>

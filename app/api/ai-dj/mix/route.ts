@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
 
   const { title, segments, avoidUris, date, extraPlayCounts, strictPaceTolerance, segmentCandidateUris, ignorePlayCounts } = await req.json() as {
     title: string; segments: string[]; avoidUris?: string[]; date?: string; extraPlayCounts?: Record<string, number>;
-    strictPaceTolerance?: boolean; segmentCandidateUris?: (string[] | null)[]; ignorePlayCounts?: boolean;
+    strictPaceTolerance?: boolean; segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[]; ignorePlayCounts?: boolean;
   };
   if (!segments?.length) {
     return NextResponse.json({ error: "segments required" }, { status: 400 });

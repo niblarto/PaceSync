@@ -47,14 +47,21 @@ export async function POST(req: NextRequest) {
     const kind = segmentKind(segment);
     const m = segment.match(/(\d{1,2}):(\d{2})\s*\/\s*mi/i);
     const paceSec = m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : kind === "strength" ? null : easyPace;
-    let targetBpm: number | null = null;
+    const o = kind !== "strength" ? overrides[kind] : undefined;
+    // Cadence at this pace — warm up/easy/cool down/rest read the "easy"
+    // profile, work the "work" one (workout.py: kind="easy" if seg.kind in
+    // WIDE_TOLERANCE_KINDS else "work").
+    let paceBpm: number | null = null;
     if (paceSec != null) {
-      targetBpm = (kind !== "strength" ? nearestBucket(kindCadence?.[kind], paceSec) : null)
+      paceBpm = (kind !== "strength" ? nearestBucket(kindCadence?.[kind === "work" ? "work" : "easy"], paceSec) : null)
         ?? nearestBucket(cadence, paceSec)
         ?? Math.round(Math.min(Math.max(171 + (555 - paceSec) / 30, 164), 180));
     }
-    const o = kind !== "strength" ? overrides[kind] : undefined;
-    return { segment, kind, paceSec, targetBpm, min: o?.min ?? null, max: o?.max ?? null };
+    // ...then clamped into the run type's Settings range, as the mixer does.
+    let targetBpm = paceBpm;
+    if (targetBpm != null && o?.max != null) targetBpm = Math.min(targetBpm, o.max);
+    if (targetBpm != null && o?.min != null) targetBpm = Math.max(targetBpm, o.min);
+    return { segment, kind, paceSec, paceBpm, targetBpm, min: o?.min ?? null, max: o?.max ?? null };
   });
   return NextResponse.json({ defaults });
 }
