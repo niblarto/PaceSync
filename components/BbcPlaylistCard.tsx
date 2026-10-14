@@ -72,9 +72,7 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy, onDelete
           body: JSON.stringify({ uris: [`spotify:track:${trackId}`] }),
         });
         if (res.ok) {
-          // Bring the app forward on the track's page so its main panel
-          // reflects what's now playing (the API only switches the audio).
-          window.location.href = `spotify:track:${trackId}`;
+          // Playback switched — Spotify stays in the background.
           return;
         }
       } catch { /* fall through */ }

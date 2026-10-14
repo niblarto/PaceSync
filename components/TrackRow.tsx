@@ -104,10 +104,8 @@ export async function playInSpotify(uri: string, token?: string | null): Promise
         });
         if (!isCurrent()) return; // a newer track was clicked while this request was in flight
         if (res.ok) {
-          // Playback switched, but the app's main panel keeps showing
-          // whatever page was open (the API can't refresh it). Deep-link
-          // the track so the app comes forward showing what's now playing.
-          window.location.href = uri;
+          // Playback switched — leave Spotify in the background; PaceSync's
+          // own playback bars and play/pause control it from here.
           return;
         }
       } catch { /* fall through to opening the app */ }
