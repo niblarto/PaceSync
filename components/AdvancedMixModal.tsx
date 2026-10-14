@@ -257,7 +257,9 @@ export function AdvancedMixModal({ workoutTitle, segments, onClose, onBuild }: P
   const anyOverMax = segmentMatches.some(m => m != null && m.length > MAX_CANDIDATES);
 
   function handleBuild() {
-    const segmentCandidateUris = segmentMatches.map(m => {
+    // The mixer numbers only real steps (it skips the header line), so the
+    // header's slot is dropped to keep each list on its own segment.
+    const segmentCandidateUris = segmentMatches.filter((_, i) => !isHeaderLine(segments[i])).map(m => {
       if (m == null) return null;
       const uris = m.map(t => t.uri);
       return randomize && uris.length > MAX_CANDIDATES ? shuffle(uris).slice(0, MAX_CANDIDATES) : uris;
