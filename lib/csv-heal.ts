@@ -307,12 +307,25 @@ let inFlight: Promise<HealResult> | null = null;
 // no longer the active one.
 let cancelRequested = false;
 
+// A sweep reads the library once at its start, so rows written while it
+// runs (e.g. a Song Crawler adding tracks mid-sweep) would be missed if a
+// new request just joined it. Instead, one follow-up sweep is queued to run
+// right after; further requests during that wait share the same follow-up.
+let queuedHeal: Promise<HealResult> | null = null;
+
 export function healActiveCsv(): Promise<HealResult> {
   if (!inFlight) {
     cancelRequested = false;
     inFlight = doHeal().finally(() => { inFlight = null; });
+    return inFlight;
   }
-  return inFlight;
+  if (!queuedHeal) {
+    queuedHeal = inFlight.catch(() => undefined).then(() => {
+      queuedHeal = null;
+      return healActiveCsv();
+    });
+  }
+  return queuedHeal;
 }
 
 // Stops a running sweep at the next checkpoint and clears its progress log.

@@ -2,7 +2,8 @@ import { NextRequest } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getFreshToken } from "@/lib/tokenStore";
-import { sendNtfy, trackLinkLines } from "@/lib/ntfy";
+import { trackLinkLines } from "@/lib/ntfy";
+import { cronNotify } from "@/lib/cron-notify";
 import { appendCronLog } from "@/lib/cron-log";
 import fs from "fs";
 import path from "path";
@@ -39,7 +40,9 @@ function loadBbcProgrammes(): { pid: string; name: string }[] {
 
 // ── ntfy.sh ────────────────────────────────────────────────────────────────
 
-const notify = sendNtfy;
+// Every result goes to ntfy AND the Android app (lib/cron-notify.ts).
+const notify = (message: string, o: { title?: string; tags?: string; priority?: string } = {}) =>
+  cronNotify(message, { title: o.title ?? "BBC playlist refresh", tags: o.tags, priority: o.priority as "high" | undefined, type: "bbc" });
 
 // ── Disk cache ─────────────────────────────────────────────────────────────
 

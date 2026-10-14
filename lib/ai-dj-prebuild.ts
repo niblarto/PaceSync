@@ -4,7 +4,8 @@ import { upsertPlaylist } from "@/lib/spotify-playlist";
 import { buildAiDjMix } from "@/lib/ai-dj-mix";
 import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { fetchRunnaSchedule, TODAYS_RUN_PLAYLIST, type RunnaWorkout } from "@/lib/runna-schedule";
-import { sendNtfy, trackLinkLines } from "@/lib/ntfy";
+import { trackLinkLines } from "@/lib/ntfy";
+import { cronNotify } from "@/lib/cron-notify";
 import { appendCronLog } from "@/lib/cron-log";
 import { saveTodaysRunEntry, getTodaysRunEntry, timelineToHistoryTracks } from "@/lib/todays-run-history";
 import { getPinnedMix } from "@/lib/pinned-mixes";
@@ -28,7 +29,9 @@ import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 // playlist. (The dated per-workout playlist is only created when the user
 // explicitly saves it from the dashboard.)
 
-const notify = sendNtfy;
+// Every result goes to ntfy AND the Android app (lib/cron-notify.ts).
+const notify = (message: string, o: { title?: string; tags?: string; priority?: string } = {}) =>
+  cronNotify(message, { title: o.title ?? "AI DJ pre-build", tags: o.tags, priority: o.priority as "high" | undefined, type: "ai-dj" });
 
 function isRunnableWorkout(w: RunnaWorkout): boolean {
   if (w.type === "rest") return false;
@@ -62,11 +65,13 @@ export async function buildAndSaveMixesFor(targetDate: string, label: "pre-build
   if (!config?.enabled) {
     console.log(`[cron/ai-dj] AI DJ not enabled — skipping (${label})`);
     appendCronLog("AI DJ", `Skipped (${label}) — AI DJ not enabled in Settings`);
+    await notify("AI DJ is not enabled in Settings — nothing built.", { title: `⏭ AI DJ ${label} skipped`, priority: "low" });
     return { ok: true, skipped: "AI DJ not enabled in Settings" };
   }
   if (!config.autoPlaylist) {
     console.log(`[cron/ai-dj] auto playlist switched off — skipping (${label})`);
     appendCronLog("AI DJ", `Skipped (${label}) — auto playlist upload switched off`);
+    await notify("Auto playlist upload is switched off in Settings — nothing built.", { title: `⏭ AI DJ ${label} skipped`, priority: "low" });
     return { ok: true, skipped: "Auto playlist upload switched off in Settings" };
   }
 
@@ -90,6 +95,7 @@ export async function buildAndSaveMixesFor(targetDate: string, label: "pre-build
   if (targetWorkouts.length === 0) {
     console.log(`[cron/ai-dj] no runnable (uncovered) workout on ${targetDate} — skipping (${label})`);
     appendCronLog("AI DJ", `Skipped (${label}) — no run scheduled for ${targetDate}`);
+    await notify(`No run scheduled for ${targetDate} (or it's already covered) — nothing to build.`, { title: `⏭ AI DJ ${label}: nothing to build`, priority: "low" });
     return { ok: true, skipped: `No run scheduled for ${targetDate}` };
   }
 

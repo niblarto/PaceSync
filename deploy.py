@@ -248,6 +248,7 @@ FILES = [
     ('app/api/tracks/move-genre/route.ts',         'app/api/tracks/move-genre/route.ts'),
     ('app/api/tracks/replace-candidates-budget/route.ts', 'app/api/tracks/replace-candidates-budget/route.ts'),
     ('app/api/tracks/song-crawler/route.ts',     'app/api/tracks/song-crawler/route.ts'),
+    ('lib/song-crawler.ts',                        'lib/song-crawler.ts'),
     ('app/api/tracks/lookup-list/route.ts',        'app/api/tracks/lookup-list/route.ts'),
     ('app/api/tracks/lookup-fit/route.ts',         'app/api/tracks/lookup-fit/route.ts'),
     ('lib/fit-budget.ts',                          'lib/fit-budget.ts'),
@@ -304,6 +305,9 @@ FILES = [
     ('app/api/cron/ai-dj-retry/route.ts',          'app/api/cron/ai-dj-retry/route.ts'),
     ('app/api/cron/digest/route.ts',               'app/api/cron/digest/route.ts'),
     ('app/api/cron/library-sync/route.ts',         'app/api/cron/library-sync/route.ts'),
+    ('app/api/cron/notify/route.ts',               'app/api/cron/notify/route.ts'),
+    ('app/api/cron/heal/route.ts',                 'app/api/cron/heal/route.ts'),
+    ('lib/cron-notify.ts',                         'lib/cron-notify.ts'),
     ('lib/spotify-library-sync.ts',                'lib/spotify-library-sync.ts'),
     ('lib/cron-schedule.ts',                      'lib/cron-schedule.ts'),
     ('lib/cron-log.ts',                           'lib/cron-log.ts'),
@@ -619,6 +623,16 @@ library_sync_cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/library-sync' || {{ (crontab -l 2>/dev/null; echo '{library_sync_cron_line}') | crontab -; }}""")
+
+# Overnight library heal — every gap-filling pass, with a result notification.
+print('  Ensuring cron job (nightly library heal, default daily 02:00)...')
+heal_cron_log = f'/home/{PI["user"]}/cron-heal.log'
+heal_cron_line = (
+    f'0 2 * * * curl -s -o {heal_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/heal '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/heal' || {{ (crontab -l 2>/dev/null; echo '{heal_cron_line}') | crontab -; }}""")
 
 # Garmin sync completion notification: sftp doesn't carry the exec bit (and a
 # Windows checkout may add CRLFs), so normalise the script, then append it to

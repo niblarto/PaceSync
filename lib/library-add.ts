@@ -23,6 +23,9 @@ export interface LibraryAddTrack {
   energy?: number;
   danceability?: number;
   valence?: number;
+  /** Track length when the source already knows it (e.g. Deezer) — saves a
+      heal-sweep lookup and avoids a blank Duration (ms) row. */
+  durationMs?: number;
   /** Comma-separated, same convention as the CSV's own Genres column — set
       by the title/artist/BPM/genre bulk import (Settings > Playlist
       Management), which supplies genre directly rather than relying on the
@@ -69,8 +72,12 @@ export async function addTracksToLibrary(tracks: LibraryAddTrack[], allowDeleted
   const freshIsrcTracks = tracks.filter(t => !t.uri && t.isrc && !existingIsrcs.has(t.isrc));
   const fresh = [...freshUriTracks, ...freshIsrcTracks];
 
+  // Same "Added At" format Spotify sync writes (ISO, no milliseconds) — the
+  // Tracklist's "Added" sort reads this column, so every add path sets it.
+  const addedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const newRows = fresh.map(t => ({
     uri: t.uri ?? "",
+    addedAt,
     isrc: t.isrc ?? null,
     trackName: t.name,
     artistNames: t.artist,
@@ -81,6 +88,7 @@ export async function addTracksToLibrary(tracks: LibraryAddTrack[], allowDeleted
     energy: t.energy,
     danceability: t.danceability,
     valence: t.valence,
+    ...(t.durationMs && t.durationMs > 0 ? { durationMs: Math.round(t.durationMs) } : {}),
   }));
 
   if (newRows.length > 0) {

@@ -648,7 +648,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     key: number | null; mode: number | null; danceability: number | null; valence: number | null;
   }
   const [tracklist, setTracklist] = useState<ManagedTrack[] | null>(null);
-  // URIs explicitly confirmed as NOT a duplicate ("Keep this track" in the
+  // URIs explicitly confirmed as NOT a duplicate ("Keep" in the
   // Possible Duplicates review below) — excluded from duplicateGroups so a
   // reviewed-and-kept track doesn't keep reappearing on every visit.
   const [confirmedUniqueUris, setConfirmedUniqueUris] = useState<Set<string>>(new Set());
@@ -671,9 +671,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const tracklistContainerRef = useRef<HTMLDivElement>(null);
   const tracklistSentinelRef = useRef<HTMLDivElement>(null);
 
-  // ── Song Crawler ── crawls Deezer artist radio from a track's artist,
-  // adding same-BPM finds to the library (app/api/tracks/song-crawler).
-  // Stop = abort the streaming request, which ends the crawl server-side.
+  // ── Song Crawler ── a server-side background job (lib/song-crawler.ts):
+  // it keeps running with the browser closed. This page starts/stops it and
+  // polls its log; only the form inputs are remembered in the browser.
   interface CrawlerLine { level: "info" | "match" | "warn" | "error"; msg: string; at: string }
   const [crawlerArtist, setCrawlerArtist] = useState("");
   const [crawlerBpm, setCrawlerBpm] = useState("");
@@ -682,13 +682,20 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [crawlerBpmMax, setCrawlerBpmMax] = useState("");
   // How many distinct artists a crawl may discover before it stops queuing.
   const [crawlerMaxArtists, setCrawlerMaxArtists] = useState("50");
-  // What the log below is from — kept with the log so a reload still says
-  // which crawl it was.
+  // What to crawl: the artist's own tracks, their artist radio, or both.
+  const [crawlerMode, setCrawlerMode] = useState<"artist" | "radio" | "both">("radio");
+  // Artists processed so far / artists found so far.
+  const [crawlerProgress, setCrawlerProgress] = useState<{ crawled: number; total: number } | null>(null);
+  // What the log below is from.
   const [crawlerSeed, setCrawlerSeed] = useState<{ artist: string; bpm: number; bpmMax?: number | null; startedAt: string } | null>(null);
   const [crawlerRunning, setCrawlerRunning] = useState(false);
+  const [crawlerStopping, setCrawlerStopping] = useState(false);
+  const [crawlerStatusText, setCrawlerStatusText] = useState<string | null>(null);
   const [crawlerLog, setCrawlerLog] = useState<CrawlerLine[]>([]);
   const [crawlerAdded, setCrawlerAdded] = useState(0);
-  const crawlerAbortRef = useRef<AbortController | null>(null);
+  const crawlerJobIdRef = useRef<string | null>(null);
+  const crawlerSinceRef = useRef(0);
+  const crawlerWasRunningRef = useRef(false);
   const crawlerLogRef = useRef<HTMLDivElement>(null);
   const [bulkDeleteArtist, setBulkDeleteArtist] = useState("");
   const [bulkDeleteTarget, setBulkDeleteTarget] = useState<{ kind: "genre" | "artist"; value: string; tracks: ManagedTrack[] } | null>(null);
@@ -1072,11 +1079,69 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }, []);
 
-  function crawlerAppend(level: CrawlerLine["level"], msg: string) {
-    const at = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    // Capped so a long crawl doesn't grow the log without bound.
-    setCrawlerLog(prev => [...prev, { level, msg, at }].slice(-2000));
-  }
+  type CrawlJobMeta = {
+    id: string; status: "running" | "stopping" | "healing" | "done" | "stopped" | "error" | "interrupted";
+    startedAt: string; added: number; crawled: number; totalArtists: number;
+    params: { artist: string; bpm?: number; bpmMin?: number; bpmMax?: number };
+  };
+  const CRAWLER_STATUS_TEXT: Record<CrawlJobMeta["status"], string> = {
+    running: "Running", stopping: "Stopping", healing: "Filling in missing data",
+    done: "Last crawl", stopped: "Last crawl (stopped)", error: "Last crawl (failed)", interrupted: "Last crawl (interrupted)",
+  };
+
+  // Pulls new log lines (and status) for the server's current/last crawl.
+  const pollSongCrawler = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/tracks/song-crawler?since=${crawlerSinceRef.current}`);
+      if (!res.ok) return;
+      const d = await res.json() as { job: CrawlJobMeta | null; lines: { seq: number; at: string; level: CrawlerLine["level"]; msg: string }[] };
+      if (!d.job) return;
+      // A different crawl than the one shown — start its log from scratch.
+      if (d.job.id !== crawlerJobIdRef.current) {
+        crawlerJobIdRef.current = d.job.id;
+        if (crawlerSinceRef.current !== 0) {
+          crawlerSinceRef.current = 0;
+          setCrawlerLog([]);
+          return pollSongCrawler();
+        }
+        setCrawlerLog([]);
+      }
+      if (d.lines.length > 0) {
+        crawlerSinceRef.current = d.lines[d.lines.length - 1].seq + 1;
+        const mapped = d.lines.map(l => ({
+          level: l.level, msg: l.msg,
+          at: new Date(l.at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        }));
+        setCrawlerLog(prev => [...prev, ...mapped].slice(-5000));
+      }
+      const job = d.job;
+      const running = job.status === "running" || job.status === "stopping" || job.status === "healing";
+      setCrawlerRunning(running);
+      setCrawlerStopping(job.status === "stopping" || job.status === "healing");
+      setCrawlerStatusText(CRAWLER_STATUS_TEXT[job.status]);
+      setCrawlerAdded(job.added);
+      setCrawlerProgress(job.totalArtists > 0 ? { crawled: job.crawled, total: job.totalArtists } : null);
+      const p = job.params;
+      const isRange = !!p.bpmMin && !!p.bpmMax;
+      setCrawlerSeed({
+        artist: p.artist,
+        bpm: (isRange ? p.bpmMin : p.bpm) ?? 0,
+        bpmMax: isRange ? p.bpmMax : null,
+        startedAt: new Date(job.startedAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }),
+      });
+      // Crawl just ended while watching — show the tracks it added.
+      if (crawlerWasRunningRef.current && !running && job.added > 0) void loadTracklist();
+      crawlerWasRunningRef.current = running;
+    } catch { /* transient — next poll retries */ }
+  }, [loadTracklist]);
+
+  // Restore the current/last crawl on load; poll while one is running.
+  useEffect(() => { void pollSongCrawler(); }, [pollSongCrawler]);
+  useEffect(() => {
+    if (!crawlerRunning) return;
+    const id = setInterval(() => { void pollSongCrawler(); }, 2000);
+    return () => clearInterval(id);
+  }, [crawlerRunning, pollSongCrawler]);
 
   async function startSongCrawler() {
     if (crawlerRunning) return;
@@ -1085,90 +1150,57 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     const bpmMaxRaw = parseFloat(crawlerBpmMax);
     const bpmMax = bpmMaxRaw > 0 && bpmMaxRaw > bpm ? bpmMaxRaw : null;
     if (!artist || !bpm || bpm <= 0) return;
-    const abort = new AbortController();
-    crawlerAbortRef.current = abort;
-    setCrawlerSeed({ artist, bpm, bpmMax, startedAt: new Date().toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) });
-    setCrawlerLog([]);
-    setCrawlerAdded(0);
-    setCrawlerRunning(true);
-    crawlerAppend("info", `Crawling from ${artist} for ${bpmMax ? `${Math.round(bpm)}–${Math.round(bpmMax)}` : Math.round(bpm)} BPM`);
-    let added = 0;
-    try {
-      const res = await fetch("/api/tracks/song-crawler", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          artist,
-          ...(bpmMax ? { bpmMin: bpm, bpmMax } : { bpm }),
-          maxArtists: parseInt(crawlerMaxArtists, 10) > 0 ? parseInt(crawlerMaxArtists, 10) : 50,
-        }),
-        signal: abort.signal,
-      });
-      if (!res.ok || !res.body) {
-        const err = await res.json().catch(() => ({})) as { error?: string };
-        throw new Error(err.error ?? `Song Crawler failed (${res.status})`);
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let sep;
-        while ((sep = buf.indexOf("\n\n")) !== -1) {
-          const chunk = buf.slice(0, sep);
-          buf = buf.slice(sep + 2);
-          const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
-          if (!dataLine) continue;
-          const msg = JSON.parse(dataLine.slice(6)) as { type: string; level?: CrawlerLine["level"]; msg?: string; error?: string };
-          if (msg.type === "log" && msg.msg) crawlerAppend(msg.level ?? "info", msg.msg);
-          else if (msg.type === "added") { added++; setCrawlerAdded(n => n + 1); }
-          else if (msg.type === "error") crawlerAppend("error", msg.error ?? "Song Crawler failed");
-        }
-      }
-    } catch (e) {
-      if (abort.signal.aborted) crawlerAppend("warn", `Stopped by you. ${added} track${added === 1 ? "" : "s"} added.`);
-      else crawlerAppend("error", e instanceof Error ? e.message : "Song Crawler failed");
-    } finally {
-      crawlerAbortRef.current = null;
-      setCrawlerRunning(false);
-      if (added > 0) loadTracklist();
+    const res = await fetch("/api/tracks/song-crawler", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        artist,
+        ...(bpmMax ? { bpmMin: bpm, bpmMax } : { bpm }),
+        maxArtists: parseInt(crawlerMaxArtists, 10) > 0 ? parseInt(crawlerMaxArtists, 10) : 50,
+        mode: crawlerMode,
+      }),
+    }).catch(() => null);
+    const d = res ? await res.json().catch(() => ({})) as { id?: string; error?: string } : { error: "Couldn't reach the server" };
+    if (!res?.ok || !d.id) {
+      setCrawlerLog(prev => [...prev, { level: "error", msg: d.error ?? "Couldn't start the crawl", at: new Date().toLocaleTimeString("en-GB") }]);
+      return;
     }
+    crawlerJobIdRef.current = d.id;
+    crawlerSinceRef.current = 0;
+    crawlerWasRunningRef.current = true;
+    setCrawlerLog([]);
+    setCrawlerRunning(true);
+    void pollSongCrawler();
   }
 
-  function stopSongCrawler() {
-    crawlerAbortRef.current?.abort();
+  async function stopSongCrawler() {
+    setCrawlerStopping(true);
+    await fetch("/api/tracks/song-crawler", { method: "DELETE" }).catch(() => null);
+    void pollSongCrawler();
   }
 
-  // Last crawl's log survives reloads (this browser only). Loaded once on
-  // mount, saved shortly after it changes.
-  const CRAWLER_STORE_KEY = "pacesync.songCrawler.last";
+  // Form inputs are remembered in this browser; the log lives on the server.
+  const CRAWLER_STORE_KEY = "pacesync.songCrawler.inputs";
   useEffect(() => {
     try {
       const raw = localStorage.getItem(CRAWLER_STORE_KEY);
       if (!raw) return;
-      const saved = JSON.parse(raw) as { seed?: typeof crawlerSeed; log?: CrawlerLine[]; added?: number; artist?: string; bpm?: string; bpmMax?: string; maxArtists?: string };
-      if (saved.seed) setCrawlerSeed(saved.seed);
-      if (saved.log) setCrawlerLog(saved.log);
-      if (typeof saved.added === "number") setCrawlerAdded(saved.added);
+      const saved = JSON.parse(raw) as { artist?: string; bpm?: string; bpmMax?: string; maxArtists?: string; mode?: string; allTracks?: boolean };
       if (saved.artist) setCrawlerArtist(saved.artist);
       if (saved.bpm) setCrawlerBpm(saved.bpm);
       if (saved.bpmMax) setCrawlerBpmMax(saved.bpmMax);
       if (saved.maxArtists) setCrawlerMaxArtists(saved.maxArtists);
-    } catch { /* storage unavailable — start empty */ }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      if (saved.mode === "artist" || saved.mode === "radio" || saved.mode === "both") setCrawlerMode(saved.mode);
+      else if (saved.allTracks) setCrawlerMode("both");
+    } catch { /* storage unavailable */ }
   }, []);
   useEffect(() => {
-    const id = setTimeout(() => {
-      try {
-        localStorage.setItem(CRAWLER_STORE_KEY, JSON.stringify({
-          seed: crawlerSeed, log: crawlerLog, added: crawlerAdded, artist: crawlerArtist, bpm: crawlerBpm, bpmMax: crawlerBpmMax, maxArtists: crawlerMaxArtists,
-        }));
-      } catch { /* storage full/unavailable — the log just won't persist */ }
-    }, 800);
-    return () => clearTimeout(id);
-  }, [crawlerSeed, crawlerLog, crawlerAdded, crawlerArtist, crawlerBpm, crawlerBpmMax, crawlerMaxArtists]);
+    try {
+      localStorage.setItem(CRAWLER_STORE_KEY, JSON.stringify({
+        artist: crawlerArtist, bpm: crawlerBpm, bpmMax: crawlerBpmMax, maxArtists: crawlerMaxArtists, mode: crawlerMode,
+      }));
+    } catch { /* storage unavailable */ }
+  }, [crawlerArtist, crawlerBpm, crawlerBpmMax, crawlerMaxArtists, crawlerMode]);
 
   // Keep the log scrolled to the newest line.
   useEffect(() => {
@@ -1186,7 +1218,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
   async function confirmTrackUnique(uri: string) {
     setConfirmingUniqueUris(prev => new Set(prev).add(uri));
-    setConfirmedUniqueUris(prev => new Set(prev).add(uri)); // optimistic — drops it out of duplicateGroups immediately
+    setConfirmedUniqueUris(prev => new Set(prev).add(uri)); // optimistic — marks it kept in its group immediately
     try {
       await fetch("/api/tracks/confirm-unique", {
         method: "POST",
@@ -1222,19 +1254,20 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // design, per explicit product decision, rather than trying to get
   // pattern-matching clever about telling them apart: the user listens
   // (track name is clickable -> opens in Spotify) and decides "Delete this
-  // one" or "Keep this track" (confirmedUniqueUris) themselves. A track
-  // marked kept is filtered out of every future scan here.
+  // one" or "Keep" (confirmedUniqueUris) themselves. Kept tracks stay in
+  // their group (marked kept, choices still shown) — a group is listed while
+  // ANY of its tracks is still undecided, so keeping one never makes the
+  // others in that group vanish; it drops off once every track is decided.
   const duplicateGroups = (() => {
     if (!tracklist) return [];
     const byKey = new Map<string, ManagedTrack[]>();
     for (const t of tracklist) {
-      if (confirmedUniqueUris.has(t.uri)) continue;
       const key = dupMatchKey(t.name, t.artist);
       const group = byKey.get(key);
       if (group) group.push(t); else byKey.set(key, [t]);
     }
     return Array.from(byKey.values())
-      .filter(g => g.length > 1)
+      .filter(g => g.length > 1 && g.some(t => !confirmedUniqueUris.has(t.uri)))
       .map(group => {
         const remasters = group.filter(t => isRemaster(t.name));
         const suggestedKeepUri = remasters.length === 1 ? remasters[0].uri : null;
@@ -5655,6 +5688,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               { key: "aidj", label: "AI DJ pre-build", desc: "Builds tomorrow's mix and saves it to “Today's Run”" },
               { key: "aidjRetry", label: "AI DJ morning retry", desc: "Catches today's mix if the evening pre-build missed it" },
               { key: "digest", label: "Daily digest", desc: "Push notification with today's schedule + first track of the playlist" },
+              { key: "heal", label: "Nightly library heal", desc: "Fills every gap it can — Spotify links, audio features, durations and genres — and reports what changed" },
               { key: "librarySync", label: "Library ↔ Spotify sync", desc: "Two-way sync of the library and its Spotify playlist (deleted tracks are removed, new ones added both ways)" },
             ] as const).map(meta => {
               const job = cronJobs.find(j => j.key === meta.key);
@@ -6149,11 +6183,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     {group.tracks[0].name.replace(/\s*[([-].*$/, "")} — {group.tracks[0].artist}
                     {group.suggestedKeepUri && <span className="text-green-500"> · remaster found, suggested keeper marked</span>}
                   </p>
-                  {group.tracks.map(t => (
+                  {group.tracks.map(t => {
+                    const kept = confirmedUniqueUris.has(t.uri);
+                    return (
                     <div
                       key={t.uri}
                       className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm ${
-                        t.uri === group.suggestedKeepUri ? "bg-green-500/10 border border-green-500/30" : "bg-slate-800/40"
+                        kept ? "bg-emerald-500/10 border border-emerald-500/30"
+                          : t.uri === group.suggestedKeepUri ? "bg-green-500/10 border border-green-500/30" : "bg-slate-800/40"
                       }`}
                     >
                       <div className="min-w-0 flex-1">
@@ -6163,7 +6200,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                           title={`${t.name} — open in Spotify`}
                         >
                           {t.name}
-                          {t.uri === group.suggestedKeepUri && <span className="text-green-400 text-xs font-medium ml-2">Keep</span>}
+                          {kept
+                            ? <span className="text-emerald-400 text-xs font-medium ml-2">✓ Kept</span>
+                            : t.uri === group.suggestedKeepUri && <span className="text-green-400 text-xs font-medium ml-2">Suggested keep</span>}
                         </button>
                         <p className="text-xs text-slate-500">
                           {(() => {
@@ -6175,11 +6214,15 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                       <div className="shrink-0 flex items-center gap-2">
                         <button
                           onClick={() => confirmTrackUnique(t.uri)}
-                          disabled={confirmingUniqueUris.has(t.uri)}
-                          title="Not actually a duplicate — keep this track and stop flagging it against this group"
-                          className="text-xs text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 hover:border-emerald-500/50 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
+                          disabled={kept || confirmingUniqueUris.has(t.uri)}
+                          title={kept ? "Already kept" : "Keep this track and stop flagging it as a duplicate"}
+                          className={`text-xs rounded-lg px-3 py-1.5 border transition-colors disabled:cursor-default ${
+                            kept
+                              ? "text-emerald-300 bg-emerald-500/15 border-emerald-500/40"
+                              : "text-emerald-400 hover:text-emerald-300 border-emerald-500/30 hover:border-emerald-500/50 disabled:opacity-40"
+                          }`}
                         >
-                          Keep this track
+                          {kept ? "✓ Kept" : "Keep"}
                         </button>
                         <button
                           onClick={() => deleteManagedTrack(t, true)}
@@ -6190,7 +6233,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                         </button>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ))}
             </div>
@@ -6543,11 +6587,12 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             <input
               type="number"
               min={1}
-              max={500}
+              max={2000}
               value={crawlerMaxArtists}
               onChange={e => setCrawlerMaxArtists(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
-              disabled={crawlerRunning}
+              // Only the radio crawl spreads to other artists.
+              disabled={crawlerRunning || crawlerMode === "artist"}
               placeholder="50"
               className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 font-mono disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500"
             />
@@ -6560,19 +6605,42 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             Crawl
           </button>
           <button
-            onClick={stopSongCrawler}
-            disabled={!crawlerRunning}
+            onClick={() => void stopSongCrawler()}
+            disabled={!crawlerRunning || crawlerStopping}
             className="rounded-lg border border-red-500/40 bg-red-500/15 hover:bg-red-500/25 disabled:opacity-30 disabled:cursor-not-allowed text-red-300 font-semibold text-xs px-4 py-2 transition-colors"
           >
-            ■ Stop
+            {crawlerStopping ? "Stopping…" : "■ Stop"}
           </button>
           <button
-            onClick={() => { setCrawlerLog([]); setCrawlerSeed(null); setCrawlerAdded(0); }}
+            onClick={() => { setCrawlerLog([]); setCrawlerSeed(null); setCrawlerAdded(0); setCrawlerProgress(null); setCrawlerStatusText(null); }}
             disabled={crawlerRunning || crawlerLog.length === 0}
             className="rounded-lg border border-white/10 hover:border-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-slate-400 hover:text-slate-200 text-xs px-3 py-2 transition-colors"
           >
             Clear log
           </button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-slate-500 mr-1">Crawl:</span>
+          {([
+            ["artist", "Artist", "Only this artist's own tracks — every album, EP and single"],
+            ["radio", "Artist radio", "This artist's radio, spreading to the artists it finds (up to Max artists)"],
+            ["both", "Both", "This artist's own tracks first, then their artist radio"],
+          ] as const).map(([value, label, hint]) => (
+            <button
+              key={value}
+              onClick={() => setCrawlerMode(value)}
+              disabled={crawlerRunning}
+              title={hint}
+              className={`text-xs rounded-lg border px-3 py-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                crawlerMode === value
+                  ? "border-teal-500/50 bg-teal-500/15 text-teal-300"
+                  : "border-white/10 text-slate-400 hover:text-slate-200 hover:border-white/20"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
 
         {/* Run-type ranges from "Run BPM limits" (Settings > BPM) — fills
@@ -6610,7 +6678,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
         {crawlerSeed && (
           <p className="text-xs text-slate-500">
-            {crawlerRunning ? "Running" : "Last crawl"}: {crawlerSeed.artist} · {crawlerSeed.bpmMax ? `${Math.round(crawlerSeed.bpm)}–${Math.round(crawlerSeed.bpmMax)}` : Math.round(crawlerSeed.bpm)} BPM · started {crawlerSeed.startedAt} · {crawlerAdded} added
+            {crawlerStatusText ?? (crawlerRunning ? "Running" : "Last crawl")}: {crawlerSeed.artist} · {crawlerSeed.bpmMax ? `${Math.round(crawlerSeed.bpm)}–${Math.round(crawlerSeed.bpmMax)}` : Math.round(crawlerSeed.bpm)} BPM · started {crawlerSeed.startedAt} · {crawlerAdded} added
+            {crawlerProgress ? ` · Artist ${crawlerProgress.crawled} of ${crawlerProgress.total}` : ""}
           </p>
         )}
 

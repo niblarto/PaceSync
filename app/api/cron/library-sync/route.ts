@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { syncLibraryWithSpotify } from "@/lib/spotify-library-sync";
-import { sendPush } from "@/lib/push";
+import { cronNotify } from "@/lib/cron-notify";
 
 // Daily library <-> Spotify playlist sync ("librarySync" cron job). Same
 // X-Cron-Secret-or-session auth as the other /api/cron/* routes.
@@ -25,11 +25,19 @@ export async function POST(req: NextRequest) {
   );
 
   if (!result.ok) {
-    await sendPush(`Library ↔ Spotify sync failed: ${result.error}`, { title: "Library sync failed", type: "sync-error", priority: "high" });
+    await cronNotify(`Library ↔ Spotify sync failed: ${result.error}`, { title: "❌ Library sync failed", tags: "x", type: "sync-error", priority: "high" });
   } else if ("skippedRemovals" in result && result.skippedRemovals) {
-    await sendPush(
+    await cronNotify(
       `${result.skippedRemovals} tracks deleted from the library are still on Spotify — over the per-run safety limit, so none were removed. Check before removing them by hand.`,
-      { title: "Library sync needs a look", type: "sync-error" },
+      { title: "⚠ Library sync needs a look", tags: "warning", type: "sync-error" },
+    );
+  } else {
+    const changes = result.addedToSpotify + result.importedToLibrary + result.removedFromSpotify;
+    await cronNotify(
+      changes === 0
+        ? `Library and Spotify already match (${result.libraryCount} tracks).`
+        : `+${result.addedToSpotify} added to Spotify, +${result.importedToLibrary} imported into the library, −${result.removedFromSpotify} removed from Spotify.`,
+      { title: "✅ Library sync done", tags: "white_check_mark", type: "library-sync", priority: changes === 0 ? "low" : "default" },
     );
   }
 

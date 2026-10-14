@@ -1,16 +1,18 @@
 #!/bin/bash
-# Push an ntfy notification after the Garmin sync cron finishes.
+# Reports the Garmin sync cron's result to ntfy + the Android app, via the
+# app's /api/cron/notify route (lib/cron-notify.ts sends both).
 # The crontab garmin line calls this with the sync's exit status:
 #   .../garmin_run.py --all ...; .../scripts/garmin_notify.sh $?
 # Deployed and hooked into the crontab by deploy.py.
 status=$1
-config="$(dirname "$0")/../ntfy-config.json"
-topic=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('topic',''))" "$config" 2>/dev/null)
-[ -z "$topic" ] && exit 0
+app_dir="$(dirname "$0")/.."
+secret=$(grep -E '^CRON_SECRET=' "$app_dir/.env.local" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')
+[ -z "$secret" ] && exit 0
 if [ "$status" = "0" ]; then
-  title="Garmin sync finished"; tags="white_check_mark"; msg="Daily GarminDB sync completed OK"
+  body='{"title":"✅ Garmin sync finished","message":"Daily GarminDB sync completed OK","type":"garmin","tags":"white_check_mark","priority":"low"}'
 else
-  title="Garmin sync FAILED"; tags="x"; msg="GarminDB sync exited with status $status"
+  body="{\"title\":\"❌ Garmin sync FAILED\",\"message\":\"GarminDB sync exited with status $status\",\"type\":\"sync-error\",\"tags\":\"x\",\"priority\":\"high\"}"
 fi
-curl -s -X POST https://ntfy.sh -H 'Content-Type: application/json' \
-  -d "{\"topic\":\"$topic\",\"title\":\"$title\",\"message\":\"$msg\",\"tags\":[\"$tags\"]}" >/dev/null
+curl -s -X POST http://localhost:5005/api/cron/notify \
+  -H 'Content-Type: application/json' -H "X-Cron-Secret: $secret" \
+  -d "$body" >/dev/null
