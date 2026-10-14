@@ -98,6 +98,24 @@ function fmtDurationMs(ms: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
+const PITCH_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
+
+// Mirrors lib/track-lookup.ts's LookupResult.
+interface TrackLookupResult {
+  deezerId: number; title: string; artist: string; contributors: string[];
+  album: string | null; albumType: string | null; label: string | null; genres: string[];
+  releaseDate: string | null; trackPosition: number | null; discNumber: number | null;
+  durationSec: number | null; deezerBpm: number | null; gain: number | null; explicit: boolean;
+  rank: number | null; isrc: string | null; cover: string | null; preview: string | null;
+  deezerUrl: string | null; spotifyUri: string | null;
+  features: {
+    tempo: number | null; key: number | null; mode: number | null; energy: number | null;
+    danceability: number | null; valence: number | null; acousticness: number | null;
+    instrumentalness: number | null; liveness: number | null; loudness: number | null; speechiness: number | null;
+  } | null;
+  bpm: number | null; effectiveBpm: number | null; inLibrary: boolean; previouslyDeleted: boolean;
+}
+
 function calcZones(maxHR: number, restingHR: number): ZoneRow[] {
   const hrr = maxHR - restingHR;
   const pcts = [0.60, 0.70, 0.80, 0.90, 1.00];
@@ -701,6 +719,18 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [crawlerAddedTracks, setCrawlerAddedTracks] = useState<{ uri: string; name: string; artist: string; bpm: number }[]>([]);
   const [crawlerPlayingUri, setCrawlerPlayingUri] = useState<string | null>(null);
   const [crawlerMenu, setCrawlerMenu] = useState<{ x: number; y: number; uri: string } | null>(null);
+
+  // ── Track Lookup ── (under the Song Crawler) everything Deezer/ReccoBeats
+  // know about an artist + title; nothing is saved unless "Add to playlist".
+  const [lookupArtist, setLookupArtist] = useState("");
+  const [lookupTrack, setLookupTrack] = useState("");
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupMsg, setLookupMsg] = useState<{ text: string; error?: boolean } | null>(null);
+  const [lookupResults, setLookupResults] = useState<TrackLookupResult[]>([]);
+  const [lookupMenu, setLookupMenu] = useState<{ x: number; y: number; id: number } | null>(null);
+  const [lookupPlayingId, setLookupPlayingId] = useState<number | null>(null);
+  const [lookupAddingId, setLookupAddingId] = useState<number | null>(null);
+  const lookupAudioRef = useRef<HTMLAudioElement | null>(null);
   const crawlerJobIdRef = useRef<string | null>(null);
   const crawlerSinceRef = useRef(0);
   const crawlerWasRunningRef = useRef(false);
@@ -1215,6 +1245,87 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setCrawlerStopping(true);
     await fetch("/api/tracks/song-crawler", { method: "DELETE" }).catch(() => null);
     void pollSongCrawler();
+  }
+
+  // Track Lookup results are kept in this browser until removed.
+  const LOOKUP_STORE_KEY = "pacesync.trackLookup";
+  const lookupLoadedRef = useRef(false);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LOOKUP_STORE_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw) as { artist?: string; track?: string; results?: TrackLookupResult[] };
+        if (saved.artist) setLookupArtist(saved.artist);
+        if (saved.track) setLookupTrack(saved.track);
+        if (Array.isArray(saved.results)) setLookupResults(saved.results);
+      }
+    } catch { /* storage unavailable */ }
+    lookupLoadedRef.current = true;
+  }, []);
+  useEffect(() => {
+    if (!lookupLoadedRef.current) return;
+    try {
+      localStorage.setItem(LOOKUP_STORE_KEY, JSON.stringify({ artist: lookupArtist, track: lookupTrack, results: lookupResults }));
+    } catch { /* storage unavailable */ }
+  }, [lookupArtist, lookupTrack, lookupResults]);
+
+  async function runTrackLookup() {
+    if (lookupBusy || (!lookupArtist.trim() && !lookupTrack.trim())) return;
+    setLookupBusy(true);
+    setLookupMsg(null);
+    try {
+      const qs = new URLSearchParams({ artist: lookupArtist.trim(), track: lookupTrack.trim() });
+      const res = await fetch(`/api/tracks/lookup?${qs}`);
+      const d = await res.json() as { results?: TrackLookupResult[]; error?: string };
+      if (!res.ok || d.error) throw new Error(d.error ?? `HTTP ${res.status}`);
+      const found = d.results ?? [];
+      // Newest lookup on top; a repeat result replaces its older copy.
+      setLookupResults(prev => [...found, ...prev.filter(p => !found.some(f => f.deezerId === p.deezerId))]);
+      setLookupMsg({ text: found.length ? `${found.length} match${found.length === 1 ? "" : "es"} found` : "No matches on Deezer" });
+    } catch (e) {
+      setLookupMsg({ text: e instanceof Error ? e.message : "Lookup failed", error: true });
+    } finally {
+      setLookupBusy(false);
+    }
+  }
+
+  function playLookupResult(r: TrackLookupResult) {
+    setLookupMenu(null);
+    setLookupPlayingId(r.deezerId);
+    lookupAudioRef.current?.pause();
+    if (r.spotifyUri) { void playInSpotify(r.spotifyUri, session?.accessToken); return; }
+    // No Spotify match — fall back to Deezer's 30-second preview.
+    if (r.preview) {
+      const a = new Audio(r.preview);
+      lookupAudioRef.current = a;
+      void a.play().catch(() => {});
+    }
+  }
+
+  async function addLookupResult(r: TrackLookupResult) {
+    setLookupMenu(null);
+    setLookupAddingId(r.deezerId);
+    try {
+      const res = await fetch("/api/tracks/lookup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ add: r }),
+      });
+      const d = await res.json() as { addedToLibrary?: boolean; addedToSpotify?: boolean; error?: string };
+      if (d.addedToLibrary || d.addedToSpotify) {
+        setLookupResults(prev => prev.map(p => p.deezerId === r.deezerId ? { ...p, inLibrary: true, previouslyDeleted: false } : p));
+        invalidateRunningPlaylistCache();
+        loadActiveTracks();
+      }
+      const where = [d.addedToLibrary && "library", d.addedToSpotify && "Spotify playlist"].filter(Boolean).join(" and ");
+      setLookupMsg(where
+        ? { text: `Added ${r.title} to the ${where}${d.error ? ` (${d.error})` : ""}`, error: !!d.error }
+        : { text: d.error ?? `${r.title} is already in the library and playlist`, error: !!d.error });
+    } catch (e) {
+      setLookupMsg({ text: e instanceof Error ? e.message : "Add failed", error: true });
+    } finally {
+      setLookupAddingId(null);
+    }
   }
 
   // Form inputs are remembered in this browser; the log lives on the server.
@@ -6802,6 +6913,162 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </>,
           document.body,
         )}
+      </div>
+
+      {/* ── Track Lookup ── look up an artist + title without adding it. */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">
+        <div>
+          <h3 className="font-semibold text-slate-100 flex items-center gap-2">
+            <span className="text-sky-400">🔎</span> Track Lookup
+          </h3>
+          <p className="text-xs text-slate-500">
+            Everything Deezer and ReccoBeats know about a track. Nothing is added to the library — click a result to play it, right-click to add it to the playlist or remove it from this list.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="text-xs text-slate-500 space-y-1 flex-1 min-w-[12rem]">
+            <span className="block">Artist</span>
+            <input
+              list="crawler-artist-options"
+              value={lookupArtist}
+              onChange={e => setLookupArtist(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") void runTrackLookup(); }}
+              placeholder="Artist"
+              className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-sky-500"
+            />
+          </label>
+          <label className="text-xs text-slate-500 space-y-1 flex-1 min-w-[12rem]">
+            <span className="block">Track</span>
+            <input
+              value={lookupTrack}
+              onChange={e => setLookupTrack(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") void runTrackLookup(); }}
+              placeholder="Track title"
+              className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-sky-500"
+            />
+          </label>
+          <button
+            onClick={() => void runTrackLookup()}
+            disabled={lookupBusy || (!lookupArtist.trim() && !lookupTrack.trim())}
+            className="rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-sm font-semibold px-4 py-1.5 transition-colors disabled:opacity-40"
+          >
+            {lookupBusy ? "Looking up…" : "Lookup"}
+          </button>
+          {lookupResults.length > 0 && (
+            <button
+              onClick={() => { setLookupResults([]); setLookupMsg(null); }}
+              className="text-xs text-slate-400 hover:text-slate-200 border border-white/10 rounded-lg px-3 py-1.5 transition-colors"
+            >
+              Clear list
+            </button>
+          )}
+        </div>
+        {lookupMsg && <p className={`text-xs ${lookupMsg.error ? "text-red-400" : "text-slate-400"}`}>{lookupMsg.text}</p>}
+
+        <div className="max-h-[36rem] overflow-y-auto space-y-2">
+          {lookupResults.length === 0 ? (
+            <p className="text-xs text-slate-600">Results appear here.</p>
+          ) : lookupResults.map(r => {
+            const f = r.features;
+            const playing = lookupPlayingId === r.deezerId;
+            const pct = (v: number | null | undefined) => (v == null ? null : `${Math.round(v * 100)}%`);
+            const facts: [string, string | null][] = [
+              ["BPM", r.bpm == null ? null : r.effectiveBpm !== Math.round(r.bpm) ? `${r.bpm} (×2 = ${r.effectiveBpm})` : String(r.bpm)],
+              ["Deezer BPM", r.deezerBpm == null ? null : String(r.deezerBpm)],
+              ["ReccoBeats tempo", f?.tempo == null ? null : String(Math.round(f.tempo * 10) / 10)],
+              ["Duration", r.durationSec == null ? null : fmtDurationMs(r.durationSec * 1000)],
+              ["Key", f?.key == null || f.key < 0 ? null : `${PITCH_NAMES[f.key]} ${f.mode === 1 ? "major" : "minor"}`],
+              ["Energy", pct(f?.energy)],
+              ["Danceability", pct(f?.danceability)],
+              ["Valence", pct(f?.valence)],
+              ["Acousticness", pct(f?.acousticness)],
+              ["Instrumentalness", pct(f?.instrumentalness)],
+              ["Liveness", pct(f?.liveness)],
+              ["Speechiness", pct(f?.speechiness)],
+              ["Loudness", f?.loudness == null ? null : `${Math.round(f.loudness * 10) / 10} dB`],
+              ["Gain", r.gain == null ? null : `${r.gain} dB`],
+              ["Album", r.album ? `${r.album}${r.albumType ? ` (${r.albumType})` : ""}` : null],
+              ["Track", r.trackPosition == null ? null : `${r.trackPosition}${r.discNumber && r.discNumber > 1 ? ` · disc ${r.discNumber}` : ""}`],
+              ["Released", r.releaseDate],
+              ["Label", r.label],
+              ["Genres", r.genres.length ? r.genres.join(", ") : null],
+              ["Contributors", r.contributors.length > 1 ? r.contributors.join(", ") : null],
+              ["Explicit", r.explicit ? "Yes" : null],
+              ["Deezer rank", r.rank == null ? null : r.rank.toLocaleString()],
+              ["ISRC", r.isrc],
+              ["Spotify", r.spotifyUri],
+              ["Deezer ID", String(r.deezerId)],
+            ];
+            return (
+              <div
+                key={r.deezerId}
+                onClick={() => playLookupResult(r)}
+                onContextMenu={e => { e.preventDefault(); setLookupMenu({ x: e.clientX, y: e.clientY, id: r.deezerId }); }}
+                title={r.spotifyUri ? "Click to play · right-click for options" : "No Spotify match — click plays the Deezer preview · right-click for options"}
+                className={`flex gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${
+                  playing ? "border-sky-500/50 bg-sky-500/10" : "border-white/10 bg-slate-950/60 hover:bg-slate-800/50"
+                }`}
+              >
+                {r.cover && <img src={r.cover} alt="" className="w-16 h-16 rounded-md shrink-0 object-cover" />}
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`text-sm font-semibold truncate ${playing ? "text-sky-300" : "text-slate-100"}`}>{r.title}</span>
+                    <span className="text-sm text-slate-400 truncate">— {r.artist}</span>
+                    {r.inLibrary && <span className="text-[10px] rounded px-1.5 py-0.5 bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">In library</span>}
+                    {r.previouslyDeleted && !r.inLibrary && <span className="text-[10px] rounded px-1.5 py-0.5 bg-amber-500/15 text-amber-300 border border-amber-500/30">Previously deleted</span>}
+                    {!r.spotifyUri && <span className="text-[10px] rounded px-1.5 py-0.5 bg-red-500/15 text-red-300 border border-red-500/30">No Spotify match</span>}
+                    {lookupAddingId === r.deezerId && <span className="text-[10px] text-sky-300">Adding…</span>}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-0.5">
+                    {facts.filter(([, v]) => v != null && v !== "").map(([k, v]) => (
+                      <div key={k} className="text-[11px] min-w-0 truncate" title={`${k}: ${v}`}>
+                        <span className="text-slate-500">{k}:</span> <span className="text-slate-300">{v}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Portalled to <body> for the same backdrop-blur reason as the crawler menu. */}
+        {lookupMenu && (() => {
+          const r = lookupResults.find(x => x.deezerId === lookupMenu.id);
+          if (!r) return null;
+          return createPortal(
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setLookupMenu(null)} onContextMenu={e => { e.preventDefault(); setLookupMenu(null); }} />
+              <div
+                className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl py-1 w-48"
+                style={{ left: Math.min(lookupMenu.x, window.innerWidth - 200), top: Math.min(lookupMenu.y, window.innerHeight - 120) }}
+              >
+                <button
+                  onClick={() => playLookupResult(r)}
+                  className="w-full text-left px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800 transition-colors"
+                >
+                  ▶ Play
+                </button>
+                <button
+                  onClick={() => void addLookupResult(r)}
+                  disabled={!r.spotifyUri || lookupAddingId != null}
+                  title={r.spotifyUri ? "Add to the library and the Spotify playlist" : "No Spotify match to add"}
+                  className="w-full text-left px-3 py-1.5 text-sm text-emerald-400 hover:bg-emerald-500/15 transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
+                >
+                  ➕ Add to playlist
+                </button>
+                <button
+                  onClick={() => { setLookupMenu(null); setLookupResults(prev => prev.filter(p => p.deezerId !== r.deezerId)); }}
+                  className="w-full text-left px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/15 transition-colors"
+                >
+                  ✕ Remove from list
+                </button>
+              </div>
+            </>,
+            document.body,
+          );
+        })()}
       </div>
 
     </div>
