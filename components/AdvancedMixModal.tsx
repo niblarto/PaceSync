@@ -5,7 +5,8 @@ import { createPortal } from "react-dom";
 
 // Dashboard's Runna Schedule card -> "⚙️ Advanced AI DJ Mix" — lets the user
 // override the normal track-picking criteria for ONE mix build: a BPM
-// min/max range, a genre filter (same 3-tier main genre -> subgenre -> tag
+// min/max range per workout segment (blank = the mixer's normal default for
+// that segment's pace, shown as the placeholder), a genre filter (same 3-tier main genre -> subgenre -> tag
 // tree as the Dashboard's "Remix by genre…" picker, via the same
 // /api/tracks/genres endpoint), an "ignore play count" toggle, and a
 // "randomize" toggle for which of the matching tracks get sent to the
@@ -42,9 +43,35 @@ const MAX_CANDIDATES = 150;
 
 interface Props {
   workoutTitle: string;
+  // The mix's segment lines, in order (RunnaCard's mixSegmentsFor).
+  segments: string[];
   onClose: () => void;
-  onBuild: (opts: { minBpm: number | null; maxBpm: number | null; genres: string[]; ignorePlayCounts: boolean; candidateUris: string[] }) => void;
+  // One entry per segment: a candidate URI list, or null = no restriction
+  // (the mixer's normal BPM targeting for that pace).
+  onBuild: (opts: { genres: string[]; ignorePlayCounts: boolean; segmentCandidateUris: (string[] | null)[] }) => void;
 }
+
+// What the mixer aims for on a segment when no range is entered
+// (/api/ai-dj/segment-defaults).
+interface SegmentDefault {
+  segment: string;
+  kind: string;
+  paceSec: number | null;
+  targetBpm: number | null;
+  min: number | null;
+  max: number | null;
+}
+
+// The card's summary header ("Long Run • 12mi • 1h40m - 1h50m") travels in
+// the segment list so the mixer can read the run's target length, but it
+// isn't a step — same 2+ bullets rule as ai_dj/workout.py's _is_segment_line.
+function isHeaderLine(line: string): boolean {
+  return (line.match(/•/g) ?? []).length >= 2;
+}
+
+const KIND_LABEL: Record<string, string> = {
+  warmup: "Warm up", work: "Work", easy: "Easy", cooldown: "Cool down", rest: "Rest", strength: "Strength",
+};
 
 // Minimal client-side CSV parser scoped to just what this modal needs for
 // the BPM filter (uri/name/artist/bpm) — lib/csv-store.ts's parseCsv can't
@@ -105,12 +132,13 @@ function shuffle<T>(arr: T[]): T[] {
   return out;
 }
 
-export function AdvancedMixModal({ workoutTitle, onClose, onBuild }: Props) {
+export function AdvancedMixModal({ workoutTitle, segments, onClose, onBuild }: Props) {
   const [tracks, setTracks] = useState<LibraryTrack[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [minBpm, setMinBpm] = useState("");
-  const [maxBpm, setMaxBpm] = useState("");
+  // Per-segment BPM range, same order as `segments`.
+  const [ranges, setRanges] = useState<{ min: string; max: string }[]>(() => segments.map(() => ({ min: "", max: "" })));
+  const [defaults, setDefaults] = useState<SegmentDefault[] | null>(null);
   const [ignorePlayCounts, setIgnorePlayCounts] = useState(false);
   const [randomize, setRandomize] = useState(false);
 
@@ -132,7 +160,22 @@ export function AdvancedMixModal({ workoutTitle, onClose, onBuild }: Props) {
       .then(r => r.json())
       .then((d: { hierarchy?: GenreHierarchyNode[] }) => setHierarchy(d.hierarchy ?? []))
       .catch(() => setHierarchy([]));
+    fetch("/api/ai-dj/segment-defaults", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ segments }),
+    })
+      .then(r => r.json())
+      .then((d: { defaults?: SegmentDefault[] }) => setDefaults(d.defaults ?? []))
+      .catch(() => setDefaults([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function setRange(i: number, field: "min" | "max", value: string) {
+    // Typing a min copies it into max (a single-BPM range by default);
+    // editing max never touches min.
+    setRanges(prev => prev.map((r, j) => (j !== i ? r : field === "min" ? { min: value, max: value } : { ...r, max: value })));
+  }
 
   // Resolve selected genre tags -> URIs server-side whenever the selection
   // changes — same lookup /api/tracks/genre-uris already serves the
@@ -187,28 +230,39 @@ export function AdvancedMixModal({ workoutTitle, onClose, onBuild }: Props) {
     });
   }
 
-  const filtered = useMemo(() => {
+  // Genre filter alone — what a segment with no BPM range is restricted to
+  // (null = no genre filter either, so that segment is left to the mixer).
+  const genreFiltered = useMemo(
+    () => (tracks && genreUris != null ? tracks.filter(t => genreUris.has(t.uri)) : null),
+    [tracks, genreUris],
+  );
+
+  // Per segment: the matching tracks when a range is entered, else the
+  // genre-only list, else null (mixer default for that pace).
+  const segmentMatches = useMemo(() => segments.map((seg, i) => {
+    if (isHeaderLine(seg)) return null;
+    const r = ranges[i] ?? { min: "", max: "" };
+    const min = r.min ? parseFloat(r.min) : null;
+    const max = r.max ? parseFloat(r.max) : null;
+    if (min == null && max == null) return genreFiltered;
     if (!tracks) return [];
-    const min = minBpm ? parseFloat(minBpm) : null;
-    const max = maxBpm ? parseFloat(maxBpm) : null;
-    return tracks.filter(t => {
+    return (genreFiltered ?? tracks).filter(t => {
       if (min != null && (t.effBpm === 0 || t.effBpm < min)) return false;
       if (max != null && (t.effBpm === 0 || t.effBpm > max)) return false;
-      if (genreUris != null && !genreUris.has(t.uri)) return false;
       return true;
     });
-  }, [tracks, minBpm, maxBpm, genreUris]);
+  }), [segments, ranges, tracks, genreFiltered]);
+
+  const stepCount = segments.filter(seg => !isHeaderLine(seg)).length;
+  const anyOverMax = segmentMatches.some(m => m != null && m.length > MAX_CANDIDATES);
 
   function handleBuild() {
-    const uris = filtered.map(t => t.uri);
-    const candidateUris = randomize && uris.length > MAX_CANDIDATES ? shuffle(uris).slice(0, MAX_CANDIDATES) : uris;
-    onBuild({
-      minBpm: minBpm ? parseFloat(minBpm) : null,
-      maxBpm: maxBpm ? parseFloat(maxBpm) : null,
-      genres: Array.from(selectedGenres),
-      ignorePlayCounts,
-      candidateUris,
+    const segmentCandidateUris = segmentMatches.map(m => {
+      if (m == null) return null;
+      const uris = m.map(t => t.uri);
+      return randomize && uris.length > MAX_CANDIDATES ? shuffle(uris).slice(0, MAX_CANDIDATES) : uris;
     });
+    onBuild({ genres: Array.from(selectedGenres), ignorePlayCounts, segmentCandidateUris });
   }
 
   const busy = !tracks || genreUrisLoading;
@@ -231,23 +285,56 @@ export function AdvancedMixModal({ workoutTitle, onClose, onBuild }: Props) {
           {loadError && <p className="text-sm text-red-400">{loadError}</p>}
 
           <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5">BPM range</label>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                value={minBpm}
-                onChange={e => setMinBpm(e.target.value)}
-                placeholder="Min"
-                className="w-24 rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
-              />
-              <span className="text-slate-600 text-sm">–</span>
-              <input
-                type="number"
-                value={maxBpm}
-                onChange={e => setMaxBpm(e.target.value)}
-                placeholder="Max"
-                className="w-24 rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
-              />
+            <label className="block text-xs font-medium text-slate-400 mb-1.5">BPM range per segment</label>
+            <p className="text-[11px] text-slate-500 mb-2">Leave blank to use the default for that pace (shown greyed out).</p>
+            <div className="space-y-2">
+              {segments.map((seg, i) => {
+                if (isHeaderLine(seg)) return null;
+                const d = defaults?.[i];
+                const m = segmentMatches[i];
+                const r = ranges[i] ?? { min: "", max: "" };
+                const entered = !!(r.min || r.max);
+                const minPh = d?.min != null ? String(d.min) : d?.targetBpm != null ? String(d.targetBpm) : "Min";
+                const maxPh = d?.max != null ? String(d.max) : d?.targetBpm != null ? String(d.targetBpm) : "Max";
+                return (
+                  <div key={i} className="rounded-lg border border-white/10 bg-slate-800/30 px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                    <div className="flex-1 min-w-[12rem]">
+                      <p className="text-sm text-slate-200 truncate" title={seg}>{seg}</p>
+                      <p className="text-[11px] text-slate-500">
+                        {d ? (
+                          <>
+                            {KIND_LABEL[d.kind] ?? d.kind}
+                            {d.targetBpm != null && <> · default ≈ {d.targetBpm} BPM</>}
+                            {(d.min != null || d.max != null) && <> · range {d.min ?? "…"}–{d.max ?? "…"}</>}
+                          </>
+                        ) : "Loading default…"}
+                        {!busy && (entered || m != null) && (
+                          <span className={m && m.length === 0 ? "text-amber-400" : "text-purple-300/80"}>
+                            {" "}· {m?.length ?? 0} match{m?.length === 1 ? "" : "es"}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <input
+                        type="number"
+                        value={r.min}
+                        onChange={e => setRange(i, "min", e.target.value)}
+                        placeholder={minPh}
+                        className="w-20 rounded-lg bg-slate-800 border border-slate-700 text-sm px-2.5 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                      />
+                      <span className="text-slate-600 text-sm">–</span>
+                      <input
+                        type="number"
+                        value={r.max}
+                        onChange={e => setRange(i, "max", e.target.value)}
+                        placeholder={maxPh}
+                        className="w-20 rounded-lg bg-slate-800 border border-slate-700 text-sm px-2.5 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -360,8 +447,8 @@ export function AdvancedMixModal({ workoutTitle, onClose, onBuild }: Props) {
                 onChange={e => setRandomize(e.target.checked)}
                 className="accent-purple-500"
               />
-              Randomize candidates {filtered.length > MAX_CANDIDATES && (
-                <span className="text-slate-500">(picks {MAX_CANDIDATES} at random from {filtered.length} matches)</span>
+              Randomize candidates {anyOverMax && (
+                <span className="text-slate-500">(picks {MAX_CANDIDATES} at random where a segment has more matches)</span>
               )}
             </label>
           </div>
@@ -369,8 +456,10 @@ export function AdvancedMixModal({ workoutTitle, onClose, onBuild }: Props) {
           <p className="text-xs text-slate-500 border-t border-white/5 pt-3">
             {busy ? "Loading…" : (
               <>
-                {filtered.length} track{filtered.length === 1 ? "" : "s"} match{filtered.length === 1 ? "es" : ""} this filter
-                {filtered.length > MAX_CANDIDATES && !randomize && ` (closest ${MAX_CANDIDATES} will be sent to the mixer)`}.
+                {segmentMatches.filter(m => m != null).length} of {stepCount} segment{stepCount === 1 ? "" : "s"} restricted
+                {genreFiltered != null && ` · ${genreFiltered.length} track${genreFiltered.length === 1 ? "" : "s"} in the selected genres`}
+                {anyOverMax && !randomize && ` · where a segment has over ${MAX_CANDIDATES} matches, the closest ${MAX_CANDIDATES} go to the mixer`}.
+                {" "}A segment with too few matches falls back to the full library.
               </>
             )}
           </p>
@@ -380,7 +469,7 @@ export function AdvancedMixModal({ workoutTitle, onClose, onBuild }: Props) {
           <button onClick={onClose} className="text-xs text-slate-500 hover:text-slate-300 px-3 py-1.5">Cancel</button>
           <button
             onClick={handleBuild}
-            disabled={busy || filtered.length === 0}
+            disabled={busy}
             className="rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 text-black font-semibold text-xs px-4 py-1.5 transition-colors"
           >
             Build mix

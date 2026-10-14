@@ -2163,17 +2163,17 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       {advancedMixFor && (
         <AdvancedMixModal
           workoutTitle={advancedMixFor.title}
+          segments={mixSegmentsFor(advancedMixFor, raceSplits[advancedMixFor.date])}
           onClose={() => setAdvancedMixFor(null)}
-          onBuild={({ ignorePlayCounts, candidateUris }) => {
+          onBuild={({ ignorePlayCounts, segmentCandidateUris }) => {
             const w = advancedMixFor;
             setAdvancedMixFor(null);
             const snap = mixSnapshots[w.date];
             const snapUris = snap?.tracks.map(t => t.uri).filter((u): u is string => !!u);
-            // Same shape useImperativeHandle's remix() already uses for its
-            // own genreRestrictUris — one identical candidate list per
-            // segment, restricting (not replacing) the mixer's own
-            // energy/BPM-tolerance/artist-dedup/play-count logic.
-            const segmentCandidateUris = mixSegmentsFor(w, raceSplits[w.date]).map(() => candidateUris);
+            // One candidate list per segment (null = unrestricted, the
+            // mixer's default for that pace) — restricting, not replacing,
+            // the mixer's own energy/BPM-tolerance/artist-dedup/play-count
+            // logic.
             buildMix(w, snapUris, undefined, undefined, segmentCandidateUris, ignorePlayCounts);
           }}
         />
