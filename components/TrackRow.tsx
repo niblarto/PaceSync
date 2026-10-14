@@ -108,9 +108,24 @@ export async function playInSpotify(uri: string, token?: string | null): Promise
           // own playback bars and play/pause control it from here.
           return;
         }
-      } catch { /* fall through to opening the app */ }
+      } catch { /* fall through */ }
     }
     if (!isCurrent()) return;
+    // Browser token missing/expired (or the call failed) — play through the
+    // server's stored Spotify login instead, still without bringing the
+    // Spotify app forward.
+    try {
+      const res = await fetch("/api/spotify/play", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uri }),
+      });
+      if (!isCurrent()) return;
+      if (res.ok) return;
+    } catch { /* fall through to opening the app */ }
+    if (!isCurrent()) return;
+    // No active Spotify device to command — opening the app is the only way
+    // to start playback.
     openInSpotify(uri);
   };
 
