@@ -5,7 +5,7 @@ import { getCrawl, requestStopCrawl, startCrawl, type CrawlParams } from "@/lib/
 // Song Crawler control (Settings > Tracklist). The crawl itself is a
 // server-side background job (lib/song-crawler.ts) that keeps running with
 // no browser attached:
-//   POST   { artist, bpm | bpmMin+bpmMax, maxArtists, mode: "artist" | "radio" | "both" } -> start
+//   POST   { artist, bpm | bpmMin+bpmMax, maxArtists, sources: { artist, radio, related } } -> start
 //   GET    ?since=<seq>  -> current/last crawl status + log lines from <seq>
 //   DELETE               -> stop (finishes the current track, then the
 //                           post-crawl fill-in, all logged)

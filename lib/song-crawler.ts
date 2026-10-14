@@ -22,6 +22,8 @@ const BPM_TOLERANCE = 1;
 export const DEFAULT_MAX_ARTISTS = 50;
 export const MAX_ARTISTS_CAP = 2000;
 const RADIO_LIMIT = 25;
+const TOP_TRACKS_LIMIT = 25;
+const RELATED_LIMIT = 20;
 const DEEZER_GAP_MS = 150; // Deezer allows 50 req/5s; stay well under
 const LOG_KEEP = 5000;
 const STATE_PATH = path.join(process.cwd(), "song-crawler-state.json");
@@ -36,9 +38,24 @@ export type CrawlLevel = "info" | "match" | "warn" | "error";
 export interface CrawlLine { seq: number; at: string; level: CrawlLevel; msg: string }
 export type CrawlStatus = "running" | "stopping" | "healing" | "done" | "stopped" | "error" | "interrupted";
 
-// What to crawl: the typed artist's own catalogue, their artist radio
-// (spreading to the artists it finds), or the catalogue first then radio.
+// What to crawl — any combination of:
+//   artist:  the typed artist's own catalogue (every album, EP and single)
+//   radio:   each visited artist's radio tracks; artists in it are queued
+//   related: each visited artist's related artists are queued, and every
+//            visited artist's top tracks are checked
+// radio + related share one artist queue and the Max artists cap.
+export interface CrawlSources { artist: boolean; radio: boolean; related: boolean }
+/** @deprecated older clients — mapped onto sources. */
 export type CrawlMode = "artist" | "radio" | "both";
+
+function resolveSources(p: CrawlParams): CrawlSources {
+  if (p.sources && (p.sources.artist || p.sources.radio || p.sources.related)) {
+    return { artist: !!p.sources.artist, radio: !!p.sources.radio, related: !!p.sources.related };
+  }
+  if (p.mode === "artist") return { artist: true, radio: false, related: false };
+  if (p.mode === "both") return { artist: true, radio: true, related: false };
+  return { artist: false, radio: true, related: false };
+}
 
 export interface CrawlParams {
   artist: string;
@@ -46,6 +63,7 @@ export interface CrawlParams {
   bpmMin?: number;
   bpmMax?: number;
   maxArtists?: number;
+  sources?: Partial<CrawlSources>;
   mode?: CrawlMode;
 }
 
@@ -151,12 +169,15 @@ async function runCrawl(job: CrawlJob) {
   const targetLabel = isRange ? `${Math.round(lo)}–${Math.round(hi)} BPM` : `${Math.round(effective(p.bpm!))} BPM (±${BPM_TOLERANCE})`;
   const stopped = () => store.stopRequested;
   const artist = p.artist.trim();
-  const mode: CrawlMode = p.mode === "artist" || p.mode === "both" ? p.mode : "radio";
-  const doCatalogue = mode !== "radio";
-  const doRadio = mode !== "artist";
-  const scope = mode === "artist" ? `${artist}'s own tracks only`
-    : mode === "both" ? `${artist}'s own tracks, then artist radio (up to ${maxArtists} artists)`
-    : `artist radio from ${artist} (up to ${maxArtists} artists)`;
+  const src = resolveSources(p);
+  const doCatalogue = src.artist;
+  const spreads = src.radio || src.related;
+  const parts = [
+    src.artist && `${artist}'s own tracks`,
+    src.radio && "artist radio",
+    src.related && "related artists' top tracks",
+  ].filter(Boolean).join(" + ");
+  const scope = spreads ? `${parts} (up to ${maxArtists} artists)` : parts;
 
   log(`Crawling ${scope} for ${targetLabel} — half-time tracks counted at double tempo`);
 
@@ -267,34 +288,58 @@ async function runCrawl(job: CrawlJob) {
         await checkTrack(t, t.isrc ?? null, t.duration ?? null);
       }
     }
-    if (!stopped()) log(doRadio ? `Finished ${seed.name}'s catalogue — starting artist radio.` : `Finished ${seed.name}'s catalogue.`);
+    if (!stopped()) log(spreads ? `Finished ${seed.name}'s catalogue — moving on to ${[src.radio && "radio", src.related && "related artists"].filter(Boolean).join(" and ")}.` : `Finished ${seed.name}'s catalogue.`);
   }
 
   const queue: { id: number; name: string }[] = [seed];
   const queuedArtists = new Set<number>([seed.id]);
-  while (doRadio && queue.length > 0 && !stopped()) {
+  const enqueue = (a: { id: number; name: string }) => {
+    if (queuedArtists.has(a.id) || queuedArtists.size >= maxArtists) return;
+    queuedArtists.add(a.id);
+    job.totalArtists = queuedArtists.size;
+    if (queuedArtists.size === maxArtists) {
+      log(`Reached ${maxArtists} artists — no more will be added; finishing the ${queue.length + 1} still queued.`, "warn");
+    }
+    queue.push(a);
+  };
+
+  while (spreads && queue.length > 0 && !stopped()) {
     const current = queue.shift()!;
     job.crawled++;
-    log(`[${job.crawled}/${queuedArtists.size}] Artist radio: ${current.name} (${queue.length} still queued)`);
-    const radio = await deezer<{ data?: DeezerRadioTrack[] }>(`/artist/${current.id}/radio?limit=${RADIO_LIMIT}`);
-    if (!radio?.data?.length) { log(`  no radio for ${current.name}`, "warn"); continue; }
-    for (const t of radio.data) {
-      if (stopped()) break;
-      if (!queuedArtists.has(t.artist.id) && queuedArtists.size < maxArtists) {
-        queuedArtists.add(t.artist.id);
-        job.totalArtists = queuedArtists.size;
-        if (queuedArtists.size === maxArtists) {
-          log(`Reached ${maxArtists} artists — no more will be added; finishing the ${queue.length + 1} still queued.`, "warn");
+    const what = [src.radio && "radio", src.related && "top tracks + related"].filter(Boolean).join(", ");
+    log(`[${job.crawled}/${queuedArtists.size}] ${current.name} — ${what} (${queue.length} still queued)`);
+
+    if (src.related) {
+      // Queue related artists first so they sit alongside the radio finds.
+      const rel = await deezer<{ data?: { id: number; name: string }[] }>(`/artist/${current.id}/related?limit=${RELATED_LIMIT}`);
+      const related = rel?.data ?? [];
+      if (related.length) log(`  related: ${related.map(a => a.name).join(", ")}`);
+      for (const a of related) enqueue({ id: a.id, name: a.name });
+      // Top tracks — skipped for the typed artist when their whole
+      // catalogue was already checked above.
+      if (!(doCatalogue && current.id === seed.id) && !stopped()) {
+        const top = await deezer<{ data?: DeezerRadioTrack[] }>(`/artist/${current.id}/top?limit=${TOP_TRACKS_LIMIT}`);
+        for (const t of top?.data ?? []) {
+          if (stopped()) break;
+          await checkTrack(t);
         }
-        queue.push({ id: t.artist.id, name: t.artist.name });
       }
-      await checkTrack(t);
+    }
+
+    if (src.radio && !stopped()) {
+      const radio = await deezer<{ data?: DeezerRadioTrack[] }>(`/artist/${current.id}/radio?limit=${RADIO_LIMIT}`);
+      if (!radio?.data?.length) { log(`  no radio for ${current.name}`, "warn"); continue; }
+      for (const t of radio.data) {
+        if (stopped()) break;
+        enqueue({ id: t.artist.id, name: t.artist.name });
+        await checkTrack(t);
+      }
     }
   }
 
   const n = `${job.added} track${job.added === 1 ? "" : "s"} added`;
   if (stopped()) log(`Stopped by you. ${n}.`, "warn");
-  else if (doRadio) log(`Crawl complete — no more artists to visit. ${n}.`);
+  else if (spreads) log(`Crawl complete — no more artists to visit. ${n}.`);
   else log(`Crawl complete. ${n}.`);
   return finish(job, stopped() ? "stopped" : "done");
 }
@@ -325,7 +370,8 @@ async function finish(job: CrawlJob, outcome: "done" | "stopped") {
   const p = job.params;
   const bpm = p.bpmMin && p.bpmMax ? `${p.bpmMin}–${p.bpmMax}` : `${p.bpm}`;
   const mins = Math.round((Date.parse(job.finishedAt) - Date.parse(job.startedAt)) / 60000);
-  const scopeNote = p.mode === "artist" ? "artist's own tracks" : `artist ${job.crawled} of ${job.totalArtists}`;
+  const s = resolveSources(p);
+  const scopeNote = s.radio || s.related ? `artist ${job.crawled} of ${job.totalArtists}` : "artist's own tracks";
   await cronNotify(
     `${p.artist} · ${bpm} BPM — ${job.added} track${job.added === 1 ? "" : "s"} added, ${scopeNote}, ~${mins} min.`,
     {

@@ -682,8 +682,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [crawlerBpmMax, setCrawlerBpmMax] = useState("");
   // How many distinct artists a crawl may discover before it stops queuing.
   const [crawlerMaxArtists, setCrawlerMaxArtists] = useState("50");
-  // What to crawl: the artist's own tracks, their artist radio, or both.
-  const [crawlerMode, setCrawlerMode] = useState<"artist" | "radio" | "both">("radio");
+  // What to crawl — any combination (at least one): the artist's own
+  // tracks, artist radio, related artists.
+  const [crawlerSources, setCrawlerSources] = useState<{ artist: boolean; radio: boolean; related: boolean }>({ artist: false, radio: true, related: false });
+  const crawlerSpreads = crawlerSources.radio || crawlerSources.related;
+  const crawlerNoSource = !crawlerSources.artist && !crawlerSources.radio && !crawlerSources.related;
   // Artists processed so far / artists found so far.
   const [crawlerProgress, setCrawlerProgress] = useState<{ crawled: number; total: number } | null>(null);
   // What the log below is from.
@@ -1149,7 +1152,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     const bpm = parseFloat(crawlerBpm);
     const bpmMaxRaw = parseFloat(crawlerBpmMax);
     const bpmMax = bpmMaxRaw > 0 && bpmMaxRaw > bpm ? bpmMaxRaw : null;
-    if (!artist || !bpm || bpm <= 0) return;
+    if (!artist || !bpm || bpm <= 0 || crawlerNoSource) return;
     const res = await fetch("/api/tracks/song-crawler", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1157,7 +1160,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         artist,
         ...(bpmMax ? { bpmMin: bpm, bpmMax } : { bpm }),
         maxArtists: parseInt(crawlerMaxArtists, 10) > 0 ? parseInt(crawlerMaxArtists, 10) : 50,
-        mode: crawlerMode,
+        sources: crawlerSources,
       }),
     }).catch(() => null);
     const d = res ? await res.json().catch(() => ({})) as { id?: string; error?: string } : { error: "Couldn't reach the server" };
@@ -1185,22 +1188,23 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     try {
       const raw = localStorage.getItem(CRAWLER_STORE_KEY);
       if (!raw) return;
-      const saved = JSON.parse(raw) as { artist?: string; bpm?: string; bpmMax?: string; maxArtists?: string; mode?: string; allTracks?: boolean };
+      const saved = JSON.parse(raw) as { artist?: string; bpm?: string; bpmMax?: string; maxArtists?: string; sources?: { artist: boolean; radio: boolean; related: boolean }; mode?: string; allTracks?: boolean };
       if (saved.artist) setCrawlerArtist(saved.artist);
       if (saved.bpm) setCrawlerBpm(saved.bpm);
       if (saved.bpmMax) setCrawlerBpmMax(saved.bpmMax);
       if (saved.maxArtists) setCrawlerMaxArtists(saved.maxArtists);
-      if (saved.mode === "artist" || saved.mode === "radio" || saved.mode === "both") setCrawlerMode(saved.mode);
-      else if (saved.allTracks) setCrawlerMode("both");
+      if (saved.sources) setCrawlerSources(saved.sources);
+      else if (saved.mode === "artist") setCrawlerSources({ artist: true, radio: false, related: false });
+      else if (saved.mode === "both" || saved.allTracks) setCrawlerSources({ artist: true, radio: true, related: false });
     } catch { /* storage unavailable */ }
   }, []);
   useEffect(() => {
     try {
       localStorage.setItem(CRAWLER_STORE_KEY, JSON.stringify({
-        artist: crawlerArtist, bpm: crawlerBpm, bpmMax: crawlerBpmMax, maxArtists: crawlerMaxArtists, mode: crawlerMode,
+        artist: crawlerArtist, bpm: crawlerBpm, bpmMax: crawlerBpmMax, maxArtists: crawlerMaxArtists, sources: crawlerSources,
       }));
     } catch { /* storage unavailable */ }
-  }, [crawlerArtist, crawlerBpm, crawlerBpmMax, crawlerMaxArtists, crawlerMode]);
+  }, [crawlerArtist, crawlerBpm, crawlerBpmMax, crawlerMaxArtists, crawlerSources]);
 
   // Keep the log scrolled to the newest line.
   useEffect(() => {
@@ -6592,14 +6596,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               onChange={e => setCrawlerMaxArtists(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
               // Only the radio crawl spreads to other artists.
-              disabled={crawlerRunning || crawlerMode === "artist"}
+              disabled={crawlerRunning || !crawlerSpreads}
               placeholder="50"
               className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 font-mono disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500"
             />
           </label>
           <button
             onClick={() => void startSongCrawler()}
-            disabled={crawlerRunning || !crawlerArtist.trim() || !(parseFloat(crawlerBpm) > 0)}
+            disabled={crawlerRunning || !crawlerArtist.trim() || !(parseFloat(crawlerBpm) > 0) || crawlerNoSource}
             className="rounded-lg bg-teal-600 hover:bg-teal-500 disabled:bg-slate-700 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-sm px-5 py-2 shadow-sm transition-colors"
           >
             Crawl
@@ -6620,27 +6624,25 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-slate-500 mr-1">Crawl:</span>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+          <span className="text-xs text-slate-500">Crawl:</span>
           {([
-            ["artist", "Artist", "Only this artist's own tracks — every album, EP and single"],
-            ["radio", "Artist radio", "This artist's radio, spreading to the artists it finds (up to Max artists)"],
-            ["both", "Both", "This artist's own tracks first, then their artist radio"],
-          ] as const).map(([value, label, hint]) => (
-            <button
-              key={value}
-              onClick={() => setCrawlerMode(value)}
-              disabled={crawlerRunning}
-              title={hint}
-              className={`text-xs rounded-lg border px-3 py-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                crawlerMode === value
-                  ? "border-teal-500/50 bg-teal-500/15 text-teal-300"
-                  : "border-white/10 text-slate-400 hover:text-slate-200 hover:border-white/20"
-              }`}
-            >
+            ["artist", "Artist", "This artist's own tracks — every album, EP and single"],
+            ["radio", "Radio", "Each artist's radio; artists in it are added to the queue (up to Max artists)"],
+            ["related", "Related", "Each artist's related artists are added to the queue, and their top tracks checked (up to Max artists)"],
+          ] as const).map(([key, label, hint]) => (
+            <label key={key} title={hint} className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={crawlerSources[key]}
+                onChange={e => setCrawlerSources(prev => ({ ...prev, [key]: e.target.checked }))}
+                disabled={crawlerRunning}
+                className="accent-teal-500"
+              />
               {label}
-            </button>
+            </label>
           ))}
+          {crawlerNoSource && <span className="text-xs text-amber-400">Tick at least one</span>}
         </div>
 
         {/* Run-type ranges from "Run BPM limits" (Settings > BPM) — fills
