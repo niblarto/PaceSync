@@ -104,28 +104,15 @@ export async function playInSpotify(uri: string, token?: string | null): Promise
         });
         if (!isCurrent()) return; // a newer track was clicked while this request was in flight
         if (res.ok) {
-          // Playback switched — leave Spotify in the background; PaceSync's
-          // own playback bars and play/pause control it from here.
+          // Playback switched, but the app's main panel keeps showing
+          // whatever page was open (the API can't refresh it). Deep-link
+          // the track so the app comes forward showing what's now playing.
+          window.location.href = uri;
           return;
         }
-      } catch { /* fall through */ }
+      } catch { /* fall through to opening the app */ }
     }
     if (!isCurrent()) return;
-    // Browser token missing/expired (or the call failed) — play through the
-    // server's stored Spotify login instead, still without bringing the
-    // Spotify app forward.
-    try {
-      const res = await fetch("/api/spotify/play", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uri }),
-      });
-      if (!isCurrent()) return;
-      if (res.ok) return;
-    } catch { /* fall through to opening the app */ }
-    if (!isCurrent()) return;
-    // No active Spotify device to command — opening the app is the only way
-    // to start playback.
     openInSpotify(uri);
   };
 
