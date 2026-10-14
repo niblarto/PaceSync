@@ -6,6 +6,7 @@ import {
 } from "recharts";
 import { useSession } from "next-auth/react";
 import { playInSpotify } from "./TrackRow";
+import { SongProgressBar, ensurePlaying } from "./SongProgressBar";
 
 // Shared shape for a mix track with pacing/segment info — matches
 // lib/todays-run-history.ts's HistoryTrack (the AI DJ mix's per-track
@@ -599,6 +600,7 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
                     setLastPlayedUri(t.uri);
                     onTrackClick?.(t.uri);
                     playInSpotify(t.uri, session?.accessToken).catch(() => {});
+                    ensurePlaying();
                   }}
                   onContextMenu={(e) => {
                     if (!t.uri) return;
@@ -645,9 +647,12 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
               );
             })}
           </div>
-          <p className="text-[10px] text-slate-600 mt-1">
-            🎧 Song playing at each point — click a song to play it{onReorder ? ", drag to reorder" : ""}, right-click for options{onToggleSelect ? ", ctrl/cmd-click to multi-select" : ""}, click a segment to zoom
-          </p>
+          <div className="flex items-center gap-3 mt-1">
+            <p className="text-[10px] text-slate-600 flex-1 min-w-0">
+              🎧 Song playing at each point — click a song to play it{onReorder ? ", drag to reorder" : ""}, right-click for options{onToggleSelect ? ", ctrl/cmd-click to multi-select" : ""}, click a segment to zoom
+            </p>
+            <SongProgressBar className="w-[36rem] max-w-[65%]" trackNames={Object.fromEntries(tracks.filter(t => t.uri).map(t => [t.uri as string, `${t.name} — ${t.artist}`]))} />
+          </div>
         </div>
       )}
     </div>

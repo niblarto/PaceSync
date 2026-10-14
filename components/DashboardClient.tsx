@@ -16,6 +16,7 @@ import { ZoneCard } from "./ZoneCard";
 import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArtError, MiniSpinner } from "./TrackRow";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
+import { SongProgressBar, ensurePlaying } from "./SongProgressBar";
 import { useRunningPlaylist, getRunningPlaylist, invalidateRunningPlaylistCache } from "./useRunningPlaylist";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
@@ -4861,6 +4862,7 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
     if (!c.uri) return; // online candidate not yet resolved to a playable URI — shouldn't happen, resolveByIsrc always returns one when it succeeds
     setPlayingUri(c.uri);
     playInSpotify(c.uri, session?.accessToken).catch(() => {});
+    ensurePlaying();
   }
 
   async function use(c: ReplaceCandidate) {
@@ -4916,6 +4918,7 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
             {loading ? "Searching…" : "Search"}
           </button>
         </div>
+        <SongProgressBar className="w-full" />
         <p className="text-xs text-slate-500">
           Only tracks within 15s of the original&apos;s length ({Math.round(target.duration_ms / 1000)}s) are shown, so swapping never throws off the rest of the mix&apos;s timing.
         </p>
@@ -5086,6 +5089,7 @@ function QuickSwapModal({ target, mixUris, onClose, onConfirm }: {
     if (!c.uri) return;
     setPlayingUri(c.uri);
     playInSpotify(c.uri, session?.accessToken).catch(() => {});
+    ensurePlaying();
   }
 
   async function use(c: ReplaceCandidate) {
@@ -5142,6 +5146,7 @@ function QuickSwapModal({ target, mixUris, onClose, onConfirm }: {
             </button>
           )}
         </div>
+        <SongProgressBar className="w-full" />
         <p className="text-xs text-slate-500">
           Library tracks at {searchBpm} BPM within 15s of the original&apos;s length ({Math.round(target.duration_ms / 1000)}s).
         </p>

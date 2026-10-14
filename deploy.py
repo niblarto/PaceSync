@@ -159,6 +159,7 @@ FILES = [
     ('components/GarminClient.tsx',               'components/GarminClient.tsx'),
     ('components/GarminActivityClient.tsx',       'components/GarminActivityClient.tsx'),
     ('components/MixPaceChart.tsx',               'components/MixPaceChart.tsx'),
+    ('components/SongProgressBar.tsx',            'components/SongProgressBar.tsx'),
     ('components/MixChartClient.tsx',             'components/MixChartClient.tsx'),
     ('app/mix/[date]/page.tsx',                   'app/mix/[date]/page.tsx'),
     ('lib/garmin-config.ts',                      'lib/garmin-config.ts'),
