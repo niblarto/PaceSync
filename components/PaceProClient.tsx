@@ -543,10 +543,11 @@ export function PaceProClient() {
   }
 
   return (
-    <div
-      className="min-h-screen flex flex-col bg-cover bg-fixed bg-center bg-no-repeat bg-slate-950 text-slate-100"
-      style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.75), rgba(2,6,23,0.75)), url('/dashboard-hero.png')" }}
-    >
+    <div className="relative isolate min-h-screen flex flex-col text-slate-100">
+      {/* Page background on its own fixed layer behind everything, so sticky
+          panels and pop-ups sit on top of it without moving it. */}
+      <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
+        style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.75), rgba(2,6,23,0.75)), url('/dashboard-hero.png')" }} />
       <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
         <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
           <Link href="/dashboard" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">

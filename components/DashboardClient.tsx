@@ -83,8 +83,14 @@ const ALL_ZONE: RunningZone = {
   textColor: "text-white",
 };
 
-function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, playedCounts, deletedUris }: {
+function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, highlightNonce, playingUri, playedCounts, deletedUris }: {
   tracks: TrackWithBPM[];
+  /** Bumped on every Pace Chart chip click, so clicking the same track again
+      still scrolls back to it. */
+  highlightNonce?: number;
+  /** Track started from outside the list (a Pace Chart chip) — tinted as the
+      playing track, same as clicking its row here. */
+  playingUri?: string | null;
   /** Tracks in the loaded mix that have been deleted from the library —
       kept in place and highlighted until Quick Swapped. */
   deletedUris?: Set<string>;
@@ -117,6 +123,7 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReor
   // Last track clicked to play in Spotify — tinted orange until a different
   // track is clicked, so it stays visually marked in a long list.
   const [lastPlayedUri, setLastPlayedUri] = useState<string | null>(null);
+  useEffect(() => { if (playingUri) setLastPlayedUri(playingUri); }, [playingUri, highlightNonce]);
   // Index (into the full tracks array) currently being dragged, and which
   // row it's hovering over — drives the drop-target highlight. Native HTML5
   // drag/drop rather than a library: this list is already virtualized/long,
@@ -227,6 +234,19 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReor
     const container = containerRef.current;
     const row = highlightRowRef.current;
     if (!container || !row) return;
+    // The list usually grows with the page rather than scrolling itself —
+    // then scroll the PAGE so the row sits mid-way in the space visible
+    // below the sticky Pace Chart.
+    if (container.scrollHeight <= container.clientHeight + 1) {
+      const chart = document.querySelector("[data-sticky-pace-chart]");
+      const visibleTop = chart ? chart.getBoundingClientRect().bottom : 56;
+      const r = row.getBoundingClientRect();
+      const targetCenter = (visibleTop + window.innerHeight) / 2;
+      if (r.top < visibleTop + 16 || r.bottom > window.innerHeight - 16 || highlightNonce) {
+        window.scrollBy({ top: r.top + r.height / 2 - targetCenter, behavior: "smooth" });
+      }
+      return;
+    }
     const rowTop = row.offsetTop;
     const rowBottom = rowTop + row.offsetHeight;
     const viewTop = container.scrollTop;
@@ -240,13 +260,13 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReor
     if (target != null) {
       container.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
     }
-  }, [highlightUri, tracks, visibleCount]);
+  }, [highlightUri, highlightNonce, tracks, visibleCount]);
 
   return (
     <div ref={containerRef} className="divide-y divide-slate-800/50 h-full min-h-[400px] overflow-y-auto no-scrollbar">
       {tracks.slice(0, visibleCount).map((track, i) => (
         <div
-          key={`${track.id}-${i}`}
+          key={`${track.id}-${i}${highlightUri === track.uri && highlightNonce ? `-h${highlightNonce}` : ""}`}
           ref={(el) => {
             if (inlineCard?.trackId === track.id && el) setAnchorEl(prev => (prev === el ? prev : el));
             if (highlightUri === track.uri) highlightRowRef.current = el;
@@ -512,6 +532,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   // scrolls to and briefly highlights that same track in the list below,
   // without filtering the list down to it (unlike singleTrackFilter).
   const [chartHighlightUri, setChartHighlightUri] = useState<string | null>(null);
+  const [chartHighlightNonce, setChartHighlightNonce] = useState(0);
   // Free-text search across track name + artist — typing this always shows
   // matches regardless of which zone/pace/etc. filter is active, and takes
   // priority over all of them (same pattern as singleTrackFilter).
@@ -2914,10 +2935,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
   const suggestSeedVisible = suggest !== null && suggest.origin === "list" && filteredTracks.some(t => t.id === suggest.seed.id);
 
   return (
-    <div
-      className="min-h-screen flex flex-col bg-cover bg-fixed bg-center bg-no-repeat"
-      style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.65), rgba(2,6,23,0.65)), url('/dashboard-hero.png')" }}
-    >
+    <div className="relative isolate min-h-screen flex flex-col">
+      {/* Page background on its own fixed layer behind everything, so sticky
+          panels and pop-ups sit on top of it without moving it. */}
+      <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
+        style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.65), rgba(2,6,23,0.65)), url('/dashboard-hero.png')" }} />
       {/* Header */}
       <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
         <div className="max-w-[1800px] mx-auto px-4 h-14 flex items-center justify-between">
@@ -2984,7 +3006,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           underneath it rather than pushing it down, letting you watch the
           chart update live as you reorder without losing it off-screen. */}
       {aiDjMix && !aiDjMix.stale && !remixing && !chartDismissed && aiDjMix.timeline?.length > 0 && (
-        <div className="sticky top-14 z-10 bg-slate-950/95 backdrop-blur-md border-b border-purple-500/30 shadow-xl">
+        <div data-sticky-pace-chart className="sticky top-14 z-10 bg-slate-950/95 backdrop-blur-md border-b border-purple-500/30 shadow-xl">
           <div className="max-w-[1800px] mx-auto px-4 py-4">
             <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border-4 border-purple-500/40 p-5">
               <div className="flex items-start justify-between gap-4">
@@ -3001,7 +3023,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 tracks={timelineToChartTracks(aiDjMix.timeline)}
                 zoomKey={`${aiDjMix.date}|${aiDjMix.workoutTitle}`}
                 deletedUris={mixDeletedUris}
-                onTrackClick={setChartHighlightUri}
+                onTrackClick={uri => { setChartHighlightUri(uri); setChartHighlightNonce(n => n + 1); }}
                 onReorder={!aiDjMix.stale ? reorderMixTrackByUri : undefined}
                 onTrackContextMenu={(uri, x, y) => setChartTrackMenu({ uri, x, y })}
                 selectedUris={chartSelectedUris}
@@ -3674,6 +3696,8 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                         ? { trackId: suggest.seed.id, node: suggestCardNode }
                         : null}
                       highlightUri={singleTrackFilter ?? chartHighlightUri}
+                      highlightNonce={singleTrackFilter ? undefined : chartHighlightNonce}
+                      playingUri={aiDjMix ? chartHighlightUri : undefined}
                       playedCounts={playedCounts}
                     />
                   )}
