@@ -3006,9 +3006,13 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           underneath it rather than pushing it down, letting you watch the
           chart update live as you reorder without losing it off-screen. */}
       {aiDjMix && !aiDjMix.stale && !remixing && !chartDismissed && aiDjMix.timeline?.length > 0 && (
-        <div data-sticky-pace-chart className="sticky top-14 z-10 bg-slate-950/95 backdrop-blur-md border-b border-purple-500/30 shadow-xl">
+        // Transparent full-width strip: only the chart card itself is solid,
+        // so the page background shows around it (the old opaque strip hid
+        // it across the whole width). The strip ignores clicks so the
+        // margins either side of the card don't block what's beneath.
+        <div data-sticky-pace-chart className="sticky top-14 z-10 pointer-events-none">
           <div className="max-w-[1800px] mx-auto px-4 py-4">
-            <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border-4 border-purple-500/40 p-5">
+            <div className="pointer-events-auto rounded-xl bg-slate-900/95 backdrop-blur-md border-4 border-purple-500/40 shadow-2xl p-5">
               <div className="flex items-start justify-between gap-4">
                 <h2 className="font-semibold text-sm text-slate-300 mb-1">Pace &amp; BPM — &quot;{aiDjMix.workoutTitle}&quot;</h2>
                 <button
