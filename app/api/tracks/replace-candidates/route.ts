@@ -230,7 +230,19 @@ export async function POST(req: NextRequest) {
           // Crawler does: every track by the artist, then artist radio
           // spreading to 10 artists (lib/deezer-bpm-crawl.ts). Genre search
           // keeps the per-artist top-tracks walk below.
-          const crawlArtist = body.searchMode === "genre" ? null
+          const maxArtists = Math.min(Math.max(Math.round(body.maxArtists ?? MAX_ARTISTS_SEARCHED), 1), 200);
+          // Genre search: Max-artists artists from Discogs (falling back to
+          // library artists tagged with the genre), then each one's artist
+          // radio via the crawler.
+          let genreArtists: string[] | null = null;
+          if (body.searchMode === "genre" && body.searchValue) {
+            genreArtists = await discogsArtistsForGenre(body.searchValue, maxArtists).catch(() => []);
+            if (genreArtists.length === 0) {
+              genreArtists = artistsSharingGenre(allRows, new Set([body.searchValue.trim().toLowerCase()]), [], maxArtists);
+            }
+            send({ type: "progress", stage: `Genre "${body.searchValue}": ${genreArtists.length} artist${genreArtists.length === 1 ? "" : "s"}`, name: genreArtists.slice(0, 3).join(", "), artist: "", current: 0, total: 0, hits: 0 });
+          }
+          const crawlArtist = body.searchMode === "genre" ? (genreArtists?.length ? body.searchValue! : null)
             : body.searchMode === "artist" ? body.searchValue ?? null
             : body.artistName ?? null;
           if (crawlArtist) {
@@ -248,7 +260,8 @@ export async function POST(req: NextRequest) {
                 skipIsrc: isrc => resultIsrcs.has(isrc) || libraryIsrcs.has(isrc),
                 accept: r => !body.energyBand || (r.energy != null && energyInBand(r.energy, body.energyBand)),
                 need,
-                maxArtists: Math.min(Math.max(Math.round(body.maxArtists ?? MAX_ARTISTS_SEARCHED), 1), 200),
+                maxArtists,
+                ...(genreArtists ? { seedArtists: genreArtists, catalogue: false, spread: false } : {}),
                 shouldStop: () => cancelled,
                 similar: !!body.similarArtists,
                 onProgress: p => send({ type: "progress", stage: p.stage, name: p.name, artist: p.artist, current: p.checked, total: 0, hits: results.length - libraryCandidates.length }),
@@ -264,10 +277,14 @@ export async function POST(req: NextRequest) {
                 },
               });
               console.log(`[replace-candidates] crawl "${crawlArtist}" @${targetBpm} similar=${!!body.similarArtists} maxArtists=${body.maxArtists ?? MAX_ARTISTS_SEARCHED}: seedFound=${summary.seedFound} checked=${summary.checked} matched=${summary.matched} artists=${JSON.stringify(summary.artists ?? [])}${cancelled ? " (stopped — window closed)" : ""}`);
-              if (!summary.seedFound) send({ type: "warning", message: `No Deezer artist found for "${crawlArtist}" — try Search online by Artist` });
+              if (!summary.seedFound) send({ type: "warning", message: genreArtists
+                ? `None of the ${genreArtists.length} artists found for "${crawlArtist}" are on Deezer`
+                : `No Deezer artist found for "${crawlArtist}" — try Search online by Artist` });
             } catch (err) {
               console.log(`[replace-candidates] crawl threw: ${err instanceof Error ? err.message : String(err)}`);
             }
+          } else if (genreArtists !== null) {
+            send({ type: "warning", message: `No artists found for the genre "${body.searchValue ?? ""}"` });
           } else try {
             let artistNames: string[];
             if (body.searchMode === "artist" && body.searchValue) {

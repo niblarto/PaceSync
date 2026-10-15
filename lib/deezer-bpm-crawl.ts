@@ -43,6 +43,15 @@ export interface BpmCrawlOptions {
   /** Also walk Deezer's similar ("related") artists: each artist's related
       list joins the queue and their top tracks are checked, alongside radio. */
   similar?: boolean;
+  /** Seed with this list instead of `artist` — one seed per name (the first
+      credited part found on Deezer, so "Axis (5) / Universal" or "A & B"
+      still resolve). Used by genre search (Discogs-picked artists). */
+  seedArtists?: string[];
+  /** Check each seed's full catalogue first (default true). */
+  catalogue?: boolean;
+  /** Spread to the artists radio turns up (default true); false walks only
+      the seeds' own radio. */
+  spread?: boolean;
   onProgress?: (p: CrawlProgress) => void;
   onMatch: (m: CrawlMatch) => void;
   /** Checked between every request — true once the caller has gone away
@@ -86,11 +95,27 @@ export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: b
   // artist field can list several, e.g. "Chom;Ragga Twins;Georgie Riot").
   // Exact match so "Hybrid" never becomes "Hybrid Minds".
   const seeds: { id: number; name: string }[] = [];
-  for (const name of splitArtists(opts.artist)) {
-    if (done() || seeds.length >= 3) break;
+  const findExact = async (name: string) => {
     const found = await deezer<{ data?: { id: number; name: string }[] }>(`/search/artist?q=${encodeURIComponent(name)}&limit=25`);
-    const hit = found?.data?.find(a => a.name.trim().toLowerCase() === name.toLowerCase());
-    if (hit && !seeds.some(s => s.id === hit.id)) seeds.push(hit);
+    return found?.data?.find(a => a.name.trim().toLowerCase() === name.toLowerCase()) ?? null;
+  };
+  if (opts.seedArtists) {
+    for (const raw of opts.seedArtists) {
+      if (done()) break;
+      // Discogs-style names: drop "(5)" disambiguators, then try the whole
+      // name and each credited part ("A / B", "A & B") until one matches.
+      const cleaned = raw.replace(/\s*\(\d+\)/g, "").trim();
+      for (const name of splitArtists(cleaned.replace(/\s+\/\s+/g, ";"))) {
+        const hit = await findExact(name);
+        if (hit) { if (!seeds.some(s => s.id === hit.id)) seeds.push(hit); break; }
+      }
+    }
+  } else {
+    for (const name of splitArtists(opts.artist)) {
+      if (done() || seeds.length >= 3) break;
+      const hit = await findExact(name);
+      if (hit && !seeds.some(s => s.id === hit.id)) seeds.push(hit);
+    }
   }
   if (seeds.length === 0) return { seedFound: false, checked, matched };
 
@@ -123,7 +148,7 @@ export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: b
   };
 
   // 1. Every track credited to each seed artist, release by release.
-  for (const seed of seeds) {
+  for (const seed of opts.catalogue === false ? [] : seeds) {
     if (done()) break;
     const albums: { id: number; title: string }[] = [];
     let next: string | null = `/artist/${seed.id}/albums?limit=100`;
@@ -151,6 +176,7 @@ export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: b
   const walked: string[] = [];
   const seedIds = new Set(seeds.map(s => s.id));
   const enqueue = (a: { id?: number; name: string } | undefined) => {
+    if (opts.spread === false) return;
     if (a?.id != null && !queued.has(a.id) && queued.size < maxArtists) {
       queued.add(a.id);
       queue.push({ id: a.id, name: a.name });
