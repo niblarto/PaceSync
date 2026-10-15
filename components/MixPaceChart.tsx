@@ -122,8 +122,10 @@ const REST_SUFFIX_RE = / \+ ((\d+)\s*(s|sec|secs|min|mins?)\b[^,]*)$/i;
 // built from a mix's own planned data (no actual pace, since it hasn't been
 // run yet) so it can be shown the moment a mix is built or reloaded from a
 // saved/pinned snapshot. `tracks` should be the full ordered mix track list.
-export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMenu, selectedUris, onToggleSelect, onSelectionContextMenu, deletedUris, zoomKey }: {
+export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMenu, selectedUris, onToggleSelect, onSelectionContextMenu, deletedUris, zoomKey, height = 220 }: {
   tracks: MixChartTrack[];
+  /** Plot height in px (the strips below it are extra). */
+  height?: number;
   /** Identifies the mix being shown — the zoom resets only when this
       changes (a different mix loaded), not when its tracks are edited
       (swap, reorder, remove), so the chart stays focused where it was.
@@ -475,7 +477,7 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
         className="cursor-grab"
         style={{ touchAction: "none", userSelect: "none" }}
       >
-        <ResponsiveContainer width="100%" height={220}>
+        <ResponsiveContainer width="100%" height={height}>
           <ComposedChart data={records} margin={{ top: 4, right: isNarrow ? 4 : 52, left: 4, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
             <XAxis

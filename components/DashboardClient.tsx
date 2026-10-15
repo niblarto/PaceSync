@@ -3011,7 +3011,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
         // it across the whole width). The strip ignores clicks so the
         // margins either side of the card don't block what's beneath.
         <div data-sticky-pace-chart className="sticky top-14 z-10 pointer-events-none">
-          <div className="max-w-[1800px] mx-auto px-4 py-4">
+          <div className="w-[90vw] mx-auto py-4">
             <div className="pointer-events-auto rounded-xl bg-slate-900/95 backdrop-blur-md border-4 border-purple-500/40 shadow-2xl p-5">
               <div className="flex items-start justify-between gap-4">
                 <h2 className="font-semibold text-sm text-slate-300 mb-1">Pace &amp; BPM — &quot;{aiDjMix.workoutTitle}&quot;</h2>
@@ -3026,6 +3026,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <MixPaceChart
                 tracks={timelineToChartTracks(aiDjMix.timeline)}
                 zoomKey={`${aiDjMix.date}|${aiDjMix.workoutTitle}`}
+                height={165}
                 deletedUris={mixDeletedUris}
                 onTrackClick={uri => { setChartHighlightUri(uri); setChartHighlightNonce(n => n + 1); }}
                 onReorder={!aiDjMix.stale ? reorderMixTrackByUri : undefined}
@@ -3203,8 +3204,9 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           {/* Col 2: Main content */}
           <main className="space-y-6 min-w-0 flex flex-col min-h-0">
 
-            {/* Target zone */}
-            {csvName && (
+            {/* Target zone — hidden while a mix is loaded (the tracklist card
+                has its own Close mix button). */}
+            {csvName && !aiDjMix && (
               <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="font-semibold">Target zone</h2>
@@ -3255,11 +3257,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   </div>
                 </div>
                 <div className="rounded-lg bg-slate-800/50 border border-white/10 px-3 py-2 text-sm">
-                  {aiDjMix ? (
-                    <span className="text-purple-400 font-medium">
-                      🎧 AI DJ Mix — &quot;{aiDjMix.workoutTitle}&quot; · {Math.round(aiDjMix.totalSec / 60)} min
-                    </span>
-                  ) : noBpmFilter ? (
+                  {noBpmFilter ? (
                     <span className="text-red-400 font-medium">
                       Tracks without BPM info — fix with a BPM lookup, delete, or re-export via Exportify
                     </span>
@@ -3307,6 +3305,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden flex flex-col"
                 style={resultsMaxHeight ? { maxHeight: resultsMaxHeight } : undefined}
               >
+                {!aiDjMix && (
                 <div className="p-3 border-b border-white/10 relative">
                   <input
                     type="text"
@@ -3325,6 +3324,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     </button>
                   )}
                 </div>
+                )}
                 <div className="p-5 border-b border-white/10 flex items-start justify-between gap-4 flex-wrap">
                   <div>
                     <h3 className="font-semibold">
