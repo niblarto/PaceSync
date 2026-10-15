@@ -1,6 +1,7 @@
 "use client";
 
 import { createPortal } from "react-dom";
+import { SongProgressBar, ensurePlaying } from "@/components/SongProgressBar";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
@@ -695,6 +696,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // polls its log; only the form inputs are remembered in the browser.
   interface CrawlerLine { level: "info" | "match" | "warn" | "error"; msg: string; at: string }
   const [crawlerArtist, setCrawlerArtist] = useState("");
+  // open.spotify.com album / playlist link — crawled alongside (or instead of) the artist.
+  const [crawlerLink, setCrawlerLink] = useState("");
   const [crawlerBpm, setCrawlerBpm] = useState("");
   // Optional upper bound — set (with crawlerBpm as the lower) by the run-type
   // buttons; blank means "just this one BPM".
@@ -1186,15 +1189,17 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   async function startSongCrawler() {
     if (crawlerRunning) return;
     const artist = crawlerArtist.trim();
+    const link = crawlerLink.trim();
     const bpm = parseFloat(crawlerBpm);
     const bpmMaxRaw = parseFloat(crawlerBpmMax);
     const bpmMax = bpmMaxRaw > 0 && bpmMaxRaw > bpm ? bpmMaxRaw : null;
-    if (!artist || !bpm || bpm <= 0 || crawlerNoSource) return;
+    if ((!artist && !link) || !bpm || bpm <= 0 || (crawlerNoSource && !link)) return;
     const res = await fetch("/api/tracks/song-crawler", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         artist,
+        ...(link ? { link } : {}),
         ...(bpmMax ? { bpmMin: bpm, bpmMax } : { bpm }),
         maxArtists: parseInt(crawlerMaxArtists, 10) > 0 ? parseInt(crawlerMaxArtists, 10) : 50,
         sources: crawlerSources,
@@ -1293,7 +1298,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     setLookupMenu(null);
     setLookupPlayingId(r.deezerId);
     lookupAudioRef.current?.pause();
-    if (r.spotifyUri) { void playInSpotify(r.spotifyUri, session?.accessToken); return; }
+    if (r.spotifyUri) { void playInSpotify(r.spotifyUri, session?.accessToken); ensurePlaying(); return; }
     // No Spotify match — fall back to Deezer's 30-second preview.
     if (r.preview) {
       const a = new Audio(r.preview);
@@ -1334,8 +1339,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     try {
       const raw = localStorage.getItem(CRAWLER_STORE_KEY);
       if (!raw) return;
-      const saved = JSON.parse(raw) as { artist?: string; bpm?: string; bpmMax?: string; maxArtists?: string; sources?: { artist: boolean; radio: boolean; related: boolean }; mode?: string; allTracks?: boolean };
+      const saved = JSON.parse(raw) as { artist?: string; link?: string; bpm?: string; bpmMax?: string; maxArtists?: string; sources?: { artist: boolean; radio: boolean; related: boolean }; mode?: string; allTracks?: boolean };
       if (saved.artist) setCrawlerArtist(saved.artist);
+      if (saved.link) setCrawlerLink(saved.link);
       if (saved.bpm) setCrawlerBpm(saved.bpm);
       if (saved.bpmMax) setCrawlerBpmMax(saved.bpmMax);
       if (saved.maxArtists) setCrawlerMaxArtists(saved.maxArtists);
@@ -1347,10 +1353,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   useEffect(() => {
     try {
       localStorage.setItem(CRAWLER_STORE_KEY, JSON.stringify({
-        artist: crawlerArtist, bpm: crawlerBpm, bpmMax: crawlerBpmMax, maxArtists: crawlerMaxArtists, sources: crawlerSources,
+        artist: crawlerArtist, link: crawlerLink, bpm: crawlerBpm, bpmMax: crawlerBpmMax, maxArtists: crawlerMaxArtists, sources: crawlerSources,
       }));
     } catch { /* storage unavailable */ }
-  }, [crawlerArtist, crawlerBpm, crawlerBpmMax, crawlerMaxArtists, crawlerSources]);
+  }, [crawlerArtist, crawlerLink, crawlerBpm, crawlerBpmMax, crawlerMaxArtists, crawlerSources]);
 
   // Keep the log scrolled to the newest line.
   useEffect(() => {
@@ -6685,7 +6691,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               {crawlerRunning && <span className="inline-block w-2 h-2 rounded-full bg-teal-400 animate-pulse" />}
             </h3>
             <p className="text-xs text-slate-500">
-              Walks Deezer artist radio from an artist, adding tracks at the BPM (±1) or within the range to the library. Half-time tracks count at double tempo.
+              Walks Deezer artist radio from an artist — and/or every track on a Spotify album or playlist — adding tracks at the BPM (±1) or within the range to the library. Half-time tracks count at double tempo.
             </p>
           </div>
         </div>
@@ -6705,6 +6711,19 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             <datalist id="crawler-artist-options">
               {crawlerArtistOptions.map(a => <option key={a} value={a} />)}
             </datalist>
+          </label>
+          <label className="text-xs text-slate-500 space-y-1 flex-1 min-w-[14rem]" title="Spotify album or playlist link — every track on it is BPM-checked, and its artists are used as starting points for Radio / Related">
+            <span className="block">Album / Playlist</span>
+            <input
+              value={crawlerLink}
+              onChange={e => setCrawlerLink(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
+              disabled={crawlerRunning}
+              placeholder="https://open.spotify.com/album/…"
+              className={`w-full rounded-lg bg-slate-800/60 border text-sm px-2.5 py-1.5 text-slate-100 disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500 ${
+                crawlerLink.trim() && !/open\.spotify\.com\/(?:intl-[a-z]+\/)?(album|playlist)\/|spotify:(album|playlist):/.test(crawlerLink) ? "border-amber-500/60" : "border-white/10"
+              }`}
+            />
           </label>
           <label className="text-xs text-slate-500 space-y-1 w-24">
             <span className="block">BPM</span>
@@ -6750,7 +6769,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </label>
           <button
             onClick={() => void startSongCrawler()}
-            disabled={crawlerRunning || !crawlerArtist.trim() || !(parseFloat(crawlerBpm) > 0) || crawlerNoSource}
+            disabled={crawlerRunning || (!crawlerArtist.trim() && !crawlerLink.trim()) || !(parseFloat(crawlerBpm) > 0) || (crawlerNoSource && !crawlerLink.trim())}
             className="rounded-lg bg-teal-600 hover:bg-teal-500 disabled:bg-slate-700 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-sm px-5 py-2 shadow-sm transition-colors"
           >
             Crawl
@@ -6825,12 +6844,19 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           })}
         </div>
 
-        {crawlerSeed && (
-          <p className="text-xs text-slate-500">
-            {crawlerStatusText ?? (crawlerRunning ? "Running" : "Last crawl")}: {crawlerSeed.artist} · {crawlerSeed.bpmMax ? `${Math.round(crawlerSeed.bpm)}–${Math.round(crawlerSeed.bpmMax)}` : Math.round(crawlerSeed.bpm)} BPM · started {crawlerSeed.startedAt} · {crawlerAdded} added
-            {crawlerProgress ? ` · Artist ${crawlerProgress.crawled} of ${crawlerProgress.total}` : ""}
+        {/* Status (left, over the log) and the Spotify playback bar (right,
+            over the "Added this crawl" list). */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-center">
+          <p className="md:col-span-3 text-xs text-slate-500 min-w-0">
+            {crawlerSeed && (
+              <>
+                {crawlerStatusText ?? (crawlerRunning ? "Running" : "Last crawl")}: {crawlerSeed.artist} · {crawlerSeed.bpmMax ? `${Math.round(crawlerSeed.bpm)}–${Math.round(crawlerSeed.bpmMax)}` : Math.round(crawlerSeed.bpm)} BPM · started {crawlerSeed.startedAt} · {crawlerAdded} added
+                {crawlerProgress ? ` · Artist ${crawlerProgress.crawled} of ${crawlerProgress.total}` : ""}
+              </>
+            )}
           </p>
-        )}
+          <SongProgressBar className="w-full" />
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <div
@@ -6865,7 +6891,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               ) : crawlerAddedTracks.map(t => (
                 <button
                   key={t.uri}
-                  onClick={() => { setCrawlerPlayingUri(t.uri); void playInSpotify(t.uri, session?.accessToken); }}
+                  onClick={() => { setCrawlerPlayingUri(t.uri); void playInSpotify(t.uri, session?.accessToken); ensurePlaying(); }}
                   onContextMenu={e => { e.preventDefault(); setCrawlerMenu({ x: e.clientX, y: e.clientY, uri: t.uri }); }}
                   title="Click to play · right-click to accept or delete"
                   className={`w-full text-left px-3 py-1.5 border-b border-white/5 hover:bg-slate-800/60 transition-colors ${
@@ -6892,7 +6918,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               style={{ left: Math.min(crawlerMenu.x, window.innerWidth - 170), top: Math.min(crawlerMenu.y, window.innerHeight - 120) }}
             >
               <button
-                onClick={() => { const uri = crawlerMenu.uri; setCrawlerMenu(null); setCrawlerPlayingUri(uri); void playInSpotify(uri, session?.accessToken); }}
+                onClick={() => { const uri = crawlerMenu.uri; setCrawlerMenu(null); setCrawlerPlayingUri(uri); void playInSpotify(uri, session?.accessToken); ensurePlaying(); }}
                 className="w-full text-left px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800 transition-colors"
               >
                 ▶ Play

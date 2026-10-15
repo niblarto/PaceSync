@@ -7,6 +7,7 @@ import { resolveByIsrc } from "@/lib/track-enrich";
 import { addTracksToLibrary } from "@/lib/library-add";
 import { healActiveCsv } from "@/lib/csv-heal";
 import { cronNotify } from "@/lib/cron-notify";
+import { getFreshToken } from "@/lib/tokenStore";
 
 // Song Crawler as a server-side background job (Settings > Tracklist).
 // Starting from an artist it walks Deezer "artist radio" breadth-first —
@@ -34,6 +35,103 @@ const effective = (bpm: number) => (bpm < DOUBLETIME_THRESHOLD ? bpm * 2 : bpm);
 interface DeezerRadioTrack { id: number; title: string; artist: { id: number; name: string } }
 interface DeezerAlbumTrack extends DeezerRadioTrack { isrc?: string; duration?: number }
 
+interface LinkTrack { id: string; uri: string; name: string; artist: string; durationMs: number | null }
+
+// open.spotify.com/album/<id> or /playlist/<id> (any ?si=… is ignored), or
+// spotify:album:<id> / spotify:playlist:<id>.
+export function parseSpotifyLink(link: string | undefined): { kind: "album" | "playlist"; id: string } | null {
+  if (!link) return null;
+  const m = link.trim().match(/(?:open\.spotify\.com\/(?:intl-[a-z]+\/)?|spotify:)(album|playlist)[/:]([A-Za-z0-9]{10,})/);
+  return m ? { kind: m[1] as "album" | "playlist", id: m[2] } : null;
+}
+
+// Fallback for playlists the Spotify API won't list: Spotify's public embed
+// player page carries the track list (first 100 tracks) in its page data —
+// no login needed. Spotify only lets this app list the tracks of playlists
+// the logged-in user owns (others return 403 / no tracks).
+async function fetchEmbedTracks(kind: "album" | "playlist", id: string): Promise<{ name: string; tracks: LinkTrack[]; capped: boolean } | { error: string }> {
+  try {
+    const res = await fetch(`https://open.spotify.com/embed/${kind}/${id}`, {
+      headers: { "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36" },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return { error: `embed page ${res.status}` };
+    const html = await res.text();
+    const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+    if (!m) return { error: "embed page had no track data" };
+    const data = JSON.parse(m[1]) as { props?: { pageProps?: { state?: { data?: { entity?: {
+      name?: string; title?: string;
+      trackList?: { uri?: string; title?: string; subtitle?: string; duration?: number }[];
+    } } } } } };
+    const entity = data.props?.pageProps?.state?.data?.entity;
+    const list = entity?.trackList ?? [];
+    const tracks: LinkTrack[] = list
+      .filter(t => t.uri?.startsWith("spotify:track:"))
+      .map(t => ({ id: t.uri!.split(":")[2], uri: t.uri!, name: t.title ?? "", artist: t.subtitle ?? "", durationMs: t.duration ?? null }));
+    return { name: entity?.name ?? entity?.title ?? (kind === "album" ? "Album" : "Playlist"), tracks, capped: list.length >= 100 };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// Reads an album's / playlist's tracks with the stored Spotify login —
+// plain album/playlist reads, never Spotify Search. Falls back to the
+// public embed page when Spotify refuses (another user's playlist).
+async function fetchLinkTracks(kind: "album" | "playlist", id: string): Promise<{ name: string; tracks: LinkTrack[]; via?: string } | { error: string }> {
+  const viaApi = await fetchLinkTracksApi(kind, id);
+  if (!("error" in viaApi) && viaApi.tracks.length > 0) return viaApi;
+  const embed = await fetchEmbedTracks(kind, id);
+  if ("error" in embed) return "error" in viaApi ? { error: `${viaApi.error}; embed fallback: ${embed.error}` } : { error: embed.error };
+  return {
+    name: embed.name,
+    tracks: embed.tracks,
+    via: `Spotify wouldn't list this ${kind}'s tracks (${"error" in viaApi ? viaApi.error : "no tracks returned"} — it only allows playlists you own), so they were read from Spotify's public player page${embed.capped ? " — the first 100 tracks only" : ""}`,
+  };
+}
+
+async function fetchLinkTracksApi(kind: "album" | "playlist", id: string): Promise<{ name: string; tracks: LinkTrack[] } | { error: string }> {
+  const token = await getFreshToken();
+  if (!token.ok) return { error: `no Spotify login on the server (${token.reason})` };
+  const get = async (url: string) => {
+    await sleep(300);
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token.token}` }, signal: AbortSignal.timeout(20000) });
+    if (!res.ok) throw new Error(`Spotify ${res.status}`);
+    return res.json();
+  };
+  try {
+    type SpTrack = { id?: string | null; uri?: string; name?: string; duration_ms?: number; artists?: { name: string }[]; is_local?: boolean };
+    const toTrack = (t: SpTrack | null | undefined): LinkTrack | null =>
+      t?.id && t.uri?.startsWith("spotify:track:") && !t.is_local
+        ? { id: t.id, uri: t.uri, name: t.name ?? "", artist: (t.artists ?? []).map(a => a.name).join(", "), durationMs: t.duration_ms ?? null }
+        : null;
+    const tracks: LinkTrack[] = [];
+    let name = "";
+    if (kind === "album") {
+      const album = await get(`https://api.spotify.com/v1/albums/${id}`) as { name?: string; tracks?: { items?: SpTrack[]; next?: string | null } };
+      name = album.name ?? "Album";
+      for (const t of album.tracks?.items ?? []) { const x = toTrack(t); if (x) tracks.push(x); }
+      let next = album.tracks?.next ?? null;
+      while (next) {
+        const page = await get(next) as { items?: SpTrack[]; next?: string | null };
+        for (const t of page.items ?? []) { const x = toTrack(t); if (x) tracks.push(x); }
+        next = page.next ?? null;
+      }
+    } else {
+      const pl = await get(`https://api.spotify.com/v1/playlists/${id}?fields=name`) as { name?: string };
+      name = pl.name ?? "Playlist";
+      let next: string | null = `https://api.spotify.com/v1/playlists/${id}/items?limit=100&fields=next,items(track(id,uri,name,duration_ms,is_local,artists(name)))`;
+      while (next) {
+        const page = await get(next) as { items?: { track?: SpTrack | null }[]; next?: string | null };
+        for (const it of page.items ?? []) { const x = toTrack(it.track); if (x) tracks.push(x); }
+        next = page.next ?? null;
+      }
+    }
+    return { name, tracks };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export type CrawlLevel = "info" | "match" | "warn" | "error";
 export interface CrawlLine { seq: number; at: string; level: CrawlLevel; msg: string }
 export type CrawlStatus = "running" | "stopping" | "healing" | "done" | "stopped" | "error" | "interrupted";
@@ -59,6 +157,10 @@ function resolveSources(p: CrawlParams): CrawlSources {
 
 export interface CrawlParams {
   artist: string;
+  /** open.spotify.com album or playlist link — its tracks are BPM-checked
+      directly, and its artists join the typed artist as starting points
+      for radio / related. */
+  link?: string;
   bpm?: number;
   bpmMin?: number;
   bpmMax?: number;
@@ -78,6 +180,7 @@ export interface CrawlJob {
   // deleted from the library via that list).
   addedTracks: { uri: string; name: string; artist: string; bpm: number }[];
   crawled: number;      // artists whose radio has been processed
+  linkName?: string;    // album / playlist name, when crawling a link
   totalArtists: number; // distinct artists found so far (seed included)
   nextSeq: number;
   log: CrawlLine[];
@@ -160,8 +263,11 @@ export function startCrawl(params: CrawlParams): { ok: true; id: string } | { ok
   load();
   if (isCrawlRunning()) return { ok: false, error: "A crawl is already running — stop it first." };
   const isRange = !!params.bpmMin && !!params.bpmMax && params.bpmMin > 0 && params.bpmMax >= params.bpmMin;
-  if (!params.artist?.trim() || (!isRange && !(params.bpm && params.bpm > 0))) {
-    return { ok: false, error: "artist and a bpm (or bpmMin/bpmMax range) required" };
+  if (params.link?.trim() && !parseSpotifyLink(params.link)) {
+    return { ok: false, error: "Album / Playlist must be an open.spotify.com album or playlist link" };
+  }
+  if ((!params.artist?.trim() && !params.link?.trim()) || (!isRange && !(params.bpm && params.bpm > 0))) {
+    return { ok: false, error: "an artist or an album/playlist link, and a bpm (or bpmMin/bpmMax range), are required" };
   }
   store.stopRequested = false;
   store.job = {
@@ -186,12 +292,14 @@ async function runCrawl(job: CrawlJob) {
   const hi = isRange ? effective(p.bpmMax!) : effective(p.bpm!) + BPM_TOLERANCE;
   const targetLabel = isRange ? `${Math.round(lo)}–${Math.round(hi)} BPM` : `${Math.round(effective(p.bpm!))} BPM (±${BPM_TOLERANCE})`;
   const stopped = () => store.stopRequested;
-  const artist = p.artist.trim();
+  const artist = (p.artist ?? "").trim();
+  const linkRef = parseSpotifyLink(p.link);
   const src = resolveSources(p);
   const doCatalogue = src.artist;
   const spreads = src.radio || src.related;
   const parts = [
-    src.artist && `${artist}'s own tracks`,
+    linkRef && `the ${linkRef.kind}'s tracks`,
+    src.artist && artist && `${artist}'s own tracks`,
     src.radio && "artist radio",
     src.related && "related artists' top tracks",
   ].filter(Boolean).join(" + ");
@@ -217,13 +325,27 @@ async function runCrawl(job: CrawlJob) {
 
   // Seed: exact (case-insensitive) artist-name match, same rule as
   // lib/deezer-artist-top.ts so "Hybrid" never becomes "Hybrid Minds".
-  const found = await deezer<{ data?: { id: number; name: string }[] }>(`/search/artist?q=${encodeURIComponent(artist)}&limit=25`);
-  const seed = found?.data?.find(a => a.name.trim().toLowerCase() === artist.toLowerCase());
-  if (!seed) {
-    log(`No exact Deezer artist match for "${artist}"`, "warn");
-    return finish(job, "done");
+  const findArtist = async (name: string) => {
+    const found = await deezer<{ data?: { id: number; name: string }[] }>(`/search/artist?q=${encodeURIComponent(name)}&limit=25`);
+    return found?.data?.find(a => a.name.trim().toLowerCase() === name.trim().toLowerCase()) ?? null;
+  };
+  const seed = artist ? await findArtist(artist) : null;
+  if (artist && !seed) log(`No exact Deezer artist match for "${artist}"`, "warn");
+
+  // Album / playlist link: its tracks, read from Spotify.
+  let linkTracks: LinkTrack[] = [];
+  if (linkRef) {
+    const res = await fetchLinkTracks(linkRef.kind, linkRef.id);
+    if ("error" in res) log(`Couldn't read the ${linkRef.kind}: ${res.error}`, "error");
+    else {
+      linkTracks = res.tracks;
+      job.linkName = res.name;
+      if (res.via) log(res.via, "warn");
+      log(`${linkRef.kind === "album" ? "Album" : "Playlist"}: ${res.name} — ${linkTracks.length} track${linkTracks.length === 1 ? "" : "s"}`);
+    }
   }
-  job.totalArtists = 1;
+  if (!seed && linkTracks.length === 0) return finish(job, "done");
+  job.totalArtists = seed ? 1 : 0;
 
   const seenTracks = new Set<number>();
   const checkedIsrcs = new Set<string>();
@@ -287,7 +409,7 @@ async function runCrawl(job: CrawlJob) {
   // Optional catalogue pass: every track credited to the seed artist across
   // all their releases, before any radio. Tracks credited to someone else
   // (side projects, guest-led tracks) are skipped.
-  if (doCatalogue && !stopped()) {
+  if (doCatalogue && seed && !stopped()) {
     const albums: { id: number; title: string }[] = [];
     let next: string | null = `/artist/${seed.id}/albums?limit=100`;
     while (next && !stopped()) {
@@ -310,8 +432,53 @@ async function runCrawl(job: CrawlJob) {
     if (!stopped()) log(spreads ? `Finished ${seed.name}'s catalogue — moving on to ${[src.radio && "radio", src.related && "related artists"].filter(Boolean).join(" and ")}.` : `Finished ${seed.name}'s catalogue.`);
   }
 
-  const queue: { id: number; name: string }[] = [seed];
-  const queuedArtists = new Set<number>([seed.id]);
+  // Every track on the album/playlist — BPM via ReccoBeats straight from
+  // the Spotify track id (40 per request), added on a match.
+  if (linkTracks.length > 0 && !stopped()) {
+    log(`Checking the ${linkRef!.kind}'s ${linkTracks.length} tracks…`);
+    for (let i = 0; i < linkTracks.length && !stopped(); i += 40) {
+      const batch = linkTracks.slice(i, i + 40);
+      type Recco = { href?: string; isrc?: string; tempo?: number; key?: number; mode?: number; energy?: number; danceability?: number; valence?: number };
+      let content: Recco[] = [];
+      try {
+        const res = await fetch(`https://api.reccobeats.com/v1/audio-features?ids=${batch.map(t => t.id).join(",")}`, {
+          headers: { "User-Agent": "pacesync/0.1 (running playlist tool)" }, signal: AbortSignal.timeout(20000),
+        });
+        if (res.ok) content = ((await res.json()) as { content?: Recco[] }).content ?? [];
+      } catch { /* logged per track below as no BPM */ }
+      const byId = new Map<string, Recco>();
+      for (const c of content) {
+        const id = c.href?.match(/track\/([A-Za-z0-9]+)/)?.[1];
+        if (id) byId.set(id, c);
+      }
+      for (const t of batch) {
+        if (stopped()) break;
+        const label = `${t.name} — ${t.artist}`;
+        const f = byId.get(t.id);
+        if (knownUris.has(t.uri) || (f?.isrc && knownIsrcs.has(f.isrc))) { log(`  ${label}: already in library`); continue; }
+        if (f?.tempo == null) { log(`  ${label}: no BPM available`); continue; }
+        const tempo = f.tempo;
+        if (!(effective(tempo) >= lo && effective(tempo) <= hi)) { log(`  ${label}: ${Math.round(tempo)} BPM`); continue; }
+        const result = await addTracksToLibrary([{
+          uri: t.uri, isrc: f.isrc, name: t.name, artist: t.artist, tempo,
+          key: f.key, mode: f.mode, energy: f.energy, danceability: f.danceability, valence: f.valence,
+          ...(t.durationMs ? { durationMs: t.durationMs } : {}),
+        }]);
+        knownUris.add(t.uri);
+        if (f.isrc) knownIsrcs.add(f.isrc);
+        if (result.added > 0) {
+          job.added++;
+          job.addedTracks.push({ uri: t.uri, name: t.name, artist: t.artist, bpm: Math.round(tempo) });
+          log(`  ✓ ADDED ${label} (${Math.round(tempo)} BPM)`, "match");
+        } else {
+          log(`  ${label}: matches, but was previously deleted from the library — skipped`, "warn");
+        }
+      }
+    }
+  }
+
+  const queue: { id: number; name: string }[] = seed ? [seed] : [];
+  const queuedArtists = new Set<number>(seed ? [seed.id] : []);
   const enqueue = (a: { id: number; name: string }) => {
     if (queuedArtists.has(a.id) || queuedArtists.size >= maxArtists) return;
     queuedArtists.add(a.id);
@@ -321,6 +488,25 @@ async function runCrawl(job: CrawlJob) {
     }
     queue.push(a);
   };
+
+  // The album's/playlist's artists join the queue as starting points for
+  // radio / related (first credited artist of each track, exact Deezer
+  // name match, within Max artists).
+  if (spreads && linkTracks.length > 0 && !stopped()) {
+    const names = Array.from(new Set(linkTracks.map(t => t.artist.split(",")[0].trim()).filter(Boolean)));
+    const found: string[] = [];
+    for (const name of names) {
+      if (stopped() || queuedArtists.size >= maxArtists) break;
+      const a = await findArtist(name);
+      if (a && !queuedArtists.has(a.id)) {
+        queuedArtists.add(a.id);
+        queue.push({ id: a.id, name: a.name });
+        found.push(a.name);
+      }
+    }
+    job.totalArtists = queuedArtists.size;
+    log(`Starting artists from the ${linkRef!.kind}: ${found.length ? found.join(", ") : "none found on Deezer"}`);
+  }
 
   while (spreads && queue.length > 0 && !stopped()) {
     const current = queue.shift()!;
@@ -336,7 +522,7 @@ async function runCrawl(job: CrawlJob) {
       for (const a of related) enqueue({ id: a.id, name: a.name });
       // Top tracks — skipped for the typed artist when their whole
       // catalogue was already checked above.
-      if (!(doCatalogue && current.id === seed.id) && !stopped()) {
+      if (!(doCatalogue && seed && current.id === seed.id) && !stopped()) {
         const top = await deezer<{ data?: DeezerRadioTrack[] }>(`/artist/${current.id}/top?limit=${TOP_TRACKS_LIMIT}`);
         for (const t of top?.data ?? []) {
           if (stopped()) break;
@@ -391,8 +577,9 @@ async function finish(job: CrawlJob, outcome: "done" | "stopped") {
   const mins = Math.round((Date.parse(job.finishedAt) - Date.parse(job.startedAt)) / 60000);
   const s = resolveSources(p);
   const scopeNote = s.radio || s.related ? `artist ${job.crawled} of ${job.totalArtists}` : "artist's own tracks";
+  const what = [p.artist?.trim(), job.linkName].filter(Boolean).join(" + ") || "Song Crawler";
   await cronNotify(
-    `${p.artist} · ${bpm} BPM — ${job.added} track${job.added === 1 ? "" : "s"} added, ${scopeNote}, ~${mins} min.`,
+    `${what} · ${bpm} BPM — ${job.added} track${job.added === 1 ? "" : "s"} added, ${scopeNote}, ~${mins} min.`,
     {
       title: outcome === "stopped" ? "🕸 Song Crawler stopped" : "🕸 Song Crawler finished",
       tags: "spider_web",
