@@ -83,8 +83,11 @@ const ALL_ZONE: RunningZone = {
   textColor: "text-white",
 };
 
-function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, highlightNonce, playingUri, playedCounts, deletedUris }: {
+function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, highlightNonce, playingUri, playedCounts, deletedUris, visibleRows }: {
   tracks: TrackWithBPM[];
+  /** When set, the list is exactly this many rows tall and scrolls inside
+      itself (used while the Pace Chart is showing, so the page stays put). */
+  visibleRows?: number;
   /** Bumped on every Pace Chart chip click, so clicking the same track again
       still scrolls back to it. */
   highlightNonce?: number;
@@ -117,6 +120,13 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReor
 }) {
   const [visibleCount, setVisibleCount] = useState(50);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Measured row height (first row) for visibleRows sizing.
+  const [rowHeight, setRowHeight] = useState(66);
+  useEffect(() => {
+    if (!visibleRows) return;
+    const first = containerRef.current?.firstElementChild as HTMLElement | null;
+    if (first && first.offsetHeight > 20 && first.offsetHeight !== rowHeight) setRowHeight(first.offsetHeight);
+  });
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const highlightRowRef = useRef<HTMLDivElement | null>(null);
@@ -263,7 +273,11 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReor
   }, [highlightUri, highlightNonce, tracks, visibleCount]);
 
   return (
-    <div ref={containerRef} className="divide-y divide-slate-800/50 h-full min-h-[400px] overflow-y-auto no-scrollbar">
+    <div
+      ref={containerRef}
+      className={`divide-y divide-slate-800/50 overflow-y-auto no-scrollbar ${visibleRows ? "" : "h-full min-h-[400px]"}`}
+      style={visibleRows ? { height: rowHeight * visibleRows, flex: "none" } : undefined}
+    >
       {tracks.slice(0, visibleCount).map((track, i) => (
         <div
           key={`${track.id}-${i}${highlightUri === track.uri && highlightNonce ? `-h${highlightNonce}` : ""}`}
@@ -3702,6 +3716,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       highlightUri={singleTrackFilter ?? chartHighlightUri}
                       highlightNonce={singleTrackFilter ? undefined : chartHighlightNonce}
                       playingUri={aiDjMix ? chartHighlightUri : undefined}
+                      visibleRows={aiDjMix && !aiDjMix.stale && !remixing && !chartDismissed && aiDjMix.timeline?.length > 0 ? 6 : undefined}
                       playedCounts={playedCounts}
                     />
                   )}
