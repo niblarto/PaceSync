@@ -181,8 +181,8 @@ export interface CrawlJob {
   startedAt: string;
   finishedAt: string | null;
   added: number;
-  // Songs this crawl added (shown beside the log; removed from here when
-  // deleted from the library via that list).
+  // Songs crawls have added that haven't been reviewed yet — carried over
+  // from crawl to crawl until accepted or deleted (shown beside the log).
   addedTracks: { uri: string; name: string; artist: string; bpm: number }[];
   crawled: number;      // artists whose radio has been processed
   linkName?: string;    // album / playlist name, when crawling a link
@@ -276,10 +276,18 @@ export function startCrawl(params: CrawlParams): { ok: true; id: string } | { ok
     return { ok: false, error: "an artist or an album/playlist link, and a bpm (or bpmMin/bpmMax range), are required" };
   }
   store.stopRequested = false;
+  // Songs from earlier crawls not yet accepted or deleted carry over — the
+  // list is a review queue that persists across crawls. Ones no longer in
+  // the library (deleted elsewhere) are dropped.
+  let carried: CrawlJob["addedTracks"] = [];
+  try {
+    const libraryUris = new Set(readAllTracks(loadRunningPlaylistConfig().csvFile).map(t => t.uri));
+    carried = (store.job?.addedTracks ?? []).filter(t => libraryUris.has(t.uri));
+  } catch { carried = store.job?.addedTracks ?? []; }
   store.job = {
     id: randomUUID(), params, status: "running",
     startedAt: new Date().toISOString(), finishedAt: null,
-    added: 0, addedTracks: [], crawled: 0, totalArtists: 0, checked: 0, nextSeq: 0, log: [],
+    added: 0, addedTracks: carried, crawled: 0, totalArtists: 0, checked: 0, nextSeq: 0, log: [],
   };
   persist(true);
   void runCrawl(store.job).catch(e => {

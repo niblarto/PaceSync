@@ -20,6 +20,7 @@ import com.pacesync.app.network.dto.UpdateCronJobsRequest
 import com.pacesync.app.network.dto.WorkoutsResponse
 import retrofit2.Response
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.HTTP
 import retrofit2.http.POST
@@ -110,4 +111,17 @@ interface PaceSyncApi {
 
     @GET("api/spotify/playback")
     suspend fun getPlaybackState(): Response<PlaybackStateResponse>
+
+    // Song Crawler — server-side background job; the screen polls its log.
+    @POST("api/tracks/song-crawler")
+    suspend fun startCrawl(@Body body: com.pacesync.app.network.dto.StartCrawlRequest): Response<com.pacesync.app.network.dto.StartCrawlResponse>
+
+    @GET("api/tracks/song-crawler")
+    suspend fun getCrawl(@Query("since") since: Int): Response<com.pacesync.app.network.dto.CrawlStateResponse>
+
+    @DELETE("api/tracks/song-crawler")
+    suspend fun stopCrawl(): Response<Unit>
+
+    @HTTP(method = "PATCH", path = "api/tracks/song-crawler", hasBody = true)
+    suspend fun crawlRemoveAdded(@Body body: com.pacesync.app.network.dto.CrawlRemoveRequest): Response<Unit>
 }

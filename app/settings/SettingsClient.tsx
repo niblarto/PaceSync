@@ -1216,7 +1216,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     crawlerSinceRef.current = 0;
     crawlerWasRunningRef.current = true;
     setCrawlerLog([]);
-    setCrawlerAddedTracks([]);
     setCrawlerRunning(true);
     void pollSongCrawler();
   }
@@ -6784,7 +6783,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             {crawlerStopping ? "Stopping…" : "■ Stop"}
           </button>
           <button
-            onClick={() => { setCrawlerLog([]); setCrawlerSeed(null); setCrawlerAdded(0); setCrawlerProgress(null); setCrawlerStatusText(null); setCrawlerAddedTracks([]); }}
+            onClick={() => { setCrawlerLog([]); setCrawlerSeed(null); setCrawlerAdded(0); setCrawlerProgress(null); setCrawlerStatusText(null); }}
             disabled={crawlerRunning || crawlerLog.length === 0}
             className="rounded-lg border border-white/10 hover:border-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-slate-400 hover:text-slate-200 text-xs px-3 py-2 transition-colors"
           >
@@ -6847,7 +6846,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         </div>
 
         {/* Status (left, over the log) and the Spotify playback bar (right,
-            over the "Added this crawl" list). */}
+            over the "Awaiting review" list). */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-center">
           <p className="md:col-span-3 text-xs text-slate-500 min-w-0">
             {crawlerSeed && (
@@ -6885,11 +6884,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           {/* Songs this crawl added — click to play, right-click to delete. */}
           <div className="h-[36rem] flex flex-col rounded-lg border border-white/10 bg-slate-950/70 overflow-hidden">
             <p className="px-3 py-2 text-xs font-semibold text-slate-300 border-b border-white/10 shrink-0">
-              Added this crawl <span className="text-slate-500 font-normal">({crawlerAddedTracks.length})</span>
+              Awaiting review <span className="text-slate-500 font-normal">({crawlerAddedTracks.length})</span>
             </p>
             <div className="flex-1 overflow-y-auto">
               {crawlerAddedTracks.length === 0 ? (
-                <p className="px-3 py-2 text-xs text-slate-600">Songs the crawl adds appear here.</p>
+                <p className="px-3 py-2 text-xs text-slate-600">Songs crawls add stay here until you accept or delete them.</p>
               ) : crawlerAddedTracks.map(t => (
                 <button
                   key={t.uri}

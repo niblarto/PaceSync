@@ -397,6 +397,64 @@ data class PlaybackStateResponse(
     val isPlaying: Boolean = false,
     val hasDevice: Boolean = false,
     val trackUri: String? = null,
+    val trackName: String? = null,
+    val artistName: String? = null,
     val progressMs: Long = 0,
     val durationMs: Long = 0,
 )
+
+// ── Song Crawler (app/api/tracks/song-crawler, lib/song-crawler.ts) ──
+
+@Serializable
+data class CrawlSources(val artist: Boolean, val radio: Boolean, val related: Boolean)
+
+@Serializable
+data class StartCrawlRequest(
+    val artist: String,
+    val link: String? = null,
+    val bpm: Double? = null,
+    val bpmMin: Double? = null,
+    val bpmMax: Double? = null,
+    val maxArtists: Int,
+    val sources: CrawlSources,
+)
+
+@Serializable
+data class StartCrawlResponse(val ok: Boolean = false, val id: String? = null, val error: String? = null)
+
+@Serializable
+data class CrawlLine(val seq: Int, val at: String, val level: String = "info", val msg: String)
+
+@Serializable
+data class CrawlAddedTrack(val uri: String, val name: String, val artist: String, val bpm: Int = 0)
+
+@Serializable
+data class CrawlParamsDto(
+    val artist: String = "",
+    val link: String? = null,
+    val bpm: Double? = null,
+    val bpmMin: Double? = null,
+    val bpmMax: Double? = null,
+)
+
+@Serializable
+data class CrawlJobDto(
+    val id: String,
+    val params: CrawlParamsDto = CrawlParamsDto(),
+    val status: String,
+    val startedAt: String,
+    val added: Int = 0,
+    val addedTracks: List<CrawlAddedTrack> = emptyList(),
+    val crawled: Int = 0,
+    val totalArtists: Int = 0,
+    val checked: Int? = null,
+    val linkName: String? = null,
+)
+
+@Serializable
+data class CrawlStateResponse(val job: CrawlJobDto? = null, val lines: List<CrawlLine> = emptyList())
+
+// reason "accepted" keeps the track; "deleted" + deleteFromLibrary has the
+// server delete it from the library and Spotify playlist.
+@Serializable
+data class CrawlRemoveRequest(val removeAdded: String, val reason: String, val deleteFromLibrary: Boolean = false)

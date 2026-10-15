@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { getCrawl, removeCrawlAddedTrack, requestStopCrawl, startCrawl, type CrawlParams } from "@/lib/song-crawler";
+import { deleteFromLibraryServer } from "@/lib/library-delete";
 
 // Song Crawler control (Settings > Tracklist). The crawl itself is a
 // server-side background job (lib/song-crawler.ts) that keeps running with
@@ -11,7 +12,10 @@ import { getCrawl, removeCrawlAddedTrack, requestStopCrawl, startCrawl, type Cra
 //                           post-crawl fill-in, all logged)
 //   PATCH  { removeAdded: uri, reason?: "deleted" | "accepted" } -> drop a
 //                           song from the crawl's added list (deleted from
-//                           the library, or accepted and kept)
+//                           the library, or accepted and kept). With
+//                           deleteFromLibrary the server also does the
+//                           delete itself (the Android app has no browser
+//                           Spotify token; the web page deletes client-side).
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
@@ -37,7 +41,8 @@ export async function DELETE(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const { removeAdded, reason } = await req.json().catch(() => ({})) as { removeAdded?: string; reason?: string };
+  const { removeAdded, reason, deleteFromLibrary } = await req.json().catch(() => ({})) as { removeAdded?: string; reason?: string; deleteFromLibrary?: boolean };
   if (!removeAdded) return NextResponse.json({ error: "removeAdded (uri) required" }, { status: 400 });
+  if (deleteFromLibrary && reason !== "accepted") await deleteFromLibraryServer(removeAdded);
   return NextResponse.json({ ok: removeCrawlAddedTrack(removeAdded, reason === "accepted" ? "accepted" : "deleted") });
 }

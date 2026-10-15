@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -25,6 +26,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.pacesync.app.data.AppContainer
+import com.pacesync.app.ui.crawler.CrawlerScreen
 import com.pacesync.app.ui.detail.ActivityDetailScreen
 import com.pacesync.app.ui.detail.MixBuildScreen
 import com.pacesync.app.ui.detail.PaceChartScreen
@@ -45,12 +47,13 @@ import java.net.URLEncoder
 private sealed class Dest(val route: String, val label: String) {
     data object Schedule : Dest("schedule", "Schedule")
     data object Summary : Dest("summary", "Summary")
+    data object Crawler : Dest("crawler", "Crawler")
     data object Settings : Dest("settings", "Settings")
 }
 
 // Settings is reached via the top-bar cog (top right), not a bottom tab —
 // per explicit user request.
-private val bottomDestinations = listOf(Dest.Schedule, Dest.Summary)
+private val bottomDestinations = listOf(Dest.Schedule, Dest.Summary, Dest.Crawler)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -72,6 +75,7 @@ fun PaceSyncApp(container: AppContainer) {
     val topBarTitle = when {
         currentRoute == Dest.Schedule.route -> "Schedule"
         currentRoute == Dest.Summary.route -> "Summary"
+        currentRoute == Dest.Crawler.route -> "Song Crawler"
         currentRoute == Dest.Settings.route -> "Settings"
         else -> null
     }
@@ -116,6 +120,7 @@ fun PaceSyncApp(container: AppContainer) {
                                     when (dest) {
                                         Dest.Summary -> Icons.Filled.Home
                                         Dest.Schedule -> Icons.Filled.DateRange
+                                        Dest.Crawler -> Icons.Filled.Search
                                         else -> Icons.Filled.Settings
                                     },
                                     contentDescription = dest.label,
@@ -179,6 +184,7 @@ fun PaceSyncApp(container: AppContainer) {
                 }
             }
             composable(Dest.Settings.route) { SettingsScreen(container.tokenStore, container.api) }
+            composable(Dest.Crawler.route) { CrawlerScreen(container.api) }
         }
     }
 }
