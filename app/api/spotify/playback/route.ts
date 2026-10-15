@@ -70,11 +70,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: `Spotify player state failed (${res.status})` }, { status: 502 });
   }
 
-  const data = await res.json() as { is_playing?: boolean; progress_ms?: number; item?: { uri?: string; duration_ms?: number } };
+  const data = await res.json() as { is_playing?: boolean; progress_ms?: number; item?: { uri?: string; name?: string; duration_ms?: number; artists?: { name: string }[] } };
   return NextResponse.json({
     isPlaying: !!data.is_playing,
     hasDevice: true,
     trackUri: data.item?.uri ?? null,
+    trackName: data.item?.name ?? null,
+    artistName: data.item?.artists?.map(a => a.name).join(", ") ?? null,
     progressMs: data.progress_ms ?? 0,
     durationMs: data.item?.duration_ms ?? 0,
   });

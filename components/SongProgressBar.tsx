@@ -40,6 +40,8 @@ export function ensurePlaying(): void {
 interface PlaybackState {
   isPlaying: boolean;
   trackUri: string | null;
+  trackName: string | null;
+  artistName: string | null;
   progressMs: number;
   durationMs: number;
   at: number; // Date.now() when progressMs was read
@@ -65,9 +67,12 @@ export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]" }: 
     if (typeof document !== "undefined" && document.hidden) return;
     fetch("/api/spotify/playback")
       .then(r => (r.ok ? r.json() : null))
-      .then((d: { isPlaying?: boolean; hasDevice?: boolean; trackUri?: string | null; progressMs?: number; durationMs?: number } | null) => {
+      .then((d: { isPlaying?: boolean; hasDevice?: boolean; trackUri?: string | null; trackName?: string | null; artistName?: string | null; progressMs?: number; durationMs?: number } | null) => {
         if (!d || !d.hasDevice || !d.trackUri) { setState(null); return; }
-        setState({ isPlaying: !!d.isPlaying, trackUri: d.trackUri, progressMs: d.progressMs ?? 0, durationMs: d.durationMs ?? 0, at: Date.now() });
+        setState({
+          isPlaying: !!d.isPlaying, trackUri: d.trackUri, trackName: d.trackName ?? null, artistName: d.artistName ?? null,
+          progressMs: d.progressMs ?? 0, durationMs: d.durationMs ?? 0, at: Date.now(),
+        });
       })
       .catch(() => {});
   }, []);
@@ -92,16 +97,18 @@ export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]" }: 
     return () => clearInterval(id);
   }, [state?.isPlaying]);
 
-  if (!state || state.durationMs <= 0) return null;
-
-  const live = state.isPlaying ? state.progressMs + (now - state.at) : state.progressMs;
-  const posMs = Math.min(dragMs ?? live, state.durationMs);
-  const pct = (posMs / state.durationMs) * 100;
+  // Always rendered — with nothing detected the bar is idle (times "-:--",
+  // no seeking, play/pause disabled).
+  const active = !!state && state.durationMs > 0;
+  const durationMs = active ? state!.durationMs : 0;
+  const live = active ? (state!.isPlaying ? state!.progressMs + (now - state!.at) : state!.progressMs) : 0;
+  const posMs = active ? Math.min(dragMs ?? live, durationMs) : 0;
+  const pct = active ? (posMs / durationMs) * 100 : 0;
 
   const msAt = (clientX: number) => {
     const rect = barRef.current?.getBoundingClientRect();
-    if (!rect || rect.width <= 0) return 0;
-    return Math.round(Math.min(Math.max((clientX - rect.left) / rect.width, 0), 1) * state.durationMs);
+    if (!rect || rect.width <= 0 || !active) return 0;
+    return Math.round(Math.min(Math.max((clientX - rect.left) / rect.width, 0), 1) * durationMs);
   };
 
   const seek = (ms: number) => {
@@ -115,15 +122,19 @@ export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]" }: 
       .catch(() => {});
   };
 
-  const label = (state.trackUri && trackNames?.[state.trackUri]) || "Now playing";
+  const name = !active ? "Nothing playing"
+    : (state!.trackUri && trackNames?.[state!.trackUri])
+      || (state!.trackName ? `${state!.trackName}${state!.artistName ? ` — ${state!.artistName}` : ""}` : "Now playing");
 
   return (
-    <div className={`flex items-center gap-2 shrink-0 ${className}`} title={`${label} — click or drag to change position`}>
-      <span className="text-[10px] text-slate-400 font-mono tabular-nums">{fmt(posMs)}</span>
+    <div className={`flex items-center gap-2 shrink-0 ${className}`} title={active ? `${name} — click or drag to change position` : "Nothing playing in Spotify"}>
+      <span className={`text-[10px] truncate max-w-[45%] ${active ? "text-slate-300" : "text-slate-600 italic"}`}>{name}</span>
+      <span className="text-[10px] text-slate-400 font-mono tabular-nums">{active ? fmt(posMs) : "-:--"}</span>
       <div
         ref={barRef}
-        className="relative flex-1 h-3 cursor-pointer group touch-none"
+        className={`relative flex-1 min-w-16 h-3 group touch-none ${active ? "cursor-pointer" : "cursor-default opacity-50"}`}
         onPointerDown={e => {
+          if (!active) return;
           e.currentTarget.setPointerCapture(e.pointerId);
           setDragMs(msAt(e.clientX));
         }}
@@ -137,15 +148,21 @@ export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]" }: 
         onPointerCancel={() => setDragMs(null)}
       >
         <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-1 rounded-full bg-slate-700" />
-        <div className="absolute left-0 top-1/2 -translate-y-1/2 h-1 rounded-full bg-orange-500" style={{ width: `${pct}%` }} />
-        <div
-          className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2.5 h-2.5 rounded-full bg-orange-400 opacity-80 group-hover:opacity-100"
-          style={{ left: `${pct}%` }}
-        />
+        {active && (
+          <>
+            <div className="absolute left-0 top-1/2 -translate-y-1/2 h-1 rounded-full bg-orange-500" style={{ width: `${pct}%` }} />
+            <div
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2.5 h-2.5 rounded-full bg-orange-400 opacity-80 group-hover:opacity-100"
+              style={{ left: `${pct}%` }}
+            />
+          </>
+        )}
       </div>
-      <span className="text-[10px] text-slate-500 font-mono tabular-nums">{fmt(state.durationMs)}</span>
+      <span className="text-[10px] text-slate-500 font-mono tabular-nums">{active ? fmt(durationMs) : "-:--"}</span>
       <button
+        disabled={!active}
         onClick={() => {
+          if (!state) return;
           const resume = !state.isPlaying;
           // Optimistic: freeze/restart the local position straight away.
           setState(s => (s ? { ...s, isPlaying: resume, progressMs: live, at: Date.now() } : s));
@@ -157,10 +174,10 @@ export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]" }: 
             .then(() => setTimeout(poll, 600))
             .catch(() => {});
         }}
-        title={state.isPlaying ? "Pause" : "Play"}
-        className="shrink-0 w-6 h-6 rounded-full bg-orange-500/20 border border-orange-500/50 hover:bg-orange-500/35 text-orange-300 text-[10px] leading-none flex items-center justify-center"
+        title={!active ? "Nothing playing" : state!.isPlaying ? "Pause" : "Play"}
+        className="shrink-0 w-6 h-6 rounded-full bg-orange-500/20 border border-orange-500/50 hover:bg-orange-500/35 text-orange-300 text-[10px] leading-none flex items-center justify-center disabled:opacity-40 disabled:hover:bg-orange-500/20"
       >
-        {state.isPlaying ? "❚❚" : "▶"}
+        {active && state!.isPlaying ? "❚❚" : "▶"}
       </button>
     </div>
   );
