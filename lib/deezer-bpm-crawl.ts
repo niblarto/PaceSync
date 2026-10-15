@@ -27,6 +27,7 @@ export interface CrawlProgress {
   name: string;
   artist: string;
   checked: number; // tracks BPM-checked so far
+  scanned: number; // tracks looked at so far (most fail the free length check)
 }
 
 export interface BpmCrawlOptions {
@@ -86,9 +87,9 @@ async function deezer<T>(apiPath: string): Promise<T | null> {
   }
 }
 
-export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: boolean; checked: number; matched: number; artists?: string[] }> {
+export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: boolean; checked: number; matched: number; scanned: number; artists?: string[] }> {
   const maxArtists = opts.maxArtists ?? 10;
-  let matched = 0, checked = 0;
+  let matched = 0, checked = 0, scanned = 0;
   const done = () => matched >= opts.need || !!opts.shouldStop?.();
 
   // Seeds: every credited artist with an exact Deezer name match (a track's
@@ -117,7 +118,7 @@ export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: b
       if (hit && !seeds.some(s => s.id === hit.id)) seeds.push(hit);
     }
   }
-  if (seeds.length === 0) return { seedFound: false, checked, matched };
+  if (seeds.length === 0) return { seedFound: false, checked, matched, scanned };
 
   const seenIds = new Set<number>();
   const seenIsrcs = new Set<string>();
@@ -125,11 +126,15 @@ export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: b
   const check = async (t: DzTrack, stage: string) => {
     if (done() || seenIds.has(t.id)) return;
     seenIds.add(t.id);
+    scanned++;
     // Cheap duration gate first — the listing already carries the length.
-    if (t.duration != null && !opts.durationOk(t.duration * 1000)) return;
+    if (t.duration != null && !opts.durationOk(t.duration * 1000)) {
+      if (scanned % 5 === 0) opts.onProgress?.({ stage, name: t.title, artist: t.artist.name, checked, scanned });
+      return;
+    }
     if (t.isrc && (seenIsrcs.has(t.isrc) || opts.skipIsrc?.(t.isrc))) return;
     checked++;
-    opts.onProgress?.({ stage, name: t.title, artist: t.artist.name, checked });
+    opts.onProgress?.({ stage, name: t.title, artist: t.artist.name, checked, scanned });
     const detail = await deezer<{ bpm?: number; isrc?: string; duration?: number }>(`/track/${t.id}`);
     const isrc = detail?.isrc ?? t.isrc;
     const durationSec = detail?.duration ?? t.duration ?? null;
@@ -159,7 +164,7 @@ export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: b
     }
     for (let i = 0; i < albums.length && !done(); i++) {
       const stage = `${seed.name} — all tracks (release ${i + 1}/${albums.length})`;
-      opts.onProgress?.({ stage, name: albums[i].title, artist: seed.name, checked });
+      opts.onProgress?.({ stage, name: albums[i].title, artist: seed.name, checked, scanned });
       const tracks = await deezer<{ data?: DzTrack[] }>(`/album/${albums[i].id}/tracks?limit=200`);
       const own = (tracks?.data ?? []).filter(t => t.artist?.id === seed.id);
       for (const t of own) {
@@ -215,5 +220,5 @@ export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: b
     }
   }
 
-  return { seedFound: true, checked, matched, artists: walked };
+  return { seedFound: true, checked, matched, scanned, artists: walked };
 }

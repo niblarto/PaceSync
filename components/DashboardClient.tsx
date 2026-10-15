@@ -4895,6 +4895,8 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
   // candidates one at a time — null whenever nothing's in flight (library
   // search is instant, no status needed for that part).
   const [onlineStatus, setOnlineStatus] = useState<string | null>(null);
+  // Online search counts — second status line, kept after the search ends.
+  const [scanStats, setScanStats] = useState<{ scanned: number; checked: number; hits: number; finished: boolean } | null>(null);
   // Explicit override for which artist(s)/genre to search online — null
   // means "automatic" (same track's own artist, plus genre-sharing
   // artists), per the server route's default behavior.
@@ -4905,6 +4907,9 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
   // How many artists the online crawl walks (artist radio) before stopping.
   const [maxArtists, setMaxArtists] = useState("10");
   const [similarArtists, setSimilarArtists] = useState(false);
+  // Length tolerance (± seconds from the original) for library + online.
+  const [toleranceSec, setToleranceSec] = useState("15");
+  const tolSec = Math.max(parseInt(toleranceSec, 10) || 15, 1);
   // Delete (library candidates only) is two clicks — Delete -> Confirm —
   // same as Quick Swap's.
   const [confirmDeleteUri, setConfirmDeleteUri] = useState<string | null>(null);
@@ -4929,6 +4934,7 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
     setError(null);
     setCandidates(null);
     setOnlineStatus(null);
+    setScanStats(null);
     setSearchNote(null);
     searchAbortRef.current?.abort();
     const abort = new AbortController();
@@ -4944,6 +4950,7 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
           ...(energyBand ? { energyBand } : {}),
           ...(parseInt(maxArtists, 10) > 0 ? { maxArtists: parseInt(maxArtists, 10) } : {}),
           ...(similarArtists ? { similarArtists: true } : {}),
+          toleranceSec: tolSec,
         }),
       });
       if (!res.ok || !res.body) {
@@ -4964,16 +4971,19 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
           const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
           if (!dataLine) continue;
           const msg = JSON.parse(dataLine.slice(6)) as
-            { type: string; current?: number; total?: number; name?: string; artist?: string; hits?: number; stage?: string; candidates?: ReplaceCandidate[]; error?: string };
+            { type: string; current?: number; total?: number; scanned?: number; checked?: number; name?: string; artist?: string; hits?: number; stage?: string; candidates?: ReplaceCandidate[]; error?: string };
           if (msg.type === "online-start") {
             setOnlineStatus("Online lookup starting…");
           } else if (msg.type === "progress") {
-            const hitsText = msg.hits ? ` — ${msg.hits} match${msg.hits === 1 ? "" : "es"} found` : "";
-            // Crawl-style search (artist catalogue, then radio) reports its
-            // stage and a running count instead of current/total.
-            setOnlineStatus(msg.stage
-              ? `${msg.stage} · checking "${msg.name}" — ${msg.artist} (${msg.current} checked)${hitsText}`
-              : `Online lookup: checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""} (${msg.current}/${msg.total})${hitsText}`);
+            // Crawl-style search (artist catalogue, then radio): stage on
+            // the first line, running counts on the second.
+            if (msg.stage) {
+              setOnlineStatus(`${msg.stage} · checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""}`);
+              setScanStats({ scanned: msg.scanned ?? 0, checked: msg.current ?? 0, hits: msg.hits ?? 0, finished: false });
+            } else {
+              const hitsText = msg.hits ? ` — ${msg.hits} match${msg.hits === 1 ? "" : "es"} found` : "";
+              setOnlineStatus(`Online lookup: checking "${msg.name}"${msg.artist ? ` — ${msg.artist}` : ""} (${msg.current}/${msg.total})${hitsText}`);
+            }
           } else if (msg.type === "error") {
             throw new Error(msg.error ?? "Search failed");
           } else if (msg.type === "warning") {
@@ -4982,6 +4992,13 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
             // Library matches show straight away; crawl matches are added
             // as they're found.
             setCandidates(msg.candidates ?? []);
+            if (msg.type === "match") setScanStats(s => (s ? { ...s, hits: s.hits + 1 } : s));
+            if (msg.type === "done") {
+              const online = (msg.candidates ?? []).filter(c => c.source === "online").length;
+              setScanStats(s => (msg.scanned != null || s
+                ? { scanned: msg.scanned ?? s?.scanned ?? 0, checked: msg.checked ?? s?.checked ?? 0, hits: online, finished: true }
+                : null));
+            }
           }
         }
       }
@@ -5068,6 +5085,19 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
               className="w-20 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono disabled:opacity-50"
             />
           </label>
+          <label className="text-xs text-slate-500 space-y-1" title="How far (± seconds) a track's length may differ from the original's">
+            <span className="block">Length ±s</span>
+            <input
+              type="number"
+              min={1}
+              max={600}
+              value={toleranceSec}
+              onChange={e => setToleranceSec(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") search(); }}
+              disabled={loading}
+              className="w-20 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono disabled:opacity-50"
+            />
+          </label>
           <label
             className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer pb-2"
             title="Also crawl Deezer's similar artists (and their top tracks), as well as artist radio"
@@ -5084,13 +5114,22 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
         </div>
         <SongProgressBar className="w-full" />
         <p className="text-xs text-slate-500">
-          Only tracks within 15s of the original&apos;s length ({Math.round(target.duration_ms / 1000)}s) are shown, so swapping never throws off the rest of the mix&apos;s timing.
+          Only tracks within {tolSec}s of the original&apos;s length ({Math.round(target.duration_ms / 1000)}s) are shown, so swapping never throws off the rest of the mix&apos;s timing by more than that. &quot;Scanned&quot; counts every track looked at; &quot;checked&quot; the ones close enough in length to get a BPM lookup.
         </p>
         <SearchModePicker value={searchOverride} onChange={setSearchOverride} forceOnline={forceOnline} onForceOnlineChange={setForceOnline} />
         <EnergyPicker value={energyBand} onChange={setEnergyBand} />
         {searchNote && <p className="text-xs text-amber-400">{searchNote}</p>}
-        {onlineStatus && (
-          <p className="text-xs text-sky-400 flex items-center gap-1.5"><Spinner /> {onlineStatus}</p>
+        {(onlineStatus || scanStats) && (
+          <div className="space-y-0.5">
+            {onlineStatus && (
+              <p className="text-xs text-sky-400 flex items-center gap-1.5"><Spinner /> {onlineStatus}</p>
+            )}
+            {scanStats && (
+              <p className={`text-xs ${scanStats.finished ? "text-slate-400" : "text-sky-300/80"} ${onlineStatus ? "pl-5" : ""}`}>
+                {scanStats.finished ? "Finished · " : ""}{scanStats.scanned} scanned · {scanStats.checked} checked · {scanStats.hits} match{scanStats.hits === 1 ? "" : "es"} online
+              </p>
+            )}
+          </div>
         )}
         {error && <p className="text-sm text-red-400">{error}</p>}
 

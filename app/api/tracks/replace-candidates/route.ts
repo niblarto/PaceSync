@@ -116,6 +116,9 @@ export async function POST(req: NextRequest) {
     /** Optional Low/Medium/High energy filter, on top of the exact-BPM
         match — see lib/energy-bands.ts. */
     energyBand?: EnergyBand;
+    /** Length tolerance in seconds either side of the original (Replace
+        window's "Length ±" field). Default DURATION_TOLERANCE_SEC. */
+    toleranceSec?: number;
     /** How many artists the crawl's radio stage walks before stopping
         (Replace window's "Max artists" field). Default MAX_ARTISTS_SEARCHED. */
     maxArtists?: number;
@@ -134,8 +137,9 @@ export async function POST(req: NextRequest) {
   // excluded rather than let through — an online candidate whose duration
   // Deezer's lookup failed to return is exactly the kind of unchecked
   // mismatch this tolerance exists to catch.
+  const toleranceSec = Math.min(Math.max(Math.round(body.toleranceSec ?? DURATION_TOLERANCE_SEC), 1), 600);
   const durationOk = (ms: number | null) =>
-    originalDurationMs == null ? true : ms != null && Math.abs(ms - originalDurationMs) <= DURATION_TOLERANCE_SEC * 1000;
+    originalDurationMs == null ? true : ms != null && Math.abs(ms - originalDurationMs) <= toleranceSec * 1000;
 
   const encoder = new TextEncoder();
   // Set when the client goes away (Replace window closed) — ends the crawl.
@@ -206,6 +210,9 @@ export async function POST(req: NextRequest) {
           .map(({ _dist, ...c }) => c);
 
         const results: ReplaceCandidate[] = [...libraryCandidates];
+        // Final online counts, sent with "done" (the progress events skip
+        // some scanned-only updates).
+        let crawlStats: { scanned: number; checked: number } | null = null;
         // Library matches show straight away, before any online search.
         send({ type: "library", candidates: results });
 
@@ -264,7 +271,7 @@ export async function POST(req: NextRequest) {
                 ...(genreArtists ? { seedArtists: genreArtists, catalogue: false, spread: false } : {}),
                 shouldStop: () => cancelled,
                 similar: !!body.similarArtists,
-                onProgress: p => send({ type: "progress", stage: p.stage, name: p.name, artist: p.artist, current: p.checked, total: 0, hits: results.length - libraryCandidates.length }),
+                onProgress: p => send({ type: "progress", stage: p.stage, name: p.name, artist: p.artist, current: p.checked, scanned: p.scanned, total: 0, hits: results.length - libraryCandidates.length }),
                 onMatch: m => {
                   resultIsrcs.add(m.isrc);
                   results.push({
@@ -276,6 +283,7 @@ export async function POST(req: NextRequest) {
                   send({ type: "match", candidates: results });
                 },
               });
+              crawlStats = { scanned: summary.scanned, checked: summary.checked };
               console.log(`[replace-candidates] crawl "${crawlArtist}" @${targetBpm} similar=${!!body.similarArtists} maxArtists=${body.maxArtists ?? MAX_ARTISTS_SEARCHED}: seedFound=${summary.seedFound} checked=${summary.checked} matched=${summary.matched} artists=${JSON.stringify(summary.artists ?? [])}${cancelled ? " (stopped — window closed)" : ""}`);
               if (!summary.seedFound) send({ type: "warning", message: genreArtists
                 ? `None of the ${genreArtists.length} artists found for "${crawlArtist}" are on Deezer`
@@ -422,7 +430,7 @@ export async function POST(req: NextRequest) {
           }
           return bpmDistance(a.tempo, targetBpm) - bpmDistance(b.tempo, targetBpm);
         });
-        send({ type: "done", candidates: results.slice(0, MAX_RESULTS) });
+        send({ type: "done", candidates: results.slice(0, MAX_RESULTS), ...(crawlStats ? { scanned: crawlStats.scanned, checked: crawlStats.checked } : {}) });
       } catch (err) {
         send({ type: "error", error: err instanceof Error ? err.message : "Search failed" });
       } finally {
