@@ -257,20 +257,32 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReor
       }
       return;
     }
-    const rowTop = row.offsetTop;
-    const rowBottom = rowTop + row.offsetHeight;
+    // Row position within the list's own scroll content. (row.offsetTop is
+    // measured from the nearest positioned ancestor — the card, once it's
+    // sticky — which counted the card's header and made the first rows
+    // scroll out of view instead of into it.)
+    const cRect = container.getBoundingClientRect();
+    const rRect = row.getBoundingClientRect();
+    const rowTop = rRect.top - cRect.top + container.scrollTop;
+    const rowBottom = rowTop + rRect.height;
     const viewTop = container.scrollTop;
     const viewBottom = viewTop + container.clientHeight;
+    // A short box (the 6-row list beside the Pace Chart) centres the row;
+    // a tall one only scrolls when the row is near an edge.
+    const padding = Math.min(HIGHLIGHT_SCROLL_PADDING, Math.max(0, (container.clientHeight - rRect.height) / 2));
     let target: number | null = null;
-    if (rowTop < viewTop + HIGHLIGHT_SCROLL_PADDING) {
-      target = rowTop - HIGHLIGHT_SCROLL_PADDING;
-    } else if (rowBottom > viewBottom - HIGHLIGHT_SCROLL_PADDING) {
-      target = rowBottom - container.clientHeight + HIGHLIGHT_SCROLL_PADDING;
+    if (visibleRows || highlightNonce) {
+      target = rowTop - (container.clientHeight - rRect.height) / 2;
+    } else if (rowTop < viewTop + padding) {
+      target = rowTop - padding;
+    } else if (rowBottom > viewBottom - padding) {
+      target = rowBottom - container.clientHeight + padding;
     }
     if (target != null) {
-      container.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+      const max = container.scrollHeight - container.clientHeight;
+      container.scrollTo({ top: Math.min(Math.max(0, target), max), behavior: "smooth" });
     }
-  }, [highlightUri, highlightNonce, tracks, visibleCount]);
+  }, [highlightUri, highlightNonce, tracks, visibleCount, visibleRows]);
 
   return (
     <div
@@ -695,6 +707,18 @@ export function DashboardClient({ spotifyUser }: Props) {
   // the mix becomes stale (a track was deleted) or a remix starts, since the
   // chart's data would no longer match the actual track list either way.
   const [chartDismissed, setChartDismissed] = useState(false);
+  // Height of the sticky Pace Chart strip — the tracklist card pins itself
+  // right below it while the chart is showing.
+  const [chartStickyHeight, setChartStickyHeight] = useState(0);
+  useEffect(() => {
+    const el = document.querySelector("[data-sticky-pace-chart]") as HTMLElement | null;
+    if (!el) { setChartStickyHeight(0); return; }
+    const update = () => setChartStickyHeight(el.offsetHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
   const runnaScheduleRef = useRef<RunnaScheduleHandle>(null);
   const [todaysRunSaving, setTodaysRunSaving] = useState(false);
   const [todaysRunSaved, setTodaysRunSaved] = useState(false);
@@ -3316,8 +3340,15 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             {step !== "idle" && csvName && (searchText.trim() || selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || sprintBpmFilter !== null || similarFilter || noBpmFilter || missingFeaturesFilter || candidatesFilter || aiDjMix || singleTrackFilter) && (
               <div
                 ref={setResultsCardEl}
-                className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden flex flex-col"
-                style={resultsMaxHeight ? { maxHeight: resultsMaxHeight } : undefined}
+                className={`rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden flex flex-col ${
+                  chartStickyHeight > 0 && aiDjMix ? "sticky z-[5]" : ""
+                }`}
+                // While the Pace Chart is showing, the card stays pinned just
+                // below it (only its own track list scrolls).
+                style={{
+                  ...(resultsMaxHeight ? { maxHeight: resultsMaxHeight } : {}),
+                  ...(chartStickyHeight > 0 && aiDjMix ? { top: 56 + chartStickyHeight } : {}),
+                }}
               >
                 {!aiDjMix && (
                 <div className="p-3 border-b border-white/10 relative">
