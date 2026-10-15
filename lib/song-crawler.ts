@@ -181,6 +181,7 @@ export interface CrawlJob {
   addedTracks: { uri: string; name: string; artist: string; bpm: number }[];
   crawled: number;      // artists whose radio has been processed
   linkName?: string;    // album / playlist name, when crawling a link
+  checked?: number;     // tracks checked this run (each distinct track looked at)
   totalArtists: number; // distinct artists found so far (seed included)
   nextSeq: number;
   log: CrawlLine[];
@@ -273,7 +274,7 @@ export function startCrawl(params: CrawlParams): { ok: true; id: string } | { ok
   store.job = {
     id: randomUUID(), params, status: "running",
     startedAt: new Date().toISOString(), finishedAt: null,
-    added: 0, addedTracks: [], crawled: 0, totalArtists: 0, nextSeq: 0, log: [],
+    added: 0, addedTracks: [], crawled: 0, totalArtists: 0, checked: 0, nextSeq: 0, log: [],
   };
   persist(true);
   void runCrawl(store.job).catch(e => {
@@ -354,6 +355,7 @@ async function runCrawl(job: CrawlJob) {
   const checkTrack = async (t: DeezerRadioTrack, isrcHint?: string | null, durationHintSec?: number | null) => {
     if (seenTracks.has(t.id)) return;
     seenTracks.add(t.id);
+    job.checked = (job.checked ?? 0) + 1;
     // The same recording appears on album, single and deluxe releases.
     if (isrcHint) {
       if (checkedIsrcs.has(isrcHint)) return;
@@ -454,6 +456,7 @@ async function runCrawl(job: CrawlJob) {
       for (const t of batch) {
         if (stopped()) break;
         const label = `${t.name} — ${t.artist}`;
+        job.checked = (job.checked ?? 0) + 1;
         const f = byId.get(t.id);
         if (knownUris.has(t.uri) || (f?.isrc && knownIsrcs.has(f.isrc))) { log(`  ${label}: already in library`); continue; }
         if (f?.tempo == null) { log(`  ${label}: no BPM available`); continue; }

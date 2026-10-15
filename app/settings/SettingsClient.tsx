@@ -718,6 +718,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [crawlerStatusText, setCrawlerStatusText] = useState<string | null>(null);
   const [crawlerLog, setCrawlerLog] = useState<CrawlerLine[]>([]);
   const [crawlerAdded, setCrawlerAdded] = useState(0);
+  const [crawlerChecked, setCrawlerChecked] = useState<number | null>(null);
   // Songs the current/last crawl added — the list beside the log.
   const [crawlerAddedTracks, setCrawlerAddedTracks] = useState<{ uri: string; name: string; artist: string; bpm: number }[]>([]);
   const [crawlerPlayingUri, setCrawlerPlayingUri] = useState<string | null>(null);
@@ -1122,7 +1123,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
   type CrawlJobMeta = {
     id: string; status: "running" | "stopping" | "healing" | "done" | "stopped" | "error" | "interrupted";
-    startedAt: string; added: number; crawled: number; totalArtists: number;
+    startedAt: string; added: number; crawled: number; totalArtists: number; checked?: number;
     addedTracks?: { uri: string; name: string; artist: string; bpm: number }[];
     params: { artist: string; bpm?: number; bpmMin?: number; bpmMax?: number };
   };
@@ -1162,6 +1163,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setCrawlerStopping(job.status === "stopping" || job.status === "healing");
       setCrawlerStatusText(CRAWLER_STATUS_TEXT[job.status]);
       setCrawlerAdded(job.added);
+      setCrawlerChecked(job.checked ?? null);
       setCrawlerAddedTracks(job.addedTracks ?? []);
       setCrawlerProgress(job.totalArtists > 0 ? { crawled: job.crawled, total: job.totalArtists } : null);
       const p = job.params;
@@ -6850,7 +6852,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           <p className="md:col-span-3 text-xs text-slate-500 min-w-0">
             {crawlerSeed && (
               <>
-                {crawlerStatusText ?? (crawlerRunning ? "Running" : "Last crawl")}: {crawlerSeed.artist} · {crawlerSeed.bpmMax ? `${Math.round(crawlerSeed.bpm)}–${Math.round(crawlerSeed.bpmMax)}` : Math.round(crawlerSeed.bpm)} BPM · started {crawlerSeed.startedAt} · {crawlerAdded} added
+                {crawlerStatusText ?? (crawlerRunning ? "Running" : "Last crawl")}: {crawlerSeed.artist} · {crawlerSeed.bpmMax ? `${Math.round(crawlerSeed.bpm)}–${Math.round(crawlerSeed.bpmMax)}` : Math.round(crawlerSeed.bpm)} BPM · started {crawlerSeed.startedAt}{crawlerChecked != null ? ` · ${crawlerChecked.toLocaleString()} checked` : ""} · {crawlerAdded} added
                 {crawlerProgress ? ` · Artist ${crawlerProgress.crawled} of ${crawlerProgress.total}` : ""}
               </>
             )}
