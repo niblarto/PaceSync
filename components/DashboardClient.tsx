@@ -710,6 +710,25 @@ export function DashboardClient({ spotifyUser }: Props) {
   // Height of the sticky Pace Chart strip — the tracklist card pins itself
   // right below it while the chart is showing.
   const [chartStickyHeight, setChartStickyHeight] = useState(0);
+  // Where the Pace Chart strip and the tracklist card sit with the page
+  // scrolled to the top — each is pinned at exactly that position, so
+  // scrolling the page never shifts them (pinning any higher made the first
+  // bit of scrolling slide them up into place).
+  const [chartNaturalTop, setChartNaturalTop] = useState<number | null>(null);
+  const [cardNaturalTop, setCardNaturalTop] = useState<number | null>(null);
+  useEffect(() => {
+    const measure = () => {
+      if (window.scrollY > 0.5) return; // only the at-the-top layout is "natural"
+      const chart = document.querySelector("[data-sticky-pace-chart]") as HTMLElement | null;
+      setChartNaturalTop(chart ? chart.getBoundingClientRect().top : null);
+      const card = document.querySelector("[data-results-card]") as HTMLElement | null;
+      setCardNaturalTop(card ? card.getBoundingClientRect().top : null);
+    };
+    measure();
+    window.addEventListener("scroll", measure, { passive: true });
+    window.addEventListener("resize", measure);
+    return () => { window.removeEventListener("scroll", measure); window.removeEventListener("resize", measure); };
+  });
   useEffect(() => {
     const el = document.querySelector("[data-sticky-pace-chart]") as HTMLElement | null;
     if (!el) { setChartStickyHeight(0); return; }
@@ -3048,7 +3067,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
         // so the page background shows around it (the old opaque strip hid
         // it across the whole width). The strip ignores clicks so the
         // margins either side of the card don't block what's beneath.
-        <div data-sticky-pace-chart className="sticky top-14 z-10 pointer-events-none">
+        <div data-sticky-pace-chart className="sticky z-10 pointer-events-none" style={{ top: Math.max(56, chartNaturalTop ?? 56) }}>
           <div className="w-[90vw] mx-auto py-4">
             <div className="pointer-events-auto rounded-xl bg-slate-900/95 backdrop-blur-md border-4 border-purple-500/40 shadow-2xl p-5">
               <div className="flex items-start justify-between gap-4">
@@ -3340,6 +3359,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             {step !== "idle" && csvName && (searchText.trim() || selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || sprintBpmFilter !== null || similarFilter || noBpmFilter || missingFeaturesFilter || candidatesFilter || aiDjMix || singleTrackFilter) && (
               <div
                 ref={setResultsCardEl}
+                data-results-card
                 className={`rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden flex flex-col ${
                   chartStickyHeight > 0 && aiDjMix ? "sticky z-[5]" : ""
                 }`}
@@ -3347,7 +3367,9 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 // below it (only its own track list scrolls).
                 style={{
                   ...(resultsMaxHeight ? { maxHeight: resultsMaxHeight } : {}),
-                  ...(chartStickyHeight > 0 && aiDjMix ? { top: 56 + chartStickyHeight } : {}),
+                  ...(chartStickyHeight > 0 && aiDjMix
+                    ? { top: Math.max(Math.max(56, chartNaturalTop ?? 56) + chartStickyHeight, cardNaturalTop ?? 0) }
+                    : {}),
                 }}
               >
                 {!aiDjMix && (
@@ -4880,6 +4902,9 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
   const [forceOnline, setForceOnline] = useState(false);
   const [energyBand, setEnergyBand] = useState<EnergyBand | null>(null);
   const [searchNote, setSearchNote] = useState<string | null>(null);
+  // How many artists the online crawl walks (artist radio) before stopping.
+  const [maxArtists, setMaxArtists] = useState("10");
+  const [similarArtists, setSimilarArtists] = useState(false);
   // Delete (library candidates only) is two clicks — Delete -> Confirm —
   // same as Quick Swap's.
   const [confirmDeleteUri, setConfirmDeleteUri] = useState<string | null>(null);
@@ -4917,6 +4942,8 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
           targetBpm: bpm, artistName: target.artists[0]?.name, targetUri: target.uri, excludeUris: mixUris, originalDurationMs: target.duration_ms,
           ...(searchOverride ? { searchMode: searchOverride.mode, searchValue: searchOverride.value, forceOnline } : {}),
           ...(energyBand ? { energyBand } : {}),
+          ...(parseInt(maxArtists, 10) > 0 ? { maxArtists: parseInt(maxArtists, 10) } : {}),
+          ...(similarArtists ? { similarArtists: true } : {}),
         }),
       });
       if (!res.ok || !res.body) {
@@ -5028,6 +5055,32 @@ function ReplaceTrackModal({ target, mixUris, onClose, onConfirm }: {
           >
             {loading ? "Searching…" : "Search"}
           </button>
+          <label className="text-xs text-slate-500 space-y-1" title="How many artists the online crawl walks (the track's artist, then artist radio) before it stops">
+            <span className="block">Max artists</span>
+            <input
+              type="number"
+              min={1}
+              max={200}
+              value={maxArtists}
+              onChange={e => setMaxArtists(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") search(); }}
+              disabled={loading}
+              className="w-20 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono disabled:opacity-50"
+            />
+          </label>
+          <label
+            className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer pb-2"
+            title="Also crawl Deezer's similar artists (and their top tracks), as well as artist radio"
+          >
+            <input
+              type="checkbox"
+              checked={similarArtists}
+              onChange={e => setSimilarArtists(e.target.checked)}
+              disabled={loading}
+              className="accent-green-500"
+            />
+            Similar artists
+          </label>
         </div>
         <SongProgressBar className="w-full" />
         <p className="text-xs text-slate-500">

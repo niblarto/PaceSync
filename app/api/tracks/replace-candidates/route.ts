@@ -116,6 +116,11 @@ export async function POST(req: NextRequest) {
     /** Optional Low/Medium/High energy filter, on top of the exact-BPM
         match — see lib/energy-bands.ts. */
     energyBand?: EnergyBand;
+    /** How many artists the crawl's radio stage walks before stopping
+        (Replace window's "Max artists" field). Default MAX_ARTISTS_SEARCHED. */
+    maxArtists?: number;
+    /** Also crawl Deezer's similar artists (and their top tracks), not just radio. */
+    similarArtists?: boolean;
   };
   const targetBpm = body.targetBpm;
   if (!targetBpm || targetBpm <= 0) return NextResponse.json({ error: "targetBpm required" }, { status: 400 });
@@ -243,8 +248,9 @@ export async function POST(req: NextRequest) {
                 skipIsrc: isrc => resultIsrcs.has(isrc) || libraryIsrcs.has(isrc),
                 accept: r => !body.energyBand || (r.energy != null && energyInBand(r.energy, body.energyBand)),
                 need,
-                maxArtists: MAX_ARTISTS_SEARCHED,
+                maxArtists: Math.min(Math.max(Math.round(body.maxArtists ?? MAX_ARTISTS_SEARCHED), 1), 200),
                 shouldStop: () => cancelled,
+                similar: !!body.similarArtists,
                 onProgress: p => send({ type: "progress", stage: p.stage, name: p.name, artist: p.artist, current: p.checked, total: 0, hits: results.length - libraryCandidates.length }),
                 onMatch: m => {
                   resultIsrcs.add(m.isrc);
@@ -257,7 +263,7 @@ export async function POST(req: NextRequest) {
                   send({ type: "match", candidates: results });
                 },
               });
-              console.log(`[replace-candidates] crawl "${crawlArtist}" @${targetBpm}: seedFound=${summary.seedFound} checked=${summary.checked} matched=${summary.matched}`);
+              console.log(`[replace-candidates] crawl "${crawlArtist}" @${targetBpm} similar=${!!body.similarArtists} maxArtists=${body.maxArtists ?? MAX_ARTISTS_SEARCHED}: seedFound=${summary.seedFound} checked=${summary.checked} matched=${summary.matched} artists=${JSON.stringify(summary.artists ?? [])}${cancelled ? " (stopped — window closed)" : ""}`);
               if (!summary.seedFound) send({ type: "warning", message: `No Deezer artist found for "${crawlArtist}" — try Search online by Artist` });
             } catch (err) {
               console.log(`[replace-candidates] crawl threw: ${err instanceof Error ? err.message : String(err)}`);

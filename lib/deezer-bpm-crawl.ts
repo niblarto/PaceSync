@@ -40,6 +40,9 @@ export interface BpmCrawlOptions {
   accept?: (r: IsrcResolution) => boolean;
   need: number;
   maxArtists?: number;
+  /** Also walk Deezer's similar ("related") artists: each artist's related
+      list joins the queue and their top tracks are checked, alongside radio. */
+  similar?: boolean;
   onProgress?: (p: CrawlProgress) => void;
   onMatch: (m: CrawlMatch) => void;
   /** Checked between every request — true once the caller has gone away
@@ -74,7 +77,7 @@ async function deezer<T>(apiPath: string): Promise<T | null> {
   }
 }
 
-export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: boolean; checked: number; matched: number }> {
+export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: boolean; checked: number; matched: number; artists?: string[] }> {
   const maxArtists = opts.maxArtists ?? 10;
   let matched = 0, checked = 0;
   const done = () => matched >= opts.need || !!opts.shouldStop?.();
@@ -141,24 +144,50 @@ export async function crawlForBpm(opts: BpmCrawlOptions): Promise<{ seedFound: b
     }
   }
 
-  // 2. Artist radio (seeds first), spreading to the artists it turns up.
+  // 2. Artist radio (seeds first), spreading to the artists it turns up —
+  // plus, with `similar`, each artist's similar artists and their top tracks.
   const queue: { id: number; name: string }[] = [...seeds];
   const queued = new Set<number>(seeds.map(s => s.id));
+  const walked: string[] = [];
+  const seedIds = new Set(seeds.map(s => s.id));
+  const enqueue = (a: { id?: number; name: string } | undefined) => {
+    if (a?.id != null && !queued.has(a.id) && queued.size < maxArtists) {
+      queued.add(a.id);
+      queue.push({ id: a.id, name: a.name });
+    }
+  };
   for (let n = 1; queue.length > 0 && !done(); n++) {
     const current = queue.shift()!;
+    walked.push(current.name);
     const radio = await deezer<{ data?: DzTrack[] }>(`/artist/${current.id}/radio?limit=25`);
-    for (const t of radio?.data ?? []) {
-      const a = t.artist;
-      if (a?.id != null && !queued.has(a.id) && queued.size < maxArtists) {
-        queued.add(a.id);
-        queue.push({ id: a.id, name: a.name });
+    const radioArtists = (radio?.data ?? []).map(t => t.artist);
+    if (opts.similar && !done()) {
+      // Alternate similar and radio artists when queueing — radio alone
+      // (25 tracks, many artists) used to fill every Max-artists slot before
+      // the similar artists were even considered.
+      const rel = await deezer<{ data?: { id: number; name: string }[] }>(`/artist/${current.id}/related?limit=20`);
+      const related = rel?.data ?? [];
+      for (let k = 0; k < Math.max(related.length, radioArtists.length); k++) {
+        if (k < related.length) enqueue(related[k]);
+        if (k < radioArtists.length) enqueue(radioArtists[k]);
       }
+    } else {
+      for (const a of radioArtists) enqueue(a);
     }
     for (const t of radio?.data ?? []) {
       if (done()) break;
       await check(t, `Radio ${n}/${queued.size}: ${current.name}`);
     }
+    // Similar artists' own top tracks (the seeds' catalogue was already
+    // checked in step 1).
+    if (opts.similar && !seedIds.has(current.id) && !done()) {
+      const top = await deezer<{ data?: DzTrack[] }>(`/artist/${current.id}/top?limit=25`);
+      for (const t of top?.data ?? []) {
+        if (done()) break;
+        await check(t, `Top tracks ${n}/${queued.size}: ${current.name}`);
+      }
+    }
   }
 
-  return { seedFound: true, checked, matched };
+  return { seedFound: true, checked, matched, artists: walked };
 }
