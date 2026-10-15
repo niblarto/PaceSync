@@ -122,8 +122,13 @@ const REST_SUFFIX_RE = / \+ ((\d+)\s*(s|sec|secs|min|mins?)\b[^,]*)$/i;
 // built from a mix's own planned data (no actual pace, since it hasn't been
 // run yet) so it can be shown the moment a mix is built or reloaded from a
 // saved/pinned snapshot. `tracks` should be the full ordered mix track list.
-export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMenu, selectedUris, onToggleSelect, onSelectionContextMenu, deletedUris }: {
+export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMenu, selectedUris, onToggleSelect, onSelectionContextMenu, deletedUris, zoomKey }: {
   tracks: MixChartTrack[];
+  /** Identifies the mix being shown — the zoom resets only when this
+      changes (a different mix loaded), not when its tracks are edited
+      (swap, reorder, remove), so the chart stays focused where it was.
+      Without it, any change to the track list resets the zoom. */
+  zoomKey?: string;
   /** Tracks deleted from the library but still in this mix — their chips
       are highlighted red until swapped (same set the tracklist highlights). */
   deletedUris?: Set<string>;
@@ -188,10 +193,11 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
   // including just clicking a chip (which only changes unrelated state like
   // the highlighted row, not the mix itself).
   const tracksKey = tracks.map(t => t.uri).join(",");
+  const resetKey = zoomKey ?? tracksKey;
   useEffect(() => {
     setXDomain(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tracksKey]);
+  }, [resetKey]);
 
   // Narrow (mobile-width) containers get tighter axis margins so the pace
   // axis sits snug against the left edge and the BPM axis against the right

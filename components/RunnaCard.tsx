@@ -793,7 +793,11 @@ interface RunnaScheduleProps {
 // silently — the workout is looked up by date since that's what the
 // tracks card's aiDjMix state carries.
 export interface RunnaScheduleHandle {
-  remix: (date: string, avoidUris: string[], extraPlayCounts?: Record<string, number>, genreRestrictUris?: string[]) => Promise<void>;
+  remix: (
+    date: string, avoidUris: string[], extraPlayCounts?: Record<string, number>, genreRestrictUris?: string[],
+    /** Advanced AI DJ Mix options (per-segment BPM ranges / genres, play-count toggle) — overrides genreRestrictUris. */
+    advanced?: { segmentCandidateUris: { line: string; uris: string[] }[]; ignorePlayCounts: boolean },
+  ) => Promise<void>;
   topUp: (
     date: string,
     avoidUris: string[],
@@ -1568,10 +1572,13 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   }
 
   useImperativeHandle(ref, () => ({
-    remix(date, avoidUris, extraPlayCounts, genreRestrictUris) {
+    remix(date, avoidUris, extraPlayCounts, genreRestrictUris, advanced) {
       const w = workouts.find(x => x.date === date);
       if (!w) return Promise.resolve();
       setExpanded(w.uid);
+      if (advanced) {
+        return buildMix(w, avoidUris, undefined, extraPlayCounts, advanced.segmentCandidateUris, advanced.ignorePlayCounts);
+      }
       const segmentCandidateUris = genreRestrictUris
         ? mixSegmentsFor(w, raceSplits[w.date]).map(() => genreRestrictUris)
         : undefined;

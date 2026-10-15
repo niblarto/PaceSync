@@ -17,6 +17,7 @@ import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArt
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
 import { SongProgressBar, ensurePlaying } from "./SongProgressBar";
+import { AdvancedMixModal } from "./AdvancedMixModal";
 import { useRunningPlaylist, getRunningPlaylist, invalidateRunningPlaylistCache } from "./useRunningPlaylist";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
@@ -546,6 +547,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [importBpmMsg, setImportBpmMsg] = useState<string | null>(null);
   const noBpmCsvInputRef = useRef<HTMLInputElement>(null);
   const [aiDjMix, setAiDjMix] = useState<{ workoutTitle: string; name: string; tracks: TrackWithBPM[]; totalSec: number; segments: string[]; date: string; timeline: AiDjTimeline; stale: boolean; avoidUris?: string[]; originalCount: number; origin?: "pace-pro" } | null>(null);
+  const [advancedMixOpen, setAdvancedMixOpen] = useState(false);
   // Deleted-from-library tracks in the loaded mix, highlighted until they're
   // swapped: ones deleted this session plus any the broken-tracklist scan
   // reports for saved mixes.
@@ -1152,13 +1154,13 @@ export function DashboardClient({ spotifyUser }: Props) {
   // remix/topUp to look up by date.
   async function buildMixDirect(
     title: string, segments: string[], date: string, avoidUris?: string[], extraPlayCounts?: Record<string, number>,
-    segmentCandidateUris?: (string[] | null)[],
+    segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[], ignorePlayCounts?: boolean,
   ): Promise<{ tracks: TrackWithBPM[]; totalSec: number; timeline: AiDjTimeline; startedAtMs: number }> {
     const startedAtMs = Date.now();
     const res = await fetch("/api/ai-dj/mix", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, segments, avoidUris, date, extraPlayCounts, startedAtMs, segmentCandidateUris }),
+      body: JSON.stringify({ title, segments, avoidUris, date, extraPlayCounts, startedAtMs, segmentCandidateUris, ignorePlayCounts }),
     });
     if (!res.ok || !res.body) {
       const err = await res.json().catch(() => ({})) as { error?: string };
@@ -1219,7 +1221,10 @@ export function DashboardClient({ spotifyUser }: Props) {
   // lib/ai-dj-mix.ts's segmentCandidateUris doc comment) — one identical
   // list repeated per segment, since the genre restriction applies to the
   // whole mix, not any one segment specifically.
-  async function remixAiDjMix(genreRestrictUris?: string[]) {
+  // advanced: from the ⚙️ Advanced button (AdvancedMixModal) — per-segment
+  // BPM ranges/genres and the ignore-play-count toggle, for any mix loaded
+  // here (schedule or Pace Pro).
+  async function remixAiDjMix(genreRestrictUris?: string[], advanced?: { segmentCandidateUris: { line: string; uris: string[] }[]; ignorePlayCounts: boolean }) {
     if (!aiDjMix) return;
     if (aiDjMix.origin !== "pace-pro" && !runnaScheduleRef.current) return;
     setRemixing(true);
@@ -1234,12 +1239,13 @@ export function DashboardClient({ spotifyUser }: Props) {
     const extraPlayCounts = Object.fromEntries(Object.keys(removedFromMix).map(uri => [uri, 1]));
     try {
       if (aiDjMix.origin === "pace-pro") {
-        const segmentCandidateUris = genreRestrictUris ? aiDjMix.segments.map(() => genreRestrictUris) : undefined;
-        const result = await buildMixDirect(aiDjMix.workoutTitle, aiDjMix.segments, aiDjMix.date, avoidUris, extraPlayCounts, segmentCandidateUris);
+        const segmentCandidateUris = advanced ? advanced.segmentCandidateUris
+          : genreRestrictUris ? aiDjMix.segments.map(() => genreRestrictUris) : undefined;
+        const result = await buildMixDirect(aiDjMix.workoutTitle, aiDjMix.segments, aiDjMix.date, avoidUris, extraPlayCounts, segmentCandidateUris, advanced?.ignorePlayCounts);
         handleAiDjMix(aiDjMix.workoutTitle, aiDjMix.name, result.tracks, result.totalSec, aiDjMix.segments, aiDjMix.date, result.timeline,
           Array.from(new Set([...avoidUris, ...result.tracks.map(t => t.uri)])), result.startedAtMs, "pace-pro");
       } else {
-        await runnaScheduleRef.current!.remix(aiDjMix.date, avoidUris, extraPlayCounts, genreRestrictUris);
+        await runnaScheduleRef.current!.remix(aiDjMix.date, avoidUris, extraPlayCounts, genreRestrictUris, advanced);
       }
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : "Failed to remix");
@@ -1847,43 +1853,51 @@ export function DashboardClient({ spotifyUser }: Props) {
     return pinMix(aiDjMix);
   }
 
-  // Saves the current (possibly edited/remixed) state of a "pace-pro" origin
-  // mix back into the Pace Pro page's saved-mix library — updates the
-  // entry in place if this mix was loaded from one (paceProLibraryMeta.
-  // savedMixId), otherwise creates a new entry.
-  async function savePaceProMixToLibrary() {
-    if (!aiDjMix || aiDjMix.origin !== "pace-pro" || !paceProLibraryMeta) return;
-    setPaceProSaving(true);
-    setPaceProSaveMsg(null);
-    try {
-      // Use whatever the user has typed into the "Spotify playlist name"
-      // field, not aiDjMix.workoutTitle — that field never updates after
-      // the mix is loaded (it's set once when the mix is built/loaded), so
-      // saving under it silently ignored any rename the user made before
-      // clicking "Save to Pace Pro library"/"Update Pace Pro library".
-      const title = playlistName.trim() || aiDjMix.workoutTitle;
-      const res = await fetch("/api/settings/pace-pro-saved", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: paceProLibraryMeta.savedMixId ?? undefined,
-          title,
-          totalSec: aiDjMix.totalSec,
-          timeline: aiDjMix.timeline,
-          splitsCsvText: paceProLibraryMeta.splitsCsvText,
-          fileName: paceProLibraryMeta.fileName,
-        }),
-      });
-      const data = await res.json() as { mix?: { id: string; title: string }; error?: string };
-      if (!res.ok || data.error || !data.mix) throw new Error(data.error ?? `Save failed (${res.status})`);
-      setPaceProLibraryMeta(prev => prev ? { ...prev, savedMixId: data.mix!.id } : prev);
-      setPaceProSaveMsg(`Saved "${data.mix.title}" to the Pace Pro library`);
-    } catch (e) {
-      setPaceProSaveMsg(e instanceof Error ? e.message : "Failed to save");
-    } finally {
-      setPaceProSaving(false);
-    }
-  }
+  // A "pace-pro" origin mix saves itself back into the Pace Pro library on
+  // every change (swap, reorder, remove, remix, fill the gap…) — updating
+  // the entry it was loaded from (paceProLibraryMeta.savedMixId), or
+  // creating one on its first change. Debounced so a burst of edits is one
+  // save; the timeline signature skips saves when nothing actually changed
+  // (e.g. right after loading). Refreshes the broken-tracklist banner after
+  // each save, so swapping out a deleted track clears it.
+  const paceProSavedSigRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!aiDjMix || aiDjMix.origin !== "pace-pro" || !paceProLibraryMeta) { paceProSavedSigRef.current = null; return; }
+    if (remixing || toppingUp || !aiDjMix.timeline?.length || aiDjMix.tracks.length === 0) return;
+    const sig = JSON.stringify(aiDjMix.timeline.map(seg => seg.tracks.map(t => t.uri)));
+    if (paceProSavedSigRef.current === null) { paceProSavedSigRef.current = sig; return; } // just loaded
+    if (sig === paceProSavedSigRef.current) return;
+    const timer = setTimeout(async () => {
+      setPaceProSaving(true);
+      setPaceProSaveMsg(null);
+      try {
+        const res = await fetch("/api/settings/pace-pro-saved", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: paceProLibraryMeta.savedMixId ?? undefined,
+            title: aiDjMix.workoutTitle,
+            totalSec: aiDjMix.totalSec,
+            timeline: aiDjMix.timeline,
+            splitsCsvText: paceProLibraryMeta.splitsCsvText,
+            fileName: paceProLibraryMeta.fileName,
+          }),
+        });
+        const data = await res.json() as { mix?: { id: string; title: string }; error?: string };
+        if (!res.ok || data.error || !data.mix) throw new Error(data.error ?? `Save failed (${res.status})`);
+        paceProSavedSigRef.current = sig;
+        if (!paceProLibraryMeta.savedMixId) setPaceProLibraryMeta(prev => prev ? { ...prev, savedMixId: data.mix!.id } : prev);
+        setPaceProSaveMsg(`Saved to the Pace Pro library`);
+        notifyTracklistsChanged();
+      } catch (e) {
+        setPaceProSaveMsg(e instanceof Error ? `Pace Pro save failed: ${e.message}` : "Pace Pro save failed");
+      } finally {
+        setPaceProSaving(false);
+      }
+    }, 800);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiDjMix, paceProLibraryMeta, remixing, toppingUp]);
 
   async function saveTodaysRun() {
     if (!filteredTracks.length) return;
@@ -2985,6 +2999,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               </div>
               <MixPaceChart
                 tracks={timelineToChartTracks(aiDjMix.timeline)}
+                zoomKey={`${aiDjMix.date}|${aiDjMix.workoutTitle}`}
                 deletedUris={mixDeletedUris}
                 onTrackClick={setChartHighlightUri}
                 onReorder={!aiDjMix.stale ? reorderMixTrackByUri : undefined}
@@ -3480,6 +3495,14 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                         >
                           {remixing ? <><Spinner />Remixing…</> : "🎧 Remix"}
                         </button>
+                        <button
+                          onClick={() => setAdvancedMixOpen(true)}
+                          disabled={remixing || toppingUp}
+                          title="Advanced AI DJ Mix — BPM range per segment, genres, play-count options"
+                          className="inline-flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/10 hover:bg-purple-500/25 disabled:opacity-40 disabled:cursor-not-allowed text-purple-300 font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
+                        >
+                          ⚙️ Advanced
+                        </button>
                       </div>
                       <p className="text-xs text-slate-500 max-w-[260px] text-right">
                         Tracks were deleted — fill the gap to keep the rest and add replacements, or remix to rebuild from scratch.
@@ -3510,6 +3533,16 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                             {remixing ? <><Spinner />Remixing…</> : "🎧 Remix"}
                           </button>
                         )}
+                        {aiDjMix && (
+                          <button
+                            onClick={() => setAdvancedMixOpen(true)}
+                            disabled={remixing || toppingUp}
+                            title="Advanced AI DJ Mix — BPM range per segment, genres, play-count options"
+                            className="inline-flex items-center justify-center gap-2 rounded-lg border border-purple-500/40 bg-purple-500/10 hover:bg-purple-500/25 disabled:opacity-40 disabled:cursor-not-allowed text-purple-300 font-semibold text-xs px-3 py-1.5 transition-colors whitespace-nowrap"
+                          >
+                            ⚙️ Advanced
+                          </button>
+                        )}
                         <button
                           onClick={savePlaylist}
                           disabled={!playlistName || step === "saving"}
@@ -3536,19 +3569,11 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                             {pinSaving ? <><Spinner />Pinning…</> : pinSaved ? "📌 Pinned!" : "📌 Pin to workout"}
                           </button>
                         )}
-                        {aiDjMix?.origin === "pace-pro" && paceProLibraryMeta && (
-                          <button
-                            onClick={savePaceProMixToLibrary}
-                            disabled={paceProSaving}
-                            className="inline-flex items-center justify-center gap-2 rounded-lg border border-blue-500/40 bg-blue-500/15 hover:bg-blue-500/25 disabled:opacity-60 text-blue-300 font-semibold text-xs px-4 py-1.5 transition-colors whitespace-nowrap"
-                            title="Save this mix's current tracks back to the Pace Pro library"
-                          >
-                            {paceProSaving ? <><Spinner />Saving…</> : paceProLibraryMeta.savedMixId ? "Update Pace Pro library" : "Save to Pace Pro library"}
-                          </button>
-                        )}
                       </div>
                       {pinError && <p className="text-xs text-red-400">{pinError}</p>}
-                      {paceProSaveMsg && <p className="text-xs text-slate-400">{paceProSaveMsg}</p>}
+                      {aiDjMix?.origin === "pace-pro" && (paceProSaving || paceProSaveMsg) && (
+                        <p className="text-xs text-slate-400">{paceProSaving ? "Saving to the Pace Pro library…" : paceProSaveMsg}</p>
+                      )}
                       {todaysRunError && <p className="text-xs text-red-400">{todaysRunError}</p>}
                       {todaysRunSaved && todaysRunUrl && (
                         <button
@@ -4171,6 +4196,18 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           mixUris={aiDjMix?.tracks.map(t => t.uri) ?? [replaceTarget.track.uri]}
           onClose={() => setReplaceTarget(null)}
           onConfirm={(replacement) => replaceMixTrack(replaceTarget.index, replacement)}
+        />
+      )}
+
+      {advancedMixOpen && aiDjMix && (
+        <AdvancedMixModal
+          workoutTitle={aiDjMix.workoutTitle}
+          segments={aiDjMix.segments}
+          onClose={() => setAdvancedMixOpen(false)}
+          onBuild={({ ignorePlayCounts, segmentCandidateUris }) => {
+            setAdvancedMixOpen(false);
+            void remixAiDjMix(undefined, { segmentCandidateUris, ignorePlayCounts });
+          }}
         />
       )}
 
