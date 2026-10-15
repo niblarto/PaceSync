@@ -31,6 +31,11 @@ const STATE_PATH = path.join(process.cwd(), "song-crawler-state.json");
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const effective = (bpm: number) => (bpm < DOUBLETIME_THRESHOLD ? bpm * 2 : bpm);
+// Whole-number effective BPM — what the tracklist filter, mixer and Replace
+// by BPM compare on (82.9 BPM doubles to 165.8 -> 166).
+const effRounded = (bpm: number) => Math.round(effective(bpm));
+// "83 BPM" / "83 BPM (×2 = 166)" for the log.
+const bpmLabel = (bpm: number) => (bpm < DOUBLETIME_THRESHOLD ? `${Math.round(bpm)} BPM (×2 = ${effRounded(bpm)})` : `${Math.round(bpm)} BPM`);
 
 interface DeezerRadioTrack { id: number; title: string; artist: { id: number; name: string } }
 interface DeezerAlbumTrack extends DeezerRadioTrack { isrc?: string; duration?: number }
@@ -383,8 +388,8 @@ async function runCrawl(job: CrawlJob) {
     }
     if (tempo == null) { log(`  ${label}: no BPM available`); return; }
 
-    const eff = effective(tempo);
-    if (!(eff >= lo && eff <= hi)) { log(`  ${label}: ${Math.round(tempo)} BPM`); return; }
+    const eff = effRounded(tempo);
+    if (!(eff >= lo && eff <= hi)) { log(`  ${label}: ${bpmLabel(tempo)}`); return; }
 
     if (!isrc) { log(`  ${label}: ${Math.round(tempo)} BPM matches, but no ISRC to resolve on Spotify`, "warn"); return; }
     if (!resolved) resolved = await resolveByIsrc(isrc).catch(() => null);
@@ -402,7 +407,7 @@ async function runCrawl(job: CrawlJob) {
     if (result.added > 0) {
       job.added++;
       job.addedTracks.push({ uri: resolved.uri, name: t.title, artist: t.artist.name, bpm: Math.round(tempo) });
-      log(`  ✓ ADDED ${label} (${Math.round(tempo)} BPM)`, "match");
+      log(`  ✓ ADDED ${label} (${bpmLabel(tempo)})`, "match");
     } else {
       log(`  ${label}: matches, but was previously deleted from the library — skipped`, "warn");
     }
@@ -461,7 +466,7 @@ async function runCrawl(job: CrawlJob) {
         if (knownUris.has(t.uri) || (f?.isrc && knownIsrcs.has(f.isrc))) { log(`  ${label}: already in library`); continue; }
         if (f?.tempo == null) { log(`  ${label}: no BPM available`); continue; }
         const tempo = f.tempo;
-        if (!(effective(tempo) >= lo && effective(tempo) <= hi)) { log(`  ${label}: ${Math.round(tempo)} BPM`); continue; }
+        if (!(effRounded(tempo) >= lo && effRounded(tempo) <= hi)) { log(`  ${label}: ${bpmLabel(tempo)}`); continue; }
         const result = await addTracksToLibrary([{
           uri: t.uri, isrc: f.isrc, name: t.name, artist: t.artist, tempo,
           key: f.key, mode: f.mode, energy: f.energy, danceability: f.danceability, valence: f.valence,
@@ -472,7 +477,7 @@ async function runCrawl(job: CrawlJob) {
         if (result.added > 0) {
           job.added++;
           job.addedTracks.push({ uri: t.uri, name: t.name, artist: t.artist, bpm: Math.round(tempo) });
-          log(`  ✓ ADDED ${label} (${Math.round(tempo)} BPM)`, "match");
+          log(`  ✓ ADDED ${label} (${bpmLabel(tempo)})`, "match");
         } else {
           log(`  ${label}: matches, but was previously deleted from the library — skipped`, "warn");
         }
