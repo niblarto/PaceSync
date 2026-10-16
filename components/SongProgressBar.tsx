@@ -189,7 +189,12 @@ export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]", ba
         title={!active ? "Nothing playing" : state!.isPlaying ? "Pause" : "Play"}
         className="shrink-0 w-6 h-6 rounded-full bg-orange-500/20 border border-orange-500/50 hover:bg-orange-500/35 text-orange-300 text-[10px] leading-none flex items-center justify-center disabled:opacity-40 disabled:hover:bg-orange-500/20"
       >
-        {active && state!.isPlaying ? "❚❚" : "▶"}
+        {/* Drawn icons — the ▶ character rendered as a blue emoji on Windows. */}
+        {active && state!.isPlaying ? (
+          <svg viewBox="0 0 10 10" className="w-2.5 h-2.5" fill="currentColor" aria-hidden><rect x="1.5" y="1" width="2.5" height="8" rx="0.5" /><rect x="6" y="1" width="2.5" height="8" rx="0.5" /></svg>
+        ) : (
+          <svg viewBox="0 0 10 10" className="w-2.5 h-2.5 translate-x-[1px]" fill="currentColor" aria-hidden><path d="M2 1.2v7.6a.5.5 0 0 0 .76.43l6.1-3.8a.5.5 0 0 0 0-.86l-6.1-3.8A.5.5 0 0 0 2 1.2Z" /></svg>
+        )}
       </button>
       </div>
     </div>
