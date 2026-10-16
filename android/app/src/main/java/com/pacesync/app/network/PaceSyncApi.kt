@@ -123,5 +123,8 @@ interface PaceSyncApi {
     suspend fun stopCrawl(): Response<Unit>
 
     @HTTP(method = "PATCH", path = "api/tracks/song-crawler", hasBody = true)
+    suspend fun setCrawlReviewLimit(@Body body: com.pacesync.app.network.dto.CrawlReviewLimitRequest): Response<Unit>
+
+    @HTTP(method = "PATCH", path = "api/tracks/song-crawler", hasBody = true)
     suspend fun crawlRemoveAdded(@Body body: com.pacesync.app.network.dto.CrawlRemoveRequest): Response<Unit>
 }

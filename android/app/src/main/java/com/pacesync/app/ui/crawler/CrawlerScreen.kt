@@ -87,6 +87,7 @@ fun CrawlerScreen(api: PaceSyncApi) {
     var bpm by remember { mutableStateOf(prefs.getString("bpm", "") ?: "") }
     var bpmMax by remember { mutableStateOf(prefs.getString("bpmMax", "") ?: "") }
     var maxArtists by remember { mutableStateOf(prefs.getString("maxArtists", "50") ?: "50") }
+    var reviewLimit by remember { mutableStateOf(prefs.getString("reviewLimit", "") ?: "") }
     var srcArtist by remember { mutableStateOf(prefs.getBoolean("srcArtist", false)) }
     var srcRadio by remember { mutableStateOf(prefs.getBoolean("srcRadio", true)) }
     var srcRelated by remember { mutableStateOf(prefs.getBoolean("srcRelated", false)) }
@@ -94,7 +95,7 @@ fun CrawlerScreen(api: PaceSyncApi) {
     fun saveInputs() {
         prefs.edit()
             .putString("artist", artist).putString("link", link)
-            .putString("bpm", bpm).putString("bpmMax", bpmMax).putString("maxArtists", maxArtists)
+            .putString("bpm", bpm).putString("bpmMax", bpmMax).putString("maxArtists", maxArtists).putString("reviewLimit", reviewLimit)
             .putBoolean("srcArtist", srcArtist).putBoolean("srcRadio", srcRadio).putBoolean("srcRelated", srcRelated)
             .apply()
     }
@@ -108,7 +109,7 @@ fun CrawlerScreen(api: PaceSyncApi) {
     var pollNonce by remember { mutableStateOf(0) }
     var playNonce by remember { mutableStateOf(0) } // re-reads the playback bar after a tap
 
-    val running = job?.status in setOf("running", "stopping", "healing")
+    val running = job?.status in setOf("running", "paused", "stopping", "healing")
 
     suspend fun poll() {
         val resp = runCatching { api.getCrawl(since) }.getOrNull() ?: return
@@ -156,6 +157,7 @@ fun CrawlerScreen(api: PaceSyncApi) {
                 bpmMax = bMax,
                 maxArtists = maxArtists.toIntOrNull()?.takeIf { it > 0 } ?: 50,
                 sources = CrawlSources(srcArtist, srcRadio, srcRelated),
+                reviewLimit = reviewLimit.toIntOrNull()?.takeIf { it > 0 },
             )
             val resp = runCatching { api.startCrawl(req) }.getOrNull()
             if (resp == null) { message = "Couldn't reach PaceSync server"; return@launch }
@@ -175,12 +177,14 @@ fun CrawlerScreen(api: PaceSyncApi) {
         scope.launch { runCatching { api.stopCrawl() }; pollNonce++ }
     }
 
-    fun removeAdded(t: CrawlAddedTrack, delete: Boolean) {
+    // reason: "accepted" (keep), "deleted" (out + on the deleted list) or
+    // "removed" (out of the library/playlist, but can be re-added later).
+    fun removeAdded(t: CrawlAddedTrack, reason: String) {
         menuFor = null
         job = job?.copy(addedTracks = job!!.addedTracks.filter { it.uri != t.uri })
         scope.launch {
             runCatching {
-                api.crawlRemoveAdded(CrawlRemoveRequest(t.uri, if (delete) "deleted" else "accepted", deleteFromLibrary = delete))
+                api.crawlRemoveAdded(CrawlRemoveRequest(t.uri, reason, deleteFromLibrary = reason != "accepted"))
             }
             pollNonce++
         }
@@ -230,6 +234,22 @@ fun CrawlerScreen(api: PaceSyncApi) {
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         )
                     }
+                    OutlinedTextField(
+                        value = reviewLimit,
+                        onValueChange = { v ->
+                            reviewLimit = v
+                            prefs.edit().putString("reviewLimit", v).apply()
+                            // While a crawl runs, a change applies to it straight away.
+                            if (running) scope.launch {
+                                runCatching { api.setCrawlReviewLimit(com.pacesync.app.network.dto.CrawlReviewLimitRequest(v.toIntOrNull()?.takeIf { it > 0 })) }
+                            }
+                        },
+                        label = { Text("Review limit (pause at this many awaiting review)") },
+                        placeholder = { Text("none") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Crawl:", style = MaterialTheme.typography.bodySmall)
                         Checkbox(checked = srcArtist, onCheckedChange = { srcArtist = it }, enabled = !running)
@@ -245,8 +265,8 @@ fun CrawlerScreen(api: PaceSyncApi) {
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0D9488), contentColor = Color.White),
                         ) { Text("Crawl") }
                         if (running) {
-                            OutlinedButton(onClick = { stop() }, enabled = job?.status == "running") {
-                                Text(if (job?.status == "running") "Stop" else "Stopping…")
+                            OutlinedButton(onClick = { stop() }, enabled = job?.status == "running" || job?.status == "paused") {
+                                Text(if (job?.status == "running" || job?.status == "paused") "Stop" else "Stopping…")
                             }
                         }
                     }
@@ -257,7 +277,7 @@ fun CrawlerScreen(api: PaceSyncApi) {
             // ── Status ──
             job?.let { j ->
                 val label = when (j.status) {
-                    "running" -> "Running"; "stopping" -> "Stopping"; "healing" -> "Filling in data"
+                    "running" -> "Running"; "paused" -> "Paused (review limit)"; "stopping" -> "Stopping"; "healing" -> "Filling in data"
                     "stopped" -> "Last crawl (stopped)"; "error" -> "Last crawl (error)"
                     "interrupted" -> "Last crawl (interrupted)"; else -> "Last crawl"
                 }
@@ -316,7 +336,7 @@ fun CrawlerScreen(api: PaceSyncApi) {
             Card(colors = cardColors, modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(10.dp)) {
                     Text("Awaiting review (${added.size})", style = MaterialTheme.typography.titleSmall)
-                    Text("Tap to play · long-press to accept or delete", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Tap to play · long-press to accept, delete or remove", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     PlaybackBar(api, refreshKey = playNonce, modifier = Modifier.padding(top = 6.dp))
                     Spacer(Modifier.height(6.dp))
                     if (added.isEmpty()) {
@@ -334,12 +354,13 @@ fun CrawlerScreen(api: PaceSyncApi) {
                                     color = if (playingUri == t.uri) TEAL else MaterialTheme.colorScheme.onSurface,
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
-                                Text("${t.artist} · ${t.bpm} BPM", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("${t.artist} · ${t.bpm} BPM" + (if (t.bpm in 1..94) " (×2 = ${t.bpm * 2})" else ""), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             DropdownMenu(expanded = menuFor == t.uri, onDismissRequest = { menuFor = null }) {
                                 DropdownMenuItem(text = { Text("▶ Play") }, onClick = { play(t.uri) })
-                                DropdownMenuItem(text = { Text("✓ Accept", color = TEAL) }, onClick = { removeAdded(t, delete = false) })
-                                DropdownMenuItem(text = { Text("🗑 Delete", color = RED) }, onClick = { removeAdded(t, delete = true) })
+                                DropdownMenuItem(text = { Text("✓ Accept", color = TEAL) }, onClick = { removeAdded(t, "accepted") })
+                                DropdownMenuItem(text = { Text("🗑 Delete", color = RED) }, onClick = { removeAdded(t, "deleted") })
+                                DropdownMenuItem(text = { Text("↩ Remove (can re-add)", color = AMBER) }, onClick = { removeAdded(t, "removed") })
                             }
                         }
                         HorizontalDivider()

@@ -56,3 +56,28 @@ export function deleteTrackFromLibrary(uri: string, playlistId: string | null, s
     .then(() => notifyTracklistsChanged())
     .catch(() => {});
 }
+
+// Batch version of deleteTrackFromLibrary — one Spotify request per 100
+// tracks and one library request for the lot (multi-select delete).
+export function deleteTracksFromLibrary(uris: string[], skipDeletedLog?: boolean): Promise<void> {
+  if (uris.length === 0) return Promise.resolve();
+  getRunningPlaylist().then(async ({ id }) => {
+    if (!id) return;
+    const token = await freshSpotifyToken();
+    if (!token) return;
+    for (let i = 0; i < uris.length; i += 100) {
+      await spotifyFetch(`https://api.spotify.com/v1/playlists/${id}/items`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ items: uris.slice(i, i + 100).map(uri => ({ uri })) }),
+      });
+    }
+  }).catch(err => console.error("[delete] Spotify fetch error:", err));
+  return fetch("/api/tracks/delete", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spotifyUris: uris, skipDeletedLog }),
+  })
+    .then(() => notifyTracklistsChanged())
+    .catch(() => {});
+}

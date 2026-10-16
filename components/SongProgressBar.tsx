@@ -52,11 +52,17 @@ function fmt(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]" }: {
+export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]", barClassName }: {
   /** uri -> "Name — Artist" for the mix's tracks, used as the bar's label. */
   trackNames?: Record<string, string>;
   /** Width classes for the bar's container. */
   className?: string;
+  /** When set, the bar (times, slider, play/pause) is its own block with
+      these classes — e.g. a fixed width — and the track name sits to its
+      left taking only the room it needs, never squeezing the bar. Use with
+      className="contents" to make both direct children of the caller's
+      flex row. */
+  barClassName?: string;
 }) {
   const [state, setState] = useState<PlaybackState | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -128,7 +134,13 @@ export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]" }: 
 
   return (
     <div className={`flex items-center gap-2 shrink-0 ${className}`} title={active ? `${name} — click or drag to change position` : "Nothing playing in Spotify"}>
-      <span className={`text-[10px] truncate max-w-[45%] ${active ? "text-slate-300" : "text-slate-600 italic"}`}>{name}</span>
+      <span
+        className={`text-[10px] truncate ${barClassName ? "min-w-0 text-right" : "max-w-[45%]"} ${active ? "text-slate-300" : "text-slate-600 italic"}`}
+        title={name}
+      >
+        {name}
+      </span>
+      <div className={barClassName ? `flex items-center gap-2 ${barClassName}` : "contents"}>
       <span className="text-[10px] text-slate-400 font-mono tabular-nums">{active ? fmt(posMs) : "-:--"}</span>
       <div
         ref={barRef}
@@ -179,6 +191,7 @@ export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]" }: 
       >
         {active && state!.isPlaying ? "❚❚" : "▶"}
       </button>
+      </div>
     </div>
   );
 }

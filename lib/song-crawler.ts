@@ -139,7 +139,7 @@ async function fetchLinkTracksApi(kind: "album" | "playlist", id: string): Promi
 
 export type CrawlLevel = "info" | "match" | "warn" | "error";
 export interface CrawlLine { seq: number; at: string; level: CrawlLevel; msg: string }
-export type CrawlStatus = "running" | "stopping" | "healing" | "done" | "stopped" | "error" | "interrupted";
+export type CrawlStatus = "running" | "paused" | "stopping" | "healing" | "done" | "stopped" | "error" | "interrupted";
 
 // What to crawl — any combination of:
 //   artist:  the typed artist's own catalogue (every album, EP and single)
@@ -170,6 +170,10 @@ export interface CrawlParams {
   bpmMin?: number;
   bpmMax?: number;
   maxArtists?: number;
+  /** Pause once this many songs are awaiting review; resume when the
+      review list drops below it. Empty/0 = no limit. Can be changed while
+      the crawl runs (setCrawlReviewLimit). */
+  reviewLimit?: number | null;
   sources?: Partial<CrawlSources>;
   mode?: CrawlMode;
 }
@@ -211,7 +215,7 @@ function load() {
   store.loaded = true;
   try {
     const saved = JSON.parse(readFileSync(STATE_PATH, "utf8")) as CrawlJob;
-    if (["running", "stopping", "healing"].includes(saved.status)) {
+    if (["running", "paused", "stopping", "healing"].includes(saved.status)) {
       saved.status = "interrupted";
       saved.finishedAt = saved.finishedAt ?? new Date().toISOString();
       saved.log.push({ seq: saved.nextSeq++, at: new Date().toISOString(), level: "error", msg: "Crawl interrupted — the server restarted (e.g. a deploy). Start it again to continue." });
@@ -239,7 +243,9 @@ export function getCrawl(sinceSeq = 0): { job: Omit<CrawlJob, "log"> | null; lin
 
 // Drops a song from the crawl's added list and notes it in the log —
 // either deleted from the library, or accepted (kept, just reviewed).
-export function removeCrawlAddedTrack(uri: string, reason: "deleted" | "accepted" = "deleted"): boolean {
+// reason "removed": taken out of the library and Spotify playlist but NOT
+// put on the deleted list, so it can be added again later.
+export function removeCrawlAddedTrack(uri: string, reason: "deleted" | "accepted" | "removed" = "deleted"): boolean {
   load();
   const job = store.job;
   if (!job?.addedTracks) return false;
@@ -247,18 +253,30 @@ export function removeCrawlAddedTrack(uri: string, reason: "deleted" | "accepted
   if (i < 0) return false;
   const [t] = job.addedTracks.splice(i, 1);
   if (reason === "accepted") log(`  ✓ Accepted ${t.name} — ${t.artist} (kept in the library)`);
+  else if (reason === "removed") log(`  ↩ Removed ${t.name} — ${t.artist} from the library (can be re-added)`, "warn");
   else log(`  ✗ Deleted ${t.name} — ${t.artist} from the library`, "warn");
+  persist(true);
+  return true;
+}
+
+// Changes the running crawl's review limit (null/0 = none).
+export function setCrawlReviewLimit(limit: number | null): boolean {
+  load();
+  if (!isCrawlRunning()) return false;
+  const n = limit && limit > 0 ? Math.round(limit) : null;
+  store.job!.params.reviewLimit = n;
+  log(n ? `Review limit set to ${n}.` : "Review limit removed.");
   persist(true);
   return true;
 }
 
 export function isCrawlRunning(): boolean {
   load();
-  return !!store.job && ["running", "stopping", "healing"].includes(store.job.status);
+  return !!store.job && ["running", "paused", "stopping", "healing"].includes(store.job.status);
 }
 
 export function requestStopCrawl(): boolean {
-  if (!isCrawlRunning() || store.job!.status !== "running") return false;
+  if (!isCrawlRunning() || (store.job!.status !== "running" && store.job!.status !== "paused")) return false;
   store.stopRequested = true;
   store.job!.status = "stopping";
   log("Stop requested — finishing the current track, then filling in missing data…", "warn");
@@ -361,11 +379,36 @@ async function runCrawl(job: CrawlJob) {
   if (!seed && linkTracks.length === 0) return finish(job, "done");
   job.totalArtists = seed ? 1 : 0;
 
+  // Review limit: hold the crawl while too many songs await review.
+  const reviewLimit = () => {
+    const n = Number(job.params.reviewLimit);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const waitForReview = async () => {
+    let lim = reviewLimit();
+    if (!lim || job.addedTracks.length < lim || stopped()) return;
+    job.status = "paused";
+    log(`Paused — ${job.addedTracks.length} songs awaiting review (limit ${lim}). Accept, delete or remove some to carry on.`, "warn");
+    persist(true);
+    while (!stopped()) {
+      lim = reviewLimit();
+      if (!lim || job.addedTracks.length < lim) break;
+      await sleep(3000);
+    }
+    if (!stopped()) {
+      job.status = "running";
+      log(`Resumed — ${job.addedTracks.length} awaiting review.`);
+      persist(true);
+    }
+  };
+
   const seenTracks = new Set<number>();
   const checkedIsrcs = new Set<string>();
 
   // BPM-checks one Deezer track and, on a match, adds it to the library.
   const checkTrack = async (t: DeezerRadioTrack, isrcHint?: string | null, durationHintSec?: number | null) => {
+    await waitForReview();
+    if (stopped()) return;
     if (seenTracks.has(t.id)) return;
     seenTracks.add(t.id);
     job.checked = (job.checked ?? 0) + 1;
@@ -467,6 +510,7 @@ async function runCrawl(job: CrawlJob) {
         if (id) byId.set(id, c);
       }
       for (const t of batch) {
+        await waitForReview();
         if (stopped()) break;
         const label = `${t.name} — ${t.artist}`;
         job.checked = (job.checked ?? 0) + 1;

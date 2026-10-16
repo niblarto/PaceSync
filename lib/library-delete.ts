@@ -8,7 +8,9 @@ import { getFreshToken } from "@/lib/tokenStore";
 // and records it in the deletion log — same steps as /api/tracks/delete —
 // then removes it from the Spotify playlist with the stored login. Mixes
 // containing it are left as they are (flagged by lib/broken-tracklists.ts).
-export async function deleteFromLibraryServer(uri: string): Promise<{ removed: boolean; spotify: boolean }> {
+// skipDeletedLog: "Remove" — out of the library and playlist, but not put
+// on the deleted list, so a later crawl/import can add it again.
+export async function deleteFromLibraryServer(uri: string, skipDeletedLog = false): Promise<{ removed: boolean; spotify: boolean }> {
   const fullUri = uri.startsWith("spotify:track:") ? uri : `spotify:track:${uri}`;
   const config = loadRunningPlaylistConfig();
   const matched = readTracksByUris(config.csvFile, [fullUri]);
@@ -16,7 +18,7 @@ export async function deleteFromLibraryServer(uri: string): Promise<{ removed: b
   if (matched.length > 0) {
     deleteTracksByUri(config.csvFile, matched.map(t => t.uri));
     await regenerateCsvFile(config.csvFile, activeCsvPath());
-    try {
+    if (!skipDeletedLog) try {
       recordDeletedTracks(matched.map(t => ({ uri: t.uri, name: t.trackName ?? undefined, artist: t.artistNames ?? undefined })));
     } catch (e) { console.warn("[library-delete] deletion log failed:", e); }
     removed = true;

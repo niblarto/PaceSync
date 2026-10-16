@@ -417,7 +417,11 @@ data class StartCrawlRequest(
     val bpmMax: Double? = null,
     val maxArtists: Int,
     val sources: CrawlSources,
+    val reviewLimit: Int? = null,
 )
+
+@Serializable
+data class CrawlReviewLimitRequest(val reviewLimit: Int?)
 
 @Serializable
 data class StartCrawlResponse(val ok: Boolean = false, val id: String? = null, val error: String? = null)

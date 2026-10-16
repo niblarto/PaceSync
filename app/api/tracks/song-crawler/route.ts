@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
-import { getCrawl, removeCrawlAddedTrack, requestStopCrawl, startCrawl, type CrawlParams } from "@/lib/song-crawler";
+import { getCrawl, removeCrawlAddedTrack, requestStopCrawl, setCrawlReviewLimit, startCrawl, type CrawlParams } from "@/lib/song-crawler";
 import { deleteFromLibraryServer } from "@/lib/library-delete";
 
 // Song Crawler control (Settings > Tracklist). The crawl itself is a
@@ -41,8 +41,19 @@ export async function DELETE(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const { removeAdded, reason, deleteFromLibrary } = await req.json().catch(() => ({})) as { removeAdded?: string; reason?: string; deleteFromLibrary?: boolean };
-  if (!removeAdded) return NextResponse.json({ error: "removeAdded (uri) required" }, { status: 400 });
-  if (deleteFromLibrary && reason !== "accepted") await deleteFromLibraryServer(removeAdded);
-  return NextResponse.json({ ok: removeCrawlAddedTrack(removeAdded, reason === "accepted" ? "accepted" : "deleted") });
+  const { removeAdded, reason, deleteFromLibrary, reviewLimit } = await req.json().catch(() => ({})) as { removeAdded?: string | string[]; reason?: string; deleteFromLibrary?: boolean; reviewLimit?: number | null };
+  // { reviewLimit } alone: change the running crawl's review limit.
+  if (reviewLimit !== undefined && removeAdded === undefined) {
+    return NextResponse.json({ ok: setCrawlReviewLimit(reviewLimit) });
+  }
+  // One uri, or several (multi-select Accept / Delete).
+  const uris = (Array.isArray(removeAdded) ? removeAdded : removeAdded ? [removeAdded] : []).filter(u => typeof u === "string" && u);
+  if (uris.length === 0) return NextResponse.json({ error: "removeAdded (uri or uri list) required" }, { status: 400 });
+  const kind: "accepted" | "removed" | "deleted" = reason === "accepted" ? "accepted" : reason === "removed" ? "removed" : "deleted";
+  let removed = 0;
+  for (const uri of uris) {
+    if (deleteFromLibrary && kind !== "accepted") await deleteFromLibraryServer(uri, kind === "removed");
+    if (removeCrawlAddedTrack(uri, kind)) removed++;
+  }
+  return NextResponse.json({ ok: removed > 0, removed });
 }
