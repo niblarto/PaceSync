@@ -15,10 +15,26 @@ import { getDb } from "@/lib/db";
 
 const KEY_PREFIX = "workout_title_cache:";
 
-export function rememberWorkoutTitle(date: string, title: string): void {
+// steps: the workout's planned steps (e.g. "1.5mi at 8:35/mi") — kept so a
+// run whose Runna event drops out of the feed before Runna re-adds it as
+// completed still shows its plan. Omitted -> the previously remembered steps
+// are kept.
+export function rememberWorkoutTitle(date: string, title: string, steps?: string[]): void {
   if (!title.trim()) return;
+  const keepSteps = steps === undefined ? getRememberedWorkoutSteps(date) : steps;
   getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
-    .run(KEY_PREFIX + date, JSON.stringify({ title, rememberedAt: new Date().toISOString() }));
+    .run(KEY_PREFIX + date, JSON.stringify({ title, steps: keepSteps ?? undefined, rememberedAt: new Date().toISOString() }));
+}
+
+export function getRememberedWorkoutSteps(date: string): string[] | null {
+  const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(KEY_PREFIX + date) as { value_json: string } | undefined;
+  if (!row) return null;
+  try {
+    const data = JSON.parse(row.value_json) as { steps?: string[] };
+    return Array.isArray(data.steps) && data.steps.length ? data.steps : null;
+  } catch {
+    return null;
+  }
 }
 
 export function getRememberedWorkoutTitle(date: string): string | null {

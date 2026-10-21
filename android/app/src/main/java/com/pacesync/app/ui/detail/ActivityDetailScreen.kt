@@ -72,6 +72,11 @@ fun ActivityDetailScreen(
     var routePoints by remember { mutableStateOf<List<com.pacesync.app.network.dto.RoutePoint>?>(null) }
     var loading by remember { mutableStateOf(true) }
     var routeMenuOpen by remember { mutableStateOf(false) }
+    // Satellite vs street map for the route — remembered across screens.
+    val mapCtx = androidx.compose.ui.platform.LocalContext.current
+    val mapPrefs = remember { mapCtx.getSharedPreferences("route_map", android.content.Context.MODE_PRIVATE) }
+    var satellite by remember { mutableStateOf(mapPrefs.getBoolean("satellite", false)) }
+    var runNonce by remember { mutableStateOf(0) } // "Run ▶▶" — arrow along the route
     var tracklistMenuOpen by remember { mutableStateOf(false) }
     var confirmTodaysRun by remember { mutableStateOf(false) }
     var savingPlaylist by remember { mutableStateOf(false) }
@@ -216,12 +221,27 @@ fun ActivityDetailScreen(
         item {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Box {
-                    SectionHeader(
-                        "Route",
-                        interactive = routePoints != null,
-                        onPress = { routeMenuOpen = true },
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f)) {
+                            SectionHeader(
+                                "Route",
+                                interactive = routePoints != null,
+                                onPress = { routeMenuOpen = true },
+                            )
+                        }
+                        if (routePoints != null) {
+                            androidx.compose.material3.TextButton(onClick = { runNonce++ }) { Text("Run ▶▶") }
+                            androidx.compose.material3.TextButton(onClick = {
+                                satellite = !satellite
+                                mapPrefs.edit().putBoolean("satellite", satellite).apply()
+                            }) { Text(if (satellite) "🗺 Map" else "🛰 Satellite") }
+                        }
+                    }
                     DropdownMenu(expanded = routeMenuOpen, onDismissRequest = { routeMenuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Run ▶▶") },
+                            onClick = { routeMenuOpen = false; runNonce++ },
+                        )
                         DropdownMenuItem(
                             text = { Text("Unpin route") },
                             onClick = {
@@ -252,7 +272,7 @@ fun ActivityDetailScreen(
                     // instead of on the map itself (confirmed it never
                     // reaches Compose's gesture detector through the map).
                     Card {
-                        RouteMapView(routePoints!!, modifier = Modifier.fillMaxWidth().height(260.dp))
+                        RouteMapView(routePoints!!, modifier = Modifier.fillMaxWidth().height(260.dp), satellite = satellite, runNonce = runNonce)
                     }
                 }
             }
@@ -297,7 +317,17 @@ fun ActivityDetailScreen(
                         onClick = {
                             tracklistMenuOpen = false
                             val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
-                            if (date == today) saveTodaysRun() else confirmTodaysRun = true
+                            if (date == today) saveTodaysRun()
+                            else scope.launch {
+                                // No need to ask when today is a rest day or already
+                                // has a recorded activity — nothing of today's to overwrite.
+                                val body = runCatching { api.getWorkouts() }.getOrNull()?.body()
+                                val todayIsFree = body != null && (
+                                    body.pastRuns.any { it.date == today } ||
+                                        body.workouts.any { it.date == today && it.type == "rest" }
+                                    )
+                                if (todayIsFree) saveTodaysRun() else confirmTodaysRun = true
+                            }
                         },
                     )
                     DropdownMenuItem(
@@ -327,7 +357,7 @@ fun ActivityDetailScreen(
                     Text("No tracklist for this day.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.secondary)
                     val workout = summary as? RunnaWorkout
                     if (workout != null) {
-                        Button(onClick = onBuildMix) { Text("AI DJ Mix") }
+                        Button(onClick = onBuildMix) { Text(if (workout.type == "rest") "Rest-day mix" else "AI DJ Mix") }
                     }
                 }
             }

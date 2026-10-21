@@ -1988,8 +1988,20 @@ export function DashboardClient({ spotifyUser }: Props) {
     // run just done has nothing saved for it at all. Catch the mismatch here
     // rather than trust the possibly-stale date silently.
     if (aiDjMix) {
-      const today = new Date().toISOString().slice(0, 10);
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      // No need to ask when today is a rest day or already has a recorded
+      // activity — there's no run of today's to overwrite, so just save.
+      let todayIsFree = false;
       if (aiDjMix.date !== today) {
+        try {
+          const r = await fetch("/api/runna/workouts");
+          const d = await r.json() as { workouts?: { date: string; type: string }[]; pastRuns?: { date: string }[] };
+          todayIsFree = (d.pastRuns ?? []).some(p => p.date === today)
+            || (d.workouts ?? []).some(w => w.date === today && w.type === "rest");
+        } catch { /* fall back to asking */ }
+      }
+      if (aiDjMix.date !== today && !todayIsFree) {
         const [y, m, d] = aiDjMix.date.split("-");
         const proceed = window.confirm(
           `This mix was built for ${d}-${m}-${y} ("${aiDjMix.workoutTitle}"), not today — save it as today's run anyway?`

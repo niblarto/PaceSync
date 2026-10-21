@@ -116,3 +116,30 @@ export function runCronJobNow(key: CronJobKey): void {
   const child = spawn("/bin/sh", ["-c", m[6]], { detached: true, stdio: "ignore" });
   child.unref();
 }
+
+// GarminDB sync triggered by a new activity (Strava webhook): waits a couple
+// of minutes so Garmin Connect has it, then runs the scheduled "garmin" job's
+// own command — skipped if a sync is already running or one was triggered in
+// the last 10 minutes (several uploads in a row → one sync).
+const GARMIN_TRIGGER_DELAY_MS = 2 * 60 * 1000;
+const GARMIN_TRIGGER_COOLDOWN_MS = 10 * 60 * 1000;
+const garminTrigger = globalThis as unknown as { __garminTriggerAt?: number };
+export function triggerGarminSyncSoon(reason: string): boolean {
+  const now = Date.now();
+  if (garminTrigger.__garminTriggerAt && now - garminTrigger.__garminTriggerAt < GARMIN_TRIGGER_COOLDOWN_MS) return false;
+  garminTrigger.__garminTriggerAt = now;
+  setTimeout(() => {
+    try {
+      const running = spawnSync("pgrep", ["-f", JOB_MATCH.garmin], { encoding: "utf8" });
+      if (running.status === 0 && running.stdout.trim()) {
+        console.log(`[garmin-trigger] sync already running — skipped (${reason})`);
+        return;
+      }
+      runCronJobNow("garmin");
+      console.log(`[garmin-trigger] GarminDB sync started (${reason})`);
+    } catch (e) {
+      console.warn("[garmin-trigger] couldn't start the GarminDB sync:", e);
+    }
+  }, GARMIN_TRIGGER_DELAY_MS);
+  return true;
+}

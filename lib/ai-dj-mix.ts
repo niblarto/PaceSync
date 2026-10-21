@@ -4,6 +4,8 @@ import { computeEasyPaceBias } from "@/lib/run-pace-bias";
 import { getAllTrackVotes } from "@/lib/track-feedback";
 import { getPlayedTracks, getLastEasyPaceSec, getAllTodaysRunEntries } from "@/lib/todays-run-history";
 import { getPlayCounts } from "@/lib/play-counts";
+import { isRestDaySegments, REST_MIX_SEGMENT } from "@/lib/rest-day-mix-shared";
+import { buildRestDayMix } from "@/lib/rest-day-mix";
 import { loadBpmOverrides } from "@/lib/bpm-overrides";
 import { join } from "path";
 import { spawn } from "child_process";
@@ -302,6 +304,12 @@ function mergePlayCounts(base: Record<string, number>, extra?: Record<string, nu
 // ai_dj/workout.py's build_workout_playlist docstring. Used by Pace Pro to
 // hand the LLM exactly lib/pace-analysis.ts's "fits" list per split.
 export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[], extraPlayCounts?: Record<string, number>, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[], ignorePlayCounts?: boolean): Promise<AiDjMixResult> {
+  // Rest day: two hours of unplayed songs in date-added order — built here
+  // directly, no AI DJ (lib/rest-day-mix.ts).
+  if (isRestDaySegments(segments)) {
+    onProgress?.(1, 1, REST_MIX_SEGMENT, "Picking unplayed songs, oldest added first");
+    return buildRestDayMix(avoidUris, extraPlayCounts);
+  }
   const config = loadAiDjConfig();
   if (!config?.enabled) {
     return { ok: false, error: "AI DJ is not enabled in Settings" };

@@ -59,7 +59,11 @@ fun MixBuildScreen(
         runCatching { api.getWorkouts() }
             .onSuccess { resp ->
                 if (resp.isSuccessful) {
-                    segments = resp.body()?.workouts?.find { it.date == date && it.title == title }?.segments ?: emptyList()
+                    val w = resp.body()?.workouts?.find { it.date == date && it.title == title }
+                    // Rest day: the server builds two hours of unplayed songs in
+                    // date-added order from these marker lines (lib/rest-day-mix-shared.ts).
+                    segments = if (w?.type == "rest") listOf("Rest • 2h - 2h", "Rest day — unplayed songs, oldest added first")
+                        else w?.segments ?: emptyList()
                 } else {
                     segmentsError = "Failed to load workout (${resp.code()})"
                 }

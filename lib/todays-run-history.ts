@@ -100,9 +100,18 @@ export function saveTodaysRunEntry(entry: TodaysRunEntry): void {
   }
 }
 
+// A rest day becomes "Rest (Walk)" once a walk is recorded, but its mix was
+// saved (and pinned) under "Rest" — lookups for the walk title fall back to it.
+export function workoutTitleAliases(title: string): string[] {
+  return title === "Rest (Walk)" ? [title, "Rest"] : [title];
+}
+
 export function getTodaysRunEntry(date: string, title: string): TodaysRunEntry | null {
-  const row = getDb().prepare("SELECT * FROM todays_run_history WHERE date = ? AND workout_title = ?").get(date, title) as Row | undefined;
-  return row ? rowToEntry(row) : null;
+  for (const t of workoutTitleAliases(title)) {
+    const row = getDb().prepare("SELECT * FROM todays_run_history WHERE date = ? AND workout_title = ?").get(date, t) as Row | undefined;
+    if (row) return rowToEntry(row);
+  }
+  return null;
 }
 
 // Every saved entry for a given date, regardless of title — for callers
@@ -143,9 +152,13 @@ export function removeTodaysRunEntry(date: string, title: string): void {
 // can exclude it without losing the record.
 export function setTodaysRunApproval(date: string, title: string, approved: boolean): TodaysRunEntry | null {
   const db = getDb();
-  const existing = db.prepare("SELECT * FROM todays_run_history WHERE date = ? AND workout_title = ?").get(date, title) as Row | undefined;
+  let existing: Row | undefined;
+  for (const t of workoutTitleAliases(title)) {
+    existing = db.prepare("SELECT * FROM todays_run_history WHERE date = ? AND workout_title = ?").get(date, t) as Row | undefined;
+    if (existing) break;
+  }
   if (!existing) return null;
-  db.prepare("UPDATE todays_run_history SET approved = ? WHERE date = ? AND workout_title = ?").run(approved ? 1 : 0, date, title);
+  db.prepare("UPDATE todays_run_history SET approved = ? WHERE date = ? AND workout_title = ?").run(approved ? 1 : 0, date, existing.workout_title);
   return rowToEntry({ ...existing, approved: approved ? 1 : 0 });
 }
 

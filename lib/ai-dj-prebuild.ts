@@ -1,4 +1,5 @@
 import { getFreshToken } from "@/lib/tokenStore";
+import { restDaySegments } from "@/lib/rest-day-mix-shared";
 import { getSpotifyUser } from "@/lib/spotify";
 import { upsertPlaylist } from "@/lib/spotify-playlist";
 import { buildAiDjMix } from "@/lib/ai-dj-mix";
@@ -34,7 +35,7 @@ const notify = (message: string, o: { title?: string; tags?: string; priority?: 
   cronNotify(message, { title: o.title ?? "AI DJ pre-build", tags: o.tags, priority: o.priority as "high" | undefined, type: "ai-dj" });
 
 function isRunnableWorkout(w: RunnaWorkout): boolean {
-  if (w.type === "rest") return false;
+  if (w.type === "rest") return true; // rest-day mix (unplayed songs, lib/rest-day-mix.ts)
   if (w.type === "strength") return w.durationSec > 0;
   return w.segments.length > 0;
 }
@@ -47,6 +48,7 @@ function isRunnableWorkout(w: RunnaWorkout): boolean {
 const STRENGTH_MIN_SEC = 10 * 60;
 const STRENGTH_MAX_SEC = 90 * 60;
 function mixSegmentsFor(w: RunnaWorkout): string[] {
+  if (w.type === "rest") return restDaySegments();
   if (w.type !== "strength") return w.segments;
   const raw = w.durationSec;
   const clamped = Math.min(Math.max(raw || 45 * 60, STRENGTH_MIN_SEC), STRENGTH_MAX_SEC);

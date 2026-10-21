@@ -252,6 +252,8 @@ FILES = [
     ('app/api/tracks/song-crawler/route.ts',     'app/api/tracks/song-crawler/route.ts'),
     ('lib/song-crawler.ts',                        'lib/song-crawler.ts'),
     ('lib/library-delete.ts',                      'lib/library-delete.ts'),
+    ('lib/rest-day-mix.ts',                        'lib/rest-day-mix.ts'),
+    ('lib/rest-day-mix-shared.ts',                 'lib/rest-day-mix-shared.ts'),
     ('app/api/tracks/lookup/route.ts',           'app/api/tracks/lookup/route.ts'),
     ('lib/track-lookup.ts',                        'lib/track-lookup.ts'),
     ('app/api/tracks/lookup-list/route.ts',        'app/api/tracks/lookup-list/route.ts'),

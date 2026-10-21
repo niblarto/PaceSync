@@ -25,21 +25,28 @@ export async function GET(req: NextRequest) {
   if (!DATE_RE.test(date) || !title) {
     return NextResponse.json({ error: "date (YYYY-MM-DD) and title required" }, { status: 400 });
   }
-  // A pinned mix outranks the history snapshot — it's what the nightly
-  // pre-build will actually put in "Today's Run" for that date.
-  const pin = await getPinnedMix(date, title);
-  if (pin?.timeline?.length) {
-    return NextResponse.json({
-      entry: {
-        date,
-        workoutTitle: pin.workoutTitle,
-        savedAt: pin.pinnedAt,
-        tracks: timelineToHistoryTracks(pin.timeline),
-        pinned: true,
-      },
-    });
+  // A rest day becomes "Rest (Walk)" once a walk is recorded, but its mix
+  // was saved under "Rest" — look that up too.
+  const titles = title === "Rest (Walk)" ? [title, "Rest"] : [title];
+  for (const t of titles) {
+    // A pinned mix outranks the history snapshot — it's what the nightly
+    // pre-build will actually put in "Today's Run" for that date.
+    const pin = await getPinnedMix(date, t);
+    if (pin?.timeline?.length) {
+      return NextResponse.json({
+        entry: {
+          date,
+          workoutTitle: pin.workoutTitle,
+          savedAt: pin.pinnedAt,
+          tracks: timelineToHistoryTracks(pin.timeline),
+          pinned: true,
+        },
+      });
+    }
+    const entry = getTodaysRunEntry(date, t);
+    if (entry) return NextResponse.json({ entry });
   }
-  return NextResponse.json({ entry: getTodaysRunEntry(date, title) });
+  return NextResponse.json({ entry: null });
 }
 
 export async function POST(req: NextRequest) {

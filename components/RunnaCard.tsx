@@ -8,6 +8,7 @@ import type { RaceSplitsEntry } from "@/lib/race-splits";
 import type { SavedPaceProMix } from "@/lib/pace-pro-saved";
 import { RouteMapLightbox } from "./RouteMapLightbox";
 import { AdvancedMixModal } from "./AdvancedMixModal";
+import { restDaySegments } from "@/lib/rest-day-mix-shared";
 import { openInSpotify } from "./TrackRow";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useBrokenTracklists } from "./useBrokenTracklists";
@@ -582,7 +583,7 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                         </>
                       );
                     })()}
-                    {run.type === "rest" && !isToday(run.date) && (
+                    {run.type === "rest" && !run.uid.startsWith("GARMIN_WALK_") && !isToday(run.date) && (
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                         <span className="text-slate-500">
                           Cut a run short? It won&apos;t show here until GarminDB syncs.
@@ -821,6 +822,8 @@ const STRENGTH_MAX_SEC = 90 * 60;
 // Opt-in per race: a race with no saved splits falls through to w.segments
 // unchanged, same as it always has.
 function mixSegmentsFor(w: RunnaWorkout, raceSplits?: RaceSplitsEntry | null): string[] {
+  // Rest day: two hours of unplayed songs, oldest added first (no AI DJ).
+  if (w.type === "rest") return restDaySegments();
   if (w.type === "race" && raceSplits?.splits.length) {
     return raceSplits.splits.map(s => `${s.splitMi}mi at ${fmtPaceSec(s.splitPaceSec)}/mi`);
   }
@@ -1174,7 +1177,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   useEffect(() => {
     if (!expanded || !aiDjEnabled) return;
     const w = workouts.find(x => x.uid === expanded);
-    if (!w || w.type === "rest") return;
+    if (!w) return;
     if (mixSnapshots[w.date] !== undefined) return;
     fetch(`/api/todays-run/history?date=${w.date}&title=${encodeURIComponent(w.title)}`)
       .then(r => r.json())
@@ -1778,7 +1781,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                         </div>
                       );
                     })()}
-                    {aiDjEnabled && ((isRun && w.segments.length > 0) || (w.type === "strength" && w.durationSec > 0)) && (() => {
+                    {aiDjEnabled && ((isRun && w.segments.length > 0) || (w.type === "strength" && w.durationSec > 0) || w.type === "rest") && (() => {
                       const st = mixState[w.uid];
                       const snap = mixSnapshots[w.date];
                       // A saved/pinned mix already exists for this workout even
@@ -1795,16 +1798,20 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                               disabled={st?.status === "building"}
                               className="text-xs px-2.5 py-1 rounded-lg border bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25 disabled:opacity-60 disabled:cursor-wait transition-colors"
                             >
-                              {st?.status === "building" ? "🎧 Mixing…" : hasExistingMix ? "🎧 Remix" : "🎧 AI DJ Mix"}
+                              {st?.status === "building" ? "🎧 Mixing…"
+                                : w.type === "rest" ? (hasExistingMix ? "🎧 New rest-day mix" : "🎧 Rest-day mix")
+                                : hasExistingMix ? "🎧 Remix" : "🎧 AI DJ Mix"}
                             </button>
+                            {w.type !== "rest" && (
                             <button
-                              onClick={e => { e.stopPropagation(); if (st?.status !== "building") setAdvancedMixFor(w); }}
-                              disabled={st?.status === "building"}
-                              title="Override BPM range, genre, play-count and candidate selection for this mix"
-                              className="text-xs px-2.5 py-1 rounded-lg border bg-slate-700/40 border-slate-600/40 text-slate-300 hover:bg-slate-700/60 disabled:opacity-60 transition-colors"
-                            >
-                              ⚙️ Advanced AI DJ Mix
-                            </button>
+                                onClick={e => { e.stopPropagation(); if (st?.status !== "building") setAdvancedMixFor(w); }}
+                                disabled={st?.status === "building"}
+                                title="Override BPM range, genre, play-count and candidate selection for this mix"
+                                className="text-xs px-2.5 py-1 rounded-lg border bg-slate-700/40 border-slate-600/40 text-slate-300 hover:bg-slate-700/60 disabled:opacity-60 transition-colors"
+                              >
+                                ⚙️ Advanced AI DJ Mix
+                              </button>
+                            )}
                             {st?.status === "building" && (
                               <MixProgressBar startedAt={st.startedAt ?? Date.now()} progress={st.progress} />
                             )}

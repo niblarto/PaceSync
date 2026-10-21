@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { loadStravaConfig } from "@/lib/strava-config";
 import { syncWorkoutToStravaActivity } from "@/lib/strava-workout-sync";
 import { sendNtfy } from "@/lib/ntfy";
+import { triggerGarminSyncSoon } from "@/lib/cron-schedule";
 
 // Strava's push subscription callback. Not gated by getServerSession — Strava
 // calls this directly with no session cookie; the GET handshake is protected
@@ -48,6 +49,10 @@ export async function POST(req: NextRequest) {
   }
 
   if (event.object_type === "activity" && event.aspect_type === "create") {
+    // Any new activity (runs, and walks Runna never sees) — pull it into
+    // GarminDB within minutes instead of waiting for the 06:00 sync, so it
+    // shows on Summary / today's rest card.
+    triggerGarminSyncSoon(`Strava activity ${event.object_id}`);
     syncWorkoutToStravaActivity(event.object_id)
       .then(result => {
         if (!result.ok) {

@@ -1,7 +1,7 @@
 import { loadRunnaUrl } from "@/lib/runna-config";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { getTodaysRunEntriesForDate } from "@/lib/todays-run-history";
-import { rememberWorkoutTitle, getRememberedWorkoutTitle } from "@/lib/workout-title-cache";
+import { rememberWorkoutTitle, getRememberedWorkoutTitle, getRememberedWorkoutSteps } from "@/lib/workout-title-cache";
 import { getRaceByGarminActivity } from "@/lib/races";
 import path from "path";
 
@@ -127,10 +127,17 @@ function suggestZone(type: WorkoutType, segments: string[]): number | null {
 // target - run at whatever pace feels truly easy!" — keep the pace clause,
 // drop everything after it (both here and in Strava descriptions/titles,
 // it's just noise once the step is already labeled "easy").
+//
+// A rest that follows the pace clause on the same line ("…(no faster than
+// 8:55/mi), 90s walking rest") is part of the step, not coaching — it's
+// kept, or the mix is built without that rest (confirmed: a warm up's 90s
+// walking rest was dropped, so the mix was 90s short before the reps).
 function stripCoachingAside(line: string): string {
   const m = line.match(/\(no faster than[^)]*\)/i);
   if (!m) return line;
-  return line.slice(0, m.index! + m[0].length).trim();
+  const kept = line.slice(0, m.index! + m[0].length).trim();
+  const rest = line.slice(m.index! + m[0].length).match(/^\s*,\s*(\d+\s*(?:s|sec|secs|seconds|min|mins|minutes)\b[^,.!]*\b(?:rest|walk)\w*)/i);
+  return rest ? `${kept}, ${rest[1].trim()}` : kept;
 }
 
 function parseSegments(description: string): string[] {
@@ -249,7 +256,7 @@ function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPast
       // VEVENT can vanish from a later fetch even after being marked
       // completed, and garminOrphanRun needs something better than
       // Garmin's raw activity name to fall back to when it does).
-      rememberWorkoutTitle(date, title);
+      rememberWorkoutTitle(date, title, stats.planSteps.length ? stats.planSteps : undefined);
     } else if (!isCompletedRun(uid, rawDesc) && date >= today && date <= cutoff) {
       const segments = parseSegments(rawDesc);
       const title = stripEmoji(rawSummary);
@@ -269,7 +276,7 @@ function parseIcs(text: string): { workouts: RunnaWorkout[]; pastRuns: RunnaPast
       // the one worth remembering NOW, before the day even arrives — by the
       // time it's run and Runna's feed either drops the event or is slow to
       // re-tag it completed, this is the only place that title still exists.
-      rememberWorkoutTitle(date, title);
+      rememberWorkoutTitle(date, title, segments.length ? segments : undefined);
     }
   }
 
@@ -320,6 +327,25 @@ function fmtGarminPace(distanceMi: number | null, elapsedTime: string | null): s
 // data/heuristic as app/api/garmin/activity-for-date's garminActivityForDate)
 // for a real recorded activity and, if one exists, surface it as a genuine
 // (if planless) past run instead of silently dropping it.
+// Best-effort plan from a saved mix's segment names when Runna's own plan
+// text is gone: the mixer merges short rests into neighbours ("A + 90s
+// walking rest") and repeats a rep's name per rep ("3x …"), so split the
+// merged names and list each step once, in order.
+function stepsFromMixSegments(segments: (string | null | undefined)[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const seg of segments) {
+    for (const part of (seg ?? "").split(" + ")) {
+      const p = part.trim();
+      const key = p.replace(/^\d+x\s+/i, "").toLowerCase();
+      if (!p || seen.has(key)) continue;
+      seen.add(key);
+      out.push(p);
+    }
+  }
+  return out;
+}
+
 function garminOrphanRun(date: string): RunnaPastRun | null {
   const config = loadGarminConfig();
   if (!config) return null;
@@ -365,8 +391,43 @@ function garminOrphanRun(date: string): RunnaPastRun | null {
       durationStr: fmtGarminDuration(row.elapsed_time),
       avgPace: fmtGarminPace(row.distance, row.elapsed_time),
       laps: [],
-      // No Runna plan text exists for a run Runna itself doesn't know
-      // about — planSteps stays empty rather than guessing at segments.
+      // Runna's event for the day can be missing (dropped from the feed
+      // before Runna re-adds it as completed) — show the plan remembered
+      // while it was upcoming, else the saved tracklist's segment names.
+      planSteps: getRememberedWorkoutSteps(date) ?? stepsFromMixSegments((savedEntry?.tracks ?? []).map(t => t.segment)),
+      appUrl: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// A walk recorded on a rest day (Garmin "walking" activity, longest if
+// several) — shown on Summary as "Rest (Walk)" with its distance and time.
+function garminRestWalk(date: string): RunnaPastRun | null {
+  const config = loadGarminConfig();
+  if (!config) return null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+    const db = new Database(path.join(config.dbPath, "garmin_activities.db"), { readonly: true, fileMustExist: true });
+    db.pragma("busy_timeout = 30000");
+    const row = db.prepare(`
+      SELECT distance, elapsed_time FROM activities
+      WHERE LOWER(sport) LIKE '%walk%' AND DATE(start_time) = ?
+      ORDER BY distance DESC LIMIT 1
+    `).get(date) as { distance: number | null; elapsed_time: string | null } | undefined;
+    db.close();
+    if (!row) return null;
+    return {
+      uid: `GARMIN_WALK_${date}`,
+      date,
+      title: "Rest (Walk)",
+      type: "rest",
+      distanceMi: row.distance,
+      durationStr: fmtGarminDuration(row.elapsed_time),
+      avgPace: fmtGarminPace(row.distance, row.elapsed_time),
+      laps: [],
       planSteps: [],
       appUrl: null,
     };
@@ -416,7 +477,7 @@ function reconcileWithGarmin(workouts: RunnaWorkout[], pastRuns: RunnaPastRun[],
   }
 
   const isRealRunnaCompletion = (r: RunnaPastRun) =>
-    !r.uid.startsWith("GARMIN_ORPHAN_") && !r.uid.startsWith("SYNTHETIC_REST_");
+    !r.uid.startsWith("GARMIN_ORPHAN_") && !r.uid.startsWith("SYNTHETIC_REST_") && !r.uid.startsWith("GARMIN_WALK_");
 
   for (const date of dates) {
     const existing = pastRuns.find(r => r.date === date);
@@ -469,11 +530,17 @@ function fillRestDays(workouts: RunnaWorkout[], pastRuns: RunnaPastRun[], lookba
       const orphan = garminOrphanRun(date);
       // Today's rest day belongs on the Schedule (not Summary) for the whole
       // calendar day — the web Schedule card hides any date Summary has.
-      if (!orphan && date === today) {
+      // Today's rest day stays on the Schedule all day — until an activity
+      // (a walk) is recorded, when it moves to Summary as "Rest (Walk)" with
+      // its links, tracklist and confirm. (Its mix, saved under "Rest", is
+      // still found — lookups fall back from "Rest (Walk)" to "Rest".)
+      const walk = !orphan ? garminRestWalk(date) : null;
+      if (!orphan && !walk && date === today) {
         workouts.push(syntheticRestWorkout(date));
         continue;
       }
-      pastRuns.push(orphan ?? {
+      if (walk) { pastRuns.push(walk); continue; }
+      pastRuns.push(orphan ?? garminRestWalk(date) ?? {
         uid: `SYNTHETIC_REST_${date}`,
         date,
         title: "Rest",

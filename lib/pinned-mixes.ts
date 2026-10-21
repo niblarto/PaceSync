@@ -85,8 +85,12 @@ function dedupeAndRetimeTimeline(timeline: AiDjMixResponse["timeline"]): AiDjMix
 }
 
 export async function getPinnedMix(date: string, title: string): Promise<PinnedMix | null> {
-  const row = getDb().prepare("SELECT * FROM pinned_mixes WHERE date = ? AND workout_title = ?").get(date, title) as Row | undefined;
-  return row ? rowToMix(row) : null;
+  // "Rest (Walk)" falls back to the rest day's mix pinned under "Rest".
+  for (const t of title === "Rest (Walk)" ? [title, "Rest"] : [title]) {
+    const row = getDb().prepare("SELECT * FROM pinned_mixes WHERE date = ? AND workout_title = ?").get(date, t) as Row | undefined;
+    if (row) return rowToMix(row);
+  }
+  return null;
 }
 
 // Rejects (no-op, returns false) a write whose startedAtMs is older than
