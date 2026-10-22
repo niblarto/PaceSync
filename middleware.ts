@@ -59,6 +59,7 @@ export const config = {
     "/settings/:path*",
     "/garmin/:path*",
     "/races/:path*",
+    "/coach/:path*",
     "/strava/:path*",
     "/api/auth/signin/:path*",
     "/api/auth/callback/:path*",

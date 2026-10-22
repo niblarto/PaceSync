@@ -2,6 +2,7 @@ package com.pacesync.app.data
 
 import android.content.Context
 import com.pacesync.app.network.ApiClient
+import com.pacesync.app.network.CoachApi
 import com.pacesync.app.network.MixBuildClient
 import com.pacesync.app.network.PaceSyncApi
 
@@ -12,4 +13,5 @@ class AppContainer(context: Context) {
     val tokenStore: TokenStore = TokenStore(context.applicationContext)
     val api: PaceSyncApi by lazy { ApiClient.create(tokenStore) }
     val mixBuildClient: MixBuildClient by lazy { MixBuildClient(tokenStore) }
+    val coachApi: CoachApi by lazy { CoachApi.create(tokenStore) }
 }

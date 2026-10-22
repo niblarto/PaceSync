@@ -61,6 +61,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun ActivityDetailScreen(
     api: PaceSyncApi,
+    coachApi: com.pacesync.app.network.CoachApi? = null,
     date: String,
     title: String,
     onPickRoute: (distanceMi: Double) -> Unit = {},
@@ -215,6 +216,12 @@ fun ActivityDetailScreen(
                 Text(withWeekday(date), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 Text(title, style = MaterialTheme.typography.headlineSmall)
                 SummaryDetails(summary)
+                // Post-run effort/feel/notes for a finished run (not rest days).
+                val pastRun = summary as? com.pacesync.app.network.dto.RunnaPastRun
+                if (coachApi != null && pastRun != null && pastRun.type != "rest") {
+                    androidx.compose.foundation.layout.Spacer(Modifier.height(10.dp))
+                    com.pacesync.app.ui.coach.RunFeedbackCard(coachApi, date = pastRun.date, title = pastRun.title)
+                }
             }
         }
 

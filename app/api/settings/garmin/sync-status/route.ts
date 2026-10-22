@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { spawnSync, spawn } from "child_process";
+import path from "path";
 import fs from "fs";
 
 const WRAPPER  = process.env.GARMINDB_SYNC_WRAPPER || "/home/pi/garmin_run.py";
@@ -142,7 +143,9 @@ export async function POST() {
   }
 
   // Launch detached so it outlives this request
-  const child = spawn(PYTHON, [WRAPPER, "--all", "--download", "--import", "--analyze", "--latest"], {
+  // Afterwards, store the new runs' laps/weather/HRV for the Coach.
+  const afterSync = path.join(process.cwd(), "scripts", "garmin_after_sync.sh");
+  const child = spawn("/bin/sh", ["-c", '"$0" "$1" --all --download --import --analyze --latest; "$2"', PYTHON, WRAPPER, afterSync], {
     detached: true,
     stdio: "ignore",
   });

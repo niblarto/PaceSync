@@ -12,6 +12,7 @@ import { restDaySegments } from "@/lib/rest-day-mix-shared";
 import { openInSpotify } from "./TrackRow";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useBrokenTracklists } from "./useBrokenTracklists";
+import { RunFeedbackChip, RunFeedbackPanel, type RunFeedbackValue } from "./RunFeedbackPanel";
 
 interface PaceSpmRow { bucket: number; avg_spm: number; records: number; }
 
@@ -284,6 +285,18 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
   const [splitsLinkBusy, setSplitsLinkBusy] = useState(false);
   const [splitsLinkError, setSplitsLinkError] = useState<string | null>(null);
   const [splitsLinkedMsg, setSplitsLinkedMsg] = useState<{ date: string; text: string } | null>(null);
+  // Post-run effort/feel/notes, keyed "date|title".
+  const [feedback, setFeedback] = useState<Record<string, RunFeedbackValue>>({});
+  const oldestRunDate = pastRuns.reduce<string | null>((min, r) => (min == null || r.date < min ? r.date : min), null);
+  useEffect(() => {
+    if (!oldestRunDate) return;
+    fetch(`/api/run-feedback?from=${oldestRunDate}`)
+      .then(r => r.json())
+      .then((d: { feedback?: RunFeedbackValue[] }) => {
+        setFeedback(Object.fromEntries((d.feedback ?? []).map(f => [`${f.date}|${f.title}`, f])));
+      })
+      .catch(() => {});
+  }, [oldestRunDate]);
 
   function openSplitsLinkPicker(date: string) {
     setSplitsLinking(date);
@@ -509,6 +522,8 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                     <span className="text-xs text-slate-500 shrink-0">{run.avgPace}</span>
                   )}
 
+                  <RunFeedbackChip value={feedback[`${run.date}|${run.title}`]} />
+
                   <span className={`text-xs font-medium px-2 py-0.5 rounded-full border shrink-0 ${meta.color}`}>
                     {meta.label}
                   </span>
@@ -583,6 +598,19 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
                         </>
                       );
                     })()}
+                    {run.type !== "rest" && (
+                      <RunFeedbackPanel
+                        date={run.date}
+                        title={run.title}
+                        value={feedback[`${run.date}|${run.title}`]}
+                        onSaved={v => setFeedback(f => {
+                          const next = { ...f };
+                          const key = `${run.date}|${run.title}`;
+                          if (v) next[key] = v; else delete next[key];
+                          return next;
+                        })}
+                      />
+                    )}
                     {run.type === "rest" && !run.uid.startsWith("GARMIN_WALK_") && !isToday(run.date) && (
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                         <span className="text-slate-500">

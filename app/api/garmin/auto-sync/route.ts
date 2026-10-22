@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { spawnSync, spawn } from "child_process";
+import path from "path";
 import { getDb } from "@/lib/db";
 
 // Triggers a GarminDB "--latest" sync the first time today's completed run
@@ -57,7 +58,9 @@ export async function POST(req: NextRequest) {
   }
 
   markTriggered(date);
-  const child = spawn(PYTHON, [WRAPPER, "--all", "--download", "--import", "--analyze", "--latest"], {
+  // Afterwards, store the new runs' laps/weather/HRV for the Coach.
+  const afterSync = path.join(process.cwd(), "scripts", "garmin_after_sync.sh");
+  const child = spawn("/bin/sh", ["-c", '"$0" "$1" --all --download --import --analyze --latest; "$2"', PYTHON, WRAPPER, afterSync], {
     detached: true,
     stdio: "ignore",
   });

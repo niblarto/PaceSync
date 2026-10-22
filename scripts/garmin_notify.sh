@@ -16,3 +16,5 @@ fi
 curl -s -X POST http://localhost:5005/api/cron/notify \
   -H 'Content-Type: application/json' -H "X-Cron-Secret: $secret" \
   -d "$body" >/dev/null
+# Store the new runs' laps/weather/HRV for the Coach.
+"$(dirname "$0")/garmin_after_sync.sh"

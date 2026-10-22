@@ -148,6 +148,34 @@ FILES = [
     ('components/PaceProClient.tsx',              'components/PaceProClient.tsx'),
     ('app/races/page.tsx',                        'app/races/page.tsx'),
     ('components/RacesClient.tsx',                'components/RacesClient.tsx'),
+    ('app/coach/page.tsx',                        'app/coach/page.tsx'),
+    ('components/CoachClient.tsx',                'components/CoachClient.tsx'),
+    ('app/api/coach/chat/route.ts',               'app/api/coach/chat/route.ts'),
+    ('app/api/coach/session/route.ts',            'app/api/coach/session/route.ts'),
+    ('app/api/coach/context/route.ts',            'app/api/coach/context/route.ts'),
+    ('app/api/settings/coach/route.ts',           'app/api/settings/coach/route.ts'),
+    ('lib/coach-config.ts',                       'lib/coach-config.ts'),
+    ('lib/coach-llm.ts',                          'lib/coach-llm.ts'),
+    ('lib/coach-context.ts',                      'lib/coach-context.ts'),
+    ('lib/coach-store.ts',                        'lib/coach-store.ts'),
+    ('lib/coach-prompt.ts',                       'lib/coach-prompt.ts'),
+    ('lib/coach-memory.ts',                       'lib/coach-memory.ts'),
+    ('lib/coach-session.ts',                      'lib/coach-session.ts'),
+    ('app/api/coach/memory/route.ts',             'app/api/coach/memory/route.ts'),
+    ('lib/run-feedback.ts',                       'lib/run-feedback.ts'),
+    ('app/api/run-feedback/route.ts',             'app/api/run-feedback/route.ts'),
+    ('components/RunFeedbackPanel.tsx',           'components/RunFeedbackPanel.tsx'),
+    ('lib/garmin-personal-api.ts',                'lib/garmin-personal-api.ts'),
+    ('app/api/settings/garmin-personal-api/route.ts', 'app/api/settings/garmin-personal-api/route.ts'),
+    ('components/GarminPersonalApiCard.tsx',      'components/GarminPersonalApiCard.tsx'),
+    ('lib/coach-garmin-extra.ts',                 'lib/coach-garmin-extra.ts'),
+    ('scripts/fit_laps.py',                       'scripts/fit_laps.py'),
+    ('scripts/garmin_after_sync.sh',              'scripts/garmin_after_sync.sh'),
+    ('app/api/coach/refresh-data/route.ts',       'app/api/coach/refresh-data/route.ts'),
+    ('lib/coach-weekly.ts',                       'lib/coach-weekly.ts'),
+    ('app/api/cron/coach-weekly/route.ts',        'app/api/cron/coach-weekly/route.ts'),
+    ('app/api/coach/reports/route.ts',            'app/api/coach/reports/route.ts'),
+    ('components/CoachSettingsCard.tsx',          'components/CoachSettingsCard.tsx'),
     ('app/races/[id]/page.tsx',                    'app/races/[id]/page.tsx'),
     ('components/RaceDetailClient.tsx',           'components/RaceDetailClient.tsx'),
     ('components/InlineRouteMap.tsx',             'components/InlineRouteMap.tsx'),
@@ -386,6 +414,8 @@ FILES = [
     # AI DJ workout mixer (on-Pi fallback when the remote service is down;
     # source of truth lives in ../AI_DJ)
     ('scripts/ai_dj_bridge.py',                   'scripts/ai_dj_bridge.py'),
+    ('scripts/coach_bridge.py',                   'scripts/coach_bridge.py'),
+    ('scripts/coach_embed.py',                    'scripts/coach_embed.py'),
     ('scripts/parse_workout_segments.py',         'scripts/parse_workout_segments.py'),
     ('scripts/garmin_notify.sh',                  'scripts/garmin_notify.sh'),
     ('../AI_DJ/ai_dj/__init__.py',                'ai_dj/__init__.py'),
@@ -538,6 +568,15 @@ print('  Checking google-genai (Gemini API) dependency...')
 run(ssh, 'python3 -c "import google.genai" 2>/dev/null && echo "google-genai OK" || echo "installing google-genai..."')
 run(ssh, 'python3 -c "import google.genai" 2>/dev/null || pip3 install --break-system-packages -q google-genai')
 
+# fastembed (ONNX MiniLM) — the Pi's backup embedding model for Coach memory
+# when the PC (bge-large via Ollama) is off. See scripts/coach_embed.py.
+print('  Checking fastembed (Coach memory) dependency...')
+run(ssh, 'python3 -c "import fastembed" 2>/dev/null && echo "fastembed OK" || echo "installing fastembed..."')
+run(ssh, 'python3 -c "import fastembed" 2>/dev/null || pip3 install --break-system-packages -q fastembed')
+# fitdecode — reads lap records from activity FIT files for the Coach
+# (scripts/fit_laps.py); GarminDB imports laps with empty times/distances.
+run(ssh, 'python3 -c "import fitdecode" 2>/dev/null || pip3 install --break-system-packages -q fitdecode')
+
 print('  Building Next.js app...')
 # Abort the deploy if the build fails — restarting the service without a
 # production build takes the whole app down.
@@ -658,6 +697,15 @@ broken_cron_line = (
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/broken-tracklists' || {{ (crontab -l 2>/dev/null; echo '{broken_cron_line}') | crontab -; }}""")
 
+print('  Ensuring cron job (weekly coach report, default Sunday 19:00)...')
+coach_cron_log = f'/home/{PI["user"]}/cron-coach-weekly.log'
+coach_cron_line = (
+    f'0 19 * * 0 curl -s -m 900 -o {coach_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/coach-weekly '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/coach-weekly' || {{ (crontab -l 2>/dev/null; echo '{coach_cron_line}') | crontab -; }}""")
+
 # Garmin sync completion notification: sftp doesn't carry the exec bit (and a
 # Windows checkout may add CRLFs), so normalise the script, then append it to
 # the existing garmin cron line if the hook isn't there yet. The garmin cron
@@ -665,6 +713,8 @@ run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/broken-tracklists' || {
 # install-if-missing step for it here.
 print('  Ensuring Garmin sync ntfy hook...')
 notify_sh = f'{PI_REMOTE}/scripts/garmin_notify.sh'
+after_sh = f'{PI_REMOTE}/scripts/garmin_after_sync.sh'
+run(ssh, f"sed -i 's/\\r$//' {after_sh} && chmod +x {after_sh}")
 run(ssh, f"sed -i 's/\\r$//' {notify_sh} && chmod +x {notify_sh}")
 run(ssh, f"""crontab -l 2>/dev/null | grep 'garmin_run.py' | grep -q 'garmin_notify' || {{ crontab -l 2>/dev/null | sed '/garmin_run.py/ {{ /garmin_notify/! s|$|; {notify_sh} $?| }}' | crontab -; }}""")
 

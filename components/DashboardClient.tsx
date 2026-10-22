@@ -3030,6 +3030,9 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 Garmin
               </Link>
             )}
+            <Link href="/coach" className="text-xs px-2.5 py-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 transition-colors">
+              🧠 Coach
+            </Link>
             <Link href="/pace-pro" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
               Pace Pro
             </Link>

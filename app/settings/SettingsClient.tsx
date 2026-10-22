@@ -1,5 +1,7 @@
 "use client";
 
+import { CoachSettingsCard } from "@/components/CoachSettingsCard";
+import { GarminPersonalApiCard } from "@/components/GarminPersonalApiCard";
 import { createPortal } from "react-dom";
 import { SongProgressBar, ensurePlaying } from "@/components/SongProgressBar";
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -5305,6 +5307,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         )}
       </div>
 
+      <CoachSettingsCard />
+
       {/* Runna */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
         <div className="px-5 py-4 border-b border-white/10">
@@ -5538,6 +5542,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           {discogsConfigured && <span className="text-xs text-green-400">✓ Configured</span>}
         </div>
       </div>
+
+      <GarminPersonalApiCard />
 
       {/* Garmin DB */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
@@ -5903,6 +5909,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               { key: "heal", label: "Nightly library heal", desc: "Fills every gap it can — Spotify links, audio features, durations and genres — and reports what changed" },
               { key: "librarySync", label: "Library ↔ Spotify sync", desc: "Two-way sync of the library and its Spotify playlist (deleted tracks are removed, new ones added both ways)" },
               { key: "brokenCheck", label: "Broken tracklist check", desc: "Notifies you when an upcoming schedule or Pace Pro tracklist still contains a deleted track" },
+              { key: "coachWeekly", label: "Weekly coach report", desc: "The Coach reviews your week against the plan, load and recovery, sets up next week, and notifies you" },
             ] as const).map(meta => {
               const job = cronJobs.find(j => j.key === meta.key);
               if (!job) return null;

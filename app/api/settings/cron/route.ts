@@ -5,7 +5,7 @@ import { getCronLog } from "@/lib/cron-log";
 
 export const dynamic = "force-dynamic";
 
-const VALID_KEYS = ["garmin", "weekly", "aidj", "aidjRetry", "digest", "librarySync", "heal", "brokenCheck"];
+const VALID_KEYS = ["garmin", "weekly", "aidj", "aidjRetry", "digest", "librarySync", "heal", "brokenCheck", "coachWeekly"];
 const TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 
 // The Pi's own clock + time zone, so Settings can show the time the cron
