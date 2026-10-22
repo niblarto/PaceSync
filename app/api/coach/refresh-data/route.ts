@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { prefetchCoachData } from "@/lib/coach-context";
 
 export const dynamic = "force-dynamic";
@@ -10,7 +9,7 @@ export const maxDuration = 300;
 // weather and HRV are stored before the Coach needs them.
 export async function POST(req: NextRequest) {
   const hasCronSecret = process.env.CRON_SECRET && req.headers.get("X-Cron-Secret") === process.env.CRON_SECRET;
-  if (!hasCronSecret && !(await getServerSession(authOptions))) {
+  if (!hasCronSecret && !(await hasApiAccess(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const result = await prefetchCoachData();

@@ -4,6 +4,7 @@ import android.content.Context
 import com.pacesync.app.network.ApiClient
 import com.pacesync.app.network.CoachApi
 import com.pacesync.app.network.MixBuildClient
+import com.pacesync.app.network.NutritionApi
 import com.pacesync.app.network.PaceSyncApi
 
 // Minimal manual DI — no Hilt needed at this scope (a handful of screens,
@@ -14,4 +15,5 @@ class AppContainer(context: Context) {
     val api: PaceSyncApi by lazy { ApiClient.create(tokenStore) }
     val mixBuildClient: MixBuildClient by lazy { MixBuildClient(tokenStore) }
     val coachApi: CoachApi by lazy { CoachApi.create(tokenStore) }
+    val nutritionApi: NutritionApi by lazy { NutritionApi.create(tokenStore) }
 }

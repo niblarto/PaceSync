@@ -46,7 +46,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import android.content.Context
+import androidx.compose.ui.platform.LocalContext
+import com.pacesync.app.health.NutritionSync
 import com.pacesync.app.network.CoachApi
+import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.CoachMemory
 import com.pacesync.app.network.dto.CoachMessage
 import com.pacesync.app.network.dto.CoachReport
@@ -88,28 +92,59 @@ private fun memoryDate(dateId: Int): String = runCatching {
     LocalDate.parse(dateId.toString(), DateTimeFormatter.BASIC_ISO_DATE).format(DateTimeFormatter.ofPattern("EEE d MMM"))
 }.getOrDefault(dateId.toString())
 
+// Food only reaches the server when this phone syncs Health Connect, so send
+// the latest before the coach reads it (on opening, before each message and
+// report, and from the refresh button). Quick; failures are ignored.
+private suspend fun syncFood(context: Context, api: PaceSyncApi) {
+    runCatching { NutritionSync.sync(context, api, NutritionSync.PERIODIC_DAYS) }
+}
+
 @Composable
-fun CoachScreen(coachApi: CoachApi) {
+fun CoachScreen(coachApi: CoachApi, api: PaceSyncApi) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var tab by remember { mutableIntStateOf(0) }
     // "Discuss with coach" on the Report tab hands a message to the Chat tab.
     var queued by remember { mutableStateOf<String?>(null) }
+    var refreshing by remember { mutableStateOf(false) }
+    var refreshMsg by remember { mutableStateOf<String?>(null) }
+    val sync: suspend () -> Unit = { syncFood(context, api) }
+
+    LaunchedEffect(Unit) { sync() }
 
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        TabRow(selectedTabIndex = tab) {
-            listOf("Chat", "Report", "Memory").forEachIndexed { i, label ->
-                Tab(selected = tab == i, onClick = { tab = i }, text = { Text(label) })
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TabRow(selectedTabIndex = tab, modifier = Modifier.weight(1f)) {
+                listOf("Chat", "Report", "Memory").forEachIndexed { i, label ->
+                    Tab(selected = tab == i, onClick = { tab = i }, text = { Text(label) })
+                }
+            }
+            TextButton(onClick = {
+                refreshing = true
+                refreshMsg = null
+                scope.launch {
+                    sync()
+                    val ok = runCatching { coachApi.refreshData().isSuccessful }.getOrDefault(false)
+                    refreshMsg = if (ok) "Coach data refreshed" else "Food synced; server refresh failed"
+                    refreshing = false
+                }
+            }, enabled = !refreshing) {
+                if (refreshing) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Text("↻")
             }
         }
+        refreshMsg?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+        }
         when (tab) {
-            0 -> ChatTab(coachApi, queued) { queued = null }
-            1 -> ReportTab(coachApi) { msg -> queued = msg; tab = 0 }
+            0 -> ChatTab(coachApi, queued, sync) { queued = null }
+            1 -> ReportTab(coachApi, sync) { msg -> queued = msg; tab = 0 }
             else -> MemoryTab(coachApi)
         }
     }
 }
 
 @Composable
-private fun ChatTab(coachApi: CoachApi, queued: String?, onQueuedTaken: () -> Unit) {
+private fun ChatTab(coachApi: CoachApi, queued: String?, sync: suspend () -> Unit, onQueuedTaken: () -> Unit) {
     val scope = rememberCoroutineScope()
     var messages by remember { mutableStateOf<List<CoachMessage>?>(null) }
     var model by remember { mutableStateOf("") }
@@ -145,6 +180,7 @@ private fun ChatTab(coachApi: CoachApi, queued: String?, onQueuedTaken: () -> Un
         pending = msg
         input = ""
         scope.launch {
+            sync()
             val resp = runCatching { coachApi.send(CoachSendRequest(msg)) }
             val r = resp.getOrNull()
             val body = r?.body()
@@ -250,19 +286,20 @@ private fun Bubble(m: CoachMessage) {
 }
 
 @Composable
-private fun ReportTab(coachApi: CoachApi, onDiscuss: (String) -> Unit) {
+private fun ReportTab(coachApi: CoachApi, sync: suspend () -> Unit, onDiscuss: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     var reports by remember { mutableStateOf<List<CoachReport>?>(null) }
     var idx by remember { mutableIntStateOf(0) }
     var writing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var weekMenu by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf<Int?>(null) }
 
     suspend fun load() {
         val body = runCatching { coachApi.getReports().body() }.getOrNull() ?: return
         val firstBefore = reports?.firstOrNull()?.id
         reports = body.reports
-        if (body.reports.firstOrNull()?.id != firstBefore) idx = 0
+        if (body.reports.firstOrNull()?.id != firstBefore || idx >= body.reports.size) idx = 0
         if (writing && !body.writing && body.error != null) error = body.error
         writing = body.writing
     }
@@ -284,6 +321,7 @@ private fun ReportTab(coachApi: CoachApi, onDiscuss: (String) -> Unit) {
             OutlinedButton(onClick = {
                 error = null
                 scope.launch {
+                    sync()
                     val ok = runCatching { coachApi.writeReport().isSuccessful }.getOrDefault(false)
                     if (ok) writing = true else error = "Couldn't start the report"
                 }
@@ -299,10 +337,32 @@ private fun ReportTab(coachApi: CoachApi, onDiscuss: (String) -> Unit) {
             )
             else -> {
                 val r = reports!![idx.coerceIn(0, reports!!.size - 1)]
-                Text(
-                    "Week of ${weekLabel(r.weekStart)} · written ${timeLabel(r.createdAt)}${r.model?.let { " · $it" } ?: ""}",
-                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Week of ${weekLabel(r.weekStart)} · written ${timeLabel(r.createdAt)}${r.model?.let { " · $it" } ?: ""}",
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (confirmDelete == r.id) {
+                        TextButton(onClick = {
+                            confirmDelete = null
+                            scope.launch {
+                                val resp = runCatching { coachApi.deleteReport(r.id) }.getOrNull()
+                                if (resp?.isSuccessful == true) {
+                                    idx = 0
+                                    load()
+                                } else {
+                                    error = resp?.let { CoachApi.errorText(it) } ?: "Couldn't delete the report"
+                                }
+                            }
+                        }) { Text("Delete", color = Color(0xFFF87171)) }
+                        TextButton(onClick = { confirmDelete = null }) { Text("Cancel") }
+                    } else {
+                        TextButton(onClick = { confirmDelete = r.id }, enabled = !writing) {
+                            Text("🗑 Delete", color = MaterialTheme.colorScheme.secondary)
+                        }
+                    }
+                }
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                     Box(Modifier.padding(12.dp)) { CoachMarkdown(r.content) }
                 }

@@ -48,6 +48,13 @@ interface CoachApi {
     @POST("api/coach/reports")
     suspend fun writeReport(): Response<Unit>
 
+    // Refresh laps, weather, HRV and zones on the server before the coach reads them.
+    @POST("api/coach/refresh-data")
+    suspend fun refreshData(): Response<Unit>
+
+    @DELETE("api/coach/reports")
+    suspend fun deleteReport(@Query("id") id: Int): Response<Unit>
+
     @GET("api/run-feedback")
     suspend fun getRunFeedback(@Query("date") date: String, @Query("title") title: String): Response<RunFeedbackResponse>
 

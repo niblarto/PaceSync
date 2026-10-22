@@ -5,6 +5,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Restaurant
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -30,6 +31,7 @@ import com.pacesync.app.data.AppContainer
 import com.pacesync.app.ui.coach.CoachScreen
 import com.pacesync.app.ui.crawler.CrawlerScreen
 import com.pacesync.app.ui.detail.ActivityDetailScreen
+import com.pacesync.app.ui.nutrition.NutritionScreen
 import com.pacesync.app.ui.detail.MixBuildScreen
 import com.pacesync.app.ui.detail.PaceChartScreen
 import com.pacesync.app.ui.detail.RoutePickerScreen
@@ -51,12 +53,13 @@ private sealed class Dest(val route: String, val label: String) {
     data object Summary : Dest("summary", "Summary")
     data object Crawler : Dest("crawler", "Crawler")
     data object Coach : Dest("coach", "Coach")
+    data object Nutrition : Dest("nutrition", "Nutrition")
     data object Settings : Dest("settings", "Settings")
 }
 
 // Settings is reached via the top-bar cog (top right), not a bottom tab —
 // per explicit user request.
-private val bottomDestinations = listOf(Dest.Schedule, Dest.Summary, Dest.Coach, Dest.Crawler)
+private val bottomDestinations = listOf(Dest.Schedule, Dest.Summary, Dest.Coach, Dest.Nutrition, Dest.Crawler)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -80,6 +83,7 @@ fun PaceSyncApp(container: AppContainer) {
         currentRoute == Dest.Summary.route -> "Summary"
         currentRoute == Dest.Crawler.route -> "Song Crawler"
         currentRoute == Dest.Coach.route -> "🧠 Coach"
+        currentRoute == Dest.Nutrition.route -> "🥗 Nutrition"
         currentRoute == Dest.Settings.route -> "Settings"
         else -> null
     }
@@ -126,6 +130,7 @@ fun PaceSyncApp(container: AppContainer) {
                                         Dest.Schedule -> Icons.Filled.DateRange
                                         Dest.Crawler -> Icons.Filled.Search
                                         Dest.Coach -> Icons.Filled.Psychology
+                                        Dest.Nutrition -> Icons.Filled.Restaurant
                                         else -> Icons.Filled.Settings
                                     },
                                     contentDescription = dest.label,
@@ -191,7 +196,8 @@ fun PaceSyncApp(container: AppContainer) {
             }
             composable(Dest.Settings.route) { SettingsScreen(container.tokenStore, container.api) }
             composable(Dest.Crawler.route) { CrawlerScreen(container.api) }
-            composable(Dest.Coach.route) { CoachScreen(container.coachApi) }
+            composable(Dest.Coach.route) { CoachScreen(container.coachApi, container.api) }
+            composable(Dest.Nutrition.route) { NutritionScreen(container.nutritionApi, container.api) }
         }
     }
 }
