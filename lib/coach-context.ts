@@ -3,6 +3,8 @@ import { getDb } from "@/lib/db";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { fetchRunnaSchedule, type RunnaPastRun, type RunnaWorkout } from "@/lib/runna-schedule";
 import { listRaces } from "@/lib/races";
+import { buildNutritionDashboard, type NutritionDashboard } from "@/lib/nutrition-dashboard";
+import { formatWeight, formatWeightDelta } from "@/lib/weight-format";
 import { listRunFeedback, effortLabel, FEEL_LABELS, type RunFeedback } from "@/lib/run-feedback";
 import { formatLaps, getCurrentHrZones, type FitLap, getHrvDays, getRunLaps, getZoneSplits, isStructured, zonesText, type HrvDay, type HrZones } from "@/lib/coach-garmin-extra";
 
@@ -13,8 +15,7 @@ import { formatLaps, getCurrentHrZones, type FitLap, getHrvDays, getRunLaps, get
 
 const RECENT_RUN_DAYS = 28;
 const WEEKS = 12;
-const WEATHER_RUNS = 10;
-const LAP_RUNS = 8;
+const DETAIL_DAYS = 7; // full day-by-day detail; older runs are one-liners
 
 interface ActivityRow {
   activity_id: string;
@@ -176,10 +177,12 @@ function zoneSplit(a: ActivityRow, recalculated?: number[]): string {
   return "zones " + z.map((s, i) => `Z${i + 1} ${Math.round((s / total) * 100)}%`).join(" ");
 }
 
-function wellnessSection(hrvApi: Map<string, HrvDay>): string[] {
+// Recovery figures per day (resting HR, sleep, HRV, stress, body battery),
+// merged into that day's DAY BY DAY entry.
+function recoveryByDay(hrvApi: Map<string, HrvDay>, since: string): Map<string, string> {
+  const out = new Map<string, string>();
   const db = openGarmin("garmin.db");
-  if (!db) return [];
-  const since = localDate(new Date(Date.now() - 7 * 86_400_000));
+  if (!db) return out;
   try {
     const days = db.prepare(`
       SELECT DATE(d.day) AS day, d.rhr, d.stress_avg, d.bb_max, s.total_sleep, s.score AS sleep_score, s.qualifier,
@@ -188,34 +191,25 @@ function wellnessSection(hrvApi: Map<string, HrvDay>): string[] {
       LEFT JOIN sleep s ON DATE(s.day) = DATE(d.day)
       LEFT JOIN hrv h ON DATE(h.day) = DATE(d.day)
       WHERE DATE(d.day) >= ?
-      ORDER BY d.day DESC
     `).all(since) as { day: string; rhr: number | null; stress_avg: number | null; bb_max: number | null; total_sleep: string | null; sleep_score: number | null; qualifier: string | null; hrv: number | null; hrv_status: string | null }[];
-    if (!days.length) return [];
-    const lines = ["## Recovery — last 7 days (Garmin)"];
     for (const d of days) {
+      const h = hrvApi.get(d.day); // GarminDB's HRV table is empty; prefer the Personal API's
+      const hrv = h?.lastNightAvg != null
+        ? `HRV ${h.lastNightAvg}ms (7-day avg ${h.weeklyAvg ?? "-"}${h.balancedLow != null && h.balancedUpper != null ? `, baseline ${h.balancedLow}-${h.balancedUpper}` : ""}${h.status ? `, ${h.status.toLowerCase()}` : ""})`
+        : d.hrv != null ? `HRV ${d.hrv}${d.hrv_status ? ` ${d.hrv_status.toLowerCase()}` : ""}` : "";
       const parts = [
         d.rhr != null ? `resting HR ${d.rhr}` : "",
         d.total_sleep ? `sleep ${clock(secs(d.total_sleep)).replace(/:\d\d$/, "")}h${d.sleep_score != null ? ` (score ${d.sleep_score}${d.qualifier ? ` ${d.qualifier.toLowerCase()}` : ""})` : ""}` : "",
-        (() => {
-          // GarminDB's HRV table is empty — prefer the Personal API's.
-          const h = hrvApi.get(d.day);
-          if (h?.lastNightAvg != null) {
-            const base = h.balancedLow != null && h.balancedUpper != null ? `, baseline ${h.balancedLow}-${h.balancedUpper}` : "";
-            return `HRV ${h.lastNightAvg}ms (7-day avg ${h.weeklyAvg ?? "-"}${base}${h.status ? `, ${h.status.toLowerCase()}` : ""})`;
-          }
-          return d.hrv != null ? `HRV ${d.hrv}${d.hrv_status ? ` ${d.hrv_status.toLowerCase()}` : ""}` : "";
-        })(),
+        hrv,
         d.stress_avg != null ? `stress ${d.stress_avg}` : "",
         d.bb_max != null ? `body battery max ${d.bb_max}` : "",
       ].filter(Boolean);
-      if (parts.length) lines.push(`- ${weekday(d.day)} ${d.day}: ${parts.join(", ")}`);
+      if (parts.length) out.set(d.day, parts.join(", "));
     }
-    return lines;
-  } catch {
-    return [];
-  } finally {
+  } catch {} finally {
     db.close();
   }
+  return out;
 }
 
 function weeklySection(acts: ActivityRow[]): string[] {
@@ -257,58 +251,54 @@ function weeklySection(acts: ActivityRow[]): string[] {
   return lines;
 }
 
-async function recentRunsSection(acts: ActivityRow[], pastRuns: RunnaPastRun[], zones: HrZones | null): Promise<{ lines: string[]; count: number }> {
+// "Rushcliffe - W6 Tue Easy Run - 4.5mi Easy Run (" → "4.5mi Easy Run"
+function cleanRunName(name: string | null): string {
+  if (!name) return "Run";
+  const last = name.split(" - ").pop() ?? name;
+  return last.replace(/\s*\([^)]*$/, "").trim() || "Run"; // drop a cut-off "(..." tail
+}
+
+function ratingText(fb: RunFeedback | undefined): string {
+  if (!fb) return "";
+  const rated = [
+    fb.effort != null ? `effort ${fb.effort}/10 (${effortLabel(fb.effort)})` : "",
+    fb.feel != null ? `felt ${FEEL_LABELS[fb.feel - 1].toLowerCase()} (${fb.feel}/5)` : "",
+  ].filter(Boolean).join(", ");
+  return `${rated || "no score"}${fb.notes ? `; notes: "${fb.notes.replace(/\s+/g, " ")}"` : ""}`;
+}
+
+// The athlete's post-run rating for a run; if two runs share a date, prefer
+// the one whose title matches.
+function feedbackFor(all: RunFeedback[], date: string, title: string): RunFeedback | undefined {
+  const fbs = all.filter(f => f.date === date);
+  return fbs.find(f => f.title === title) ?? (fbs.length === 1 ? fbs[0] : undefined);
+}
+
+// Runs before the DAY BY DAY window, one line each (the last 7 days are in
+// full there).
+function earlierRunsSection(acts: ActivityRow[], pastRuns: RunnaPastRun[], zones: HrZones | null, feedback: RunFeedback[]): string[] {
   const cutoff = localDate(new Date(Date.now() - RECENT_RUN_DAYS * 86_400_000));
-  const runs = acts.filter(a => isRun(a) && a.start_time.slice(0, 10) >= cutoff);
-  if (!runs.length) return { lines: [], count: 0 };
-  const weather = await Promise.all(runs.slice(0, WEATHER_RUNS).map(runWeather));
+  const detailStart = localDate(new Date(Date.now() - (DETAIL_DAYS - 1) * 86_400_000));
+  const runs = acts.filter(a => isRun(a) && a.start_time.slice(0, 10) >= cutoff && a.start_time.slice(0, 10) < detailStart);
+  if (!runs.length) return [];
   const byDate = new Map(pastRuns.map(p => [p.date, p]));
-  const feedbackByDate = new Map<string, RunFeedback[]>();
-  for (const f of listRunFeedback(cutoff)) feedbackByDate.set(f.date, [...(feedbackByDate.get(f.date) ?? []), f]);
-  // Lap-by-lap detail (watch FIT) for the most recent runs.
-  const lapsById = await getRunLaps(runs.slice(0, LAP_RUNS).map(r => String(r.activity_id))).catch(() => new Map());
   const splits = zones ? getZoneSplits(runs.map(r => String(r.activity_id)), zones) : new Map<string, number[]>();
-  const lines = [`## Runs — last ${RECENT_RUN_DAYS} days (newest first, Garmin)`];
-  runs.forEach((r, i) => {
+  const lines = [`## Earlier runs — ${detailStart > cutoff ? `days ${DETAIL_DAYS + 1}-${RECENT_RUN_DAYS}` : ""} (newest first)`];
+  for (const r of runs) {
     const date = r.start_time.slice(0, 10);
     const sec = secs(r.moving_time ?? r.elapsed_time);
     const plan = byDate.get(date);
-    const title = plan?.title ?? r.name ?? "Run";
+    const title = plan && plan.type !== "rest" && !plan.uid.startsWith("GARMIN_") ? plan.title : cleanRunName(r.name);
     const parts = [
-      `${(r.distance ?? 0).toFixed(2)}mi in ${clock(sec)} (${pace(sec, r.distance)})`,
-      r.avg_hr != null ? `HR avg ${r.avg_hr}/max ${r.max_hr ?? "-"}` : "",
-      r.spm != null ? `cadence ${Math.round(r.spm)}spm` : "",
-      r.ascent ? `ascent ${Math.round(r.ascent)}ft` : "",
-      r.training_effect != null ? `training effect aerobic ${r.training_effect}/anaerobic ${r.anaerobic_training_effect ?? 0}` : "",
+      `${(r.distance ?? 0).toFixed(2)}mi, ${clock(sec)}, ${pace(sec, r.distance)}`,
+      r.avg_hr != null ? `HR ${r.avg_hr}/${r.max_hr ?? "-"}` : "",
       r.training_load != null ? `load ${Math.round(r.training_load)}` : "",
       zoneSplit(r, splits.get(String(r.activity_id))),
-      i < WEATHER_RUNS ? weatherText(weather[i]) : "",
     ].filter(Boolean);
-    lines.push(`- ${weekday(date)} ${date} ${r.start_time.slice(11, 16)} — ${title}: ${parts.join("; ")}`);
-    // The athlete's own post-run rating (Summary card). If two runs share a
-    // date, prefer the one whose title matches.
-    const fbs = feedbackByDate.get(date) ?? [];
-    const fb = fbs.find(f => f.title === title) ?? (fbs.length === 1 ? fbs[0] : undefined);
-    if (fb) {
-      const rated = [
-        fb.effort != null ? `effort ${fb.effort}/10 (${effortLabel(fb.effort)})` : "",
-        fb.feel != null ? `felt ${FEEL_LABELS[fb.feel - 1].toLowerCase()} (${fb.feel}/5)` : "",
-      ].filter(Boolean).join(", ");
-      lines.push(`  athlete's rating: ${rated || "no score"}${fb.notes ? ` — notes: "${fb.notes.replace(/\s+/g, " ")}"` : ""}`);
-    }
-    // Plan vs actual for the most recent sessions.
-    if (i < LAP_RUNS) {
-      if (plan?.planSteps.length) lines.push(`  planned: ${plan.planSteps.join(" | ")}`);
-      const laps = lapsById.get(String(r.activity_id));
-      if (laps && (isStructured(laps) || !plan?.laps.length) && laps.length > 1) {
-        // Structured workouts: the watch's own warm-up/rep/rest/cool-down laps.
-        lines.push(`  ${isStructured(laps) ? "workout laps (watch)" : "laps (watch)"}: ${formatLaps(laps)}`);
-      } else if (plan?.laps.length) {
-        lines.push(`  laps: ${plan.laps.slice(0, 16).join(" | ")}`);
-      }
-    }
-  });
-  return { lines, count: runs.length };
+    const rating = ratingText(feedbackFor(feedback, date, plan?.title ?? title));
+    lines.push(`- ${weekday(date)} ${date} — ${title}: ${parts.join("; ")}${rating ? `; rating ${rating}` : ""}`);
+  }
+  return lines;
 }
 
 // Everything that isn't a run (walks, strength, cycling, hiking, ...), dated,
@@ -439,105 +429,153 @@ function judgeWorkoutLaps(planSteps: string[], laps: FitLap[]): string {
     .join(" | ");
 }
 
-// Day-by-day plan vs actual for the last 7 days (today included), built
-// here so the coach doesn't have to infer what was planned. Plan comes from
-// the Runna feed: a completed/past entry carries the planned session's title;
-// a day with no Runna session is a genuine rest day.
-async function dayByDaySection(acts: ActivityRow[], pastRuns: RunnaPastRun[], workouts: RunnaWorkout[]): Promise<string[]> {
+// Runna step lists start with a header ("Long Run • 11mi • 1h30m - 1h40m")
+// that repeats the title; drop it.
+function planSteps(steps: string[]): string[] {
+  return steps.filter((st, i) => !(i === 0 && st.includes(" • ") && !st.trim().startsWith("•")));
+}
+
+// Everything for each of the last 7 days (today included) in one entry:
+// plan (Runna), what was done (Garmin) with run detail, rating and judged
+// splits, recovery, and food. Built here so the coach doesn't have to infer
+// or cross-reference anything.
+async function dayByDaySection(
+  acts: ActivityRow[], pastRuns: RunnaPastRun[], workouts: RunnaWorkout[], nutrition: NutritionDashboard | null,
+  zones: HrZones | null, recovery: Map<string, string>, feedback: RunFeedback[],
+): Promise<string[]> {
+  const food = new Map((nutrition?.days ?? []).map(d => [d.date, d]));
   const today = localDate(new Date());
-  const weekStart = localDate(new Date(Date.now() - 6 * 86_400_000));
+  const weekStart = localDate(new Date(Date.now() - (DETAIL_DAYS - 1) * 86_400_000));
+  const anyFood = (nutrition?.days ?? []).some(d => d.date >= weekStart && d.eaten != null);
   const weekRuns = acts.filter(a => isRun(a) && a.start_time.slice(0, 10) >= weekStart);
-  const watchLaps = await getRunLaps(weekRuns.map(r => String(r.activity_id))).catch(() => new Map());
-  const lines = ["## Day by day — last 7 days (PLAN from Runna, ACTUAL from Garmin). Use this for plan vs actual; it is complete."];
-  for (let i = 6; i >= 0; i--) {
+  const [watchLaps, weather] = await Promise.all([
+    getRunLaps(weekRuns.map(r => String(r.activity_id))).catch(() => new Map<string, FitLap[]>()),
+    Promise.all(weekRuns.map(r => runWeather(r).catch(() => null))),
+  ]);
+  const weatherById = new Map(weekRuns.map((r, i) => [String(r.activity_id), weather[i]]));
+  const zoneById = zones ? getZoneSplits(weekRuns.map(r => String(r.activity_id)), zones) : new Map<string, number[]>();
+
+  const lines = [`## Day by day — last ${DETAIL_DAYS} days (plan from Runna, actual from Garmin). Complete: use it for plan vs actual.`];
+  for (let i = DETAIL_DAYS - 1; i >= 0; i--) {
     const date = localDate(new Date(Date.now() - i * 86_400_000));
     const past = pastRuns.find(p => p.date === date);
     const upcoming = workouts.find(w => w.date === date);
+    const plannedPast = past && past.type !== "rest" && !past.uid.startsWith("GARMIN_WALK_") && !past.uid.startsWith("SYNTHETIC_REST_");
+    const steps = planSteps(plannedPast ? past!.planSteps : upcoming?.segments ?? []);
+    const dayActs = acts.filter(a => a.start_time.slice(0, 10) === date).sort((a, b) => a.start_time.localeCompare(b.start_time));
 
-    let plan: string;
-    if (past && past.type !== "rest" && !past.uid.startsWith("GARMIN_WALK_") && !past.uid.startsWith("SYNTHETIC_REST_")) {
-      plan = past.uid.startsWith("GARMIN_ORPHAN_")
-        ? `${past.title} (Runna entry missing; plan taken from the Garmin activity name)`
-        : past.title;
-      if (past.planSteps.length) plan += ` — steps: ${past.planSteps.slice(0, 10).join(" | ")}`;
-    } else if (upcoming && upcoming.type !== "rest") {
-      plan = upcoming.title + (upcoming.distanceMi ? ` (${upcoming.distanceMi.toFixed(1)}mi)` : "");
-      if (upcoming.segments.length) plan += ` — steps: ${upcoming.segments.slice(0, 10).join(" | ")}`;
-    } else {
-      plan = "Rest day (no session in the Runna plan)";
-    }
-
-    const done = acts
-      .filter(a => a.start_time.slice(0, 10) === date)
-      .sort((a, b) => a.start_time.localeCompare(b.start_time))
-      .map(a => {
-        const sec = secs(a.moving_time ?? a.elapsed_time);
-        const what = isRun(a) ? "Run" : sportLabel(a);
+    // Judged splits per run; when present they already carry the plan's
+    // targets, so the plan line doesn't repeat the steps.
+    const runBlocks: string[] = [];
+    let judgedAny = false;
+    for (const a of dayActs) {
+      const sec = secs(a.moving_time ?? a.elapsed_time);
+      if (!isRun(a)) {
         const bits = [
           a.distance ? `${a.distance.toFixed(2)}mi` : "",
           clock(sec),
-          isRun(a) ? pace(sec, a.distance) : "",
-          a.avg_hr != null ? `HR avg ${a.avg_hr}` : "",
+          a.avg_hr != null ? `HR ${a.avg_hr}/${a.max_hr ?? "-"}` : "",
           a.training_load != null ? `load ${Math.round(a.training_load)}` : "",
         ].filter(Boolean);
-        return `${what} ${a.start_time.slice(11, 16)} (${bits.join(", ")})`;
-      });
-    const actual = done.length ? done.join("; ") : date === today ? "nothing recorded yet today" : "nothing recorded";
-    lines.push(`- ${weekday(date)} ${date}${date === today ? " (TODAY)" : ""}: PLAN: ${plan}. ACTUAL: ${actual}.`);
-
-    // Splits for each run that day, so each planned segment can be judged:
-    // the watch's workout laps (with HR) for structured sessions, otherwise
-    // Runna's per-segment splits, otherwise the watch's auto laps.
-    for (const r of weekRuns.filter(a => a.start_time.slice(0, 10) === date)) {
-      const laps: FitLap[] | undefined = watchLaps.get(String(r.activity_id));
-      const steps = past?.planSteps ?? [];
-      const judged = past?.laps.length ? judgeSegments(steps, past.laps, laps) : null;
-      if (laps && isStructured(laps) && laps.length > 1) {
-        lines.push(`  SPLITS vs PLAN (watch workout laps): ${steps.length ? judgeWorkoutLaps(steps, laps) : formatLaps(laps)}`);
-      } else if (judged) {
-        lines.push(`  SPLITS vs PLAN: ${judged}`);
-      } else if (past?.laps.length) {
-        lines.push(`  SPLITS (per planned segment): ${past.laps.slice(0, 16).join(" | ")}`);
-        if (laps && laps.length > 1) lines.push(`  watch laps (HR): ${formatLaps(laps)}`);
-      } else if (laps && laps.length > 1) {
-        lines.push(`  SPLITS (watch laps): ${formatLaps(laps)}`);
+        runBlocks.push(`  DONE: ${sportLabel(a)} ${a.start_time.slice(11, 16)} (${bits.join(", ")})`);
+        continue;
       }
+      const id = String(a.activity_id);
+      const detail = [
+        `${(a.distance ?? 0).toFixed(2)}mi in ${clock(sec)} (${pace(sec, a.distance)})`,
+        a.avg_hr != null ? `HR avg ${a.avg_hr}/max ${a.max_hr ?? "-"}` : "",
+        a.spm != null ? `cadence ${Math.round(a.spm)}spm` : "",
+        a.ascent ? `ascent ${Math.round(a.ascent)}ft` : "",
+        a.training_effect != null ? `training effect aerobic ${a.training_effect}/anaerobic ${a.anaerobic_training_effect ?? 0}` : "",
+        a.training_load != null ? `load ${Math.round(a.training_load)}` : "",
+        zoneSplit(a, zoneById.get(id)),
+        weatherText(weatherById.get(id)),
+      ].filter(Boolean);
+      runBlocks.push(`  DONE: Run ${a.start_time.slice(11, 16)}: ${detail.join("; ")}`);
+      const rating = ratingText(feedbackFor(feedback, date, plannedPast ? past!.title : cleanRunName(a.name)));
+      if (rating) runBlocks.push(`  RATING: ${rating}`);
+
+      const laps = watchLaps.get(id);
+      const judged = past?.laps.length ? judgeSegments(steps, past.laps, laps) : null;
+      if (laps && isStructured(laps) && laps.length > 1 && steps.length) {
+        runBlocks.push(`  SPLITS vs PLAN: ${judgeWorkoutLaps(steps, laps)}`);
+        judgedAny = true;
+      } else if (judged) {
+        runBlocks.push(`  SPLITS vs PLAN: ${judged}`);
+        judgedAny = true;
+      } else if (laps && laps.length > 1) {
+        runBlocks.push(`  SPLITS: ${formatLaps(laps)}`);
+      } else if (past?.laps.length) {
+        runBlocks.push(`  SPLITS: ${past.laps.join(" | ")}`);
+      }
+    }
+
+    let plan: string;
+    if (plannedPast) {
+      plan = past!.uid.startsWith("GARMIN_ORPHAN_") ? `${past!.title} (from the Garmin activity name)` : past!.title;
+    } else if (upcoming && upcoming.type !== "rest") {
+      plan = upcoming.title + (upcoming.distanceMi ? ` (${upcoming.distanceMi.toFixed(1)}mi)` : "");
+    } else {
+      plan = "Rest day";
+    }
+    if (steps.length && !judgedAny && plan !== "Rest day") plan += ` — steps: ${steps.join(" | ")}`;
+
+    lines.push(`- ${weekday(date)} ${date}${date === today ? " (TODAY)" : ""} — PLAN: ${plan}`);
+    if (runBlocks.length) lines.push(...runBlocks);
+    else lines.push(`  DONE: nothing${date === today ? " yet today" : ""}`);
+    const rec = recovery.get(date);
+    if (rec) lines.push(`  RECOVERY: ${rec}`);
+    if (anyFood) {
+      const f = food.get(date);
+      lines.push(f?.eaten == null
+        ? "  FOOD: not logged"
+        : `  FOOD: eaten ${f.eaten} kcal${f.proteinG != null ? ` (P ${Math.round(f.proteinG)}g C ${Math.round(f.carbsG ?? 0)}g F ${Math.round(f.fatG ?? 0)}g)` : ""}`
+          + (f.burnt != null ? `, burnt ${f.burnt}, net ${f.net! > 0 ? "+" : ""}${f.net}` : date === today ? " so far" : ""));
     }
   }
   return lines;
 }
 
-function otherTrainingSection(acts: ActivityRow[]): string[] {
-  const cutoff = localDate(new Date(Date.now() - RECENT_RUN_DAYS * 86_400_000));
-  const others = acts.filter(a => !isRun(a) && a.start_time.slice(0, 10) >= cutoff);
-  if (!others.length) return [];
-  const lines = [`## Other training — last ${RECENT_RUN_DAYS} days (walks, strength, etc.; newest first, Garmin)`];
-  for (const a of others) {
-    const date = a.start_time.slice(0, 10);
-    const sec = secs(a.moving_time ?? a.elapsed_time);
-    const parts = [
-      clock(sec),
-      a.distance ? `${a.distance.toFixed(2)}mi` : "",
-      a.avg_hr != null ? `HR avg ${a.avg_hr}/max ${a.max_hr ?? "-"}` : "",
-      a.calories ? `${Math.round(a.calories)} kcal` : "",
-      a.training_load != null ? `load ${Math.round(a.training_load)}` : "",
-    ].filter(Boolean);
-    lines.push(`- ${weekday(date)} ${date} ${a.start_time.slice(11, 16)} — ${sportLabel(a)}${a.name && a.name !== sportLabel(a) ? ` (${a.name})` : ""}: ${parts.join("; ")}`);
+// Weight goal, trend and fuelling (Lose It! food via Health Connect,
+// Garmin burn and weigh-ins), from the Nutrition page's data.
+function nutritionSection(n: NutritionDashboard | null): string[] {
+  if (!n) return [];
+  const c = n.config;
+  const u = c.weightUnit;
+  const lines = ["## Weight & nutrition (food from Lose It!, burn and weigh-ins from Garmin)"];
+  if (n.current) {
+    lines.push(`- Current weight: ${formatWeight(n.current.kg, u)} (${n.current.kg.toFixed(1)} kg) on ${n.current.date}; 7-day average ${formatWeight(n.current.avg7Kg, u)}`);
+  }
+  const goal = [
+    c.targetWeightKg != null ? `target ${formatWeight(c.targetWeightKg, u)}` : "",
+    c.goalDate ? `by ${c.goalDate}` : "",
+    c.dailyCalorieLimit != null ? `daily calorie limit ${c.dailyCalorieLimit} kcal eaten` : "",
+  ].filter(Boolean);
+  if (goal.length) lines.push(`- Goal: ${goal.join(", ")}. Maximum safe loss rate: 2 lb/week.`);
+  if (n.required) lines.push(`- Needed to hit the goal on time: ${formatWeightDelta(n.required.kgPerWeek, u)}/week (daily balance ${n.required.dailyBalance} kcal${n.required.intake != null ? `, about ${n.required.intake} kcal eaten/day` : ""})`);
+  const a = n.averages;
+  const burn = `avg burnt ${a.burnt != null ? Math.round(a.burnt) : "?"} kcal/day (exercise ${a.exercise != null ? Math.round(a.exercise) : "?"})`;
+  lines.push(a.loggedDays
+    ? `- Last ${a.windowDays} days (excluding today): ${a.loggedDays} days with food logged; avg eaten ${Math.round(a.eaten!)} kcal, ${burn}, avg net ${Math.round(a.net!)} (eaten − burnt; negative = deficit)`
+    : `- Last ${a.windowDays} days: no food logged yet; ${burn}`);
+  for (const p of n.projections) {
+    const hit = p.hitStatus === "reached" ? "already reached" : p.hitStatus === "on-course" ? `reached ${p.hitDate}` : "not reached at this rate";
+    lines.push(`- Projection, ${p.label} (${p.basis}): ${formatWeightDelta(p.kgPerWeek, u)}/week; target ${hit}${p.weightAtGoalKg != null ? `; ${formatWeight(p.weightAtGoalKg, u)} on the goal date` : ""}`);
   }
   return lines;
 }
 
 function upcomingSection(workouts: RunnaWorkout[]): string[] {
-  const today = localDate(new Date());
+  // Today is in DAY BY DAY, so this starts tomorrow.
+  const tomorrow = localDate(new Date(Date.now() + 86_400_000));
   const until = localDate(new Date(Date.now() + 10 * 86_400_000));
-  const next = workouts.filter(w => w.date >= today && w.date <= until).sort((a, b) => a.date.localeCompare(b.date));
+  const next = workouts.filter(w => w.date >= tomorrow && w.date <= until).sort((a, b) => a.date.localeCompare(b.date));
   if (!next.length) return [];
-  const lines = ["## Planned sessions — next 10 days (Runna plan)"];
+  const lines = ["## Planned sessions — next 10 days from tomorrow (Runna plan)"];
   for (const w of next) {
-    const head = `${weekday(w.date)} ${w.date}${w.date === today ? " (TODAY)" : ""} — ${w.title}`
-      + (w.distanceMi ? ` (${w.distanceMi.toFixed(1)}mi${w.durationSec ? `, ~${Math.round(w.durationSec / 60)}min` : ""})` : "");
-    lines.push(`- ${head}`);
-    if (w.segments.length && w.type !== "rest") lines.push(`  steps: ${w.segments.slice(0, 14).join(" | ")}`);
+    if (w.type === "rest") { lines.push(`- ${weekday(w.date)} ${w.date} — Rest`); continue; }
+    const steps = planSteps(w.segments);
+    lines.push(`- ${weekday(w.date)} ${w.date} — ${w.title}${w.distanceMi ? ` (${w.distanceMi.toFixed(1)}mi)` : ""}${steps.length ? `: ${steps.slice(0, 14).join(" | ")}` : ""}`);
   }
   return lines;
 }
@@ -551,8 +589,14 @@ function racesSection(): string[] {
   if (upcoming.length) {
     lines.push("## Upcoming races (goals)");
     for (const r of upcoming) {
-      const weeks = r.raceDate ? Math.round((new Date(`${r.raceDate}T12:00:00`).getTime() - Date.now()) / (7 * 86_400_000)) : null;
-      lines.push(`- ${r.name}${r.raceDate ? ` on ${weekday(r.raceDate)} ${r.raceDate} (${weeks} weeks away)` : " (date not set)"}${r.distanceMi ? `, ${r.distanceMi.toFixed(1)}mi` : ""}${r.notes ? ` — notes: ${r.notes}` : ""}`);
+      // Exact calendar days, so the coach never has to work it out.
+      let away = "";
+      if (r.raceDate) {
+        const days = Math.round((new Date(`${r.raceDate}T12:00:00`).getTime() - new Date(`${today}T12:00:00`).getTime()) / 86_400_000);
+        const w = Math.floor(days / 7), d = days % 7;
+        away = days === 0 ? "TODAY" : `in ${days} days = ${w} week${w === 1 ? "" : "s"}${d ? ` ${d} day${d === 1 ? "" : "s"}` : ""}`;
+      }
+      lines.push(`- ${r.name}${r.raceDate ? ` on ${weekday(r.raceDate)} ${r.raceDate} (${away})` : " (date not set)"}${r.distanceMi ? `, ${r.distanceMi.toFixed(1)}mi` : ""}${r.notes ? ` — notes: ${r.notes}` : ""}`);
     }
   }
   if (done.length) {
@@ -588,21 +632,23 @@ export async function buildCoachContext(): Promise<CoachContext> {
   const workouts = schedule?.ok ? schedule.workouts : [];
   const pastRuns = schedule?.ok ? schedule.pastRuns : [];
   const zones = await getCurrentHrZones().catch(() => null);
-  const [recent, hrv, dayBy] = await Promise.all([
-    recentRunsSection(acts, pastRuns, zones),
-    getHrvDays(localDate(new Date(Date.now() - 7 * 86_400_000)), localDate(new Date())).catch(() => new Map<string, HrvDay>()),
-    dayByDaySection(acts, pastRuns, workouts),
-  ]);
+  let nutrition: NutritionDashboard | null = null;
+  try { nutrition = buildNutritionDashboard(14); } catch {}
+  const detailStart = localDate(new Date(Date.now() - (DETAIL_DAYS - 1) * 86_400_000));
+  const feedback = listRunFeedback(localDate(new Date(Date.now() - RECENT_RUN_DAYS * 86_400_000)));
+  const hrv = await getHrvDays(detailStart, localDate(new Date())).catch(() => new Map<string, HrvDay>());
+  const dayBy = await dayByDaySection(acts, pastRuns, workouts, nutrition, zones, recoveryByDay(hrv, detailStart), feedback);
+  const cutoff = localDate(new Date(Date.now() - RECENT_RUN_DAYS * 86_400_000));
+  const runCount = acts.filter(a => isRun(a) && a.start_time.slice(0, 10) >= cutoff).length;
 
   const sections = [
     profileSection(acts, zones),
     racesSection(),
-    upcomingSection(workouts),
     dayBy,
-    recent.lines,
-    otherTrainingSection(acts),
+    upcomingSection(workouts),
+    earlierRunsSection(acts, pastRuns, zones, feedback),
     weeklySection(acts),
-    wellnessSection(hrv),
+    nutritionSection(nutrition),
   ].filter(s => s.length);
 
   if (!acts.length) sections.unshift(["(No GarminDB activity data is available — say so if the athlete asks about their recent training.)"]);
@@ -611,7 +657,7 @@ export async function buildCoachContext(): Promise<CoachContext> {
   return {
     text: sections.map(s => s.join("\n")).join("\n\n"),
     generatedAt: new Date().toISOString(),
-    runCount: recent.count,
+    runCount,
   };
 }
 
@@ -627,7 +673,8 @@ export async function prefetchCoachData(): Promise<{ runs: number; laps: number;
   if (zones) getZoneSplits(runs.map(r => String(r.activity_id)), zones);
   const [laps, weather, hrv] = await Promise.all([
     getRunLaps(runs.map(r => String(r.activity_id))),
-    Promise.all(runs.slice(0, WEATHER_RUNS).map(runWeather)),
+    // Weather is only shown for runs in the DAY BY DAY window.
+    Promise.all(runs.filter(r => r.start_time.slice(0, 10) >= localDate(new Date(Date.now() - (DETAIL_DAYS - 1) * 86_400_000))).map(runWeather)),
     getHrvDays(localDate(new Date(Date.now() - 7 * 86_400_000)), localDate(new Date()), true).catch(() => new Map<string, HrvDay>()),
   ]);
   return { runs: runs.length, laps: laps.size, weather: weather.filter(Boolean).length, hrvDays: hrv.size };

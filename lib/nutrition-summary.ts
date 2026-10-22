@@ -172,7 +172,7 @@ Under 350 words.`;
 
 async function writeSummary(): Promise<{ ok: true; summary: NutritionSummary } | { ok: false; error: string }> {
   const { text, start, end } = dataText();
-  const reply = await coachChat(`${SYSTEM}\n\n### DATA\n${text}`, [{ role: "user", content: REQUEST }]);
+  const reply = await coachChat(`${SYSTEM}\n\n### DATA\n${text}`, [{ role: "user", content: REQUEST }], { think: true });
   if (!reply.ok) return { ok: false, error: reply.error };
   const model = coachModelLabel(loadCoachConfig());
   const createdAt = new Date().toISOString();

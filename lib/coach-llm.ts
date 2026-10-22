@@ -13,11 +13,15 @@ export type CoachReply = { ok: true; reply: string } | { ok: false; error: strin
 const PYTHON = process.platform === "win32" ? "python" : "python3";
 const BRIDGE_TIMEOUT_MS = 260_000;
 const LOCAL_TIMEOUT_MS = 300_000;
+const LOCAL_THINK_TIMEOUT_MS = 900_000;
 
 // One coach reply from whichever AI Settings -> Coach picked. Claude and
 // Gemini run on the Pi (scripts/coach_bridge.py, same API keys and usage
 // counters as the AI DJ); the local model runs on the AI DJ service PC.
-export async function coachChat(system: string, messages: CoachMessage[]): Promise<CoachReply> {
+// opts.think: let the local model reason before answering. Slower, but much
+// more careful with dates, numbers and comparisons; used for reports, which
+// run in the background. Chat stays fast.
+export async function coachChat(system: string, messages: CoachMessage[], opts: { think?: boolean } = {}): Promise<CoachReply> {
   const config = loadCoachConfig();
 
   if (config.provider === "local") {
@@ -27,8 +31,8 @@ export async function coachChat(system: string, messages: CoachMessage[]): Promi
       const res = await fetch(`${dj.url}/coach/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ system, messages, model: config.ollamaModel || undefined }),
-        signal: AbortSignal.timeout(LOCAL_TIMEOUT_MS),
+        body: JSON.stringify({ system, messages, model: config.ollamaModel || undefined, think: !!opts.think }),
+        signal: AbortSignal.timeout(opts.think ? LOCAL_THINK_TIMEOUT_MS : LOCAL_TIMEOUT_MS),
       });
       if (res.status === 404) return { ok: false, error: "The AI DJ service on the PC needs restarting to pick up the Coach" };
       const data = await res.json() as { reply?: string; error?: string };
