@@ -424,7 +424,7 @@ export function CoachClient() {
                       onClick={writeReport}
                       disabled={writing}
                       className="text-xs px-2.5 py-1 rounded-lg border border-white/10 bg-slate-800/60 text-slate-300 hover:text-slate-100 disabled:opacity-40"
-                      title="Write this week's report now (the scheduled one is Sunday evening)"
+                      title="Write a report on the last 7 days now (the scheduled one on Sunday evening covers Mon–Sun)"
                     >
                       {writing ? `Writing… ${writingSecs}s` : "Write now"}
                     </button>

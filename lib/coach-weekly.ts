@@ -57,28 +57,47 @@ function localDate(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-// The Mon-Sun week being reviewed: this week, or last week if run early on
-// a Monday before any training.
-function reviewWeek(now = new Date()): { start: string; end: string; label: string } {
+// The period being reviewed. Scheduled (Sunday): the Mon-Sun week, or last
+// week if run early on a Monday before any training. Written by hand from
+// the Coach page (rolling): the last 7 days up to and including today.
+function reviewWeek(now = new Date(), rolling = false): { start: string; end: string; label: string } {
   const d = new Date(now);
   d.setHours(12, 0, 0, 0);
-  const dow = (d.getDay() + 6) % 7; // 0 = Monday
-  if (dow === 0 && now.getHours() < 12) d.setDate(d.getDate() - 7);
-  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  if (rolling) {
+    d.setDate(d.getDate() - 6);
+  } else {
+    const dow = (d.getDay() + 6) % 7; // 0 = Monday
+    if (dow === 0 && now.getHours() < 12) d.setDate(d.getDate() - 7);
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  }
   const end = new Date(d);
   end.setDate(end.getDate() + 6);
   const fmt = (x: Date) => x.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
   return { start: localDate(d), end: localDate(end), label: `${fmt(d)} – ${fmt(end)}` };
 }
 
-function reportRequest(week: { start: string; end: string; label: string }): string {
-  return `Write my weekly coaching report for the week ${week.label} (${week.start} to ${week.end}), using the TRAINING DATA.
+// The 7 days after the reviewed period: for a manual report that's
+// tomorrow onwards; for the Sunday report, the coming Mon-Sun.
+function nextPeriod(week: { end: string }): { start: string; end: string; label: string } {
+  const s = new Date(`${week.end}T12:00:00`);
+  s.setDate(s.getDate() + 1);
+  const e = new Date(s);
+  e.setDate(e.getDate() + 6);
+  const fmt = (x: Date) => x.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+  return { start: localDate(s), end: localDate(e), label: `${fmt(s)} – ${fmt(e)}` };
+}
+
+function reportRequest(week: { start: string; end: string; label: string }, rolling = false): string {
+  const period = rolling ? "these 7 days" : "this week";
+  const n = nextPeriod(week);
+  const next = `${rolling ? "**Next 7 days**" : "**Next week**"} — ${n.label} (${n.start} to ${n.end}) ONLY, one line per date in order, starting ${n.label.split(" – ")[0]}: the planned session for that date from PLANNED SESSIONS (or rest if none is listed)`;
+  return `Write my ${rolling ? "coaching report for the last 7 days" : "weekly coaching report for the week"} ${week.label} (${week.start} to ${week.end}), using the TRAINING DATA.
 
 Use exactly these sections, each as a bold heading line:
-**Verdict** — 2-3 sentences: how the week went overall and the single most important takeaway.
-**Plan vs actual** — each run this week: what was planned, what I did (for interval/structured sessions use the workout laps: rep paces and heart rates against the target), and whether it hit the purpose of the session. Mention my effort/feel ratings and notes where given.
-**Load & recovery** — this week's mileage and training load against the previous weeks, plus HRV, resting HR, sleep and body battery trends. Flag anything that needs attention.
-**Next week** — the planned sessions for the coming week with specific guidance (target paces or heart rates, what to focus on, what to watch for), adjusted for how this week went.
+**Verdict** — 2-3 sentences: how ${period} went overall and the single most important takeaway.
+**Plan vs actual** — each day of ${period} up to today (don't report on days that haven't happened yet). Take what was planned and what I did from the DAY BY DAY section exactly as written: never call a day a rest day unless it says "Rest day", and quote distances from it. For runs, use the SPLITS vs PLAN line: each split already has a verdict (✓ = hit, ⚠ = much faster than planned, ✗ = slower than target). Report those verdicts as given and never contradict them. Remember a lower pace number is faster: on target, slightly faster, or up to 5 s/mi slower is a hit. For easy/conversational runs, running at or slower than the cap is correct; never describe it as "slow" or a miss. Judge the session by its splits, not the overall average pace. For each day: what was planned, what I did (for interval/structured sessions use the workout laps: rep paces and heart rates against the target), and whether it hit the purpose of the session. Include walks, strength and other sessions from OTHER TRAINING on the days they happened, so a planned rest day with a walk or strength session isn't reported as "nothing logged". Mention my effort/feel ratings and notes where given.
+**Load & recovery** — the mileage and training load (runs plus walks, strength and other sessions) for ${period} against the previous weeks, plus HRV, resting HR, sleep and body battery trends. Flag anything that needs attention.
+${next} with specific guidance (target paces or heart rates, what to focus on, what to watch for), adjusted for how ${period} went.
 **Race readiness** — only if a race is coming up: weeks to go and whether I'm on track.
 
 Be specific and quote numbers. Under 500 words.`;
@@ -98,12 +117,12 @@ export function reportWriteState(): { writing: boolean; error: string | null } {
   return { writing: !!state.__coachReportWriting, error: state.__coachReportError ?? null };
 }
 
-export async function generateWeeklyReport(): Promise<WeeklyReportResult> {
+export async function generateWeeklyReport(opts: { rolling?: boolean } = {}): Promise<WeeklyReportResult> {
   if (state.__coachReportWriting) return { ok: false, error: "A report is already being written" };
   state.__coachReportWriting = true;
   state.__coachReportError = null;
   try {
-    const result = await writeReport();
+    const result = await writeReport(!!opts.rolling);
     if (!result.ok) state.__coachReportError = result.error;
     return result;
   } finally {
@@ -111,8 +130,8 @@ export async function generateWeeklyReport(): Promise<WeeklyReportResult> {
   }
 }
 
-async function writeReport(): Promise<WeeklyReportResult> {
-  const week = reviewWeek();
+async function writeReport(rolling: boolean): Promise<WeeklyReportResult> {
+  const week = reviewWeek(new Date(), rolling);
   // Make sure this week's laps, weather and HRV are all in first.
   await prefetchCoachData().catch(() => {});
   const [context, recall] = await Promise.all([
@@ -120,7 +139,7 @@ async function writeReport(): Promise<WeeklyReportResult> {
     recallPastAnalyses(`weekly training review ${week.label}: progress, recovery, injuries, plan changes`).catch(() => ({ memories: [], model: null })),
   ]);
   const system = buildCoachSystemPrompt(context.text, recall.memories.map(m => m.document));
-  const reply = await coachChat(system, [{ role: "user", content: reportRequest(week) }]);
+  const reply = await coachChat(system, [{ role: "user", content: reportRequest(week, rolling) }]);
   if (!reply.ok) return { ok: false, error: reply.error };
 
   const model = coachModelLabel(loadCoachConfig());

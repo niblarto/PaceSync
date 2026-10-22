@@ -10,13 +10,14 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ reports: listReports(), ...reportWriteState() });
 }
 
-// "Write now" from the Coach page (no notification): starts writing in the
+// "Write now" from the Coach page (no notification): reviews the last 7
+// days up to today (the scheduled Sunday report reviews Mon-Sun). Starts writing in the
 // background — a report can outlast the web proxy's request timeout — and
 // the page polls GET until it lands.
 export async function POST(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (reportWriteState().writing) return NextResponse.json({ started: false, writing: true });
-  void generateWeeklyReport();
+  void generateWeeklyReport({ rolling: true });
   return NextResponse.json({ started: true, writing: true });
 }
 

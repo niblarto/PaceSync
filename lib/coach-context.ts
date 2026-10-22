@@ -4,7 +4,7 @@ import { loadGarminConfig } from "@/lib/garmin-config";
 import { fetchRunnaSchedule, type RunnaPastRun, type RunnaWorkout } from "@/lib/runna-schedule";
 import { listRaces } from "@/lib/races";
 import { listRunFeedback, effortLabel, FEEL_LABELS, type RunFeedback } from "@/lib/run-feedback";
-import { formatLaps, getCurrentHrZones, getHrvDays, getRunLaps, getZoneSplits, isStructured, zonesText, type HrvDay, type HrZones } from "@/lib/coach-garmin-extra";
+import { formatLaps, getCurrentHrZones, type FitLap, getHrvDays, getRunLaps, getZoneSplits, isStructured, zonesText, type HrvDay, type HrZones } from "@/lib/coach-garmin-extra";
 
 // The training brief the Coach reads before every reply: who the athlete
 // is right now (load, recovery, recent runs with weather), what's planned
@@ -20,6 +20,8 @@ interface ActivityRow {
   activity_id: string;
   name: string | null;
   sport: string | null;
+  sub_sport: string | null;
+  calories: number | null;
   start_time: string;
   elapsed_time: string | null;
   moving_time: string | null;
@@ -142,7 +144,7 @@ function loadActivities(sinceDate: string): ActivityRow[] {
   if (!db) return [];
   try {
     return db.prepare(`
-      SELECT a.activity_id, a.name, a.sport, a.start_time, a.elapsed_time, a.moving_time, a.distance,
+      SELECT a.activity_id, a.name, a.sport, a.sub_sport, a.calories, a.start_time, a.elapsed_time, a.moving_time, a.distance,
              a.avg_hr, a.max_hr, a.ascent, a.training_load, a.training_effect, a.anaerobic_training_effect,
              a.start_lat, a.start_long, s.avg_steps_per_min AS spm, s.vo2_max,
              a.hrz_1_time AS z1, a.hrz_2_time AS z2, a.hrz_3_time AS z3, a.hrz_4_time AS z4, a.hrz_5_time AS z5,
@@ -219,6 +221,7 @@ function wellnessSection(hrvApi: Map<string, HrvDay>): string[] {
 function weeklySection(acts: ActivityRow[]): string[] {
   const runs = acts.filter(isRun);
   if (!runs.length) return [];
+  const others = acts.filter(a => !isRun(a));
   const monday = (d: string) => {
     const dt = new Date(`${d}T12:00:00`);
     dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
@@ -235,9 +238,21 @@ function weeklySection(acts: ActivityRow[]): string[] {
     e.long = Math.max(e.long, r.distance ?? 0);
     weeks.set(w, e);
   }
-  const lines = [`## Weekly running volume — last ${WEEKS} weeks (Mon-Sun, current week partial)`];
+  // Cross-training (walks, strength, cycling, ...) per week.
+  const otherWeeks = new Map<string, { n: number; sec: number; load: number }>();
+  for (const a of others) {
+    const w = monday(a.start_time.slice(0, 10));
+    const e = otherWeeks.get(w) ?? { n: 0, sec: 0, load: 0 };
+    e.n++;
+    e.sec += secs(a.moving_time ?? a.elapsed_time);
+    e.load += a.training_load ?? 0;
+    otherWeeks.set(w, e);
+  }
+  const lines = [`## Weekly volume — last ${WEEKS} weeks (Mon-Sun, current week partial)`];
   for (const [w, e] of Array.from(weeks.entries()).sort((a, b) => b[0].localeCompare(a[0]))) {
-    lines.push(`- w/c ${w}: ${e.runs} runs, ${e.mi.toFixed(1)}mi, ${clock(e.sec)}, longest ${e.long.toFixed(1)}mi, training load ${Math.round(e.load)}`);
+    const o = otherWeeks.get(w);
+    const other = o ? `; plus ${o.n} other session${o.n === 1 ? "" : "s"} (${clock(o.sec)}, load ${Math.round(o.load)})` : "";
+    lines.push(`- w/c ${w}: ${e.runs} runs, ${e.mi.toFixed(1)}mi, ${clock(e.sec)}, longest ${e.long.toFixed(1)}mi, training load ${Math.round(e.load)}${other}`);
   }
   return lines;
 }
@@ -245,7 +260,6 @@ function weeklySection(acts: ActivityRow[]): string[] {
 async function recentRunsSection(acts: ActivityRow[], pastRuns: RunnaPastRun[], zones: HrZones | null): Promise<{ lines: string[]; count: number }> {
   const cutoff = localDate(new Date(Date.now() - RECENT_RUN_DAYS * 86_400_000));
   const runs = acts.filter(a => isRun(a) && a.start_time.slice(0, 10) >= cutoff);
-  const walks = acts.filter(a => (a.sport ?? "").toLowerCase().includes("walk") && a.start_time.slice(0, 10) >= cutoff);
   if (!runs.length) return { lines: [], count: 0 };
   const weather = await Promise.all(runs.slice(0, WEATHER_RUNS).map(runWeather));
   const byDate = new Map(pastRuns.map(p => [p.date, p]));
@@ -294,11 +308,223 @@ async function recentRunsSection(acts: ActivityRow[], pastRuns: RunnaPastRun[], 
       }
     }
   });
-  if (walks.length) {
-    const mi = walks.reduce((s, w) => s + (w.distance ?? 0), 0);
-    lines.push(`- Also ${walks.length} walk${walks.length === 1 ? "" : "s"} (${mi.toFixed(1)}mi total) in this period.`);
-  }
   return { lines, count: runs.length };
+}
+
+// Everything that isn't a run (walks, strength, cycling, hiking, ...), dated,
+// so the coach counts it in plan-vs-actual and load/recovery.
+function sportLabel(a: ActivityRow): string {
+  const sub = (a.sub_sport ?? "").toLowerCase();
+  const sport = (a.sport ?? "").toLowerCase();
+  if (sub === "strength_training" || sport === "training") return "Strength";
+  if (sport === "walking") return "Walk";
+  if (sport === "hiking") return "Hike";
+  if (sport === "cycling") return "Ride";
+  return (a.sub_sport && a.sub_sport !== "generic" ? a.sub_sport : a.sport ?? "Activity").replace(/_/g, " ");
+}
+
+// ── Split verdicts ──────────────────────────────────────────────────────────
+// Pace comparisons are worked out here rather than left to the model (which
+// tends to read a faster-than-target split as a miss). Rule: from 15 s/mi
+// faster to 5 s/mi slower than target is a hit; easy/conversational running
+// should be at or slower than its cap (slower is correct, never "slow").
+
+const FAST_OK_SEC = 15;
+const SLOW_TOL_SEC = 5;
+
+function paceSec(s: string): number {
+  const [m, sec] = s.split(":").map(Number);
+  return m * 60 + sec;
+}
+
+const mmss = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, "0")}`;
+
+type StepTarget =
+  | { kind: "range"; lo: number; hi: number; mid: number | null }
+  | { kind: "target"; t: number }
+  | { kind: "cap"; cap: number }
+  | { kind: "easy" }
+  | { kind: "none" };
+
+function stepTarget(step: string): StepTarget {
+  const range = step.match(/\((\d+:\d{2})\s*-\s*(\d+:\d{2})\s*\/mi\)/);
+  const at = step.match(/at (\d+:\d{2})\s*\/mi/);
+  if (range) return { kind: "range", lo: paceSec(range[1]), hi: paceSec(range[2]), mid: at ? paceSec(at[1]) : null };
+  if (at) return { kind: "target", t: paceSec(at[1]) };
+  const cap = step.match(/no faster than (\d+:\d{2})\s*\/mi/);
+  if (cap) return { kind: "cap", cap: paceSec(cap[1]) };
+  if (/conversational|easy/i.test(step)) return { kind: "easy" };
+  return { kind: "none" };
+}
+
+function verdict(actual: number, t: StepTarget): string {
+  switch (t.kind) {
+    case "range": {
+      const goal = `target ${mmss(t.lo)}-${mmss(t.hi)}/mi`;
+      if (actual >= t.lo && actual <= t.hi) return `${goal} → ✓ within target range`;
+      if (actual < t.lo) {
+        const d = t.lo - actual;
+        return d <= FAST_OK_SEC ? `${goal} → ✓ slightly faster than range (${Math.round(d)}s/mi)` : `${goal} → ⚠ ${Math.round(d)}s/mi faster than range (well ahead; check effort)`;
+      }
+      const slow = actual - t.hi;
+      return slow <= SLOW_TOL_SEC ? `${goal} → ✓ within target range (${Math.round(slow)}s/mi slower, within tolerance)` : `${goal} → ✗ ${Math.round(slow)}s/mi slower than range`;
+    }
+    case "target": {
+      const goal = `target ${mmss(t.t)}/mi`;
+      const d = actual - t.t;
+      if (d <= 0) {
+        if (-d <= FAST_OK_SEC) return `${goal} → ✓ on target${d < 0 ? ` (${Math.round(-d)}s/mi faster, ideal)` : ""}`;
+        return `${goal} → ⚠ ${Math.round(-d)}s/mi faster than target (well ahead; check effort)`;
+      }
+      if (d <= SLOW_TOL_SEC) return `${goal} → ✓ on target (${Math.round(d)}s/mi slower, within tolerance)`;
+      return `${goal} → ✗ ${Math.round(d)}s/mi slower than target`;
+    }
+    case "cap":
+      return actual >= t.cap
+        ? `easy, no faster than ${mmss(t.cap)}/mi → ✓ kept easy (at or slower than the cap is exactly right)`
+        : `easy, no faster than ${mmss(t.cap)}/mi → ⚠ ${Math.round(t.cap - actual)}s/mi faster than the easy cap`;
+    case "easy":
+      return "conversational, no pace target → ✓ (judge by effort/HR)";
+    default:
+      return "";
+  }
+}
+
+interface SplitIn { label: string; mi: number; sec: number; hr: string }
+
+function fmtSplit(s: SplitIn, step: string | undefined): string {
+  const pace = s.mi > 0.05 ? s.sec / s.mi : 0;
+  const base = `${s.label} ${s.mi.toFixed(2)}mi @ ${pace ? `${mmss(pace)}/mi` : "-"}${s.hr ? ` (${s.hr})` : ""}`;
+  if (!step || !pace) return base;
+  const v = verdict(pace, stepTarget(step));
+  return v ? `${base} — ${v}` : base;
+}
+
+// Runna's per-segment splits ("2.00 mi @ 8:27 /mi") lined up with the plan
+// steps one-to-one, for non-interval sessions. HR from the watch's laps when
+// they line up too.
+function judgeSegments(planSteps: string[], runnaLaps: string[], watch: FitLap[] | undefined): string | null {
+  if (planSteps.some(s => /reps? of/i.test(s) || s.trim().startsWith("•"))) return null;
+  const segs = runnaLaps
+    .map(l => l.match(/([\d.]+)\s*mi\s*@\s*(\d+:\d{2})/))
+    .filter((m): m is RegExpMatchArray => !!m)
+    .map(m => ({ mi: Number(m[1]), pace: paceSec(m[2]) }))
+    .filter(s => s.mi >= 0.1);
+  if (segs.length !== planSteps.length) return null;
+  const wl = (watch ?? []).filter(l => l.m / 1609.344 >= 0.1);
+  const hrFor = (i: number) => {
+    const l = wl.length === segs.length ? wl[i] : undefined;
+    return l?.avgHr != null ? `HR ${l.avgHr}${l.maxHr != null ? `/${l.maxHr}` : ""}` : "";
+  };
+  return segs.map((s, i) => fmtSplit({ label: `segment ${i + 1}`, mi: s.mi, sec: s.pace * s.mi, hr: hrFor(i) }, planSteps[i])).join(" | ");
+}
+
+// Structured watch laps (warm-up / reps / rests / cool-down) judged against
+// the plan's warm-up, rep and cool-down steps.
+function judgeWorkoutLaps(planSteps: string[], laps: FitLap[]): string {
+  const warm = planSteps.find(s => /warm.?up/i.test(s));
+  const cool = planSteps.find(s => /cool.?down/i.test(s));
+  const rep = planSteps.find(s => s.trim().startsWith("•") && /\/mi/.test(s));
+  let n = 0;
+  return laps
+    .filter(l => l.sec >= 15)
+    .map(l => {
+      const mi = l.m / 1609.344;
+      const hr = l.avgHr != null ? `HR ${l.avgHr}${l.maxHr != null && l.intensity !== "rest" && l.intensity !== "recovery" ? `/${l.maxHr}` : ""}` : "";
+      if (l.intensity === "rest" || l.intensity === "recovery") return `rest ${mmss(l.sec)}${hr ? ` (${hr})` : ""}`;
+      if (l.intensity === "warmup") return fmtSplit({ label: "warm-up", mi, sec: l.sec, hr }, warm);
+      if (l.intensity === "cooldown") return fmtSplit({ label: "cool-down", mi, sec: l.sec, hr }, cool);
+      return fmtSplit({ label: `rep ${++n}`, mi, sec: l.sec, hr }, rep);
+    })
+    .join(" | ");
+}
+
+// Day-by-day plan vs actual for the last 7 days (today included), built
+// here so the coach doesn't have to infer what was planned. Plan comes from
+// the Runna feed: a completed/past entry carries the planned session's title;
+// a day with no Runna session is a genuine rest day.
+async function dayByDaySection(acts: ActivityRow[], pastRuns: RunnaPastRun[], workouts: RunnaWorkout[]): Promise<string[]> {
+  const today = localDate(new Date());
+  const weekStart = localDate(new Date(Date.now() - 6 * 86_400_000));
+  const weekRuns = acts.filter(a => isRun(a) && a.start_time.slice(0, 10) >= weekStart);
+  const watchLaps = await getRunLaps(weekRuns.map(r => String(r.activity_id))).catch(() => new Map());
+  const lines = ["## Day by day — last 7 days (PLAN from Runna, ACTUAL from Garmin). Use this for plan vs actual; it is complete."];
+  for (let i = 6; i >= 0; i--) {
+    const date = localDate(new Date(Date.now() - i * 86_400_000));
+    const past = pastRuns.find(p => p.date === date);
+    const upcoming = workouts.find(w => w.date === date);
+
+    let plan: string;
+    if (past && past.type !== "rest" && !past.uid.startsWith("GARMIN_WALK_") && !past.uid.startsWith("SYNTHETIC_REST_")) {
+      plan = past.uid.startsWith("GARMIN_ORPHAN_")
+        ? `${past.title} (Runna entry missing; plan taken from the Garmin activity name)`
+        : past.title;
+      if (past.planSteps.length) plan += ` — steps: ${past.planSteps.slice(0, 10).join(" | ")}`;
+    } else if (upcoming && upcoming.type !== "rest") {
+      plan = upcoming.title + (upcoming.distanceMi ? ` (${upcoming.distanceMi.toFixed(1)}mi)` : "");
+      if (upcoming.segments.length) plan += ` — steps: ${upcoming.segments.slice(0, 10).join(" | ")}`;
+    } else {
+      plan = "Rest day (no session in the Runna plan)";
+    }
+
+    const done = acts
+      .filter(a => a.start_time.slice(0, 10) === date)
+      .sort((a, b) => a.start_time.localeCompare(b.start_time))
+      .map(a => {
+        const sec = secs(a.moving_time ?? a.elapsed_time);
+        const what = isRun(a) ? "Run" : sportLabel(a);
+        const bits = [
+          a.distance ? `${a.distance.toFixed(2)}mi` : "",
+          clock(sec),
+          isRun(a) ? pace(sec, a.distance) : "",
+          a.avg_hr != null ? `HR avg ${a.avg_hr}` : "",
+          a.training_load != null ? `load ${Math.round(a.training_load)}` : "",
+        ].filter(Boolean);
+        return `${what} ${a.start_time.slice(11, 16)} (${bits.join(", ")})`;
+      });
+    const actual = done.length ? done.join("; ") : date === today ? "nothing recorded yet today" : "nothing recorded";
+    lines.push(`- ${weekday(date)} ${date}${date === today ? " (TODAY)" : ""}: PLAN: ${plan}. ACTUAL: ${actual}.`);
+
+    // Splits for each run that day, so each planned segment can be judged:
+    // the watch's workout laps (with HR) for structured sessions, otherwise
+    // Runna's per-segment splits, otherwise the watch's auto laps.
+    for (const r of weekRuns.filter(a => a.start_time.slice(0, 10) === date)) {
+      const laps: FitLap[] | undefined = watchLaps.get(String(r.activity_id));
+      const steps = past?.planSteps ?? [];
+      const judged = past?.laps.length ? judgeSegments(steps, past.laps, laps) : null;
+      if (laps && isStructured(laps) && laps.length > 1) {
+        lines.push(`  SPLITS vs PLAN (watch workout laps): ${steps.length ? judgeWorkoutLaps(steps, laps) : formatLaps(laps)}`);
+      } else if (judged) {
+        lines.push(`  SPLITS vs PLAN: ${judged}`);
+      } else if (past?.laps.length) {
+        lines.push(`  SPLITS (per planned segment): ${past.laps.slice(0, 16).join(" | ")}`);
+        if (laps && laps.length > 1) lines.push(`  watch laps (HR): ${formatLaps(laps)}`);
+      } else if (laps && laps.length > 1) {
+        lines.push(`  SPLITS (watch laps): ${formatLaps(laps)}`);
+      }
+    }
+  }
+  return lines;
+}
+
+function otherTrainingSection(acts: ActivityRow[]): string[] {
+  const cutoff = localDate(new Date(Date.now() - RECENT_RUN_DAYS * 86_400_000));
+  const others = acts.filter(a => !isRun(a) && a.start_time.slice(0, 10) >= cutoff);
+  if (!others.length) return [];
+  const lines = [`## Other training — last ${RECENT_RUN_DAYS} days (walks, strength, etc.; newest first, Garmin)`];
+  for (const a of others) {
+    const date = a.start_time.slice(0, 10);
+    const sec = secs(a.moving_time ?? a.elapsed_time);
+    const parts = [
+      clock(sec),
+      a.distance ? `${a.distance.toFixed(2)}mi` : "",
+      a.avg_hr != null ? `HR avg ${a.avg_hr}/max ${a.max_hr ?? "-"}` : "",
+      a.calories ? `${Math.round(a.calories)} kcal` : "",
+      a.training_load != null ? `load ${Math.round(a.training_load)}` : "",
+    ].filter(Boolean);
+    lines.push(`- ${weekday(date)} ${date} ${a.start_time.slice(11, 16)} — ${sportLabel(a)}${a.name && a.name !== sportLabel(a) ? ` (${a.name})` : ""}: ${parts.join("; ")}`);
+  }
+  return lines;
 }
 
 function upcomingSection(workouts: RunnaWorkout[]): string[] {
@@ -362,16 +588,19 @@ export async function buildCoachContext(): Promise<CoachContext> {
   const workouts = schedule?.ok ? schedule.workouts : [];
   const pastRuns = schedule?.ok ? schedule.pastRuns : [];
   const zones = await getCurrentHrZones().catch(() => null);
-  const [recent, hrv] = await Promise.all([
+  const [recent, hrv, dayBy] = await Promise.all([
     recentRunsSection(acts, pastRuns, zones),
     getHrvDays(localDate(new Date(Date.now() - 7 * 86_400_000)), localDate(new Date())).catch(() => new Map<string, HrvDay>()),
+    dayByDaySection(acts, pastRuns, workouts),
   ]);
 
   const sections = [
     profileSection(acts, zones),
     racesSection(),
     upcomingSection(workouts),
+    dayBy,
     recent.lines,
+    otherTrainingSection(acts),
     weeklySection(acts),
     wellnessSection(hrv),
   ].filter(s => s.length);
