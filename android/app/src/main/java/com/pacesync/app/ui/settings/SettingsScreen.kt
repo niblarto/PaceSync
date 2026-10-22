@@ -170,6 +170,10 @@ fun SettingsScreen(tokenStore: TokenStore, api: PaceSyncApi) {
             }
             digestStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         }
+
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
+        HealthConnectSection()
     }
     }
 

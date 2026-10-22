@@ -251,6 +251,20 @@ CREATE TABLE IF NOT EXISTS tracks (
   PRIMARY KEY (csv_file, uri, row_no)
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_csv_file ON tracks(csv_file);
+
+-- Daily nutrition totals pushed by the Android app from Health Connect
+-- (written there by Lose It!). One row per local calendar day. Nullable
+-- columns: free Lose It! accounts may only sync calories, not macros.
+CREATE TABLE IF NOT EXISTS nutrition_daily (
+  date TEXT PRIMARY KEY,
+  energy_kcal REAL,
+  protein_g REAL,
+  carbs_g REAL,
+  fat_g REAL,
+  weight_kg REAL,
+  source TEXT,
+  updated_at TEXT NOT NULL
+);
 `;
 
 let db: Database.Database | null = null;

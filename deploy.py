@@ -176,6 +176,8 @@ FILES = [
     ('app/api/cron/coach-weekly/route.ts',        'app/api/cron/coach-weekly/route.ts'),
     ('app/api/coach/reports/route.ts',            'app/api/coach/reports/route.ts'),
     ('components/CoachSettingsCard.tsx',          'components/CoachSettingsCard.tsx'),
+    ('lib/nutrition.ts',                          'lib/nutrition.ts'),
+    ('app/api/nutrition/route.ts',                'app/api/nutrition/route.ts'),
     ('app/races/[id]/page.tsx',                    'app/races/[id]/page.tsx'),
     ('components/RaceDetailClient.tsx',           'components/RaceDetailClient.tsx'),
     ('components/InlineRouteMap.tsx',             'components/InlineRouteMap.tsx'),

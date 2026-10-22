@@ -125,6 +125,11 @@ interface PaceSyncApi {
     @HTTP(method = "PATCH", path = "api/tracks/song-crawler", hasBody = true)
     suspend fun setCrawlReviewLimit(@Body body: com.pacesync.app.network.dto.CrawlReviewLimitRequest): Response<Unit>
 
+    // Daily nutrition totals read from Health Connect (Lose It!) — see
+    // health/NutritionSync.kt.
+    @POST("api/nutrition")
+    suspend fun syncNutrition(@Body body: com.pacesync.app.network.dto.NutritionSyncRequest): Response<com.pacesync.app.network.dto.NutritionSyncResponse>
+
     @HTTP(method = "PATCH", path = "api/tracks/song-crawler", hasBody = true)
     suspend fun crawlRemoveAdded(@Body body: com.pacesync.app.network.dto.CrawlRemoveRequest): Response<Unit>
 }
