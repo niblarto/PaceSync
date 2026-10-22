@@ -3,6 +3,9 @@ package com.pacesync.app.health
 import android.content.Context
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.HealthConnectFeatures
+import androidx.health.connect.client.changes.DeletionChange
+import androidx.health.connect.client.changes.UpsertionChange
+import androidx.health.connect.client.request.ChangesTokenRequest
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.NutritionRecord
 import androidx.health.connect.client.records.WeightRecord
@@ -14,6 +17,7 @@ import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.NutritionDayDto
 import com.pacesync.app.network.dto.NutritionSyncRequest
 import java.time.Instant
+import java.time.ZoneId
 import java.time.LocalDate
 import java.time.Period
 import java.time.temporal.ChronoUnit
@@ -56,6 +60,83 @@ object NutritionSync {
     }
 
     data class SyncResult(val from: LocalDate, val to: LocalDate, val daysWithData: Int)
+
+    // ── Changes feed ────────────────────────────────────────────────────────
+    // Health Connect can't notify apps of new data, so the worker checks its
+    // changes feed every 15 minutes: "what changed since this bookmark?".
+    // Nothing changed → no server call. Changed → re-send the affected days.
+
+    private const val PREFS = "nutrition_sync"
+    private const val KEY_TOKEN = "changes_token"
+    private const val MAX_CHANGE_DAYS = 90
+
+    private fun changesRequest() = ChangesTokenRequest(
+        recordTypes = setOf(NutritionRecord::class),
+        dataOriginFilters = setOf(DataOrigin(LOSE_IT_PACKAGE)),
+    )
+
+    private fun savedToken(context: Context) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_TOKEN, null)
+
+    private fun saveToken(context: Context, token: String) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_TOKEN, token).apply()
+
+    // Returns the sync result, or null when nothing had changed.
+    suspend fun syncIfChanged(context: Context, api: PaceSyncApi): SyncResult? {
+        val hc = client(context)
+        if (READ_NUTRITION !in hc.permissionController.getGrantedPermissions()) {
+            throw SecurityException("Health Connect nutrition permission not granted")
+        }
+        val token = savedToken(context)
+        if (token == null) {
+            // First run: bookmark now, then send the usual window, so nothing
+            // logged in between is missed.
+            val fresh = hc.getChangesToken(changesRequest())
+            val r = sync(context, api, PERIODIC_DAYS)
+            saveToken(context, fresh)
+            return r
+        }
+
+        var next: String = token
+        var earliest: LocalDate? = null
+        var deleted = false
+        while (true) {
+            val resp = hc.getChanges(next)
+            if (resp.changesTokenExpired) {
+                // Bookmarks expire after ~30 days unused: start again.
+                val fresh = hc.getChangesToken(changesRequest())
+                val r = sync(context, api, PERIODIC_DAYS)
+                saveToken(context, fresh)
+                return r
+            }
+            for (c in resp.changes) {
+                when (c) {
+                    is UpsertionChange -> {
+                        val rec = c.record as? NutritionRecord
+                        if (rec != null) {
+                            val d = rec.startTime.atZone(ZoneId.systemDefault()).toLocalDate()
+                            val e = earliest
+                            if (e == null || d.isBefore(e)) earliest = d
+                        }
+                    }
+                    is DeletionChange -> deleted = true // no date given; resend the usual window
+                }
+            }
+            next = resp.nextChangesToken
+            if (!resp.hasMore) break
+        }
+
+        if (earliest == null && !deleted) {
+            saveToken(context, next)
+            return null
+        }
+        val today = LocalDate.now()
+        val fromChanges = earliest?.let { java.time.temporal.ChronoUnit.DAYS.between(it, today).toInt() + 1 } ?: 0
+        val days = maxOf(if (deleted) PERIODIC_DAYS else 1, fromChanges).coerceIn(1, MAX_CHANGE_DAYS)
+        val r = sync(context, api, days)
+        saveToken(context, next) // only after the server has the data
+        return r
+    }
 
     // Reads [today - days + 1, today] and replaces that range on the server.
     suspend fun sync(context: Context, api: PaceSyncApi, days: Int): SyncResult {

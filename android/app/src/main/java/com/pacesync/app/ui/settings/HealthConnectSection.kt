@@ -108,7 +108,7 @@ fun HealthConnectSection() {
             else -> {
                 val missing = requestable - g
                 val note = buildString {
-                    append("Access granted. Syncs every ~3 hours.")
+                    append("Access granted. Checks Lose It! for changes every 15 minutes and sends only what changed.")
                     if (NutritionSync.READ_BACKGROUND in missing) append(" Background access not granted, so it only syncs while the app is open.")
                     if (NutritionSync.READ_HISTORY in missing) append(" History access not granted: only 30 days before the grant are readable.")
                 }
@@ -148,6 +148,12 @@ fun HealthConnectSection() {
         lastSync?.let { (msg, at) ->
             val time = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(at))
             Text("Last sync ($time): $msg", style = MaterialTheme.typography.bodySmall)
+        }
+        SyncStatus.lastChecked(context)?.let { at ->
+            Text(
+                "Last checked: ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(at))}",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary,
+            )
         }
     }
 }

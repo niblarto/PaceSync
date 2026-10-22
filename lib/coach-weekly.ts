@@ -2,6 +2,7 @@ import { getDb } from "@/lib/db";
 import { buildCoachContext, prefetchCoachData } from "@/lib/coach-context";
 import { buildCoachSystemPrompt } from "@/lib/coach-prompt";
 import { coachChat } from "@/lib/coach-llm";
+import { formatCoachText } from "@/lib/coach-format";
 import { coachModelLabel, loadCoachConfig } from "@/lib/coach-config";
 import { commitSessionToMemory, recallPastAnalyses } from "@/lib/coach-memory";
 
@@ -37,7 +38,9 @@ export interface CoachReport {
 }
 
 interface Row { id: number; week_start: string; created_at: string; content: string; model: string | null }
-const toReport = (r: Row): CoachReport => ({ id: r.id, weekStart: r.week_start, createdAt: r.created_at, content: r.content, model: r.model });
+// Formatted on the way out too, so reports saved before the bullet layout
+// display the same way.
+const toReport = (r: Row): CoachReport => ({ id: r.id, weekStart: r.week_start, createdAt: r.created_at, content: formatCoachText(r.content, { splitHeadings: true }), model: r.model });
 
 export function listReports(limit = 12): CoachReport[] {
   return (db().prepare("SELECT * FROM coach_reports ORDER BY created_at DESC LIMIT ?").all(limit) as Row[]).map(toReport);
@@ -95,13 +98,21 @@ function reportRequest(week: { start: string; end: string; label: string }, roll
 
 Use exactly these sections, each as a bold heading line:
 **Verdict** — 2-3 sentences: how ${period} went overall and the single most important takeaway.
-**Plan vs actual** — each day of ${period} up to today (don't report on days that haven't happened yet). Take what was planned and what I did from the DAY BY DAY section exactly as written: never call a day a rest day unless it says "Rest day", and quote distances from it. For runs, use the SPLITS vs PLAN line: each split already has a verdict (✓ = hit, ⚠ = much faster than planned, ✗ = slower than target). Report those verdicts as given and never contradict them. Remember a lower pace number is faster: on target, slightly faster, or up to 5 s/mi slower is a hit. For easy/conversational runs, running at or slower than the cap is correct; never describe it as "slow" or a miss. Judge the session by its splits, not the overall average pace. For each day: what was planned, what I did (every DONE line, including walks and strength), whether it hit the purpose of the session, my RATING where given, and anything notable in that day's RECOVERY.
+**Plan vs actual** — each day of ${period} up to today (don't report on days that haven't happened yet). Take what was planned and what I did from the DAY BY DAY section exactly as written: never call a day a rest day unless it says "Rest day", and quote distances from it. For runs, use the SPLITS vs PLAN line: each split already has a verdict (✓ = hit, ⚠ = much faster than planned, ✗ = slower than target). Report those verdicts as given and never contradict them. Remember a lower pace number is faster: on target, slightly faster, or up to 5 s/mi slower is a hit. For easy/conversational runs, running at or slower than the cap is correct; never describe it as "slow" or a miss. Judge the session by its splits, not the overall average pace. Write one bullet per day in this order, using the DAY BY DAY figures and leaving out only parts that are missing for that day:
+- <Day> <date>: PLAN <plan> → DONE <each activity: distance, pace for runs, load> · splits <✓/⚠/✗ summary> · effort <x/10> · sleep <h:mm> (score <n>)
+Every DONE activity gets its load, runs included. Every day with a RECOVERY line gets its sleep. Then add a few words on whether the session hit its purpose.
 **Load & recovery** — the mileage and training load (runs plus walks, strength and other sessions) for ${period} against the previous weeks, plus HRV, resting HR, sleep and body battery trends. Flag anything that needs attention.
 ${next} with specific guidance (target paces or heart rates, what to focus on, what to watch for), adjusted for how ${period} went.
 **Fuelling & weight** — from WEIGHT & NUTRITION and the FOOD lines in DAY BY DAY: weight trend against the goal, whether key sessions (long runs, intervals) were fuelled well enough (food the day before and on the day, carbs), protein, and the calorie deficit against training load. Skip if no food is logged.
 **Race readiness** — only if a race is coming up: quote the race date and the days/weeks away exactly as given in UPCOMING RACES (don't calculate it yourself), and whether I'm on track.
 
-Be specific and quote numbers. Under 500 words.`;
+Be specific and quote numbers. Under 500 words.
+
+Formatting: put each bold heading on its own line with nothing after it. Under it, write one bullet ("- ") per day or item, each on its own line, e.g.
+**Plan vs actual**
+- Fri 16: rest day; walked 1.98mi (load 7)
+- Sat 17: 12mi Progressive Long Run, done 12.01mi, all splits ✓; effort 8/10
+Never join several days or items on one line with "|" or ";". Verdict and other short summaries can be 1-3 plain sentences.`;
 }
 
 function verdictOf(content: string): string {
@@ -142,6 +153,7 @@ async function writeReport(rolling: boolean): Promise<WeeklyReportResult> {
   const system = buildCoachSystemPrompt(context.text, recall.memories.map(m => m.document));
   const reply = await coachChat(system, [{ role: "user", content: reportRequest(week, rolling) }], { think: true });
   if (!reply.ok) return { ok: false, error: reply.error };
+  reply.reply = formatCoachText(reply.reply, { splitHeadings: true });
 
   const model = coachModelLabel(loadCoachConfig());
   const createdAt = new Date().toISOString();

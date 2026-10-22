@@ -173,6 +173,8 @@ FILES = [
     ('scripts/garmin_after_sync.sh',              'scripts/garmin_after_sync.sh'),
     ('app/api/coach/refresh-data/route.ts',       'app/api/coach/refresh-data/route.ts'),
     ('lib/coach-weekly.ts',                       'lib/coach-weekly.ts'),
+    ('lib/coach-format.ts', 'lib/coach-format.ts'),
+    ('lib/garmin-connect.ts', 'lib/garmin-connect.ts'),
     ('app/api/cron/coach-weekly/route.ts',        'app/api/cron/coach-weekly/route.ts'),
     ('app/api/coach/reports/route.ts',            'app/api/coach/reports/route.ts'),
     ('components/CoachSettingsCard.tsx',          'components/CoachSettingsCard.tsx'),
@@ -189,6 +191,7 @@ FILES = [
     ('lib/nutrition-summary.ts', 'lib/nutrition-summary.ts'),
     ('lib/garmin-weight.ts', 'lib/garmin-weight.ts'),
     ('app/api/nutrition/weight-refresh/route.ts', 'app/api/nutrition/weight-refresh/route.ts'),
+    ('app/api/cron/garmin-weight/route.ts', 'app/api/cron/garmin-weight/route.ts'),
     ('app/api/nutrition/summary/route.ts', 'app/api/nutrition/summary/route.ts'),
     ('app/api/cron/nutrition-summary/route.ts', 'app/api/cron/nutrition-summary/route.ts'),
     ('app/races/[id]/page.tsx',                    'app/races/[id]/page.tsx'),
@@ -729,6 +732,15 @@ nutrition_cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/nutrition-summary' || {{ (crontab -l 2>/dev/null; echo '{nutrition_cron_line}') | crontab -; }}""")
+
+print('  Ensuring cron job (Garmin weigh-ins, hourly)...')
+weight_cron_log = f'/home/{PI["user"]}/cron-garmin-weight.log'
+weight_cron_line = (
+    f'37 * * * * curl -s -m 60 -o {weight_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/garmin-weight '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/garmin-weight' || {{ (crontab -l 2>/dev/null; echo '{weight_cron_line}') | crontab -; }}""")
 
 # Garmin sync completion notification: sftp doesn't carry the exec bit (and a
 # Windows checkout may add CRLFs), so normalise the script, then append it to

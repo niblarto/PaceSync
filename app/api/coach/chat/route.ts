@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { buildCoachContext } from "@/lib/coach-context";
+import { formatCoachText } from "@/lib/coach-format";
 import { buildCoachSystemPrompt } from "@/lib/coach-prompt";
 import { coachChat } from "@/lib/coach-llm";
 import { coachModelLabel, loadCoachConfig } from "@/lib/coach-config";
@@ -20,7 +21,9 @@ export async function GET(req: NextRequest) {
   closeIdleSession();
   const id = getOpenSessionId();
   return NextResponse.json({
-    messages: id == null ? [] : getSessionMessages(id),
+    // Assistant replies get the same layout as reports (headings on their own
+    // line, one bullet per item), including ones saved before that existed.
+    messages: id == null ? [] : getSessionMessages(id).map(m => m.role === "assistant" ? { ...m, content: formatCoachText(m.content, { splitHeadings: true }) } : m),
     model: coachModelLabel(loadCoachConfig()),
   });
 }
@@ -56,6 +59,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: result.error }, { status: 502 });
   }
   const label = coachModelLabel(loadCoachConfig());
-  const reply = addMessage(sessionId, "assistant", result.reply, label, recall.memories.map(m => m.id));
+  const reply = addMessage(sessionId, "assistant", formatCoachText(result.reply, { splitHeadings: true }), label, recall.memories.map(m => m.id));
   return NextResponse.json({ userMessage: userMsg, reply, recallModel: recall.model });
 }

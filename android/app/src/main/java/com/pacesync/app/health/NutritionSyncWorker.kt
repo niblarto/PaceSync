@@ -16,8 +16,9 @@ import java.io.IOException
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 
-// Periodically pushes the last week of Health Connect nutrition to the
-// backend (re-sending recent days picks up meals logged late). Needs
+// Every 15 minutes (Android's minimum for background work) checks Health
+// Connect's changes feed and sends the backend only the days whose food
+// changed. "Sync now" runs a full backfill instead. Needs
 // READ_HEALTH_DATA_IN_BACKGROUND to read while the app isn't in front.
 class NutritionSyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
@@ -25,10 +26,12 @@ class NutritionSyncWorker(context: Context, params: WorkerParameters) : Coroutin
         if (app.container.tokenStore.getToken() == null) return Result.success()
         if (!NutritionSync.isAvailable(applicationContext)) return Result.success()
 
-        val days = inputData.getInt(KEY_DAYS, NutritionSync.PERIODIC_DAYS)
+        val days = inputData.getInt(KEY_DAYS, 0)
         return try {
-            val r = NutritionSync.sync(applicationContext, app.container.api, days)
-            SyncStatus.save(applicationContext, "Synced ${r.daysWithData} day(s), ${r.from} to ${r.to}")
+            val r = if (days > 0) NutritionSync.sync(applicationContext, app.container.api, days)
+            else NutritionSync.syncIfChanged(applicationContext, app.container.api)
+            if (r != null) SyncStatus.save(applicationContext, "Synced ${r.daysWithData} day(s), ${r.from} to ${r.to}")
+            SyncStatus.checked(applicationContext)
             Result.success()
         } catch (e: SecurityException) {
             // Permission revoked, or background read not granted.
@@ -53,11 +56,12 @@ class NutritionSyncWorker(context: Context, params: WorkerParameters) : Coroutin
             .build()
 
         fun schedulePeriodic(context: Context) {
-            val req = PeriodicWorkRequestBuilder<NutritionSyncWorker>(3, TimeUnit.HOURS)
+            val req = PeriodicWorkRequestBuilder<NutritionSyncWorker>(15, TimeUnit.MINUTES)
                 .setConstraints(networkConstraint)
                 .build()
+            // UPDATE (not KEEP) so an existing 3-hourly schedule switches to 15 min.
             WorkManager.getInstance(context)
-                .enqueueUniquePeriodicWork(PERIODIC_NAME, ExistingPeriodicWorkPolicy.KEEP, req)
+                .enqueueUniquePeriodicWork(PERIODIC_NAME, ExistingPeriodicWorkPolicy.UPDATE, req)
         }
 
         fun runNow(context: Context, days: Int) {
@@ -81,6 +85,14 @@ object SyncStatus {
             .putLong("at", Instant.now().toEpochMilli())
             .apply()
     }
+
+    // When the changes feed was last checked (even if nothing had changed).
+    fun checked(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putLong("checked_at", Instant.now().toEpochMilli()).apply()
+    }
+
+    fun lastChecked(context: Context): Long? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong("checked_at", 0L).takeIf { it > 0 }
 
     fun load(context: Context): Pair<String, Long>? {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

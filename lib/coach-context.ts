@@ -3,6 +3,7 @@ import { getDb } from "@/lib/db";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { fetchRunnaSchedule, type RunnaPastRun, type RunnaWorkout } from "@/lib/runna-schedule";
 import { listRaces } from "@/lib/races";
+import { getDayRecovery } from "@/lib/garmin-connect";
 import { buildNutritionDashboard, type NutritionDashboard } from "@/lib/nutrition-dashboard";
 import { formatWeight, formatWeightDelta } from "@/lib/weight-format";
 import { listRunFeedback, effortLabel, FEEL_LABELS, type RunFeedback } from "@/lib/run-feedback";
@@ -637,7 +638,24 @@ export async function buildCoachContext(): Promise<CoachContext> {
   const detailStart = localDate(new Date(Date.now() - (DETAIL_DAYS - 1) * 86_400_000));
   const feedback = listRunFeedback(localDate(new Date(Date.now() - RECENT_RUN_DAYS * 86_400_000)));
   const hrv = await getHrvDays(detailStart, localDate(new Date())).catch(() => new Map<string, HrvDay>());
-  const dayBy = await dayByDaySection(acts, pastRuns, workouts, nutrition, zones, recoveryByDay(hrv, detailStart), feedback);
+  const recovery = recoveryByDay(hrv, detailStart);
+  // GarminDB only stores a day once it's over, so today's recovery (last
+  // night's sleep, this morning's resting HR) comes straight from Garmin.
+  const todayDate = localDate(new Date());
+  if (!recovery.has(todayDate)) {
+    const r = await getDayRecovery(todayDate).catch(() => null);
+    if (r) {
+      const parts = [
+        r.restingHr != null ? `resting HR ${r.restingHr}` : "",
+        r.sleepSec != null ? `sleep ${clock(r.sleepSec).replace(/:\d\d$/, "")}h${r.sleepScore != null ? ` (score ${r.sleepScore}${r.sleepQualifier ? ` ${r.sleepQualifier.toLowerCase()}` : ""})` : ""}` : "",
+        r.hrv != null ? `HRV ${Math.round(r.hrv)}ms${r.hrvStatus ? ` (${r.hrvStatus.toLowerCase()})` : ""}` : "",
+        r.stressAvg != null ? `stress ${r.stressAvg} so far` : "",
+        r.bodyBatteryMax != null ? `body battery max ${r.bodyBatteryMax}` : "",
+      ].filter(Boolean);
+      if (parts.length) recovery.set(todayDate, parts.join(", "));
+    }
+  }
+  const dayBy = await dayByDaySection(acts, pastRuns, workouts, nutrition, zones, recovery, feedback);
   const cutoff = localDate(new Date(Date.now() - RECENT_RUN_DAYS * 86_400_000));
   const runCount = acts.filter(a => isRun(a) && a.start_time.slice(0, 10) >= cutoff).length;
 

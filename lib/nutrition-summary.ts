@@ -1,6 +1,7 @@
 import { getDb } from "@/lib/db";
 import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { coachChat } from "@/lib/coach-llm";
+import { formatCoachText } from "@/lib/coach-format";
 import { coachModelLabel, loadCoachConfig } from "@/lib/coach-config";
 import { buildNutritionDashboard } from "@/lib/nutrition-dashboard";
 import { formatWeight, formatWeightDelta } from "@/lib/weight-format";
@@ -168,12 +169,19 @@ const REQUEST = `Write today's nutrition summary of the last 14 days. Use exactl
 **Macros** — protein per kg of body weight, carbs on training vs rest days, anything out of balance (skip if no macro data).
 **Weight & goal** — the weight trend against the goal and whether the current deficit gets there by the goal date.
 **Next few days** — 2-3 concrete actions.
-Under 350 words.`;
+Under 350 words.
+
+Formatting: put each bold heading on its own line with nothing after it. Under it, write one bullet ("- ") per day or item, each on its own line, e.g.
+**Calories**
+- Average eaten 1,620 kcal vs your 1,500 limit
+- Best day: Tue 20, net −1,050 kcal
+Never join several days or items on one line with "|" or ";". Verdict and other short summaries can be 1-3 plain sentences.`;
 
 async function writeSummary(): Promise<{ ok: true; summary: NutritionSummary } | { ok: false; error: string }> {
   const { text, start, end } = dataText();
   const reply = await coachChat(`${SYSTEM}\n\n### DATA\n${text}`, [{ role: "user", content: REQUEST }], { think: true });
   if (!reply.ok) return { ok: false, error: reply.error };
+  reply.reply = formatCoachText(reply.reply, { splitHeadings: true });
   const model = coachModelLabel(loadCoachConfig());
   const createdAt = new Date().toISOString();
   const id = Number(db().prepare(
