@@ -187,6 +187,8 @@ FILES = [
     ('lib/nutrition-dashboard.ts', 'lib/nutrition-dashboard.ts'),
     ('lib/weight-format.ts', 'lib/weight-format.ts'),
     ('lib/nutrition-summary.ts', 'lib/nutrition-summary.ts'),
+    ('lib/garmin-weight.ts', 'lib/garmin-weight.ts'),
+    ('app/api/nutrition/weight-refresh/route.ts', 'app/api/nutrition/weight-refresh/route.ts'),
     ('app/api/nutrition/summary/route.ts', 'app/api/nutrition/summary/route.ts'),
     ('app/api/cron/nutrition-summary/route.ts', 'app/api/cron/nutrition-summary/route.ts'),
     ('app/races/[id]/page.tsx',                    'app/races/[id]/page.tsx'),

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Bar, CartesianGrid, ComposedChart, Legend, Line, ReferenceLine, ResponsiveContainer, Scatter, Tooltip, XAxis, YAxis,
+  Bar, CartesianGrid, Cell, ComposedChart, Legend, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { formatWeight, formatWeightDelta, LB_PER_KG, type WeightUnit } from "@/lib/weight-format";
 
@@ -19,6 +19,7 @@ interface DayRow {
   exercise: number | null;
   weightKg: number | null;
   deficit: number | null;
+  net: number | null;
 }
 interface Summary { id: number; createdAt: string; periodStart: string; periodEnd: string; content: string; model: string | null }
 interface SummaryState {
@@ -37,6 +38,8 @@ interface Projection {
   weightAtGoalKg: number | null;
   hitDate: string | null;
   hitStatus: "reached" | "on-course" | "never";
+  rawKgPerWeek: number;
+  capped: boolean;
 }
 interface Dashboard {
   config: {
@@ -50,9 +53,9 @@ interface Dashboard {
   today: string;
   days: DayRow[];
   weights: { date: string; kg: number }[];
-  current: { kg: number; date: string; avg7Kg: number } | null;
+  current: { kg: number; date: string; avg7Kg: number; measuredAt: string | null; source: "Garmin" | "Health Connect" } | null;
   averages: {
-    eaten: number | null; burnt: number | null; exercise: number | null; deficit: number | null;
+    eaten: number | null; burnt: number | null; exercise: number | null; deficit: number | null; net: number | null;
     loggedDays: number; windowDays: number; deficit7: number | null; deficit7Days: number;
   };
   projections: Projection[];
@@ -60,6 +63,7 @@ interface Dashboard {
 }
 
 const RANGES = [14, 30, 90] as const;
+const RANGE_KEY = "nutrition.chartRange";
 const DAY_MS = 86_400_000;
 const PROJ_COLORS: Record<Projection["method"], string> = { trend: "#a78bfa", energy: "#f59e0b", plan: "#38bdf8" };
 
@@ -69,6 +73,8 @@ const C = {
   exercise: "#34d399",
   limit: "#f87171",
   deficit: "#e879f9",
+  netOk: "#22c55e",
+  netOver: "#ef4444",
   weight: "#e2e8f0",
   target: "#34d399",
   axis: "#64748b",
@@ -94,10 +100,13 @@ function Card({ title, children, className = "" }: { title?: string; children: R
   );
 }
 
-function Stat({ label, value, sub }: { label: string; value: string; sub?: React.ReactNode }) {
+function Stat({ label, value, sub, action }: { label: string; value: string; sub?: React.ReactNode; action?: React.ReactNode }) {
   return (
     <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-4 min-w-0">
-      <div className="text-xs text-slate-500">{label}</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs text-slate-500">{label}</div>
+        {action}
+      </div>
       <div className="text-2xl font-semibold text-slate-100 mt-1 tabular-nums truncate">{value}</div>
       {sub && <div className="text-xs text-slate-400 mt-1">{sub}</div>}
     </div>
@@ -107,16 +116,16 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: React
 function CaloriesTooltip({ active, payload, label }: { active?: boolean; payload?: { payload: DayRow }[]; label?: string }) {
   if (!active || !payload?.length || !label) return null;
   const d = payload[0].payload;
-  const def = d.deficit;
   return (
     <div className="rounded-lg bg-slate-950/95 border border-white/10 px-3 py-2 text-xs space-y-0.5 shadow-lg">
       <div className="font-medium text-slate-200 mb-1">{longDate(label)}</div>
       <div style={{ color: C.eaten }}>Eaten: {kcal(d.eaten)} kcal</div>
       <div style={{ color: C.burnt }}>Burnt: {kcal(d.burnt)} kcal{d.resting != null ? ` (${kcal(d.resting)} resting)` : ""}</div>
       <div style={{ color: C.exercise }}>Exercise: {kcal(d.exercise)} kcal</div>
-      {def != null && (
-        <div className={def >= 0 ? "text-emerald-300" : "text-rose-300"}>
-          {def >= 0 ? "Deficit" : "Surplus"} (burnt − eaten): {kcal(Math.abs(def))} kcal
+
+      {d.net != null && (
+        <div className={d.net <= 0 ? "text-emerald-300" : "text-rose-300"}>
+          Net (eaten − burnt): {d.net > 0 ? "+" : d.net < 0 ? "−" : ""}{kcal(Math.abs(d.net))} kcal ({d.net <= 0 ? "deficit" : "gain"})
         </div>
       )}
       {d.proteinG != null && (
@@ -233,7 +242,19 @@ function SummaryPanel() {
 }
 
 export function NutritionClient() {
-  const [range, setRange] = useState<(typeof RANGES)[number]>(30);
+  // Chart range is remembered in this browser across refreshes.
+  const [range, setRangeState] = useState<(typeof RANGES)[number]>(() => {
+    try {
+      const v = Number(window.localStorage.getItem(RANGE_KEY));
+      return (RANGES as readonly number[]).includes(v) ? (v as (typeof RANGES)[number]) : 30;
+    } catch {
+      return 30;
+    }
+  });
+  const setRange = (r: (typeof RANGES)[number]) => {
+    setRangeState(r);
+    try { window.localStorage.setItem(RANGE_KEY, String(r)); } catch {}
+  };
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -251,6 +272,32 @@ export function NutritionClient() {
 
   useEffect(() => { load(range); }, [range, load]);
 
+  // Pull the latest weigh-ins from Garmin Connect, then reload the page data.
+  const [weightRefresh, setWeightRefresh] = useState<{ busy: boolean; msg: string | null }>({ busy: false, msg: null });
+  const refreshWeight = useCallback(async () => {
+    setWeightRefresh({ busy: true, msg: null });
+    try {
+      const res = await fetch("/api/nutrition/weight-refresh", { method: "POST" });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || `Failed (${res.status})`);
+      await load(range);
+      setWeightRefresh({ busy: false, msg: d.latest ? `Garmin: latest ${shortDate(d.latest.date)}` : "No weigh-ins in Garmin" });
+    } catch (e) {
+      setWeightRefresh({ busy: false, msg: e instanceof Error ? e.message : "Refresh failed" });
+    }
+  }, [load, range]);
+
+  // Get Garmin's latest weigh-in once when the page opens.
+  useEffect(() => { refreshWeight(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Click a legend entry to hide/show that series.
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const toggleSeries = (key: string) => setHidden(h => {
+    const next = new Set(h);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+
   const unit = data?.config.weightUnit ?? "st";
   const cfg = data?.config;
   const today = data?.today;
@@ -267,21 +314,36 @@ export function NutritionClient() {
     if (cfg?.goalDate) candidates.push(toMs(cfg.goalDate));
     for (const p of data.projections) if (p.hitDate) candidates.push(toMs(p.hitDate));
     const endMs = Math.min(Math.max(...candidates), toMs(today) + 730 * DAY_MS);
-    const lines = data.projections.map(p => {
-      const days = (endMs - toMs(today)) / DAY_MS;
-      return {
-        p,
-        points: [
-          { t: toMs(today), kg: anchor },
-          { t: endMs, kg: anchor + (p.kgPerWeek / 7) * days },
-        ],
-      };
+    const todayMs = toMs(today);
+    const target = cfg?.targetWeightKg ?? null;
+
+    // One row per date shared by every series, so the tooltip shows the
+    // values for that date: weigh-ins in the past, projections from today
+    // on (a point each week, plus the goal date and the end).
+    type Row = { t: number; kg?: number } & Partial<Record<Projection["method"], number>>;
+    const rows = new Map<number, Row>();
+    for (const h of history) rows.set(h.t, { t: h.t, kg: h.kg });
+    const projTimes = new Set<number>([todayMs, endMs]);
+    for (let ms = todayMs; ms < endMs; ms += 7 * DAY_MS) projTimes.add(ms);
+    if (cfg?.goalDate && toMs(cfg.goalDate) > todayMs && toMs(cfg.goalDate) <= endMs) projTimes.add(toMs(cfg.goalDate));
+    projTimes.forEach(ms => {
+      const row = rows.get(ms) ?? { t: ms };
+      const days = (ms - todayMs) / DAY_MS;
+      for (const p of data.projections) {
+        let kg = anchor + (p.kgPerWeek / 7) * days;
+        // A losing projection stops at the target once it gets there.
+        if (target != null && p.kgPerWeek < 0 && anchor > target) kg = Math.max(kg, target);
+        row[p.method] = kg;
+      }
+      rows.set(ms, row);
     });
-    const ys = [...history.map(h => h.kg), ...lines.flatMap(l => l.points.map(x => x.kg))];
-    if (cfg?.targetWeightKg != null) ys.push(cfg.targetWeightKg);
+    const points = Array.from(rows.values()).sort((a, b) => a.t - b.t);
+
+    const ys = points.flatMap(r => [r.kg, ...data.projections.map(p => r[p.method])]).filter((v): v is number => v != null);
+    if (target != null) ys.push(target);
     const lo = Math.min(...ys), hi = Math.max(...ys);
     const pad = Math.max(0.5, (hi - lo) * 0.08);
-    return { history, lines, startMs: history[0]?.t ?? startMs, endMs, domain: [lo - pad, hi + pad] as [number, number] };
+    return { points, startMs: history[0]?.t ?? startMs, endMs, domain: [lo - pad, hi + pad] as [number, number] };
   }, [data, cfg, today]);
 
   const weightTick = (kg: number) => {
@@ -324,8 +386,34 @@ export function NutritionClient() {
             <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
               <Stat
                 label="Current weight"
-                value={formatWeight(data.current?.kg, unit)}
-                sub={data.current ? <>{shortDate(data.current.date)} · 7-day avg {formatWeight(data.current.avg7Kg, unit)}</> : "No weigh-ins yet"}
+                value={formatWeight(data.current?.kg, unit, { exact: true })}
+                sub={<>
+                  {data.current
+                    ? <>
+                        <div>
+                          {data.current.kg.toFixed(2)} kg · {data.current.measuredAt
+                            ? new Date(data.current.measuredAt).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+                            : longDate(data.current.date)} · {data.current.source}
+                        </div>
+                        <div className="text-slate-500">7-day avg {formatWeight(data.current.avg7Kg, unit)}</div>
+                      </>
+                    : "No weigh-ins yet"}
+                  {weightRefresh.msg && <div className="text-slate-500 mt-0.5">{weightRefresh.msg}</div>}
+                </>}
+                action={
+                  <button
+                    onClick={refreshWeight}
+                    disabled={weightRefresh.busy}
+                    title="Get the latest weight from Garmin"
+                    aria-label="Get the latest weight from Garmin"
+                    className="text-slate-500 hover:text-slate-200 disabled:opacity-60 transition-colors -m-1 p-1"
+                  >
+                    <svg viewBox="0 0 24 24" className={`h-4 w-4 ${weightRefresh.busy ? "animate-spin" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                      <path d="M21 3v6h-6" />
+                    </svg>
+                  </button>
+                }
               />
               <Stat
                 label="Target weight"
@@ -347,35 +435,39 @@ export function NutritionClient() {
               <Stat
                 label="Eaten today"
                 value={`${kcal(todayRow?.eaten ?? 0)} kcal`}
-                sub={cfg.dailyCalorieLimit != null
-                  ? (() => {
-                      const left = cfg.dailyCalorieLimit - (todayRow?.eaten ?? 0);
-                      return left >= 0
-                        ? <span className="text-emerald-300">{kcal(left)} left of {kcal(cfg.dailyCalorieLimit)}</span>
-                        : <span className="text-rose-300">{kcal(-left)} over {kcal(cfg.dailyCalorieLimit)}</span>;
-                    })()
-                  : "No limit set"}
+                sub={<>
+                  <div>{todayRow?.net != null
+                    ? <>net {todayRow.net > 0 ? "+" : "−"}{kcal(Math.abs(todayRow.net))} (burnt {kcal(todayRow.burnt)})</>
+                    : "Garmin burn not in yet"}</div>
+                  {cfg.dailyCalorieLimit != null
+                    ? (() => {
+                        const left = cfg.dailyCalorieLimit - (todayRow?.eaten ?? 0);
+                        return left >= 0
+                          ? <span className="text-emerald-300">{kcal(left)} left of {kcal(cfg.dailyCalorieLimit)}</span>
+                          : <span className="text-rose-300">{kcal(-left)} over {kcal(cfg.dailyCalorieLimit)}</span>;
+                      })()
+                    : "No limit set"}
+                </>}
               />
               {(() => {
-                const avg = data.averages.deficit7;
-                const lastFull = [...data.days].reverse().find(d => d.date < today && d.deficit != null);
+                const avg = data.averages.deficit7 == null ? null : -data.averages.deficit7; // net = −deficit
+                const lastFull = [...data.days].reverse().find(d => d.date < today && d.net != null);
+                const signed = (n: number) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${kcal(Math.abs(n))}`;
                 return (
                   <Stat
-                    label="Avg deficit (last 7 days)"
-                    value={avg == null ? "—" : `${kcal(Math.abs(avg))} kcal`}
+                    label="Avg net, eaten − burnt (7 days)"
+                    value={avg == null ? "—" : `${signed(avg)} kcal`}
                     sub={avg == null
                       ? "Needs logged days with Garmin burn"
                       : <>
-                          <span className={avg >= 0 ? "text-emerald-300" : "text-rose-300"}>{avg >= 0 ? "deficit" : "surplus"}/day</span>
+                          <span className={avg <= 0 ? "text-emerald-300" : "text-rose-300"}>{avg <= 0 ? "deficit" : "gain"}/day</span>
                           {" "}over {data.averages.deficit7Days} logged day{data.averages.deficit7Days === 1 ? "" : "s"}
-                          {lastFull && <> · {shortDate(lastFull.date)}: {lastFull.deficit! >= 0 ? "−" : "+"}{kcal(Math.abs(lastFull.deficit!))}</>}
+                          {lastFull && <> · {shortDate(lastFull.date)}: {signed(lastFull.net!)}</>}
                         </>}
                   />
                 );
               })()}
             </div>
-
-            <SummaryPanel />
 
             {/* Calories chart */}
             <Card>
@@ -398,13 +490,22 @@ export function NutritionClient() {
                   <XAxis dataKey="date" tickFormatter={shortDate} tick={{ fill: C.axis, fontSize: 10 }} axisLine={{ stroke: C.grid }} tickLine={false} minTickGap={16} />
                   <YAxis tick={{ fill: C.axis, fontSize: 10 }} axisLine={false} tickLine={false} width={44} />
                   <Tooltip content={<CaloriesTooltip />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
-                  <Legend wrapperStyle={{ fontSize: 11, color: C.axis }} />
-                  <Bar dataKey="eaten" name="Eaten" fill={C.eaten} radius={[2, 2, 0, 0]} />
-                  <Bar dataKey="burnt" name="Burnt" fill={C.burnt} radius={[2, 2, 0, 0]} />
-                  <Bar dataKey="exercise" name="Exercise" fill={C.exercise} radius={[2, 2, 0, 0]} />
+                  <Legend
+                    wrapperStyle={{ fontSize: 11, color: C.axis, cursor: "pointer" }}
+                    onClick={e => toggleSeries(String((e as { dataKey?: unknown }).dataKey ?? ""))}
+                    formatter={(value, entry) => (
+                      <span style={{ opacity: hidden.has(String((entry as { dataKey?: unknown }).dataKey)) ? 0.35 : 1 }}>{value}</span>
+                    )}
+                  />
+                  <Bar dataKey="net" name="Net (eaten − burnt)" fill={C.netOk} radius={[2, 2, 0, 0]} hide={hidden.has("net")}>
+                    {data.days.map(d => (
+                      <Cell key={d.date} fill={d.net != null && d.net > 0 ? C.netOver : C.netOk} />
+                    ))}
+                  </Bar>
+                  <Bar dataKey="eaten" name="Eaten" fill={C.eaten} radius={[2, 2, 0, 0]} hide={hidden.has("eaten")} />
+                  <Bar dataKey="exercise" name="Exercise" fill={C.exercise} radius={[2, 2, 0, 0]} hide={hidden.has("exercise")} />
+                  <Bar dataKey="burnt" name="Burnt" fill={C.burnt} radius={[2, 2, 0, 0]} hide={hidden.has("burnt")} />
                   <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" />
-                  <Line dataKey="deficit" name="Deficit (burnt − eaten)" stroke={C.deficit} strokeWidth={2}
-                    dot={{ r: 2.5, fill: C.deficit }} connectNulls={false} isAnimationActive={false} />
                   {cfg.dailyCalorieLimit != null && (
                     <ReferenceLine y={cfg.dailyCalorieLimit} stroke={C.limit} strokeDasharray="6 4"
                       label={{ value: `Limit ${kcal(cfg.dailyCalorieLimit)}`, fill: C.limit, fontSize: 10, position: "insideTopRight" }} />
@@ -414,24 +515,25 @@ export function NutritionClient() {
               <p className="text-xs text-slate-500 mt-2">
                 Last {data.averages.windowDays} days (not counting today): avg eaten {kcal(data.averages.eaten)} kcal on{" "}
                 {data.averages.loggedDays} logged days · avg burnt {kcal(data.averages.burnt)} · avg exercise {kcal(data.averages.exercise)} ·
-                avg deficit {data.averages.deficit == null ? "—" : `${kcal(data.averages.deficit)} kcal`}.
+                avg net {data.averages.net == null ? "—" : `${data.averages.net > 0 ? "+" : "−"}${kcal(Math.abs(data.averages.net))} kcal`}.
+                Net bars (eaten − burnt) go below zero on a deficit (green) and above on a gain (red). Click a legend entry to hide it.
                 Days with nothing logged in Lose It! are left out of the eaten average.
               </p>
             </Card>
 
-            <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] gap-6 items-start">
+            <div className="grid grid-cols-1 gap-6">
               {/* Weight + projections chart */}
               <Card title="Weight and projections">
                 {!weightChart ? (
                   <p className="text-sm text-slate-500">No weigh-ins yet.</p>
                 ) : (
                   <ResponsiveContainer width="100%" height={320}>
-                    <ComposedChart margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                    <ComposedChart data={weightChart.points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={C.grid} />
                       <XAxis dataKey="t" type="number" scale="time" domain={[weightChart.startMs, weightChart.endMs]}
                         tickFormatter={t => shortDate(msToYmd(t))} tick={{ fill: C.axis, fontSize: 10 }}
                         axisLine={{ stroke: C.grid }} tickLine={false} minTickGap={24} />
-                      <YAxis dataKey="kg" type="number" domain={weightChart.domain} tickFormatter={weightTick}
+                      <YAxis type="number" domain={weightChart.domain} tickFormatter={weightTick}
                         tick={{ fill: C.axis, fontSize: 10 }} axisLine={false} tickLine={false} width={unit === "st" ? 58 : 40} />
                       <Tooltip
                         contentStyle={{ background: "rgba(2,6,23,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
@@ -445,13 +547,16 @@ export function NutritionClient() {
                       )}
                       {cfg.goalDate && (
                         <ReferenceLine x={toMs(cfg.goalDate)} stroke={C.target} strokeDasharray="2 4"
-                          label={{ value: "Goal date", fill: C.target, fontSize: 10, position: "insideTopLeft" }} />
+                          label={{ value: "Goal date", fill: C.target, fontSize: 10, position: "insideTopRight" }} />
                       )}
                       <ReferenceLine x={toMs(today)} stroke="rgba(255,255,255,0.2)" />
-                      <Scatter data={weightChart.history} dataKey="kg" name="Weigh-ins" fill={C.weight} shape="circle" r={2} />
-                      {weightChart.lines.map(l => (
-                        <Line key={l.p.method} data={l.points} dataKey="kg" name={l.p.label} stroke={PROJ_COLORS[l.p.method]}
-                          strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} />
+                      {/* Weigh-ins as dots only (no connecting line) */}
+                      <Line dataKey="kg" name="Weigh-ins" stroke="none" legendType="circle" connectNulls={false}
+                        dot={{ r: 3, fill: C.weight, stroke: "none" }} activeDot={{ r: 5, fill: C.weight, stroke: "none" }}
+                        isAnimationActive={false} />
+                      {data.projections.map(p => (
+                        <Line key={p.method} dataKey={p.method} name={p.label} stroke={PROJ_COLORS[p.method]} connectNulls
+                          strokeWidth={2} strokeDasharray="5 4" dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
                       ))}
                     </ComposedChart>
                   </ResponsiveContainer>
@@ -464,14 +569,20 @@ export function NutritionClient() {
                   <p className="text-sm text-slate-500">Not enough data yet. Projections need a few weigh-ins or logged days.</p>
                 ) : (
                   <div className="space-y-3">
+                    <div className="flex flex-col md:flex-row gap-3">
                     {data.projections.map(p => (
-                      <div key={p.method} className="rounded-lg border border-white/10 bg-slate-800/40 p-3">
+                      <div key={p.method} className="flex-1 min-w-0 rounded-lg border border-white/10 bg-slate-800/40 p-3">
                         <div className="flex items-center gap-2">
                           <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: PROJ_COLORS[p.method] }} />
                           <span className="text-sm font-medium text-slate-200">{p.label}</span>
                           <span className="ml-auto text-xs text-slate-400 tabular-nums">{formatWeightDelta(p.kgPerWeek, unit)}/wk</span>
                         </div>
                         <div className="text-xs text-slate-500 mt-0.5">{p.basis}</div>
+                        {p.capped && (
+                          <div className="text-xs text-amber-300 mt-0.5">
+                            Measured {formatWeightDelta(p.rawKgPerWeek, unit)}/wk; dates assume the 2 lb/wk maximum.
+                          </div>
+                        )}
                         <div className="grid grid-cols-2 gap-3 mt-2 text-sm">
                           <div>
                             <div className="text-xs text-slate-500">
@@ -503,6 +614,7 @@ export function NutritionClient() {
                         </div>
                       </div>
                     ))}
+                    </div>
                     {data.required && (
                       <p className="text-xs text-slate-400 border-t border-white/10 pt-3">
                         To reach your target by {longDate(cfg.goalDate!)} you need {formatWeightDelta(data.required.kgPerWeek, unit)}/wk,
@@ -518,6 +630,8 @@ export function NutritionClient() {
                 )}
               </Card>
             </div>
+
+            <SummaryPanel />
           </>
         )}
       </main>

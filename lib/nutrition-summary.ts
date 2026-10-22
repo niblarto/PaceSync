@@ -136,7 +136,7 @@ function dataText(): { text: string; start: string; end: string } {
     if (d.proteinG != null) parts.push(`P ${Math.round(d.proteinG)}g C ${Math.round(d.carbsG ?? 0)}g F ${Math.round(d.fatG ?? 0)}g`);
     if (d.burnt != null) parts.push(`burnt ${d.burnt} kcal (resting ${d.resting ?? "?"})`);
     if (d.exercise != null) parts.push(`exercise ${d.exercise} kcal`);
-    if (d.deficit != null) parts.push(d.deficit >= 0 ? `deficit ${d.deficit}` : `surplus ${-d.deficit}`);
+    if (d.net != null) parts.push(`net ${d.net > 0 ? "+" : ""}${d.net} (eaten − burnt; ${d.net <= 0 ? "deficit" : "gain"})`);
     if (d.weightKg != null) parts.push(`weight ${formatWeight(d.weightKg, unit)}`);
     return parts.join(" · ");
   });
@@ -153,7 +153,7 @@ function dataText(): { text: string; start: string; end: string } {
   const proj = dash.projections.map(p =>
     `${p.label} (${p.basis}): ${formatWeightDelta(p.kgPerWeek, unit)}/week; weight on goal date ${formatWeight(p.weightAtGoalKg, unit)}; target reached ${p.hitStatus === "on-course" ? p.hitDate : p.hitStatus === "reached" ? "already" : "not at this rate"}`,
   );
-  const text = `GOALS\n${goals.join("\n")}\n\nPROJECTIONS\n${proj.join("\n") || "none yet"}\n\nDAILY DATA (food from Lose It!, burn and weight from Garmin; deficit = burnt − eaten)\n${lines.join("\n")}`;
+  const text = `GOALS\n${goals.join("\n")}\n\nPROJECTIONS\n${proj.join("\n") || "none yet"}\n\nDAILY DATA (food from Lose It!, burn and weight from Garmin; net = eaten − burnt, negative = deficit)\n${lines.join("\n")}`;
   return { text, start: days[0]?.date ?? dash.today, end: days[days.length - 1]?.date ?? dash.today };
 }
 
@@ -164,7 +164,7 @@ Days marked "not logged" have no food data: don't treat them as zero calories, m
 
 const REQUEST = `Write today's nutrition summary of the last 14 days. Use exactly these sections, each as a bold heading line:
 **Overview** — 2-3 sentences: how the fortnight went and the single most important takeaway.
-**Calories** — average eaten vs the daily limit, average burnt, average deficit, best and worst days, and logging gaps.
+**Calories** — average eaten vs the daily limit, days over the limit, average net (eaten − burnt), average burnt, average deficit, best and worst days, and logging gaps.
 **Macros** — protein per kg of body weight, carbs on training vs rest days, anything out of balance (skip if no macro data).
 **Weight & goal** — the weight trend against the goal and whether the current deficit gets there by the goal date.
 **Next few days** — 2-3 concrete actions.

@@ -11,6 +11,9 @@ interface NutritionConfig {
   weightUnit: WeightUnit;
   trendDays: number;
   kcalPerKg: number;
+  currentKg?: number | null;
+  today?: string;
+  maxLossLbPerWeek?: number;
 }
 
 const INPUT = "w-full rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-2 text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500";
@@ -55,13 +58,27 @@ function targetKg(f: Form): number | null {
 }
 
 // Settings → Nutrition: targets used by the /nutrition page.
+// Earliest goal date reachable losing at most maxLb a week.
+function earliestDate(currentKg: number, targetKg: number, today: string, maxLb: number): string {
+  const d = new Date(`${today}T12:00:00`);
+  if (currentKg > targetKg) d.setDate(d.getDate() + Math.ceil((currentKg - targetKg) / (maxLb / LB_PER_KG / 7)));
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+const prettyDate = (d: string) => new Date(`${d}T12:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+
 export function NutritionSettingsCard() {
   const [form, setForm] = useState<Form | null>(null);
+  const [limits, setLimits] = useState<{ currentKg: number | null; today: string; maxLb: number } | null>(null);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/settings/nutrition").then(r => r.json()).then(d => { if (!d.error) setForm(toForm(d)); }).catch(() => {});
+    fetch("/api/settings/nutrition").then(r => r.json()).then(d => {
+      if (d.error) return;
+      setForm(toForm(d));
+      setLimits({ currentKg: d.currentKg ?? null, today: d.today, maxLb: d.maxLossLbPerWeek ?? 2 });
+    }).catch(() => {});
   }, []);
 
   function set<K extends keyof Form>(k: K, v: Form[K]) {
@@ -81,8 +98,13 @@ export function NutritionSettingsCard() {
     setForm({ ...next, limit: form.limit, trendDays: form.trendDays, kcalPerKg: form.kcalPerKg });
   }
 
+  const target = form ? targetKg(form) : null;
+  const earliest = limits?.currentKg != null && target != null && limits.today
+    ? earliestDate(limits.currentKg, target, limits.today, limits.maxLb) : null;
+  const tooSoon = !!(form?.goalDate && earliest && form.goalDate < earliest);
+
   async function save() {
-    if (!form) return;
+    if (!form || tooSoon) return;
     setSaving(true);
     setStatus(null);
     try {
@@ -159,7 +181,17 @@ export function NutritionSettingsCard() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <label className="text-xs text-slate-400">Goal date</label>
-              <input type="date" value={form.goalDate} onChange={e => set("goalDate", e.target.value)} className={INPUT} />
+              <input type="date" value={form.goalDate} min={earliest ?? undefined} onChange={e => set("goalDate", e.target.value)} className={INPUT} />
+              {tooSoon ? (
+                <p className="text-[11px] text-rose-300">
+                  Needs more than {limits?.maxLb ?? 2} lb a week. Earliest: {prettyDate(earliest!)}.{" "}
+                  <button type="button" onClick={() => set("goalDate", earliest!)} className="underline hover:text-rose-200">Use it</button>
+                </p>
+              ) : (
+                <p className="text-[11px] text-slate-500">
+                  Max {limits?.maxLb ?? 2} lb a week{earliest ? `; earliest ${prettyDate(earliest)}` : ""}.
+                </p>
+              )}
             </div>
             <div className="space-y-1.5">
               <label className="text-xs text-slate-400">Daily calorie limit (kcal eaten)</label>
@@ -185,12 +217,12 @@ export function NutritionSettingsCard() {
           <div className="flex items-center gap-3">
             <button
               onClick={save}
-              disabled={saving}
+              disabled={saving || tooSoon}
               className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-sm font-medium px-4 py-2 text-white transition-colors"
             >
               {saving ? "Saving…" : "Save"}
             </button>
-            {status && <span className="text-xs text-slate-400">{status}</span>}
+            {status && <span className={`text-xs ${status === "Saved." ? "text-slate-400" : "text-rose-300"}`}>{status}</span>}
           </div>
         </div>
       )}

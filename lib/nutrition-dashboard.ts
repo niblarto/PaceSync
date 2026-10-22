@@ -1,6 +1,7 @@
 import path from "path";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { getNutritionDays } from "@/lib/nutrition";
+import { getGarminApiWeights } from "@/lib/garmin-weight";
 import { loadNutritionConfig, type NutritionConfig } from "@/lib/nutrition-config";
 
 // Data + projections for the /nutrition page.
@@ -10,6 +11,11 @@ import { loadNutritionConfig, type NutritionConfig } from "@/lib/nutrition-confi
 //   weight   — Health Connect reading, else GarminDB's weight table (lb)
 
 const LB_PER_KG = 2.20462;
+
+// Safe loss rate cap: goal dates needing faster loss can't be saved, and
+// projections never assume losing faster than this.
+export const MAX_LOSS_LB_PER_WEEK = 2;
+const MAX_LOSS_KG_PER_DAY = MAX_LOSS_LB_PER_WEEK / LB_PER_KG / 7;
 const WEIGHT_HISTORY_DAYS = 180;
 
 export interface DayRow {
@@ -23,6 +29,7 @@ export interface DayRow {
   exercise: number | null;
   weightKg: number | null;
   deficit: number | null; // burnt − eaten (positive = deficit); null unless both known
+  net: number | null; // eaten − burnt (negative = deficit); null unless both known
 }
 
 export interface Projection {
@@ -33,6 +40,8 @@ export interface Projection {
   weightAtGoalKg: number | null; // null when there's no goal date
   hitDate: string | null; // when the target is reached at this rate
   hitStatus: "reached" | "on-course" | "never"; // never = wrong direction or > 10 years
+  rawKgPerWeek: number; // the measured rate before the 2 lb/week cap
+  capped: boolean; // kgPerWeek was limited to the max loss rate
 }
 
 export interface NutritionDashboard {
@@ -40,14 +49,20 @@ export interface NutritionDashboard {
   today: string;
   days: DayRow[]; // chart window, oldest first
   weights: { date: string; kg: number }[]; // longer history for the weight chart
-  current: { kg: number; date: string; avg7Kg: number } | null;
+  current: { kg: number; date: string; avg7Kg: number; measuredAt: string | null; source: "Garmin" | "Health Connect" } | null;
   averages: {
-    eaten: number | null; burnt: number | null; exercise: number | null; deficit: number | null;
+    eaten: number | null; burnt: number | null; exercise: number | null; deficit: number | null; net: number | null;
     loggedDays: number; windowDays: number;
     deficit7: number | null; deficit7Days: number; // last 7 complete days
   };
   projections: Projection[];
   required: { kgPerWeek: number; dailyBalance: number; intake: number | null } | null;
+}
+
+// Earliest date the target can be reached losing at most 2 lb a week.
+export function earliestGoalDate(currentKg: number, targetKg: number, today: string): string {
+  if (currentKg <= targetKg) return today;
+  return addDays(today, Math.ceil((currentKg - targetKg) / MAX_LOSS_KG_PER_DAY));
 }
 
 function ymd(d: Date): string {
@@ -132,6 +147,9 @@ function project(
   method: Projection["method"], label: string, basis: string, kgPerDay: number,
   anchorKg: number, today: string, config: NutritionConfig,
 ): Projection {
+  const rawKgPerDay = kgPerDay;
+  const capped = kgPerDay < -MAX_LOSS_KG_PER_DAY;
+  if (capped) kgPerDay = -MAX_LOSS_KG_PER_DAY;
   const target = config.targetWeightKg;
   const weightAtGoalKg = config.goalDate ? anchorKg + kgPerDay * Math.max(0, daysBetween(today, config.goalDate)) : null;
   let hitDate: string | null = null;
@@ -146,11 +164,14 @@ function project(
       if (days <= 3650) { hitStatus = "on-course"; hitDate = addDays(today, days); }
     }
   }
-  return { method, label, basis, kgPerWeek: kgPerDay * 7, weightAtGoalKg, hitDate, hitStatus };
+  // Projected weight never goes below the target once it's reached.
+  const atGoal = weightAtGoalKg != null && target != null && kgPerDay < 0 && anchorKg > target
+    ? Math.max(weightAtGoalKg, target) : weightAtGoalKg;
+  return { method, label, basis, kgPerWeek: kgPerDay * 7, rawKgPerWeek: rawKgPerDay * 7, capped, weightAtGoalKg: atGoal, hitDate, hitStatus };
 }
 
 export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
-  const config = loadNutritionConfig();
+  const config = { ...loadNutritionConfig() };
   const today = ymd(new Date());
   const span = Math.max(chartDays, config.trendDays);
   const since = addDays(today, -(span - 1));
@@ -160,11 +181,17 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
   const daily = garminDaily(since);
   const exercise = garminExercise(since);
 
-  // Weights: Health Connect reading wins; Garmin fills the rest.
+  // Weights: Garmin is the source of truth (other apps only copy its scale
+  // readings, sometimes onto the wrong day). Garmin Connect (fetched by the
+  // page) wins over GarminDB's nightly sync; Health Connect is only used if
+  // Garmin has no weigh-ins at all.
   const weightMap = garminWeights(weightSince);
-  nutrition.forEach((d, date) => { if (d.weightKg != null) weightMap.set(date, d.weightKg); });
+  const apiWeights = getGarminApiWeights(weightSince);
+  for (const w of apiWeights) weightMap.set(w.date, w.kg);
+  const fromGarmin = weightMap.size > 0;
+  if (!fromGarmin) nutrition.forEach((d, date) => { if (d.weightKg != null) weightMap.set(date, d.weightKg); });
   const weights = Array.from(weightMap.entries())
-    .map(([date, kg]) => ({ date, kg: Math.round(kg * 100) / 100 }))
+    .map(([date, kg]) => ({ date, kg: Math.round(kg * 1000) / 1000 }))
     .sort((a, b) => a.date.localeCompare(b.date));
 
   const allDays: DayRow[] = [];
@@ -185,6 +212,7 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
       exercise: exercise.get(date) != null ? Math.round(exercise.get(date)!) : null,
       weightKg: weightMap.get(date) != null ? Math.round(weightMap.get(date)! * 100) / 100 : null,
       deficit: eaten != null && burnt != null ? burnt - eaten : null,
+      net: eaten != null && burnt != null ? eaten - burnt : null,
     });
   }
   const days = allDays.slice(-chartDays);
@@ -196,6 +224,8 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
     ? {
         kg: last.kg,
         date: last.date,
+        measuredAt: apiWeights.find(w => w.date === last.date)?.measuredAt ?? null,
+        source: fromGarmin ? "Garmin" as const : "Health Connect" as const,
         avg7Kg: Math.round(mean(weights.filter(w => daysBetween(w.date, last.date) < 7).map(w => w.kg))! * 100) / 100,
       }
     : null;
@@ -208,6 +238,7 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
   const averages = {
     eaten: mean(logged.map(d => d.eaten!)),
     deficit: mean(logged.map(d => d.deficit!)),
+    net: mean(logged.map(d => d.net!)),
     deficit7: mean(last7.map(d => d.deficit!)),
     deficit7Days: last7.length,
     burnt: mean(windowDays.filter(d => d.burnt != null).map(d => d.burnt!)),
@@ -235,6 +266,7 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
         balance / config.kcalPerKg, anchor, today, config,
       ));
     }
+    // The limit is on calories eaten: balance = limit − average burnt.
     if (config.dailyCalorieLimit != null && averages.burnt != null) {
       const balance = config.dailyCalorieLimit - averages.burnt;
       projections.push(project(

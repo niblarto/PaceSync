@@ -16,8 +16,15 @@ export function stLbToKg(st: number, lb: number): number {
 }
 
 // e.g. "13 st 2.4 lb", "184.9 lb", "83.9 kg"
-export function formatWeight(kg: number | null | undefined, unit: WeightUnit, opts: { decimals?: boolean } = {}): string {
+export function formatWeight(kg: number | null | undefined, unit: WeightUnit, opts: { decimals?: boolean; exact?: boolean } = {}): string {
   if (kg == null || !Number.isFinite(kg)) return "—";
+  if (opts.exact) {
+    if (unit === "kg") return `${kg.toFixed(2)} kg`;
+    const totalLb = kg * LB_PER_KG;
+    if (unit === "lb") return `${totalLb.toFixed(2)} lb`;
+    const st = Math.floor(totalLb / 14);
+    return `${st} st ${(totalLb - st * 14).toFixed(2)} lb`;
+  }
   const dec = opts.decimals ?? true;
   if (unit === "kg") return `${kg.toFixed(dec ? 1 : 0)} kg`;
   if (unit === "lb") return `${(kg * LB_PER_KG).toFixed(dec ? 1 : 0)} lb`;
