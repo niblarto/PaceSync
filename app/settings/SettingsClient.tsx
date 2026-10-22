@@ -1,6 +1,7 @@
 "use client";
 
 import { CoachSettingsCard } from "@/components/CoachSettingsCard";
+import { NutritionSettingsCard } from "@/components/NutritionSettingsCard";
 import { GarminPersonalApiCard } from "@/components/GarminPersonalApiCard";
 import { createPortal } from "react-dom";
 import { SongProgressBar, ensurePlaying } from "@/components/SongProgressBar";
@@ -3547,6 +3548,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     { key: "bpm", label: "BPM" },
     { key: "bbc", label: "BBC" },
     { key: "integrations", label: "Integrations" },
+    { key: "nutrition", label: "Nutrition" },
     { key: "notifications", label: "Notifications" },
     { key: "scheduled-jobs", label: "Scheduled Jobs" },
     { key: "security", label: "Security" },
@@ -7417,6 +7419,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       )}
 
     </div>
+    </div>
+
+    {/* ── Tab: Nutrition ── */}
+    <div className={activeTab === "nutrition" ? "grid grid-cols-1 gap-6 items-start max-w-3xl" : "hidden"}>
+      <NutritionSettingsCard />
     </div>
 
     {/* ── Tab: Pace Analysis ── */}

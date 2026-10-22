@@ -23,6 +23,9 @@ import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 import { filterTracksByBPM, getDefaultZones } from "@/lib/bpm-zones";
 import type { EnergyBand } from "@/lib/energy-bands";
 
+// Header nav links: plain text, same style for every link.
+const NAV_LINK = "text-xs text-slate-500 hover:text-slate-300 transition-colors whitespace-nowrap";
+
 function mmssToSec(mmss: string): number {
   const p = mmss.split(":").map(Number);
   return p.some(isNaN) ? 0 : p.reduce((acc, x) => acc * 60 + x, 0);
@@ -3026,31 +3029,15 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               <span>{spotifyUser.name}</span>
             </div>
             {garminConfigured && (
-              <Link href="/garmin" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
-                Garmin
-              </Link>
+              <Link href="/garmin" className={NAV_LINK}>Garmin</Link>
             )}
-            <Link href="/coach" className="text-xs px-2.5 py-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 transition-colors">
-              🧠 Coach
-            </Link>
-            <Link href="/pace-pro" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
-              Pace Pro
-            </Link>
-            <Link href="/races" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
-              Races
-            </Link>
-            <Link href="/strava" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
-              Strava
-            </Link>
-            <Link href="/bbc" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
-              BBC Radio
-            </Link>
-            <Link
-              href="/settings"
-              className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
-            >
-              Settings
-            </Link>
+            <Link href="/coach" className={NAV_LINK}>Coach</Link>
+            <Link href="/nutrition" className={NAV_LINK}>Nutrition</Link>
+            <Link href="/pace-pro" className={NAV_LINK}>Pace Pro</Link>
+            <Link href="/races" className={NAV_LINK}>Races</Link>
+            <Link href="/strava" className={NAV_LINK}>Strava</Link>
+            <Link href="/bbc" className={NAV_LINK}>BBC Radio</Link>
+            <Link href="/settings" className={NAV_LINK}>Settings</Link>
             <button
               onClick={async () => {
                 // Clear the local-auth gate first so signing back in requires
@@ -3058,7 +3045,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 await fetch("/api/local-auth/logout", { method: "POST" }).catch(() => {});
                 signOut({ callbackUrl: "/" });
               }}
-              className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+              className={NAV_LINK}
             >
               Sign out
             </button>

@@ -178,6 +178,17 @@ FILES = [
     ('components/CoachSettingsCard.tsx',          'components/CoachSettingsCard.tsx'),
     ('lib/nutrition.ts',                          'lib/nutrition.ts'),
     ('app/api/nutrition/route.ts',                'app/api/nutrition/route.ts'),
+    ('app/api/nutrition/dashboard/route.ts', 'app/api/nutrition/dashboard/route.ts'),
+    ('app/api/settings/nutrition/route.ts', 'app/api/settings/nutrition/route.ts'),
+    ('app/nutrition/page.tsx', 'app/nutrition/page.tsx'),
+    ('components/NutritionClient.tsx', 'components/NutritionClient.tsx'),
+    ('components/NutritionSettingsCard.tsx', 'components/NutritionSettingsCard.tsx'),
+    ('lib/nutrition-config.ts', 'lib/nutrition-config.ts'),
+    ('lib/nutrition-dashboard.ts', 'lib/nutrition-dashboard.ts'),
+    ('lib/weight-format.ts', 'lib/weight-format.ts'),
+    ('lib/nutrition-summary.ts', 'lib/nutrition-summary.ts'),
+    ('app/api/nutrition/summary/route.ts', 'app/api/nutrition/summary/route.ts'),
+    ('app/api/cron/nutrition-summary/route.ts', 'app/api/cron/nutrition-summary/route.ts'),
     ('app/races/[id]/page.tsx',                    'app/races/[id]/page.tsx'),
     ('components/RaceDetailClient.tsx',           'components/RaceDetailClient.tsx'),
     ('components/InlineRouteMap.tsx',             'components/InlineRouteMap.tsx'),
@@ -707,6 +718,15 @@ coach_cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/coach-weekly' || {{ (crontab -l 2>/dev/null; echo '{coach_cron_line}') | crontab -; }}""")
+
+print('  Ensuring cron job (nutrition AI summary, hourly; writes once a day after 05:00 when the AI DJ service is up)...')
+nutrition_cron_log = f'/home/{PI["user"]}/cron-nutrition-summary.log'
+nutrition_cron_line = (
+    f'7 * * * * curl -s -m 60 -o {nutrition_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/nutrition-summary '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/nutrition-summary' || {{ (crontab -l 2>/dev/null; echo '{nutrition_cron_line}') | crontab -; }}""")
 
 # Garmin sync completion notification: sftp doesn't carry the exec bit (and a
 # Windows checkout may add CRLFs), so normalise the script, then append it to
