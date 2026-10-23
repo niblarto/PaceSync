@@ -6,12 +6,16 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -21,10 +25,14 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 
 // Hand-drawn charts for the Nutrition tab (the app has no chart library).
+// Both take an optional horizontal zoom/offset (full-screen view): the date
+// axis is stretched by `zoom` and scrolled by `offset` pixels; the y axis and
+// its labels stay put.
 
 object NC {
     val eaten = Color(0xFFF59E0B)
@@ -38,12 +46,17 @@ object NC {
     val weight = Color(0xFFE2E8F0)
     val axis = Color(0xFF64748B)
     val grid = Color(0x14FFFFFF)
+    val avg = Color(0xFFFBBF24)
     fun projection(method: String) = when (method) {
         "trend" -> Color(0xFFA78BFA)
         "energy" -> Color(0xFFF59E0B)
         else -> Color(0xFF38BDF8)
     }
 }
+
+// Left gutter (y labels) in dp, shared with the full-screen gesture maths.
+const val CAL_LEFT_DP = 44
+const val WEIGHT_LEFT_DP = 56
 
 private val SHORT = DateTimeFormatter.ofPattern("d MMM")
 
@@ -56,30 +69,42 @@ private fun DrawScope.text(s: String, x: Float, y: Float, paint: Paint) = drawCo
 private val DASH = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))
 private val DOT = PathEffect.dashPathEffect(floatArrayOf(4f, 10f))
 
+private fun niceStep(range: Double): Double {
+    val raw = range / 4
+    val mag = Math.pow(10.0, Math.floor(Math.log10(raw.coerceAtLeast(1.0))))
+    return listOf(1.0, 2.0, 2.5, 5.0, 10.0).map { it * mag }.first { it >= raw }
+}
+
 // ── Daily calories: eaten, exercise and burnt bars per day, a net line
 // (eaten − burnt; dots green on a deficit, red on a gain, hollow for today's
-// "so far"), and the daily limit line. Tap a day to select it. ──
+// "so far"), and the daily limit line. ──
 @Composable
 fun CaloriesChart(
     days: List<NutritionDayRow>,
     limit: Double?,
     hidden: Set<String>,
     selected: Int?,
-    onSelect: (Int) -> Unit,
+    onTap: (Int) -> Unit,
+    modifier: Modifier = Modifier.fillMaxWidth().height(240.dp),
+    zoom: Float = 1f,
+    offset: Float = 0f,
 ) {
     val series = listOf("eaten", "exercise", "burnt").filter { it !in hidden }
+    val z by rememberUpdatedState(zoom)
+    val off by rememberUpdatedState(offset)
+    val tap by rememberUpdatedState(onTap)
     Canvas(
-        Modifier.fillMaxWidth().height(240.dp).pointerInput(days.size) {
+        modifier.pointerInput(days.size) {
             detectTapGestures { o ->
-                val left = 44.dp.toPx()
-                val w = (size.width - left) / days.size.coerceAtLeast(1)
-                val i = ((o.x - left) / w).toInt()
-                if (i in days.indices) onSelect(i)
+                val left = CAL_LEFT_DP.dp.toPx()
+                val slot = (size.width - left) * z / days.size.coerceAtLeast(1)
+                val i = ((o.x - left + off) / slot).toInt()
+                if (i in days.indices) tap(i)
             }
         },
     ) {
         if (days.isEmpty()) return@Canvas
-        val left = 44.dp.toPx()
+        val left = CAL_LEFT_DP.dp.toPx()
         val bottom = size.height - 20.dp.toPx()
         val top = 8.dp.toPx()
         val values = days.flatMap { d -> listOfNotNull(d.net, d.eaten, d.exercise, d.burnt) } + listOfNotNull(limit)
@@ -88,7 +113,6 @@ fun CaloriesChart(
         fun y(v: Double) = (bottom - (v - lo) / (hi - lo) * (bottom - top)).toFloat()
         val small = labelPaint(NC.axis, 10.dp.toPx())
 
-        // Grid + y labels
         val step = niceStep(hi - lo)
         var g = Math.ceil(lo / step) * step
         while (g <= hi) {
@@ -98,63 +122,59 @@ fun CaloriesChart(
         }
         drawLine(Color(0x33FFFFFF), Offset(left, y(0.0)), Offset(size.width, y(0.0)), 1.5f)
 
-        val slot = (size.width - left) / days.size
-        selected?.let { i -> drawRect(Color(0x14FFFFFF), Offset(left + slot * i, top), Size(slot, bottom - top)) }
-        val barW = (slot * 0.8f / series.size.coerceAtLeast(1)).coerceAtLeast(1f)
-        days.forEachIndexed { i, d ->
-            var x = left + slot * i + slot * 0.1f
-            for (s in series) {
-                val v = when (s) { "eaten" -> d.eaten; "exercise" -> d.exercise; else -> d.burnt }
-                if (v != null) {
-                    val color = when (s) {
-                        "eaten" -> NC.eaten
-                        "exercise" -> NC.exercise
-                        else -> NC.burnt
-                    }
-                    val y0 = y(0.0); val y1 = y(v)
-                    drawRect(color, Offset(x, min(y0, y1)), Size(barW, abs(y1 - y0).coerceAtLeast(1f)))
-                }
-                x += barW
-            }
-        }
-        // Net line: consecutive days with a value are joined; gaps break it.
-        if ("net" !in hidden) {
-            fun cx(i: Int) = left + slot * (i + 0.5f)
-            for (i in 1 until days.size) {
-                val a = days[i - 1].net; val b = days[i].net
-                if (a != null && b != null) drawLine(NC.netLine, Offset(cx(i - 1), y(a)), Offset(cx(i), y(b)), 3f)
-            }
+        val slot = (size.width - left) * zoom / days.size
+        fun sx(i: Int) = left + slot * i - offset // left edge of day i
+        clipRect(left = left, top = 0f, right = size.width, bottom = size.height) {
+            selected?.let { i -> drawRect(Color(0x14FFFFFF), Offset(sx(i), top), Size(slot, bottom - top)) }
+            val barW = (slot * 0.8f / series.size.coerceAtLeast(1)).coerceAtLeast(1f)
             days.forEachIndexed { i, d ->
-                val v = d.net ?: return@forEachIndexed
-                val c = if (v > 0) NC.netOver else NC.netOk
-                if (d.partial) drawCircle(c, 4.dp.toPx(), Offset(cx(i), y(v)), style = androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))
-                else drawCircle(c, 3.5f.dp.toPx(), Offset(cx(i), y(v)))
+                var x = sx(i) + slot * 0.1f
+                if (x > size.width || x + slot < left) return@forEachIndexed
+                for (s in series) {
+                    val v = when (s) { "eaten" -> d.eaten; "exercise" -> d.exercise; else -> d.burnt }
+                    if (v != null) {
+                        val color = when (s) { "eaten" -> NC.eaten; "exercise" -> NC.exercise; else -> NC.burnt }
+                        val y0 = y(0.0); val y1 = y(v)
+                        drawRect(color, Offset(x, min(y0, y1)), Size(barW, abs(y1 - y0).coerceAtLeast(1f)))
+                    }
+                    x += barW
+                }
+            }
+            if ("net" !in hidden) {
+                fun cx(i: Int) = sx(i) + slot / 2
+                for (i in 1 until days.size) {
+                    val a = days[i - 1].net; val b = days[i].net
+                    if (a != null && b != null) drawLine(NC.netLine, Offset(cx(i - 1), y(a)), Offset(cx(i), y(b)), 3f)
+                }
+                days.forEachIndexed { i, d ->
+                    val v = d.net ?: return@forEachIndexed
+                    val c = if (v > 0) NC.netOver else NC.netOk
+                    if (d.partial) drawCircle(c, 4.dp.toPx(), Offset(cx(i), y(v)), style = Stroke(2.dp.toPx()))
+                    else drawCircle(c, 3.5f.dp.toPx(), Offset(cx(i), y(v)))
+                }
+            }
+            // x labels, spaced at least ~64dp apart
+            val every = max(1, ceil(64.dp.toPx() / slot).toInt())
+            for (i in days.indices step every) {
+                val cx = sx(i) + slot / 2
+                if (cx < left - 30 || cx > size.width + 30) continue
+                val label = runCatching { LocalDate.parse(days[i].date).format(SHORT) }.getOrDefault(days[i].date)
+                text(label, cx, size.height - 4.dp.toPx(), labelPaint(NC.axis, 10.dp.toPx(), Paint.Align.CENTER))
             }
         }
         if (limit != null) {
             drawLine(NC.limit, Offset(left, y(limit)), Offset(size.width, y(limit)), 2f, pathEffect = DASH)
             text("Limit ${"%,d".format(limit.toInt())}", size.width - 4.dp.toPx(), y(limit) - 4.dp.toPx(), labelPaint(NC.limit, 10.dp.toPx(), Paint.Align.RIGHT))
         }
-        // x labels: first, middle, last
-        val idxs = listOf(0, days.size / 2, days.size - 1).distinct()
-        for (i in idxs) {
-            val label = runCatching { LocalDate.parse(days[i].date).format(SHORT) }.getOrDefault(days[i].date)
-            val align = when (i) { 0 -> Paint.Align.LEFT; days.size - 1 -> Paint.Align.RIGHT; else -> Paint.Align.CENTER }
-            val x = when (i) { 0 -> left; days.size - 1 -> size.width; else -> left + slot * (i + 0.5f) }
-            text(label, x, size.height - 4.dp.toPx(), labelPaint(NC.axis, 10.dp.toPx(), align))
-        }
     }
 }
 
-private fun niceStep(range: Double): Double {
-    val raw = range / 4
-    val mag = Math.pow(10.0, Math.floor(Math.log10(raw.coerceAtLeast(1.0))))
-    return listOf(1.0, 2.0, 2.5, 5.0, 10.0).map { it * mag }.first { it >= raw }
-}
-
 // ── Weight: weigh-ins (last 90 days) + a dashed projection line per method
-// from today's 7-day average, target line and goal date. Tap for a date. ──
+// from today's 7-day average, the 7-day average held flat to the goal date,
+// the trend line fitted through the window's weigh-ins, target and goal. ──
 data class ProjLine(val method: String, val kgPerWeek: Double)
+
+data class TrendFit(val start: LocalDate, val startKg: Double, val end: LocalDate, val endKg: Double)
 
 data class WeightChartData(
     val weights: List<Pair<LocalDate, Double>>,
@@ -164,7 +184,11 @@ data class WeightChartData(
     val targetKg: Double?,
     val goalDate: LocalDate?,
     val end: LocalDate,
-)
+    val fit: TrendFit? = null,
+) {
+    val start: LocalDate get() = weights.firstOrNull()?.first ?: today.minusDays(30)
+    val totalDays: Float get() = ChronoUnit.DAYS.between(start, end).toFloat().coerceAtLeast(1f)
+}
 
 fun projectedKg(d: WeightChartData, line: ProjLine, date: LocalDate): Double {
     val days = ChronoUnit.DAYS.between(d.today, date).toDouble()
@@ -174,27 +198,40 @@ fun projectedKg(d: WeightChartData, line: ProjLine, date: LocalDate): Double {
 }
 
 @Composable
-fun WeightChart(data: WeightChartData, unit: String, selected: LocalDate?, onSelect: (LocalDate) -> Unit) {
-    val start = data.weights.firstOrNull()?.first ?: data.today.minusDays(30)
-    val totalDays = ChronoUnit.DAYS.between(start, data.end).toFloat().coerceAtLeast(1f)
+fun WeightChart(
+    data: WeightChartData,
+    unit: String,
+    selected: LocalDate?,
+    onTap: (LocalDate) -> Unit,
+    modifier: Modifier = Modifier.fillMaxWidth().height(240.dp),
+    zoom: Float = 1f,
+    offset: Float = 0f,
+) {
+    val z by rememberUpdatedState(zoom)
+    val off by rememberUpdatedState(offset)
+    val tap by rememberUpdatedState(onTap)
     Canvas(
-        Modifier.fillMaxWidth().height(240.dp).pointerInput(data) {
+        modifier.pointerInput(data) {
             detectTapGestures { o ->
-                val left = 52.dp.toPx()
-                val frac = ((o.x - left) / (size.width - left)).coerceIn(0f, 1f)
-                onSelect(start.plusDays((frac * totalDays).toLong()))
+                val left = WEIGHT_LEFT_DP.dp.toPx()
+                val frac = ((o.x - left + off) / ((size.width - left) * z)).coerceIn(0f, 1f)
+                tap(data.start.plusDays((frac * data.totalDays).toLong()))
             }
         },
     ) {
-        val left = 52.dp.toPx()
+        val start = data.start
+        val totalDays = data.totalDays
+        val left = WEIGHT_LEFT_DP.dp.toPx()
         val bottom = size.height - 20.dp.toPx()
         val top = 8.dp.toPx()
-        val ys = data.weights.map { it.second } + data.lines.flatMap { l -> listOf(data.anchorKg, projectedKg(data, l, data.end)) } + listOfNotNull(data.targetKg)
+        val ys = data.weights.map { it.second } + data.lines.flatMap { l -> listOf(data.anchorKg, projectedKg(data, l, data.end)) } +
+            listOfNotNull(data.targetKg, data.fit?.startKg, data.fit?.endKg)
         val loRaw = ys.minOrNull() ?: 70.0
         val hiRaw = ys.maxOrNull() ?: 90.0
         val pad = max(0.5, (hiRaw - loRaw) * 0.08)
         val lo = loRaw - pad; val hi = hiRaw + pad
-        fun x(d: LocalDate) = left + ChronoUnit.DAYS.between(start, d) / totalDays * (size.width - left)
+        val plotW = (size.width - left) * zoom
+        fun x(d: LocalDate) = left + ChronoUnit.DAYS.between(start, d) / totalDays * plotW - offset
         fun y(kg: Double) = (bottom - (kg - lo) / (hi - lo) * (bottom - top)).toFloat()
         val small = labelPaint(NC.axis, 10.dp.toPx())
 
@@ -207,36 +244,53 @@ fun WeightChart(data: WeightChartData, unit: String, selected: LocalDate?, onSel
             drawLine(NC.target, Offset(left, y(it)), Offset(size.width, y(it)), 2f, pathEffect = DASH)
             text("Target", left + 4.dp.toPx(), y(it) - 4.dp.toPx(), labelPaint(NC.target, 10.dp.toPx()))
         }
-        data.goalDate?.let {
-            if (!it.isBefore(start) && !it.isAfter(data.end)) {
-                drawLine(NC.target, Offset(x(it), top), Offset(x(it), bottom), 2f, pathEffect = DOT)
-                text("Goal", x(it) - 4.dp.toPx(), top + 10.dp.toPx(), labelPaint(NC.target, 10.dp.toPx(), Paint.Align.RIGHT))
+        clipRect(left = left, top = 0f, right = size.width, bottom = size.height) {
+            data.goalDate?.let {
+                if (!it.isBefore(start) && !it.isAfter(data.end)) {
+                    drawLine(NC.target, Offset(x(it), top), Offset(x(it), bottom), 2f, pathEffect = DOT)
+                    text("Goal", x(it) - 4.dp.toPx(), top + 10.dp.toPx(), labelPaint(NC.target, 10.dp.toPx(), Paint.Align.RIGHT))
+                }
             }
-        }
-        drawLine(Color(0x33FFFFFF), Offset(x(data.today), top), Offset(x(data.today), bottom), 1.5f)
-        selected?.let { drawLine(Color(0x55FFFFFF), Offset(x(it), top), Offset(x(it), bottom), 1f) }
+            drawLine(Color(0x33FFFFFF), Offset(x(data.today), top), Offset(x(data.today), bottom), 1.5f)
+            selected?.let { drawLine(Color(0x55FFFFFF), Offset(x(it), top), Offset(x(it), bottom), 1f) }
 
-        for (l in data.lines) {
-            val c = NC.projection(l.method)
-            val from = Offset(x(data.today), y(data.anchorKg))
-            // A losing line runs to the target, then stays flat on it.
-            val hit = if (data.targetKg != null && l.kgPerWeek < 0 && data.anchorKg > data.targetKg) {
-                data.today.plusDays(((data.targetKg - data.anchorKg) / (l.kgPerWeek / 7)).toLong())
-            } else null
-            if (hit != null && hit.isBefore(data.end)) {
-                val at = Offset(x(hit), y(data.targetKg!!))
-                drawLine(c, from, at, 4f, pathEffect = DASH)
-                drawLine(c, at, Offset(x(data.end), y(data.targetKg)), 4f, pathEffect = DASH)
-            } else {
-                drawLine(c, from, Offset(x(data.end), y(projectedKg(data, l, data.end))), 4f, pathEffect = DASH)
+            // Fitted trend through the window's weigh-ins (basis of "Scale trend").
+            data.fit?.let { f ->
+                drawLine(NC.projection("trend").copy(alpha = 0.55f), Offset(x(f.start), y(f.startKg)), Offset(x(f.end), y(f.endKg)), 3f)
             }
-        }
-        for ((d, kg) in data.weights) drawCircle(NC.weight, 3.dp.toPx(), Offset(x(d), y(kg)))
+            // 7-day average: solid over the last week, dotted flat to the goal date (no change).
+            drawLine(NC.avg, Offset(x(data.today.minusDays(6)), y(data.anchorKg)), Offset(x(data.today), y(data.anchorKg)), 8f)
+            val avgEnd = data.goalDate?.takeIf { it.isAfter(data.today) && !it.isAfter(data.end) } ?: data.end
+            drawLine(NC.avg.copy(alpha = 0.8f), Offset(x(data.today), y(data.anchorKg)), Offset(x(avgEnd), y(data.anchorKg)), 3f, pathEffect = DOT)
 
-        text(start.format(SHORT), left, size.height - 4.dp.toPx(), small)
-        text(data.end.format(SHORT), size.width, size.height - 4.dp.toPx(), labelPaint(NC.axis, 10.dp.toPx(), Paint.Align.RIGHT))
-        if (x(data.today) - left > 60.dp.toPx() && size.width - x(data.today) > 60.dp.toPx()) {
-            text(data.today.format(SHORT), x(data.today), size.height - 4.dp.toPx(), labelPaint(NC.axis, 10.dp.toPx(), Paint.Align.CENTER))
+            for (l in data.lines) {
+                val c = NC.projection(l.method)
+                val from = Offset(x(data.today), y(data.anchorKg))
+                // A losing line runs to the target, then stays flat on it.
+                val hit = if (data.targetKg != null && l.kgPerWeek < 0 && data.anchorKg > data.targetKg) {
+                    data.today.plusDays(((data.targetKg - data.anchorKg) / (l.kgPerWeek / 7)).toLong())
+                } else null
+                if (hit != null && hit.isBefore(data.end)) {
+                    val at = Offset(x(hit), y(data.targetKg!!))
+                    drawLine(c, from, at, 4f, pathEffect = DASH)
+                    drawLine(c, at, Offset(x(data.end), y(data.targetKg)), 4f, pathEffect = DASH)
+                } else {
+                    drawLine(c, from, Offset(x(data.end), y(projectedKg(data, l, data.end))), 4f, pathEffect = DASH)
+                }
+            }
+            for ((d, kg) in data.weights) drawCircle(NC.weight, 3.dp.toPx(), Offset(x(d), y(kg)))
+
+            // x labels: every N days so they're ~70dp apart
+            val pxPerDay = plotW / totalDays
+            val every = max(1, ceil(70.dp.toPx() / pxPerDay).toInt())
+            var d = start
+            while (!d.isAfter(data.end)) {
+                val cx = x(d)
+                if (cx >= left - 30 && cx <= size.width + 30) {
+                    text(d.format(SHORT), cx, size.height - 4.dp.toPx(), labelPaint(NC.axis, 10.dp.toPx(), Paint.Align.CENTER))
+                }
+                d = d.plusDays(every.toLong())
+            }
         }
     }
 }

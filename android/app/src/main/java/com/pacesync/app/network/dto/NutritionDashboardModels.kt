@@ -82,7 +82,11 @@ data class NutritionDashboardDto(
     val averages: NutritionAveragesDto = NutritionAveragesDto(),
     val projections: List<ProjectionDto> = emptyList(),
     val required: RequiredDto? = null,
+    val trendFit: TrendFitDto? = null,
 )
+
+@Serializable
+data class TrendFitDto(val startDate: String, val startKg: Double, val endDate: String, val endKg: Double)
 
 @Serializable
 data class NutritionSummaryDto(

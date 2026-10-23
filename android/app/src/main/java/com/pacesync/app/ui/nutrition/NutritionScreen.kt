@@ -1,6 +1,21 @@
 package com.pacesync.app.ui.nutrition
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -81,6 +96,19 @@ private fun whenLabel(iso: String): String = runCatching {
     OffsetDateTime.parse(iso).atZoneSameInstant(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("EEE d MMM, HH:mm"))
 }.getOrDefault(iso)
 
+// Survives the activity being recreated when a chart rotates to landscape,
+// so the page doesn't reload (and re-sync) every time.
+private object NutritionCache {
+    var data: NutritionDashboardDto? = null
+    var at: Long = 0L
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
@@ -88,7 +116,10 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
     val scope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
     var range by remember { mutableIntStateOf(prefs.getInt("range", 30).takeIf { it in RANGES } ?: 30) }
-    var data by remember { mutableStateOf<NutritionDashboardDto?>(null) }
+    var data by remember { mutableStateOf(NutritionCache.data) }
+    // Which chart is open full screen ("calories" / "weight"); saveable so it
+    // reopens after the rotation recreates the activity.
+    var fullscreen by rememberSaveable { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var refreshing by remember { mutableStateOf(false) }
     var weightBusy by remember { mutableStateOf(false) }
@@ -96,7 +127,10 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
 
     suspend fun load() {
         val resp = runCatching { nutritionApi.getDashboard(range) }.getOrNull()
-        if (resp?.isSuccessful == true) { data = resp.body(); error = null } else error = "Couldn't load nutrition (${resp?.code() ?: "offline"})"
+        if (resp?.isSuccessful == true) {
+            data = resp.body(); error = null
+            NutritionCache.data = data; NutritionCache.at = System.currentTimeMillis()
+        } else error = "Couldn't load nutrition (${resp?.code() ?: "offline"})"
     }
 
     // Send this phone's latest Health Connect food first, so today's numbers
@@ -112,7 +146,11 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
         refreshing = false
     }
 
-    LaunchedEffect(Unit) { fullRefresh() }
+    LaunchedEffect(Unit) {
+        // Skip the full refresh when we already have fresh data (e.g. coming
+        // back from a full-screen chart).
+        if (NutritionCache.data == null || System.currentTimeMillis() - NutritionCache.at > 60_000) fullRefresh()
+    }
     LaunchedEffect(range) { if (data != null) load() }
 
     PullToRefreshBox(isRefreshing = refreshing, onRefresh = { scope.launch { fullRefresh() } }, modifier = Modifier.fillMaxSize()) {
@@ -146,11 +184,20 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
                     load()
                 }
             }
-            CaloriesCard(d, range) { r -> range = r; prefs.edit().putInt("range", r).apply() }
-            WeightCard(d, unit)
+            CaloriesCard(d, range, onExpand = { fullscreen = "calories" }) { r -> range = r; prefs.edit().putInt("range", r).apply() }
+            WeightCard(d, unit, onExpand = { fullscreen = "weight" })
             ProjectionsCard(d, unit)
             SummaryCard(nutritionApi)
             Spacer(Modifier.height(8.dp))
+        }
+    }
+
+    val d = data
+    if (fullscreen != null && d != null) {
+        val close = { fullscreen = null }
+        when (fullscreen) {
+            "calories" -> CaloriesFullscreen(d, range, onRange = { r -> range = r; prefs.edit().putInt("range", r).apply() }, onClose = close)
+            else -> WeightFullscreen(d, d.config.weightUnit, onClose = close)
         }
     }
 }
@@ -173,7 +220,7 @@ private fun Section(title: String? = null, trailing: (@Composable () -> Unit)? =
 @Composable
 private fun Tile(label: String, value: String, modifier: Modifier, action: (@Composable () -> Unit)? = null, sub: @Composable () -> Unit = {}) {
     Card(modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Column(Modifier.fillMaxSize().padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.weight(1f))
                 action?.invoke()
@@ -193,9 +240,10 @@ private fun StatTiles(d: NutritionDashboardDto, unit: String, weightBusy: Boolea
     val cfg = d.config
     val todayRow = d.days.find { it.date == d.today }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Each row's tiles match the tallest one, so no background shows between them.
+        Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Tile(
-                "Current weight", formatWeight(d.current?.kg, unit, exact = true), Modifier.weight(1f),
+                "Current weight", formatWeight(d.current?.kg, unit, exact = true), Modifier.weight(1f).fillMaxHeight(),
                 action = {
                     if (weightBusy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                     else Icon(Icons.Filled.Refresh, "Get the latest weight from Garmin", Modifier.size(18.dp).clickable(onClick = onRefreshWeight), tint = MaterialTheme.colorScheme.secondary)
@@ -207,20 +255,20 @@ private fun StatTiles(d: NutritionDashboardDto, unit: String, weightBusy: Boolea
                 } ?: Small("No weigh-ins yet")
                 weightMsg?.let { Small(it) }
             }
-            Tile("Target weight", formatWeight(cfg.targetWeightKg, unit), Modifier.weight(1f)) {
+            Tile("Target weight", formatWeight(cfg.targetWeightKg, unit), Modifier.weight(1f).fillMaxHeight()) {
                 if (cfg.targetWeightKg != null && d.current != null) {
                     Small("${formatWeightDelta(d.current.avg7Kg - cfg.targetWeightKg, unit).trimStart('+', '−')} to go")
                 } else Small("Not set")
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Tile("Goal date", cfg.goalDate?.let { longDate(it) } ?: "—", Modifier.weight(1f)) {
+        Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Tile("Goal date", cfg.goalDate?.let { longDate(it) } ?: "—", Modifier.weight(1f).fillMaxHeight()) {
                 cfg.goalDate?.let { g ->
                     val left = runCatching { ChronoUnit.DAYS.between(LocalDate.parse(d.today), LocalDate.parse(g)) }.getOrNull()
                     Small("${left ?: "?"} days left${d.required?.let { " · needs ${formatWeightDelta(it.kgPerWeek, unit)}/wk" } ?: ""}")
                 } ?: Small("Not set")
             }
-            Tile("Eaten today", "${kcal(todayRow?.eaten ?: 0.0)} kcal", Modifier.weight(1f)) {
+            Tile("Eaten today", "${kcal(todayRow?.eaten ?: 0.0)} kcal", Modifier.weight(1f).fillMaxHeight()) {
                 todayRow?.net?.let { Small("net ${signed(it)} (burnt ${kcal(todayRow.burnt)}${if (todayRow.partial) " so far" else ""})") } ?: Small("Garmin burn not in yet")
                 cfg.dailyCalorieLimit?.let { lim ->
                     val left = lim - (todayRow?.eaten ?: 0.0)
@@ -241,22 +289,33 @@ private fun StatTiles(d: NutritionDashboardDto, unit: String, weightBusy: Boolea
 }
 
 @Composable
-private fun CaloriesCard(d: NutritionDashboardDto, range: Int, onRange: (Int) -> Unit) {
+private fun CaloriesCard(d: NutritionDashboardDto, range: Int, onExpand: () -> Unit, onRange: (Int) -> Unit) {
     var hidden by remember { mutableStateOf(setOf<String>()) }
-    var selected by remember(d) { mutableStateOf<Int?>(null) }
     Section("Daily calories", trailing = {
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             RANGES.forEach { r -> FilterChip(selected = range == r, onClick = { onRange(r) }, label = { Text("${r}d") }) }
         }
     }) {
-        CaloriesChart(d.days, d.config.dailyCalorieLimit, hidden, selected) { selected = it }
-        // Legend: tap to hide/show a series.
+        CaloriesChart(d.days, d.config.dailyCalorieLimit, hidden, selected = null, onTap = { onExpand() })
+        CaloriesLegend(hidden) { hidden = it }
+        Small("Tap the chart to open it full screen. Net line = eaten − burnt (green dot deficit, red gain; hollow = today so far).")
+        val a = d.averages
+        Small(
+            "Last ${a.windowDays} days (not today): avg eaten ${kcal(a.eaten)} on ${a.loggedDays} logged days · avg burnt ${kcal(a.burnt)} · " +
+                "avg exercise ${kcal(a.exercise)} · avg net ${a.net?.let { signed(it) } ?: "—"}",
+        )
+    }
+}
+
+// Legend: tap an entry to hide/show that series.
+@Composable
+private fun CaloriesLegend(hidden: Set<String>, onChange: (Set<String>) -> Unit) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             listOf("net" to "Net", "eaten" to "Eaten", "exercise" to "Exercise", "burnt" to "Burnt").forEach { (key, label) ->
                 val color = when (key) { "net" -> NC.netLine; "eaten" -> NC.eaten; "exercise" -> NC.exercise; else -> NC.burnt }
                 val off = key in hidden
                 Row(
-                    Modifier.clickable { hidden = if (off) hidden - key else hidden + key },
+                    Modifier.clickable { onChange(if (off) hidden - key else hidden + key) },
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Box(Modifier.size(10.dp).clip(RoundedCornerShape(2.dp)).background(if (off) color.copy(alpha = 0.3f) else color))
@@ -264,13 +323,6 @@ private fun CaloriesCard(d: NutritionDashboardDto, range: Int, onRange: (Int) ->
                 }
             }
         }
-        selected?.let { i -> d.days.getOrNull(i)?.let { DayDetail(it) } } ?: Small("Tap a day for details. Net line = eaten − burnt (green dot deficit, red gain; hollow = today so far).")
-        val a = d.averages
-        Small(
-            "Last ${a.windowDays} days (not today): avg eaten ${kcal(a.eaten)} on ${a.loggedDays} logged days · avg burnt ${kcal(a.burnt)} · " +
-                "avg exercise ${kcal(a.exercise)} · avg net ${a.net?.let { signed(it) } ?: "—"}",
-        )
-    }
 }
 
 @Composable
@@ -286,11 +338,10 @@ private fun DayDetail(r: NutritionDayRow) {
     }
 }
 
-@Composable
-private fun WeightCard(d: NutritionDashboardDto, unit: String) {
-    val cur = d.current ?: return Section("Weight and projections") { Small("No weigh-ins yet.") }
+private fun weightChartData(d: NutritionDashboardDto): WeightChartData? {
+    val cur = d.current ?: return null
     val today = LocalDate.parse(d.today)
-    val chart = remember(d) {
+    return run {
         val start = today.minusDays(90)
         val weights = d.weights.mapNotNull { w -> runCatching { LocalDate.parse(w.date) to w.kg }.getOrNull() }.filter { !it.first.isBefore(start) }
         val goal = d.config.goalDate?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
@@ -298,18 +349,41 @@ private fun WeightCard(d: NutritionDashboardDto, unit: String) {
         goal?.let { ends += it }
         d.projections.mapNotNull { p -> p.hitDate?.let { runCatching { LocalDate.parse(it) }.getOrNull() } }.forEach { ends += it }
         val end = minOf(ends.max(), today.plusDays(730))
-        WeightChartData(weights, today, cur.avg7Kg, d.projections.map { ProjLine(it.method, it.kgPerWeek) }, d.config.targetWeightKg, goal, end)
-    }
-    var selected by remember(d) { mutableStateOf<LocalDate?>(null) }
-    Section("Weight and projections") {
-        WeightChart(chart, unit, selected) { selected = it }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            LegendDot(NC.weight, "Weigh-ins")
-            d.projections.forEach { LegendDot(NC.projection(it.method), it.label) }
+        val fit = d.trendFit?.let { f ->
+            runCatching { TrendFit(LocalDate.parse(f.startDate), f.startKg, LocalDate.parse(f.endDate), f.endKg) }.getOrNull()
         }
-        val s = selected
-        if (s == null) Small("Tap the chart for a date's values.")
-        else Column(
+        WeightChartData(weights, today, cur.avg7Kg, d.projections.map { ProjLine(it.method, it.kgPerWeek) }, d.config.targetWeightKg, goal, end, fit)
+    }
+}
+
+@Composable
+private fun WeightLegend(d: NutritionDashboardDto) {
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        LegendDot(NC.weight, "Weigh-ins")
+        LegendDot(NC.avg, "7-day avg")
+        d.projections.forEach { LegendDot(NC.projection(it.method), it.label) }
+    }
+}
+
+@Composable
+private fun WeightCard(d: NutritionDashboardDto, unit: String, onExpand: () -> Unit) {
+    val maybe = remember(d) { weightChartData(d) }
+    if (maybe == null) {
+        Section("Weight and projections") { Small("No weigh-ins yet.") }
+        return
+    }
+    val chart: WeightChartData = maybe
+    Section("Weight and projections") {
+        WeightChart(chart, unit, selected = null, onTap = { onExpand() })
+        WeightLegend(d)
+        Small("Tap the chart to open it full screen. Faint purple: trend fitted through the last ${d.config.trendDays} days of weigh-ins; yellow: 7-day average, dotted flat to the goal date.")
+    }
+}
+
+@Composable
+private fun WeightDetail(d: NutritionDashboardDto, chart: WeightChartData, unit: String, s: LocalDate) {
+    val today = chart.today
+        Column(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Color(0x22000000)).padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
@@ -323,8 +397,100 @@ private fun WeightCard(d: NutritionDashboardDto, unit: String) {
                     val p = d.projections.first { it.method == l.method }
                     Small("${p.label}: ${formatWeight(projectedKg(chart, l, s), unit)}", NC.projection(l.method))
                 }
+                Small("7-day avg if unchanged: ${formatWeight(chart.anchorKg, unit)}", NC.avg)
             }
         }
+}
+
+// ── Full-screen charts: landscape, pinch to zoom the date axis, drag to
+// scroll, tap for a day's values. Closing returns to portrait. ──
+@Composable
+private fun FullscreenChart(
+    title: String,
+    leftDp: Int,
+    onClose: () -> Unit,
+    controls: @Composable () -> Unit = {},
+    footer: @Composable () -> Unit,
+    chart: @Composable (modifier: Modifier, zoom: Float, offset: Float) -> Unit,
+) {
+    val activity = LocalContext.current.findActivity()
+    DisposableEffect(Unit) {
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
+    }
+    var zoom by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableFloatStateOf(0f) }
+    var widthPx by remember { mutableIntStateOf(0) }
+    val leftPx = with(LocalDensity.current) { leftDp.dp.toPx() }
+
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        Column(
+            Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Small("Pinch to zoom · drag to scroll · tap for values")
+                Spacer(Modifier.weight(1f))
+                controls()
+                if (zoom > 1.01f) TextButton(onClick = { zoom = 1f; offset = 0f }) { Text("Reset zoom") }
+                TextButton(onClick = onClose) { Text("✕ Close") }
+            }
+            Box(
+                Modifier.weight(1f).fillMaxWidth()
+                    .onSizeChanged { widthPx = it.width }
+                    .pointerInput(Unit) {
+                        detectTransformGestures { centroid, pan, gestureZoom, _ ->
+                            val plotW = (widthPx - leftPx).coerceAtLeast(1f)
+                            val newZoom = (zoom * gestureZoom).coerceIn(1f, 12f)
+                            val anchor = centroid.x - leftPx
+                            val newOffset = (offset + anchor) * (newZoom / zoom) - anchor - pan.x
+                            zoom = newZoom
+                            offset = newOffset.coerceIn(0f, plotW * (newZoom - 1f))
+                        }
+                    },
+            ) {
+                chart(Modifier.fillMaxSize(), zoom, offset)
+            }
+            footer()
+        }
+    }
+}
+
+@Composable
+private fun CaloriesFullscreen(d: NutritionDashboardDto, range: Int, onRange: (Int) -> Unit, onClose: () -> Unit) {
+    var hidden by remember { mutableStateOf(setOf<String>()) }
+    var selected by remember(d) { mutableStateOf<Int?>(null) }
+    FullscreenChart(
+        "Daily calories", CAL_LEFT_DP, onClose,
+        controls = { RANGES.forEach { r -> FilterChip(selected = range == r, onClick = { onRange(r) }, label = { Text("${r}d") }) } },
+        footer = {
+            Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                CaloriesLegend(hidden) { hidden = it }
+                Box(Modifier.weight(1f)) { selected?.let { i -> d.days.getOrNull(i)?.let { DayDetail(it) } } ?: Small("Tap a day for its details.") }
+            }
+        },
+    ) { modifier, zoom, offset ->
+        CaloriesChart(d.days, d.config.dailyCalorieLimit, hidden, selected, onTap = { selected = it }, modifier = modifier, zoom = zoom, offset = offset)
+    }
+}
+
+@Composable
+private fun WeightFullscreen(d: NutritionDashboardDto, unit: String, onClose: () -> Unit) {
+    val maybe = remember(d) { weightChartData(d) }
+    var selected by remember(d) { mutableStateOf<LocalDate?>(null) }
+    if (maybe == null) return
+    val chart: WeightChartData = maybe
+    FullscreenChart(
+        "Weight and projections", WEIGHT_LEFT_DP, onClose,
+        footer = {
+            Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                WeightLegend(d)
+                Box(Modifier.weight(1f)) { selected?.let { WeightDetail(d, chart, unit, it) } ?: Small("Tap a date for its values.") }
+            }
+        },
+    ) { modifier, zoom, offset ->
+        WeightChart(chart, unit, selected, onTap = { selected = it }, modifier = modifier, zoom = zoom, offset = offset)
     }
 }
 
