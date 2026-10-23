@@ -4,6 +4,13 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.view.WindowManager
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -124,6 +131,7 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
     var refreshing by remember { mutableStateOf(false) }
     var weightBusy by remember { mutableStateOf(false) }
     var weightMsg by remember { mutableStateOf<String?>(null) }
+    var syncMsg by remember { mutableStateOf<String?>(null) }
 
     suspend fun load() {
         val resp = runCatching { nutritionApi.getDashboard(range) }.getOrNull()
@@ -137,7 +145,11 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
     // are current, then pull Garmin's latest weigh-in, then load.
     suspend fun fullRefresh() {
         refreshing = true
-        runCatching { NutritionSync.sync(context, api, NutritionSync.PERIODIC_DAYS) }
+        val pushed = runCatching { NutritionSync.sync(context, api, NutritionSync.PERIODIC_DAYS) }
+        syncMsg = pushed.fold(
+            onSuccess = { "Sent ${it.daysWithData} days to PaceSync" },
+            onFailure = { "Phone sync failed: ${it.message ?: it.javaClass.simpleName}" },
+        )
         weightBusy = true
         val w = runCatching { nutritionApi.refreshWeight() }.getOrNull()
         weightMsg = if (w?.isSuccessful == true) w.body()?.latest?.let { "Garmin: latest ${shortDate(it.date)}" } ?: "No weigh-ins in Garmin" else "Garmin weight refresh failed"
@@ -158,6 +170,20 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // Pushes Lose It! food/weight from Health Connect, pulls Garmin's
+            // latest weigh-in, then reloads — same as pull-to-refresh.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (refreshing) "Refreshing…" else "Refresh nutrition & weight",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    val status = listOfNotNull(syncMsg, weightMsg).joinToString(" · ")
+                    if (status.isNotEmpty()) Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                }
+                if (refreshing) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                else IconButton(onClick = { scope.launch { fullRefresh() } }) { Icon(Icons.Filled.Refresh, contentDescription = "Refresh all nutrition and weight data") }
+            }
             error?.let { Text(it, color = RED, style = MaterialTheme.typography.bodySmall) }
             val d = data
             if (d == null) {
@@ -424,8 +450,21 @@ private fun FullscreenChart(
     val leftPx = with(LocalDensity.current) { leftDp.dp.toPx() }
 
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        // Landscape: draw edge to edge (past the camera cutout) and then pad
+        // by the real insets, so nothing sits under the cutout or nav bar.
+        val dialogView = LocalView.current
+        SideEffect {
+            (dialogView.parent as? DialogWindowProvider)?.window?.let { w ->
+                w.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+                w.attributes = w.attributes.apply {
+                    layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
+            }
+        }
         Column(
-            Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(horizontal = 12.dp, vertical = 8.dp),
+            Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
