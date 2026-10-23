@@ -1,6 +1,7 @@
 "use client";
 
 import { CoachSettingsCard } from "@/components/CoachSettingsCard";
+import { OrsKeyCard } from "@/components/OrsKeyCard";
 import { NutritionSettingsCard } from "@/components/NutritionSettingsCard";
 import { GarminPersonalApiCard } from "@/components/GarminPersonalApiCard";
 import { createPortal } from "react-dom";
@@ -5546,6 +5547,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       </div>
 
       <GarminPersonalApiCard />
+
+      <OrsKeyCard />
 
       {/* Garmin DB */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
