@@ -437,6 +437,26 @@ export function RoutePlannerClient() {
     loadSaved();
   }
 
+  // Start fresh: drop the routes, waypoints, end, filter point and messages,
+  // and put the start back at home. Settings (distance, mode, toggles, the
+  // exclusion list) are kept.
+  function clearAll() {
+    setRoutes(null);
+    setSelected(0);
+    setNote(null);
+    setError(null);
+    setRuns(null);
+    setVia([]);
+    setEnd(null);
+    setStart(home);
+    setMode(null);
+    setSection(null);
+    setJustSaved(new Set());
+    setSavedMsg(null);
+    setPlaying(false);
+    if (home) mapRef.current?.setView(home, 14);
+  }
+
   async function saveHome() {
     if (!start) return;
     setHomeMsg(null);
@@ -815,6 +835,13 @@ export function RoutePlannerClient() {
                 </button>
                 {via.length > 0 && <button onClick={() => setVia([])} className={`${chip} ${chipIdle}`}>✕ Clear waypoints ({via.length})</button>}
                 {home && <button onClick={() => setStart(home)} className={`${chip} ${chipIdle}`}>🏠 Start at home</button>}
+                <button
+                  onClick={clearAll}
+                  className="rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 px-2.5 py-1 text-xs transition-colors"
+                  title="Remove the routes, waypoints and end point, and put the start back at home"
+                >
+                  ↺ Clear route
+                </button>
                 {start && (!home || home[0] !== start[0] || home[1] !== start[1]) && (
                   <button onClick={saveHome} className={`${chip} ${chipIdle}`}>Save start as home</button>
                 )}
