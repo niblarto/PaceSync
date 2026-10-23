@@ -45,6 +45,20 @@ function memoryDate(dateId: number): string {
 
 export const COACH_HANDOFF_KEY = "coach.discuss";
 
+type TileKey = "chat" | "report" | "context" | "memory";
+const COLLAPSE_KEY = "coach.collapsed";
+
+// Clickable tile title: ▼ when open, ▶ when minimised.
+function TileTitle({ open, onToggle, children }: { open: boolean; onToggle: () => void; children: ReactNode }) {
+  return (
+    <button onClick={onToggle} aria-expanded={open} title={open ? "Minimise" : "Expand"}
+      className="flex items-center gap-2 font-semibold text-sm text-left hover:text-slate-50 transition-colors">
+      <span className={`text-[10px] text-slate-500 transition-transform ${open ? "" : "-rotate-90"}`}>▼</span>
+      {children}
+    </button>
+  );
+}
+
 const STARTERS = [
   "How did my training go this week?",
   "Review my last run against the plan.",
@@ -122,6 +136,17 @@ function timeLabel(iso: string): string {
 
 export function CoachClient() {
   const [messages, setMessages] = useState<Msg[] | null>(null);
+  // Read after mount, so the server-rendered page and the first client render match.
+  const [collapsed, setCollapsed] = useState<Partial<Record<TileKey, boolean>>>({});
+  useEffect(() => {
+    try { setCollapsed(JSON.parse(window.localStorage.getItem(COLLAPSE_KEY) || "{}")); } catch {}
+  }, []);
+  const isOpen = (k: TileKey) => !collapsed[k];
+  const toggle = (k: TileKey) => setCollapsed(c => {
+    const next = { ...c, [k]: !c[k] };
+    try { window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify(next)); } catch {}
+    return next;
+  });
   const [model, setModel] = useState("");
   const [input, setInput] = useState("");
   const [pending, setPending] = useState<string | null>(null);
@@ -320,11 +345,11 @@ export function CoachClient() {
         </div>
       </header>
 
-      <div className="flex-1 max-w-[1800px] w-full mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-6 items-start">
+      <div className="flex-1 max-w-[1800px] w-full mx-auto px-4 py-6 flex flex-col gap-6">
         {/* Chat */}
-        <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 flex flex-col h-[calc(100vh-8rem)] min-h-[28rem]">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-            <h2 className="font-semibold text-sm">Conversation</h2>
+        <div className={`rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 flex flex-col ${isOpen("chat") ? "h-[75vh] min-h-[28rem]" : ""}`}>
+          <div className={`flex items-center justify-between px-4 py-3 ${isOpen("chat") ? "border-b border-white/10" : ""}`}>
+            <TileTitle open={isOpen("chat")} onToggle={() => toggle("chat")}>Conversation</TileTitle>
             {confirmNew ? (
               <div className="flex items-center gap-2 text-xs">
                 <span className="text-slate-400">Start over?</span>
@@ -342,6 +367,7 @@ export function CoachClient() {
             )}
           </div>
 
+          {isOpen("chat") && <>
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
             {messages == null && <p className="text-sm text-slate-500">Loading…</p>}
             {empty && (
@@ -423,16 +449,16 @@ export function CoachClient() {
               Send
             </button>
           </form>
+          </>}
         </div>
 
         {/* What the coach sees */}
-        <div className="space-y-4">
           {(() => {
             const report = reports?.[reportIdx];
             return (
               <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
-                  <h2 className="font-semibold text-sm">📋 Weekly report</h2>
+                  <TileTitle open={isOpen("report")} onToggle={() => toggle("report")}>📋 Weekly report</TileTitle>
                   <div className="flex items-center gap-2">
                     {reports && reports.length > 1 && (
                       <select
@@ -453,6 +479,7 @@ export function CoachClient() {
                     </button>
                   </div>
                 </div>
+                {isOpen("report") && <>
                 {reportError && <p className="text-xs text-red-400">{reportError}</p>}
                 {reports == null && <p className="text-xs text-slate-500">Loading…</p>}
                 {reports?.length === 0 && !writing && (
@@ -465,7 +492,7 @@ export function CoachClient() {
                     <p className="text-xs text-slate-500">
                       Week of {reportWeek(report.weekStart)} · written {timeLabel(report.createdAt)}{report.model ? ` · ${report.model}` : ""}
                     </p>
-                    <div className="text-sm text-slate-300 leading-relaxed max-h-[26rem] overflow-y-auto pr-1 bg-slate-950/40 rounded-lg p-3 border border-white/5">
+                    <div className="text-sm text-slate-300 leading-relaxed max-h-[40rem] overflow-y-auto pr-1 bg-slate-950/40 rounded-lg p-3 border border-white/5">
                       <Markdown text={report.content} />
                     </div>
                     <div className="flex items-center justify-between gap-2 text-xs">
@@ -488,22 +515,23 @@ export function CoachClient() {
                     </div>
                   </>
                 )}
+                </>}
               </div>
             );
           })()}
           <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-4 space-y-3">
             <div className="flex items-center justify-between">
-              <h2 className="font-semibold text-sm">Training data the coach sees</h2>
+              <TileTitle open={isOpen("context")} onToggle={() => toggle("context")}>Training data the coach sees</TileTitle>
               <button onClick={loadContext} disabled={contextLoading} className="text-xs text-slate-400 hover:text-slate-200 disabled:opacity-40">
                 {contextLoading ? "Loading…" : "↻ Refresh"}
               </button>
             </div>
-            {context ? (
+            {!isOpen("context") ? null : context ? (
               <>
                 <p className="text-xs text-slate-500">
                   {context.runCount} runs in the last 4 weeks · rebuilt before every reply
                 </p>
-                <pre className="text-[11px] leading-relaxed text-slate-400 whitespace-pre-wrap max-h-[22rem] overflow-y-auto font-mono bg-slate-950/50 rounded-lg p-3 border border-white/5">
+                <pre className="text-[11px] leading-relaxed text-slate-400 whitespace-pre-wrap max-h-[36rem] overflow-y-auto font-mono bg-slate-950/50 rounded-lg p-3 border border-white/5">
                   {context.text}
                 </pre>
               </>
@@ -514,9 +542,10 @@ export function CoachClient() {
 
           <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-4 space-y-3">
             <div className="flex items-center justify-between">
-              <h2 className="font-semibold text-sm">🧠 Coaching memory</h2>
+              <TileTitle open={isOpen("memory")} onToggle={() => toggle("memory")}>🧠 Coaching memory</TileTitle>
               <span className="text-xs text-slate-500">{memories?.length ?? 0} saved</span>
             </div>
+            {isOpen("memory") && <>
             <p className="text-xs text-slate-500">
               Each finished conversation is summarised here. The coach recalls the 3 most relevant from the last 30 days.
             </p>
@@ -554,8 +583,8 @@ export function CoachClient() {
                 </div>
               ))}
             </div>
+            </>}
           </div>
-        </div>
       </div>
     </div>
   );
