@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { garminCacheGet, garminCacheSet } from "@/lib/garmin-cache";
+import { SAVED_PREFIX, savedRouteAsActivityRoute } from "@/lib/saved-routes";
 import path from "path";
 
 // GPS track for one activity, downsampled for drawing a route polyline.
@@ -23,6 +24,13 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  // A route saved from the Route Finder (pinnable to a scheduled run like an
+  // activity), not a GarminDB activity — no Garmin DB needed.
+  if (decodeURIComponent(params.id).startsWith(SAVED_PREFIX)) {
+    const saved = savedRouteAsActivityRoute(decodeURIComponent(params.id).slice(SAVED_PREFIX.length));
+    return saved ? NextResponse.json(saved) : NextResponse.json({ error: "Saved route not found" }, { status: 404 });
+  }
 
   const config = loadGarminConfig();
   if (!config) return NextResponse.json({ error: "Garmin DB not configured" }, { status: 404 });

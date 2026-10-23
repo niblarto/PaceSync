@@ -16,10 +16,20 @@ interface Candidate {
   compactness: number;
   isLoop: boolean;
   score?: number;
-  source?: "runs" | "streets";
+  source?: "runs" | "streets" | "gpx";
   snapped?: boolean;
   lights?: number | null;
   parkPct?: number | null;
+}
+
+interface SavedRoute {
+  id: string;
+  name: string;
+  distanceMi: number;
+  createdAt: string;
+  source: "runs" | "streets" | "gpx";
+  snapped: boolean;
+  isLoop: boolean;
 }
 
 interface RunActivity { id: string | number; name: string | null; startTime: string | null; distanceMi: number | null }
@@ -61,9 +71,46 @@ const ARROW_HTML = '<div style="width:26px;height:26px"><svg width="26" height="
 
 const COLORS = ["#22c55e", "#3b82f6", "#f97316", "#a855f7", "#ec4899", "#06b6d4"];
 
+function escapeXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// Tracks (or, failing that, routes) in a GPX file, one entry each with at
+// least two points. Elevation and time are ignored.
+function parseGpx(xml: string, fallbackName: string): { name: string; points: LatLng[] }[] {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (doc.getElementsByTagName("parsererror").length > 0) throw new Error("not a valid GPX file");
+  const pointsOf = (el: Element, tag: string): LatLng[] =>
+    Array.from(el.getElementsByTagName(tag))
+      .map(n => [parseFloat(n.getAttribute("lat") ?? ""), parseFloat(n.getAttribute("lon") ?? "")] as LatLng)
+      .filter(p => !isNaN(p[0]) && !isNaN(p[1]));
+  const nameOf = (el: Element): string =>
+    Array.from(el.children).find(c => c.localName === "name")?.textContent?.trim() ?? "";
+  const out: { name: string; points: LatLng[] }[] = [];
+  for (const [tag, ptTag] of [["trk", "trkpt"], ["rte", "rtept"]] as const) {
+    const els = Array.from(doc.getElementsByTagName(tag));
+    els.forEach((el, i) => {
+      const points = pointsOf(el, ptTag);
+      if (points.length >= 2) out.push({ name: nameOf(el) || (els.length > 1 ? `${fallbackName} ${i + 1}` : fallbackName), points });
+    });
+    if (out.length > 0) break;
+  }
+  return out;
+}
+
+// Evenly thinned to at most `max` points, keeping the first and last.
+function thinPoints(points: LatLng[], max: number): LatLng[] {
+  if (points.length <= max) return points;
+  const step = (points.length - 1) / (max - 1);
+  const out: LatLng[] = [];
+  for (let i = 0; i < max - 1; i++) out.push(points[Math.round(i * step)]);
+  out.push(points[points.length - 1]);
+  return out;
+}
+
 function toGpx(c: Candidate, name: string): string {
   const pts = c.points.map(p => `<trkpt lat="${p[0].toFixed(6)}" lon="${p[1].toFixed(6)}"/>`).join("");
-  return `<?xml version="1.0" encoding="UTF-8"?><gpx version="1.1" creator="PaceSync" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>${name}</name><trkseg>${pts}</trkseg></trk></gpx>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><gpx version="1.1" creator="PaceSync" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>${escapeXml(name)}</name><trkseg>${pts}</trkseg></trk></gpx>`;
 }
 
 export function RoutePlannerClient() {
@@ -78,8 +125,6 @@ export function RoutePlannerClient() {
   // Only paths run at least this many times are used — single-run GPS wobble
   // (e.g. a trace through back gardens) can't become a shortcut.
   const [minRuns, setMinRuns] = useState("2");
-  // Turning points the route is built through (start → W1 … Wn → end).
-  const [waypoints, setWaypoints] = useState("2");
   // "runs": loops stitched from your own GPS history. "streets": brand-new
   // routes on real streets from a start/end (OpenRouteService).
   const [sourceMode, setSourceMode] = useState<"runs" | "streets">("runs");
@@ -115,6 +160,11 @@ export function RoutePlannerClient() {
   const modeRef = useRef<PickMode>(null);
   modeRef.current = mode;
   const centredRef = useRef(false);
+  // Routes saved for later (and for pinning to a scheduled run).
+  const [saved, setSaved] = useState<SavedRoute[]>([]);
+  const [savedOpen, setSavedOpen] = useState(false);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [justSaved, setJustSaved] = useState<Set<number>>(new Set());
   // While placing a waypoint: a circle follows the cursor with a count of the
   // runs that pass through it.
   const [hover, setHover] = useState<{ x: number; y: number; text: string } | null>(null);
@@ -240,7 +290,7 @@ export function RoutePlannerClient() {
       const from = start ?? (streets ? home : null);
       if (streets && !from) { setError("Set a start point first (📍 Set start, or save a home)"); setLoading(false); return; }
       const q = new URLSearchParams({ distanceMi: String(mi), seed: String(Math.floor(Math.random() * 1e9)) });
-      if (!streets) { q.set("minRuns", minRuns); q.set("waypoints", waypoints); if (snap) q.set("snap", "1"); }
+      if (!streets) { q.set("minRuns", minRuns); if (snap) q.set("snap", "1"); }
       if (avoidLights) q.set("avoidLights", "1");
       if (preferParks) q.set("preferParks", "1");
       if (from) { q.set("lat", String(from[0])); q.set("lng", String(from[1])); }
@@ -251,6 +301,8 @@ export function RoutePlannerClient() {
       if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`);
       setNote(d.note ?? null);
       setRoutes(d.routes ?? []);
+      setJustSaved(new Set());
+      setSavedMsg(null);
       setRuns(d.runs ?? null);
       setSelected(0);
       if (!start && d.start) setStart(d.start);
@@ -259,6 +311,130 @@ export function RoutePlannerClient() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function downloadFile(filename: string, text: string) {
+    const blob = new Blob([text], { type: "application/gpx+xml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function exportSaved(r: SavedRoute) {
+    try {
+      const res = await fetch(`/api/garmin/route/${encodeURIComponent(`saved:${r.id}`)}`);
+      const d = await res.json() as { points?: number[][]; error?: string };
+      if (!res.ok || !d.points) throw new Error(d.error ?? `HTTP ${res.status}`);
+      const points = d.points.map(p => [p[0], p[1]] as LatLng);
+      downloadFile(`${r.name.replace(/[^\w.-]+/g, "-")}.gpx`, toGpx({ points } as Candidate, r.name));
+    } catch (e) {
+      setSavedMsg(e instanceof Error ? e.message : "Couldn't export the route");
+    }
+  }
+
+  async function importGpx(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setSavedMsg(null);
+    let imported = 0;
+    const problems: string[] = [];
+    for (const file of Array.from(files).slice(0, 10)) {
+      try {
+        if (file.size > 8 * 1024 * 1024) throw new Error("file is over 8 MB");
+        const parsed = parseGpx(await file.text(), file.name.replace(/\.gpx$/i, ""));
+        if (parsed.length === 0) throw new Error("no track or route found");
+        for (const t of parsed.slice(0, 20)) {
+          let miles = 0;
+          for (let i = 1; i < t.points.length; i++) miles += segMi(t.points[i - 1], t.points[i]);
+          if (miles < 0.1) { problems.push(`${t.name}: too short`); continue; }
+          const res = await fetch("/api/garmin/saved-routes", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: t.name, distanceMi: miles, points: thinPoints(t.points, 2000), source: "gpx", snapped: false,
+              isLoop: segMi(t.points[0], t.points[t.points.length - 1]) < 0.1,
+            }),
+          });
+          if (!res.ok) throw new Error(((await res.json()) as { error?: string }).error ?? `HTTP ${res.status}`);
+          imported++;
+        }
+      } catch (e) {
+        problems.push(`${file.name}: ${e instanceof Error ? e.message : "couldn't import"}`);
+      }
+    }
+    loadSaved();
+    setSavedMsg(`Imported ${imported} route${imported === 1 ? "" : "s"}.${problems.length ? ` Skipped — ${problems.join("; ")}.` : ""}`);
+  }
+
+  function loadSaved() {
+    fetch("/api/garmin/saved-routes")
+      .then(r => r.json())
+      .then((d: { routes?: SavedRoute[] }) => setSaved(d.routes ?? []))
+      .catch(() => {});
+  }
+  useEffect(loadSaved, []);
+
+  async function saveRoute(i: number) {
+    const c = routes?.[i];
+    if (!c) return;
+    const base = `${c.isLoop ? "Loop" : "Route"} ${c.distanceMi.toFixed(1)} mi`;
+    const name = window.prompt("Name this route", base);
+    if (name === null) return;
+    setSavedMsg(null);
+    try {
+      const res = await fetch("/api/garmin/saved-routes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim() || base, distanceMi: c.distanceMi, points: c.points,
+          source: c.source ?? sourceMode, snapped: !!c.snapped, isLoop: c.isLoop,
+        }),
+      });
+      const d = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`);
+      setJustSaved(s => new Set(s).add(i));
+      setSavedMsg("Saved. Pin it to a scheduled run from the Runna schedule on the dashboard.");
+      loadSaved();
+    } catch (e) {
+      setSavedMsg(e instanceof Error ? e.message : "Couldn't save the route");
+    }
+  }
+
+  async function showSaved(r: SavedRoute) {
+    try {
+      const res = await fetch(`/api/garmin/route/${encodeURIComponent(`saved:${r.id}`)}`);
+      const d = await res.json() as { points?: number[][]; error?: string };
+      if (!res.ok || !d.points) throw new Error(d.error ?? `HTTP ${res.status}`);
+      setRoutes([{
+        points: d.points.map(p => [p[0], p[1]] as [number, number]),
+        distanceMi: r.distanceMi, overlapPct: 0, familiarPct: -1, compactness: 1,
+        isLoop: r.isLoop, source: r.source, snapped: r.snapped,
+      }]);
+      setSelected(0);
+      setNote(`Showing saved route "${r.name}".`);
+      setJustSaved(new Set());
+    } catch (e) {
+      setSavedMsg(e instanceof Error ? e.message : "Couldn't load the route");
+    }
+  }
+
+  async function renameSaved(r: SavedRoute) {
+    const name = window.prompt("Rename route", r.name);
+    if (!name || !name.trim()) return;
+    await fetch("/api/garmin/saved-routes", {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: r.id, name }),
+    }).catch(() => {});
+    loadSaved();
+  }
+
+  async function deleteSaved(r: SavedRoute) {
+    if (!window.confirm(`Delete "${r.name}"? If it is pinned to a scheduled run, that pin will stop working.`)) return;
+    await fetch("/api/garmin/saved-routes", {
+      method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: r.id }),
+    }).catch(() => {});
+    loadSaved();
   }
 
   async function saveHome() {
@@ -623,16 +799,6 @@ export function RoutePlannerClient() {
               <span>or more times</span>
             </label>
 
-            <label className="flex items-center gap-2 text-xs text-slate-400">
-              Build through
-              <input
-                type="number" min={1} max={5} step={1} value={waypoints}
-                onChange={e => setWaypoints(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter") suggest(); }}
-                className="w-16 rounded-lg bg-slate-800 border border-white/10 px-2 py-1 text-xs text-slate-200"
-              />
-              <span>waypoints (1–5, yours count)</span>
-            </label>
             </>)}
 
             <div className="space-y-2 pt-1 border-t border-white/5">
@@ -771,6 +937,48 @@ export function RoutePlannerClient() {
 
           )}
 
+          <div className="rounded-xl bg-slate-900/70 border border-white/10">
+            <button
+              onClick={() => setSavedOpen(o => !o)}
+              className="w-full flex items-center justify-between px-4 py-3 text-sm"
+            >
+              <span>Saved routes{saved.length > 0 && <span className="text-green-300"> · {saved.length}</span>}</span>
+              <span className="text-slate-500">{savedOpen ? "▲" : "▼"}</span>
+            </button>
+            {savedOpen && (
+              <div className="px-4 pb-4 space-y-2 border-t border-white/5 pt-3">
+                <p className="text-[11px] text-slate-500">
+                  Saved routes appear on a scheduled Runna run of about the same distance, where you can pin one to it.
+                </p>
+                <div className="flex items-center gap-2">
+                  <label className={`${chip} ${chipIdle} cursor-pointer`}>
+                    ⬆ Import GPX
+                    <input
+                      type="file" accept=".gpx,application/gpx+xml,text/xml" multiple className="hidden"
+                      onChange={e => { void importGpx(e.target.files); e.target.value = ""; }}
+                    />
+                  </label>
+                  <span className="text-[11px] text-slate-500">Each track in a file becomes a saved route.</span>
+                </div>
+                {saved.length === 0 && <p className="text-xs text-slate-500">Nothing saved yet — press 💾 Save on a route, or import a GPX file.</p>}
+                <div className="max-h-64 overflow-y-auto rounded-lg border border-white/5 divide-y divide-white/5">
+                  {saved.map(r => (
+                    <div key={r.id} className="flex items-center gap-2 px-2 py-1.5 text-xs">
+                      <button onClick={() => void showSaved(r)} className="flex-1 min-w-0 truncate text-left hover:text-green-300" title="Show on the map">
+                        {r.name}
+                      </button>
+                      <span className="text-slate-500 whitespace-nowrap">{r.distanceMi.toFixed(1)} mi</span>
+                      <button onClick={() => void exportSaved(r)} className="text-slate-500 hover:text-slate-200" title="Export as GPX">⬇</button>
+                      <button onClick={() => void renameSaved(r)} className="text-slate-500 hover:text-slate-200" title="Rename">✎</button>
+                      <button onClick={() => void deleteSaved(r)} className="text-slate-500 hover:text-red-300" title="Delete">✕</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          {savedMsg && <p className="text-xs text-green-300">{savedMsg}</p>}
+
           {routes && routes.length === 0 && !loading && (
             <p className="text-sm text-slate-400">
               No route of that length fits your running history from there. Try a nearby distance, or a start/end on ground you&apos;ve run.
@@ -791,8 +999,15 @@ export function RoutePlannerClient() {
                 )}
                 {r.snapped && <span className="text-[10px] text-sky-300">streets</span>}
                 <button
+                  onClick={e => { e.stopPropagation(); void saveRoute(i); }}
+                  disabled={justSaved.has(i)}
+                  className="ml-auto text-xs text-slate-400 hover:text-green-300 disabled:text-green-400"
+                >
+                  {justSaved.has(i) ? "Saved ✓" : "💾 Save"}
+                </button>
+                <button
                   onClick={e => { e.stopPropagation(); downloadGpx(i); }}
-                  className="ml-auto text-xs text-slate-400 hover:text-slate-200"
+                  className="text-xs text-slate-400 hover:text-slate-200"
                 >
                   GPX ⬇
                 </button>
@@ -806,7 +1021,7 @@ export function RoutePlannerClient() {
           ))}
         </div>
 
-        <div className="relative">
+        <div className="relative self-start lg:sticky lg:top-20">
           <div
             ref={mapDivRef}
             className="rounded-xl overflow-hidden border border-white/10 min-h-[28rem] lg:min-h-[calc(100vh-8rem)]"

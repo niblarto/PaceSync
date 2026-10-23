@@ -551,14 +551,16 @@ export function RouteMapLightbox({ activityId, courseId, label, workoutSegments,
                 Satellite
               </button>
             </div>
-            <a
-              href={courseId != null ? `https://connect.garmin.com/app/course/${courseId}` : `https://connect.garmin.com/app/activity/${activityId}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs text-slate-400 hover:text-slate-200 underline"
-            >
-              Garmin Connect ↗
-            </a>
+            {!String(activityId).startsWith("saved:") && (
+              <a
+                href={courseId != null ? `https://connect.garmin.com/app/course/${courseId}` : `https://connect.garmin.com/app/activity/${activityId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-slate-400 hover:text-slate-200 underline"
+              >
+                Garmin Connect ↗
+              </a>
+            )}
             {workoutDate && workoutTitle && (
               <button
                 onClick={togglePin}

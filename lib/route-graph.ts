@@ -510,17 +510,17 @@ function jaccard(a: Set<string>, b: Set<string>): number {
   return inter / (a.size + b.size - inter);
 }
 
-// The most turning points a search will use. The Route Finder's field goes to 5;
-// the API raises it up to this when nothing is found.
-export const MAX_WAYPOINTS = 8;
+// The most generated waypoints a search will add (the API raises the count one
+// at a time up to this when nothing is found).
+export const MAX_GENERATED_WAYPOINTS = 6;
 
-// How many waypoints the finder generates itself for `waypoints` turning points
-// in total when `viaCount` are yours. Placed waypoints leave less room to tune
-// the distance, so there are always at least 1 generated (2 with a placed
-// waypoint, 3 from about 9 miles).
-export function generatedWaypoints(waypoints: number, viaCount: number, targetMi: number): number {
-  const minFree = viaCount === 0 ? 1 : targetMi >= 9 ? 3 : 2;
-  return Math.max(minFree, Math.round(waypoints) - viaCount);
+// How many waypoints the finder generates itself to start with. A loop needs at
+// least two (a triangle; one would be an out-and-back). A point-to-point route
+// can do with one. Placed waypoints leave less room to tune the distance, so
+// there are two with them, three from about 9 miles.
+export function minGeneratedWaypoints(viaCount: number, hasEnd: boolean, targetMi: number): number {
+  if (viaCount > 0) return targetMi >= 9 ? 3 : 2;
+  return hasEnd ? 1 : 2;
 }
 
 // Routes start → [your via points, in order] → end, with every leg a shortest
@@ -528,16 +528,16 @@ export function generatedWaypoints(waypoints: number, viaCount: number, targetMi
 // that is a loop. Your via points are fixed, so distance can only be tuned by
 // extra generated waypoints: they are inserted into one gap of the chain at a
 // time, the last of them chosen so the total lands within tolerance of the
-// target. `waypoints` is the total number of turning points wanted — your via
-// points count toward it, but at least one generated waypoint is always added
-// (two when you've placed your own: one alone is too constrained to fit).
+// target. `generated` is how many to add.
 // Candidates are kept only if the legs don't retrace or fold back (evaluate).
 export function suggestLoops(
   g: RouteGraph,
   targetMi: number,
   opts: {
     start?: number; end?: number; via?: number[]; seed?: number; count?: number;
-    budgetMs?: number; minRuns?: number; waypoints?: number; stats?: SearchStats;
+    budgetMs?: number; minRuns?: number; stats?: SearchStats;
+    /** Waypoints the finder adds itself (default: minGeneratedWaypoints). */
+    generated?: number;
   } = {},
 ): RouteCandidate[] {
   const start = opts.start ?? g.home;
@@ -545,8 +545,7 @@ export function suggestLoops(
   const via = opts.via ?? [];
   const isLoop = end === start;
   const minRuns = opts.minRuns ?? 2;
-  const n = Math.min(MAX_WAYPOINTS, Math.max(1, Math.round(opts.waypoints ?? 2)));
-  const free = generatedWaypoints(n, via.length, targetMi);
+  const free = Math.max(1, Math.round(opts.generated ?? minGeneratedWaypoints(via.length, !isLoop, targetMi)));
   const count = opts.count ?? 6;
   const rnd = mulberry32(opts.seed ?? Math.floor(Math.random() * 2 ** 31));
   const targetM = targetMi * M_PER_MI;

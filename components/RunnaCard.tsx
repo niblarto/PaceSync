@@ -1039,6 +1039,9 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     mixTracks?: RouteMixTrack[];
   } | null>(null);
   const [courses, setCourses] = useState<GarminCourse[] | null>(null);
+  // Routes saved from the Route Finder — offered alongside past runs, and
+  // pinnable to a workout the same way (id "saved:<id>").
+  const [savedRoutes, setSavedRoutes] = useState<{ id: string; name: string; distanceMi: number }[] | null>(null);
   const [courseOffsets, setCourseOffsets] = useState<Record<string, number>>({});
   const [weather, setWeather] = useState<Record<string, DayWeather>>({});
   // Which AI DJ provider is configured — only known here so the "N segments
@@ -1424,6 +1427,14 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       .catch(() => setPinnedRoutes(s => ({ ...s, [w.date]: null })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, garminConfigured, workouts, routeMap]);
+
+  useEffect(() => {
+    if (!expanded || savedRoutes !== null) return;
+    fetch("/api/garmin/saved-routes")
+      .then(r => r.json())
+      .then((d: { routes?: { id: string; name: string; distanceMi: number }[] }) => setSavedRoutes(d.routes ?? []))
+      .catch(() => setSavedRoutes([]));
+  }, [expanded, savedRoutes]);
 
   // Garmin Connect course library — fetched once, filtered per card below.
   useEffect(() => {
@@ -2161,6 +2172,41 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                             >
                               &gt;
                             </button>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    {showRouteMaps && isRun && w.distanceMi && savedRoutes && (() => {
+                      const matching = savedRoutes.filter(sr => Math.abs(sr.distanceMi - w.distanceMi!) <= 0.3);
+                      if (!matching.length) return null;
+                      return (
+                        <div className="pt-1 space-y-1.5">
+                          <p className="text-xs text-slate-500">
+                            Saved routes at this distance ({(w.distanceMi - 0.3).toFixed(1)}–{(w.distanceMi + 0.3).toFixed(1)}mi)
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {matching.map(sr => (
+                              <button
+                                key={sr.id}
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  setRouteMap({
+                                    id: `saved:${sr.id}`,
+                                    label: `${sr.name} · ${sr.distanceMi.toFixed(1)}mi`,
+                                    segments: mixSegmentsFor(w, raceSplits[w.date]),
+                                    workoutDate: w.date,
+                                    workoutTitle: w.title,
+                                    runDate: "Saved route",
+                                    distanceMi: sr.distanceMi,
+                                    mixTracks: mixSnapshots[w.date]?.tracks,
+                                  });
+                                }}
+                                className="min-w-0 max-w-full truncate whitespace-nowrap text-xs px-2 py-1 rounded-lg border bg-green-500/15 border-green-500/30 text-green-300 hover:bg-green-500/25 transition-colors"
+                                title={sr.name}
+                              >
+                                🗺️ {sr.name} · {sr.distanceMi.toFixed(1)}mi
+                              </button>
+                            ))}
                           </div>
                         </div>
                       );

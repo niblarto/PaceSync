@@ -156,6 +156,8 @@ FILES = [
     ('app/api/garmin/route-explore/route.ts',     'app/api/garmin/route-explore/route.ts'),
     ('lib/route-graph-cache.ts',                  'lib/route-graph-cache.ts'),
     ('app/api/garmin/route-point/route.ts',       'app/api/garmin/route-point/route.ts'),
+    ('lib/saved-routes.ts',                       'lib/saved-routes.ts'),
+    ('app/api/garmin/saved-routes/route.ts',      'app/api/garmin/saved-routes/route.ts'),
     ('app/routes/page.tsx',                      'app/routes/page.tsx'),
     ('components/RoutePlannerClient.tsx',         'components/RoutePlannerClient.tsx'),
     ('hooks/useRouteMap.ts',                      'hooks/useRouteMap.ts'),

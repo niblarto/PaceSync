@@ -4,10 +4,10 @@ import { loadGarminConfig } from "@/lib/garmin-config";
 import { getRouteGraph } from "@/lib/route-graph-cache";
 import { loadOrsKey, orsRateInfo } from "@/lib/ors";
 import { finishRoutes } from "@/lib/route-finish";
-import { familiarityOf, firstUnreachableLeg, generatedWaypoints, MAX_WAYPOINTS, nearestNode, suggestLoops } from "@/lib/route-graph";
+import { familiarityOf, firstUnreachableLeg, MAX_GENERATED_WAYPOINTS, minGeneratedWaypoints, nearestNode, suggestLoops } from "@/lib/route-graph";
 
 // New loop routes of a requested distance, stitched together from the paths
-// in the user's own recorded runs. GET ?distanceMi=6.2[&seed=n][&lat=&lng=][&endLat=&endLng=][&minRuns=2][&waypoints=2][&via=lat,lng|lat,lng]
+// in the user's own recorded runs. GET ?distanceMi=6.2[&seed=n][&lat=&lng=][&endLat=&endLng=][&minRuns=2][&via=lat,lng|lat,lng]
 
 export async function GET(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -17,7 +17,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "distanceMi required (1–30)" }, { status: 400 });
   }
   const minRuns = Math.min(50, Math.max(1, parseInt(req.nextUrl.searchParams.get("minRuns") ?? "") || 2));
-  const waypoints = Math.min(5, Math.max(1, parseInt(req.nextUrl.searchParams.get("waypoints") ?? "") || 2));
   // via=lat,lng|lat,lng — waypoints the route must pass through, in order.
   const viaPts = (req.nextUrl.searchParams.get("via") ?? "")
     .split("|")
@@ -44,33 +43,31 @@ export async function GET(req: NextRequest) {
     const start = !isNaN(lat) && !isNaN(lng) ? nearestNode(graph, lat, lng, minRuns) : graph.home;
     const end = !isNaN(endLat) && !isNaN(endLng) ? nearestNode(graph, endLat, endLng, minRuns) : undefined;
     const via = viaPts.map(v => nearestNode(graph, v[0], v[1], minRuns));
-    const search = (n: number, budgetMs?: number) => suggestLoops(graph, distanceMi, {
+    const search = (generated: number, budgetMs?: number) => suggestLoops(graph, distanceMi, {
       start,
       end,
       via,
       minRuns,
-      waypoints: n,
+      generated,
       budgetMs,
       seed: isNaN(seedParam) ? undefined : seedParam,
     });
-    let routes = search(waypoints);
-    // Nothing found: add generated waypoints and try again, until a route
-    // turns up or the limit is reached. Only counts that actually change how
-    // many are generated are tried, and each retry gets a shorter budget.
-    let usedWaypoints = waypoints;
+    // Through your placed waypoints, adding generated ones as needed: start
+    // with the fewest that can work and, if nothing is found, add one more and
+    // try again, until a route turns up or the limit is reached. Each retry
+    // gets a shorter time budget.
+    const minFree = minGeneratedWaypoints(via.length, end !== undefined && end !== start, distanceMi);
+    let routes = search(minFree);
+    let usedFree = minFree;
     let escalation: string | undefined;
     if (routes.length === 0) {
-      let free = generatedWaypoints(waypoints, via.length, distanceMi);
-      for (let n = waypoints + 1; n <= MAX_WAYPOINTS && routes.length === 0; n++) {
-        const f = generatedWaypoints(n, via.length, distanceMi);
-        if (f === free) continue;
-        free = f;
-        routes = search(n, 4000);
-        if (routes.length > 0) usedWaypoints = n;
+      for (let f = minFree + 1; f <= MAX_GENERATED_WAYPOINTS && routes.length === 0; f++) {
+        routes = search(f, 4000);
+        if (routes.length > 0) usedFree = f;
       }
       escalation = routes.length > 0
-        ? `No route with ${waypoints} waypoint${waypoints === 1 ? "" : "s"} — found with ${usedWaypoints}.`
-        : `No route found, even with up to ${MAX_WAYPOINTS} waypoints.`;
+        ? `Found a route after adding more waypoints (${usedFree} generated).`
+        : `No route found, even with ${MAX_GENERATED_WAYPOINTS} generated waypoints.`;
     }
     // Optionally snap each route onto real streets (OpenRouteService), then
     // score them all (RunPaths-style) and sort best-first.
