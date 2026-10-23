@@ -55,6 +55,12 @@ function db() {
   return d;
 }
 
+// When weigh-ins were last fetched from Garmin Connect (ISO), if ever.
+export function lastGarminWeightFetch(): string | null {
+  const row = db().prepare("SELECT MAX(fetched_at) AS at FROM garmin_weights").get() as { at: string | null };
+  return row?.at ?? null;
+}
+
 export function getGarminApiWeights(since: string): { date: string; kg: number; measuredAt: string }[] {
   return db().prepare(
     "SELECT date, weight_kg AS kg, measured_at AS measuredAt FROM garmin_weights WHERE date >= ? ORDER BY date",

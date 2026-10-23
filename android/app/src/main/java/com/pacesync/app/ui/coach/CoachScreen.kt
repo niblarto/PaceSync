@@ -173,7 +173,7 @@ private fun ChatTab(coachApi: CoachApi, queued: String?, sync: suspend () -> Uni
     val count = (messages?.size ?: 0) + if (pending != null) 2 else 0
     LaunchedEffect(count) { if (count > 0) listState.animateScrollToItem(count - 1) }
 
-    fun send(text: String) {
+    fun send(text: String, web: Boolean = false) {
         val msg = text.trim()
         if (msg.isEmpty() || pending != null) return
         error = null
@@ -181,7 +181,7 @@ private fun ChatTab(coachApi: CoachApi, queued: String?, sync: suspend () -> Uni
         input = ""
         scope.launch {
             sync()
-            val resp = runCatching { coachApi.send(CoachSendRequest(msg)) }
+            val resp = runCatching { coachApi.send(CoachSendRequest(msg, web)) }
             val r = resp.getOrNull()
             val body = r?.body()
             if (r?.isSuccessful == true && body?.userMessage != null && body.reply != null) {
@@ -252,6 +252,11 @@ private fun ChatTab(coachApi: CoachApi, queued: String?, sync: suspend () -> Uni
                 modifier = Modifier.weight(1f),
                 maxLines = 5,
             )
+            OutlinedButton(
+                onClick = { send(input, web = true) },
+                enabled = input.isNotBlank() && pending == null,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
+            ) { Text("🌐") }
             Button(
                 onClick = { send(input) },
                 enabled = input.isNotBlank() && pending == null,

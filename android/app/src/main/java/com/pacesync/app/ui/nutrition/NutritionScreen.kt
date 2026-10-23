@@ -221,7 +221,7 @@ private fun StatTiles(d: NutritionDashboardDto, unit: String, weightBusy: Boolea
                 } ?: Small("Not set")
             }
             Tile("Eaten today", "${kcal(todayRow?.eaten ?: 0.0)} kcal", Modifier.weight(1f)) {
-                todayRow?.net?.let { Small("net ${signed(it)} (burnt ${kcal(todayRow.burnt)})") } ?: Small("Garmin burn not in yet")
+                todayRow?.net?.let { Small("net ${signed(it)} (burnt ${kcal(todayRow.burnt)}${if (todayRow.partial) " so far" else ""})") } ?: Small("Garmin burn not in yet")
                 cfg.dailyCalorieLimit?.let { lim ->
                     val left = lim - (todayRow?.eaten ?: 0.0)
                     if (left >= 0) Small("${kcal(left)} left of ${kcal(lim)}", GREEN) else Small("${kcal(-left)} over ${kcal(lim)}", RED)
@@ -253,7 +253,7 @@ private fun CaloriesCard(d: NutritionDashboardDto, range: Int, onRange: (Int) ->
         // Legend: tap to hide/show a series.
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             listOf("net" to "Net", "eaten" to "Eaten", "exercise" to "Exercise", "burnt" to "Burnt").forEach { (key, label) ->
-                val color = when (key) { "net" -> NC.netOk; "eaten" -> NC.eaten; "exercise" -> NC.exercise; else -> NC.burnt }
+                val color = when (key) { "net" -> NC.netLine; "eaten" -> NC.eaten; "exercise" -> NC.exercise; else -> NC.burnt }
                 val off = key in hidden
                 Row(
                     Modifier.clickable { hidden = if (off) hidden - key else hidden + key },
@@ -264,7 +264,7 @@ private fun CaloriesCard(d: NutritionDashboardDto, range: Int, onRange: (Int) ->
                 }
             }
         }
-        selected?.let { i -> d.days.getOrNull(i)?.let { DayDetail(it) } } ?: Small("Tap a day for details. Net = eaten − burnt (green deficit, red gain).")
+        selected?.let { i -> d.days.getOrNull(i)?.let { DayDetail(it) } } ?: Small("Tap a day for details. Net line = eaten − burnt (green dot deficit, red gain; hollow = today so far).")
         val a = d.averages
         Small(
             "Last ${a.windowDays} days (not today): avg eaten ${kcal(a.eaten)} on ${a.loggedDays} logged days · avg burnt ${kcal(a.burnt)} · " +
@@ -280,8 +280,8 @@ private fun DayDetail(r: NutritionDayRow) {
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         Text(longDate(r.date), style = MaterialTheme.typography.labelLarge)
-        Small("Eaten ${kcal(r.eaten)} · Burnt ${kcal(r.burnt)}${r.resting?.let { " (${kcal(it)} resting)" } ?: ""} · Exercise ${kcal(r.exercise)}")
-        r.net?.let { Small("Net (eaten − burnt): ${signed(it)} kcal (${if (it <= 0) "deficit" else "gain"})", if (it <= 0) GREEN else RED) }
+        Small("Eaten ${kcal(r.eaten)} · Burnt${if (r.partial) " so far" else ""} ${kcal(r.burnt)}${r.resting?.let { " (${kcal(it)} resting)" } ?: ""} · Exercise ${kcal(r.exercise)}")
+        r.net?.let { Small("Net (eaten − burnt)${if (r.partial) " so far" else ""}: ${signed(it)} kcal (${if (it <= 0) "deficit" else "gain"})", if (it <= 0) GREEN else RED) }
         r.proteinG?.let { Small("P ${it.roundToInt()} g · C ${(r.carbsG ?: 0.0).roundToInt()} g · F ${(r.fatG ?: 0.0).roundToInt()} g") }
     }
 }

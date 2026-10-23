@@ -1,7 +1,10 @@
+import fs from "fs";
 import path from "path";
+import { getDb } from "@/lib/db";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { getNutritionDays } from "@/lib/nutrition";
-import { getGarminApiWeights } from "@/lib/garmin-weight";
+import { getGarminApiWeights, lastGarminWeightFetch } from "@/lib/garmin-weight";
+import { cachedTodayBurn } from "@/lib/garmin-connect";
 import { loadNutritionConfig, type NutritionConfig } from "@/lib/nutrition-config";
 
 // Data + projections for the /nutrition page.
@@ -30,6 +33,7 @@ export interface DayRow {
   weightKg: number | null;
   deficit: number | null; // burnt − eaten (positive = deficit); null unless both known
   net: number | null; // eaten − burnt (negative = deficit); null unless both known
+  partial: boolean; // today: burnt (and so net) is "so far", from Garmin Connect
 }
 
 export interface Projection {
@@ -57,6 +61,16 @@ export interface NutritionDashboard {
   };
   projections: Projection[];
   required: { kgPerWeek: number; dailyBalance: number; intake: number | null } | null;
+  // The straight line fitted through the weigh-ins in the trend window, so
+  // the chart can show where the "Scale trend" projection comes from.
+  trendFit: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
+  // When each data source was last refreshed (ISO timestamps).
+  sources: {
+    garminWeight: string | null; // weigh-ins from Garmin Connect (hourly + page refresh)
+    todayBurn: string | null; // today's calories burnt so far, Garmin Connect
+    food: string | null; // last Lose It! sync from the phone
+    garminDb: string | null; // GarminDB sync (activities, past days' burn, sleep)
+  };
 }
 
 // Earliest date the target can be reached losing at most 2 lb a week.
@@ -132,7 +146,8 @@ function garminExercise(since: string): Map<string, number> {
 
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 
-function linearSlope(points: { x: number; y: number }[]): number | null {
+// Least-squares line through the points (y = intercept + slope·x).
+function linearFit(points: { x: number; y: number }[]): { slope: number; intercept: number } | null {
   if (points.length < 4) return null;
   const xs = points.map(p => p.x);
   if (Math.max(...xs) - Math.min(...xs) < 7) return null;
@@ -140,7 +155,9 @@ function linearSlope(points: { x: number; y: number }[]): number | null {
   const my = mean(points.map(p => p.y))!;
   let num = 0, den = 0;
   for (const p of points) { num += (p.x - mx) * (p.y - my); den += (p.x - mx) ** 2; }
-  return den ? num / den : null;
+  if (!den) return null;
+  const slope = num / den;
+  return { slope, intercept: my - slope * mx };
 }
 
 function project(
@@ -170,6 +187,22 @@ function project(
   return { method, label, basis, kgPerWeek: kgPerDay * 7, rawKgPerWeek: rawKgPerDay * 7, capped, weightAtGoalKg: atGoal, hitDate, hitStatus };
 }
 
+function dataSources(today: string): NutritionDashboard["sources"] {
+  let food: string | null = null;
+  try {
+    food = (getDb().prepare("SELECT MAX(updated_at) AS at FROM nutrition_daily").get() as { at: string | null }).at;
+  } catch {}
+  let garminDb: string | null = null;
+  const cfg = loadGarminConfig();
+  if (cfg) {
+    try { garminDb = fs.statSync(path.join(cfg.dbPath, "garmin.db")).mtime.toISOString(); } catch {}
+  }
+  const burn = cachedTodayBurn(today);
+  let garminWeight: string | null = null;
+  try { garminWeight = lastGarminWeightFetch(); } catch {}
+  return { garminWeight, todayBurn: burn ? new Date(burn.at).toISOString() : null, food, garminDb };
+}
+
 export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
   const config = { ...loadNutritionConfig() };
   const today = ymd(new Date());
@@ -179,6 +212,13 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
 
   const nutrition = new Map(getNutritionDays(weightSince, today).map(d => [d.date, d]));
   const daily = garminDaily(since);
+  // Today isn't in GarminDB until it's over: use Garmin Connect's burn so far
+  // (refreshed by the API routes / coach before this runs).
+  let todayPartial = false;
+  if (!daily.get(today)?.burnt) {
+    const b = cachedTodayBurn(today);
+    if (b) { daily.set(today, { burnt: b.total, resting: b.resting, active: b.active }); todayPartial = true; }
+  }
   const exercise = garminExercise(since);
 
   // Weights: Garmin is the source of truth (other apps only copy its scale
@@ -213,6 +253,7 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
       weightKg: weightMap.get(date) != null ? Math.round(weightMap.get(date)! * 100) / 100 : null,
       deficit: eaten != null && burnt != null ? burnt - eaten : null,
       net: eaten != null && burnt != null ? eaten - burnt : null,
+      partial: date === today && todayPartial,
     });
   }
   const days = allDays.slice(-chartDays);
@@ -249,14 +290,20 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
 
   const projections: Projection[] = [];
   let required: NutritionDashboard["required"] = null;
+  let trendFit: NutritionDashboard["trendFit"] = null;
   if (current) {
     const anchor = current.avg7Kg;
     const trendPts = weights
       .filter(w => w.date >= windowStart)
       .map(w => ({ x: daysBetween(windowStart, w.date), y: w.kg }));
-    const slope = linearSlope(trendPts);
-    if (slope != null) {
-      projections.push(project("trend", "Scale trend", `${trendPts.length} weigh-ins over the last ${config.trendDays} days`, slope, anchor, today, config));
+    const fit = linearFit(trendPts);
+    if (fit) {
+      projections.push(project("trend", "Scale trend", `${trendPts.length} weigh-ins over the last ${config.trendDays} days`, fit.slope, anchor, today, config));
+      const r2 = (n: number) => Math.round(n * 1000) / 1000;
+      trendFit = {
+        startDate: windowStart, startKg: r2(fit.intercept),
+        endDate: today, endKg: r2(fit.intercept + fit.slope * daysBetween(windowStart, today)),
+      };
     }
     if (logged.length >= 3) {
       const balance = mean(logged.map(d => d.eaten! - d.burnt!))!;
@@ -286,5 +333,5 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
     }
   }
 
-  return { config, today, days, weights, current, averages, projections, required };
+  return { config, today, days, weights, current, averages, projections, required, trendFit, sources: dataSources(today) };
 }

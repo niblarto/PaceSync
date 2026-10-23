@@ -288,7 +288,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [aiDjProvider, setAiDjProvider] = useState<"local" | "claude" | "gemini">("local");
   const [aiDjClaudeModel, setAiDjClaudeModel] = useState("claude-sonnet-5");
   const [aiDjClaudeEffort, setAiDjClaudeEffort] = useState("medium");
-  const [aiDjGeminiModel, setAiDjGeminiModel] = useState("gemini-2.5-flash");
+  const [aiDjGeminiModel, setAiDjGeminiModel] = useState("gemini-3.8-flash");
   // "" = use the AI DJ service's own --model startup default.
   const [aiDjOllamaModel, setAiDjOllamaModel] = useState("");
   const [ollamaModelOptions, setOllamaModelOptions] = useState<OllamaModelInfo[]>([]);
@@ -5083,8 +5083,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     disabled={aiDjSaving}
                     className="w-full rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-2 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-purple-500"
                   >
-                    <option value="gemini-2.5-flash">Flash 2.5</option>
-                    <option value="gemini-2.5-flash-lite">Flash 2.5 Lite</option>
+                    <option value="gemini-3.8-flash">Flash 3.8</option>
+                    <option value="gemini-3.5-flash-lite">Flash 3.5 Lite</option>
                   </select>
                   <p className="text-xs text-slate-500">Free-tier models only — gemini-2.5-pro isn&apos;t available without billing.</p>
                 </div>

@@ -18,7 +18,7 @@ data class CoachMessage(
 data class CoachChatResponse(val messages: List<CoachMessage> = emptyList(), val model: String? = null)
 
 @Serializable
-data class CoachSendRequest(val message: String)
+data class CoachSendRequest(val message: String, val web: Boolean = false) // web: 🌐 Gemini + Google Search
 
 @Serializable
 data class CoachSendResponse(val userMessage: CoachMessage? = null, val reply: CoachMessage? = null, val error: String? = null)

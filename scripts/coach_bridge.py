@@ -3,8 +3,9 @@ Ollama model is reached over HTTP on the AI DJ service PC instead
 (POST /coach/chat).
 
 Reads {"system": str, "messages": [{"role", "content"}], "model": str,
-"effort"?: str} on stdin; prints one JSON line: {"reply": str} or
-{"error": str}.
+"effort"?: str, "web"?: bool} on stdin; prints one JSON line: {"reply": str}
+(plus "sources" in web mode) or {"error": str}. "web" answers with Gemini +
+Google Search (the Coach's web search button).
 """
 
 import json
@@ -21,7 +22,7 @@ if not os.path.isdir(os.path.join(_APP_ROOT, "ai_dj")):
     if os.path.isdir(os.path.join(_dev, "ai_dj")) and _dev not in sys.path:
         sys.path.insert(0, _dev)
 
-from ai_dj.llm import DEFAULT_CLAUDE_EFFORT, chat_text  # noqa: E402
+from ai_dj.llm import DEFAULT_CLAUDE_EFFORT, chat_text, chat_text_gemini_web  # noqa: E402
 
 
 def main() -> None:
@@ -30,6 +31,9 @@ def main() -> None:
         messages = [m for m in body.get("messages") or [] if m.get("role") in ("user", "assistant") and m.get("content")]
         if not messages:
             raise ValueError("No messages")
+        if body.get("web"):
+            print(json.dumps(chat_text_gemini_web(body.get("system") or "", messages, model=body["model"], timeout=240)))
+            return
         reply = chat_text(
             body.get("system") or "",
             messages,

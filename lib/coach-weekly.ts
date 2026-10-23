@@ -155,7 +155,7 @@ async function writeReport(rolling: boolean): Promise<WeeklyReportResult> {
   if (!reply.ok) return { ok: false, error: reply.error };
   reply.reply = formatCoachText(reply.reply, { splitHeadings: true });
 
-  const model = coachModelLabel(loadCoachConfig());
+  const model = reply.model || coachModelLabel(loadCoachConfig());
   const createdAt = new Date().toISOString();
   const id = Number(db().prepare("INSERT INTO coach_reports (week_start, created_at, content, model) VALUES (?, ?, ?, ?)")
     .run(week.start, createdAt, reply.reply, model).lastInsertRowid);

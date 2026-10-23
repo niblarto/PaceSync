@@ -175,6 +175,8 @@ FILES = [
     ('lib/coach-weekly.ts',                       'lib/coach-weekly.ts'),
     ('lib/coach-format.ts', 'lib/coach-format.ts'),
     ('lib/garmin-connect.ts', 'lib/garmin-connect.ts'),
+    ('lib/web-search.ts', 'lib/web-search.ts'),
+    ('app/api/settings/web-search/route.ts', 'app/api/settings/web-search/route.ts'),
     ('app/api/cron/coach-weekly/route.ts',        'app/api/cron/coach-weekly/route.ts'),
     ('app/api/coach/reports/route.ts',            'app/api/coach/reports/route.ts'),
     ('components/CoachSettingsCard.tsx',          'components/CoachSettingsCard.tsx'),

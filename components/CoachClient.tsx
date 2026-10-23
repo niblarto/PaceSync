@@ -43,6 +43,8 @@ function memoryDate(dateId: number): string {
     .toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
 }
 
+export const COACH_HANDOFF_KEY = "coach.discuss";
+
 const STARTERS = [
   "How did my training go this week?",
   "Review my last run against the plan.",
@@ -54,14 +56,16 @@ const STARTERS = [
 
 function inline(text: string): ReactNode[] {
   const out: ReactNode[] = [];
-  const re = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*\s][^*]*\*|_[^_\s][^_]*_)/g;
+  const re = /(\[[^\]]+\]\(https?:\/\/[^)\s]+\)|\*\*[^*]+\*\*|`[^`]+`|\*[^*\s][^*]*\*|_[^_\s][^_]*_)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let k = 0;
   while ((m = re.exec(text))) {
     if (m.index > last) out.push(text.slice(last, m.index));
     const t = m[0];
-    if (t.startsWith("**")) out.push(<strong key={k++} className="text-slate-50 font-semibold">{t.slice(2, -2)}</strong>);
+    const link = t.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+    if (link) out.push(<a key={k++} href={link[2]} target="_blank" rel="noopener noreferrer" className="text-sky-300 underline hover:text-sky-200">{link[1]}</a>);
+    else if (t.startsWith("**")) out.push(<strong key={k++} className="text-slate-50 font-semibold">{t.slice(2, -2)}</strong>);
     else if (t.startsWith("`")) out.push(<code key={k++} className="px-1 rounded bg-slate-800 text-emerald-300 text-[0.85em]">{t.slice(1, -1)}</code>);
     else out.push(<em key={k++}>{t.slice(1, -1)}</em>);
     last = m.index + t.length;
@@ -249,7 +253,7 @@ export function CoachClient() {
     return () => clearInterval(t);
   }, [pending]);
 
-  async function send(text?: string) {
+  async function send(text?: string, web = false) {
     const msg = (text ?? input).trim();
     if (!msg || pending) return;
     setError(null);
@@ -259,7 +263,7 @@ export function CoachClient() {
       const res = await fetch("/api/coach/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: msg }),
+        body: JSON.stringify({ message: msg, web }),
       });
       const d = await res.json() as { userMessage?: Msg; reply?: Msg; error?: string };
       if (!res.ok || !d.reply || !d.userMessage) throw new Error(d.error ?? `Coach error ${res.status}`);
@@ -273,6 +277,20 @@ export function CoachClient() {
       inputRef.current?.focus();
     }
   }
+
+  // "Discuss with coach" from another page (e.g. the Nutrition AI summary)
+  // leaves the message in sessionStorage; send it once the chat has loaded.
+  const handoffDone = useRef(false);
+  useEffect(() => {
+    if (handoffDone.current || messages == null || pending) return;
+    handoffDone.current = true;
+    let text: string | null = null;
+    try {
+      text = window.sessionStorage.getItem(COACH_HANDOFF_KEY);
+      window.sessionStorage.removeItem(COACH_HANDOFF_KEY);
+    } catch {}
+    if (text) send(text);
+  }, [messages, pending]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function newConversation() {
     setConfirmNew(false);
@@ -395,6 +413,11 @@ export function CoachClient() {
               placeholder="Ask your coach… (Enter to send, Shift+Enter for a new line)"
               className="flex-1 resize-none rounded-lg bg-slate-800/70 border border-white/10 text-sm px-3 py-2 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
             />
+            <button type="button" onClick={() => void send(undefined, true)} disabled={!input.trim() || !!pending}
+              title="Answer this with a web search (Gemini + Google Search), using your training data too"
+              className="rounded-lg border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 disabled:opacity-40 text-sky-200 text-sm font-medium px-3 py-2 h-[3.25rem]">
+              🌐
+            </button>
             <button type="submit" disabled={!input.trim() || !!pending}
               className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-sm font-medium px-4 py-2 h-[3.25rem]">
               Send

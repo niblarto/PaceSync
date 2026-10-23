@@ -28,6 +28,7 @@ data class NutritionDayRow(
     val weightKg: Double? = null,
     val deficit: Double? = null,
     val net: Double? = null, // eaten − burnt; negative = deficit
+    val partial: Boolean = false, // today: burnt/net are "so far"
 )
 
 @Serializable

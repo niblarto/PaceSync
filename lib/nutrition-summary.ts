@@ -182,7 +182,7 @@ async function writeSummary(): Promise<{ ok: true; summary: NutritionSummary } |
   const reply = await coachChat(`${SYSTEM}\n\n### DATA\n${text}`, [{ role: "user", content: REQUEST }], { think: true });
   if (!reply.ok) return { ok: false, error: reply.error };
   reply.reply = formatCoachText(reply.reply, { splitHeadings: true });
-  const model = coachModelLabel(loadCoachConfig());
+  const model = reply.model || coachModelLabel(loadCoachConfig());
   const createdAt = new Date().toISOString();
   const id = Number(db().prepare(
     "INSERT INTO nutrition_summaries (created_at, period_start, period_end, content, model) VALUES (?, ?, ?, ?, ?)",

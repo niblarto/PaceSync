@@ -32,6 +32,7 @@ object NC {
     val exercise = Color(0xFF34D399)
     val netOk = Color(0xFF22C55E)
     val netOver = Color(0xFFEF4444)
+    val netLine = Color(0xFFCBD5E1)
     val limit = Color(0xFFF87171)
     val target = Color(0xFF34D399)
     val weight = Color(0xFFE2E8F0)
@@ -55,9 +56,9 @@ private fun DrawScope.text(s: String, x: Float, y: Float, paint: Paint) = drawCo
 private val DASH = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))
 private val DOT = PathEffect.dashPathEffect(floatArrayOf(4f, 10f))
 
-// ── Daily calories: net (eaten − burnt, green deficit / red gain), eaten,
-// exercise and burnt bars per day, with the daily limit line. Tap a day to
-// select it. ──
+// ── Daily calories: eaten, exercise and burnt bars per day, a net line
+// (eaten − burnt; dots green on a deficit, red on a gain, hollow for today's
+// "so far"), and the daily limit line. Tap a day to select it. ──
 @Composable
 fun CaloriesChart(
     days: List<NutritionDayRow>,
@@ -66,7 +67,7 @@ fun CaloriesChart(
     selected: Int?,
     onSelect: (Int) -> Unit,
 ) {
-    val series = listOf("net", "eaten", "exercise", "burnt").filter { it !in hidden }
+    val series = listOf("eaten", "exercise", "burnt").filter { it !in hidden }
     Canvas(
         Modifier.fillMaxWidth().height(240.dp).pointerInput(days.size) {
             detectTapGestures { o ->
@@ -103,10 +104,9 @@ fun CaloriesChart(
         days.forEachIndexed { i, d ->
             var x = left + slot * i + slot * 0.1f
             for (s in series) {
-                val v = when (s) { "net" -> d.net; "eaten" -> d.eaten; "exercise" -> d.exercise; else -> d.burnt }
+                val v = when (s) { "eaten" -> d.eaten; "exercise" -> d.exercise; else -> d.burnt }
                 if (v != null) {
                     val color = when (s) {
-                        "net" -> if (v > 0) NC.netOver else NC.netOk
                         "eaten" -> NC.eaten
                         "exercise" -> NC.exercise
                         else -> NC.burnt
@@ -115,6 +115,20 @@ fun CaloriesChart(
                     drawRect(color, Offset(x, min(y0, y1)), Size(barW, abs(y1 - y0).coerceAtLeast(1f)))
                 }
                 x += barW
+            }
+        }
+        // Net line: consecutive days with a value are joined; gaps break it.
+        if ("net" !in hidden) {
+            fun cx(i: Int) = left + slot * (i + 0.5f)
+            for (i in 1 until days.size) {
+                val a = days[i - 1].net; val b = days[i].net
+                if (a != null && b != null) drawLine(NC.netLine, Offset(cx(i - 1), y(a)), Offset(cx(i), y(b)), 3f)
+            }
+            days.forEachIndexed { i, d ->
+                val v = d.net ?: return@forEachIndexed
+                val c = if (v > 0) NC.netOver else NC.netOk
+                if (d.partial) drawCircle(c, 4.dp.toPx(), Offset(cx(i), y(v)), style = androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))
+                else drawCircle(c, 3.5f.dp.toPx(), Offset(cx(i), y(v)))
             }
         }
         if (limit != null) {

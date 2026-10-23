@@ -11,6 +11,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
@@ -21,16 +25,20 @@ import androidx.compose.ui.unit.dp
 // Just enough Markdown for coach replies: **bold**, *italic*, bullets,
 // numbered lists and headings.
 
-private val INLINE = Regex("""\*\*([^*]+)\*\*|\*([^*\s][^*]*)\*|`([^`]+)`""")
+private val INLINE = Regex("""\[([^\]]+)\]\((https?://[^)\s]+)\)|\*\*([^*]+)\*\*|\*([^*\s][^*]*)\*|`([^`]+)`""")
 
 fun inlineMarkdown(text: String): AnnotatedString = buildAnnotatedString {
     var last = 0
     for (m in INLINE.findAll(text)) {
         append(text.substring(last, m.range.first))
         when {
-            m.groupValues[1].isNotEmpty() -> withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = Color.White)) { append(m.groupValues[1]) }
-            m.groupValues[2].isNotEmpty() -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(m.groupValues[2]) }
-            else -> withStyle(SpanStyle(color = Color(0xFF6EE7B7))) { append(m.groupValues[3]) }
+            // [title](url): tappable link (web search sources)
+            m.groupValues[1].isNotEmpty() -> withLink(
+                LinkAnnotation.Url(m.groupValues[2], TextLinkStyles(SpanStyle(color = Color(0xFF7DD3FC), textDecoration = TextDecoration.Underline))),
+            ) { append(m.groupValues[1]) }
+            m.groupValues[3].isNotEmpty() -> withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = Color.White)) { append(m.groupValues[3]) }
+            m.groupValues[4].isNotEmpty() -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(m.groupValues[4]) }
+            else -> withStyle(SpanStyle(color = Color(0xFF6EE7B7))) { append(m.groupValues[5]) }
         }
         last = m.range.last + 1
     }

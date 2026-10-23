@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { buildCoachContext } from "@/lib/coach-context";
+import { coachWebChat } from "@/lib/coach-llm";
 import { formatCoachText } from "@/lib/coach-format";
 import { buildCoachSystemPrompt } from "@/lib/coach-prompt";
 import { coachChat } from "@/lib/coach-llm";
@@ -30,7 +31,8 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const { message } = await req.json() as { message?: string };
+  // web: the 🌐 button, answered by Gemini with Google Search.
+  const { message, web } = await req.json() as { message?: string; web?: boolean };
   const text = (message ?? "").trim();
   if (!text) return NextResponse.json({ error: "Empty message" }, { status: 400 });
 
@@ -52,13 +54,19 @@ export async function POST(req: NextRequest) {
   // The latest weekly report (if this week's), so "let's discuss the report" works.
   const report = latestReport();
   const system = buildCoachSystemPrompt(context.text, recall.memories.map(m => m.document), report ? { week: weekLabel(report.weekStart), content: report.content } : undefined);
-  const result = await coachChat(system, history);
+  const result = web ? await coachWebChat(system, history) : await coachChat(system, history);
   if (!result.ok) {
     // Leave the conversation as it was so the message can be resent.
     deleteMessage(userMsg.id);
     return NextResponse.json({ error: result.error }, { status: 502 });
   }
-  const label = coachModelLabel(loadCoachConfig());
-  const reply = addMessage(sessionId, "assistant", formatCoachText(result.reply, { splitHeadings: true }), label, recall.memories.map(m => m.id));
+  const label = result.model || coachModelLabel(loadCoachConfig());
+  // Web answers end with their sources as links.
+  let content = formatCoachText(result.reply, { splitHeadings: true });
+  if (result.note) content = `_${result.note}_\n\n${content}`;
+  if (result.sources?.length) {
+    content += `\n\n**Sources**\n${result.sources.slice(0, 8).map(s => `- [${s.title.replace(/[\[\]]/g, "")}](${s.url})`).join("\n")}`;
+  }
+  const reply = addMessage(sessionId, "assistant", content, label, recall.memories.map(m => m.id));
   return NextResponse.json({ userMessage: userMsg, reply, recallModel: recall.model });
 }

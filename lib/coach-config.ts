@@ -1,5 +1,5 @@
 import { getDb } from "@/lib/db";
-import { loadAiDjConfig, DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_EFFORT, DEFAULT_GEMINI_MODEL, type AiDjProvider } from "@/lib/ai-dj-config";
+import { loadAiDjConfig, currentGeminiModel, DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_EFFORT, type AiDjProvider } from "@/lib/ai-dj-config";
 
 const KEY = "coach_config";
 
@@ -12,6 +12,7 @@ export interface CoachConfig {
   claudeEffort: string;
   geminiModel: string;
   ollamaModel: string; // "" = the AI DJ service's default model
+  fallbackToLocal: boolean; // Claude/Gemini quota or rate limit hit → use the local model
 }
 
 export function loadCoachConfig(): CoachConfig {
@@ -27,8 +28,9 @@ export function loadCoachConfig(): CoachConfig {
     provider: provider === "claude" || provider === "gemini" ? provider : "local",
     claudeModel: data.claudeModel || dj?.claudeModel || DEFAULT_CLAUDE_MODEL,
     claudeEffort: data.claudeEffort || dj?.claudeEffort || DEFAULT_CLAUDE_EFFORT,
-    geminiModel: data.geminiModel || dj?.geminiModel || DEFAULT_GEMINI_MODEL,
+    geminiModel: currentGeminiModel(data.geminiModel || dj?.geminiModel),
     ollamaModel: data.ollamaModel ?? dj?.ollamaModel ?? "",
+    fallbackToLocal: data.fallbackToLocal ?? true,
   };
 }
 

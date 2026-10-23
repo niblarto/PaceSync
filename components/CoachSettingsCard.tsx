@@ -4,12 +4,76 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 type Provider = "local" | "claude" | "gemini";
-interface CoachConfig { provider: Provider; claudeModel: string; claudeEffort: string; geminiModel: string; ollamaModel: string }
+interface CoachConfig { provider: Provider; claudeModel: string; claudeEffort: string; geminiModel: string; ollamaModel: string; fallbackToLocal: boolean }
 
 const SELECT = "w-full rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-2 text-slate-100 disabled:opacity-40 focus:outline-none focus:ring-1 focus:ring-emerald-500";
 
 // Settings -> Integrations: which AI the Coach page uses. Separate from the
 // AI DJ's choice; shares its API keys and the PC running the local model.
+// Ollama web search key for the Coach's 🌐 button (saved on the server;
+// only a hint of it is ever shown back).
+function WebSearchKey() {
+  const [state, setState] = useState<{ hasKey: boolean; hint: string | null } | null>(null);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/settings/web-search").then(r => r.json()).then(d => { if (!d.error) setState(d); }).catch(() => {});
+  }, []);
+
+  async function save() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/settings/web-search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: input }) });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || `Save failed (${res.status})`);
+      setState({ hasKey: true, hint: d.hint });
+      setInput("");
+      setMsg({ ok: true, text: `Saved and tested: the search returned ${d.testResults} result${d.testResults === 1 ? "" : "s"}.` });
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : "Save failed" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    setBusy(true);
+    await fetch("/api/settings/web-search", { method: "DELETE" }).catch(() => {});
+    setState({ hasKey: false, hint: null });
+    setMsg(null);
+    setBusy(false);
+  }
+
+  return (
+    <div className="space-y-2 border-t border-white/10 pt-4">
+      <div className="text-xs font-medium text-slate-300">🌐 Web search key (Ollama)</div>
+      <p className="text-xs text-slate-500">
+        Lets the 🌐 button on the Coach page search the web. Free key from{" "}
+        <a href="https://ollama.com/settings/keys" target="_blank" rel="noopener noreferrer" className="text-sky-300 underline">ollama.com/settings/keys</a>.
+        The search results are then answered by the AI picked above.
+      </p>
+      {state?.hasKey && (
+        <div className="flex items-center gap-3 text-xs">
+          <span className="text-emerald-300">✓ Key saved ({state.hint})</span>
+          <button onClick={remove} disabled={busy} className="text-slate-500 hover:text-red-300 disabled:opacity-50">Remove</button>
+        </div>
+      )}
+      <div className="flex gap-2">
+        <input type="password" value={input} onChange={e => setInput(e.target.value)} placeholder={state?.hasKey ? "Paste a new key to replace it" : "Paste your Ollama API key"}
+          autoComplete="off" className={SELECT} />
+        <button onClick={save} disabled={busy || !input.trim()}
+          className="shrink-0 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-medium px-3 py-2">
+          {busy ? "Testing…" : "Save"}
+        </button>
+      </div>
+      {msg && <p className={`text-xs ${msg.ok ? "text-emerald-300" : "text-red-400"}`}>{msg.text}</p>}
+    </div>
+  );
+}
+
 export function CoachSettingsCard() {
   const [config, setConfig] = useState<CoachConfig | null>(null);
   const [saving, setSaving] = useState(false);
@@ -109,15 +173,26 @@ export function CoachSettingsCard() {
             <div className="space-y-1.5">
               <label className="text-xs text-slate-400">Model</label>
               <select value={config.geminiModel} onChange={e => save({ geminiModel: e.target.value })} disabled={saving} className={SELECT}>
-                <option value="gemini-2.5-flash">Flash 2.5</option>
-                <option value="gemini-2.5-flash-lite">Flash 2.5 Lite</option>
+                <option value="gemini-3.8-flash">Flash 3.8</option>
+                <option value="gemini-3.5-flash-lite">Flash 3.5 Lite</option>
               </select>
             </div>
           )}
 
           {(config.provider === "claude" || config.provider === "gemini") && (
-            <p className="text-xs text-slate-500">Uses the {config.provider === "claude" ? "Claude" : "Gemini"} API key saved in the AI DJ card above.</p>
+            <>
+              <p className="text-xs text-slate-500">Uses the {config.provider === "claude" ? "Claude" : "Gemini"} API key saved in the AI DJ card above.</p>
+              <label className="flex items-start gap-2 text-xs text-slate-300 cursor-pointer">
+                <input type="checkbox" checked={config.fallbackToLocal !== false} disabled={saving}
+                  onChange={e => save({ fallbackToLocal: e.target.checked })} className="mt-0.5 accent-emerald-500" />
+                <span>
+                  When {config.provider === "claude" ? "Claude" : "Gemini"}&apos;s limit is reached (free quota, rate limit or no credit), answer with the local model instead.
+                  {config.ollamaModel ? ` (${config.ollamaModel})` : ""} The reply is labelled when this happens.
+                </span>
+              </label>
+            </>
           )}
+          <WebSearchKey />
           {error && <p className="text-xs text-red-400">{error}</p>}
         </>
       )}

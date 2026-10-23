@@ -21,8 +21,9 @@ export async function GET(req: NextRequest) {
 
 // POST → write the summary now if it's due and the AI is reachable.
 // The page calls this every minute while a summary is due.
+// POST ?force=1 → write a fresh one now even if today's exists (refresh button).
 export async function POST(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const result = await ensureSummary();
+  const result = await ensureSummary({ force: req.nextUrl.searchParams.get("force") === "1" });
   return NextResponse.json({ ...snapshot(), result });
 }

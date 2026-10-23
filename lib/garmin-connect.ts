@@ -71,6 +71,35 @@ async function displayName(): Promise<string> {
   return p.displayName;
 }
 
+export interface DayBurn { total: number; resting: number | null; active: number | null; at: number }
+
+const BURN_TTL_MS = 15 * 60_000;
+
+// Today's calories burnt so far (resting + active) from Garmin Connect;
+// GarminDB only has a day once it's over. Cached 15 minutes.
+export async function refreshTodayBurn(date: string): Promise<DayBurn | null> {
+  const key = `garmin_burn:${date}`;
+  const cached = kvGet<DayBurn>(key);
+  if (cached && Date.now() - cached.at < BURN_TTL_MS) return cached;
+  try {
+    const dn = await displayName();
+    const s = await garminConnectGet<{ totalKilocalories?: number | null; bmrKilocalories?: number | null; activeKilocalories?: number | null }>(
+      `/usersummary-service/usersummary/daily/${encodeURIComponent(dn)}?calendarDate=${date}`,
+    );
+    if (!s.totalKilocalories) return cached;
+    const burn: DayBurn = { total: Math.round(s.totalKilocalories), resting: s.bmrKilocalories ?? null, active: s.activeKilocalories ?? null, at: Date.now() };
+    kvSet(key, burn);
+    return burn;
+  } catch {
+    return cached;
+  }
+}
+
+// Cached value only (no network), for synchronous readers.
+export function cachedTodayBurn(date: string): DayBurn | null {
+  return kvGet<DayBurn>(`garmin_burn:${date}`);
+}
+
 export interface DayRecovery {
   restingHr: number | null;
   sleepSec: number | null;

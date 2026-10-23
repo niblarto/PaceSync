@@ -8,7 +8,15 @@ const KEY = "ai_dj_config";
 export type AiDjProvider = "local" | "claude" | "gemini";
 export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5";
 export const DEFAULT_CLAUDE_EFFORT = "medium";
-export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"; // 2.5 was withdrawn for new API users
+
+// Saved settings from before: Gemini 2.5 now 404s, so map to the 3.x Flash models.
+export function currentGeminiModel(m: string | undefined | null): string {
+  if (!m) return DEFAULT_GEMINI_MODEL;
+  if (m === "gemini-2.5-flash-lite") return "gemini-3.5-flash-lite";
+  if (m.startsWith("gemini-2.5")) return DEFAULT_GEMINI_MODEL;
+  return m;
+}
 
 export interface AiDjConfig {
   url: string;      // e.g. http://192.168.1.50:8765
@@ -38,7 +46,7 @@ export function loadAiDjConfig(): AiDjConfig | null {
         provider: data.provider === "claude" ? "claude" : data.provider === "gemini" ? "gemini" : "local",
         claudeModel: data.claudeModel || DEFAULT_CLAUDE_MODEL,
         claudeEffort: data.claudeEffort || DEFAULT_CLAUDE_EFFORT,
-        geminiModel: data.geminiModel || DEFAULT_GEMINI_MODEL,
+        geminiModel: currentGeminiModel(data.geminiModel),
         ollamaModel: data.ollamaModel || undefined,
       };
     }

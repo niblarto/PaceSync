@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Bar, CartesianGrid, Cell, ComposedChart, Legend, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
+  Bar, CartesianGrid, ComposedChart, Legend, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { formatWeight, formatWeightDelta, LB_PER_KG, type WeightUnit } from "@/lib/weight-format";
 
@@ -20,6 +21,7 @@ interface DayRow {
   weightKg: number | null;
   deficit: number | null;
   net: number | null;
+  partial?: boolean;
 }
 interface Summary { id: number; createdAt: string; periodStart: string; periodEnd: string; content: string; model: string | null }
 interface SummaryState {
@@ -60,6 +62,19 @@ interface Dashboard {
   };
   projections: Projection[];
   required: { kgPerWeek: number; dailyBalance: number; intake: number | null } | null;
+  trendFit: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
+  sources: { garminWeight: string | null; todayBurn: string | null; food: string | null; garminDb: string | null };
+}
+
+const AUTO_REFRESH_MS = 15 * 60_000;
+
+// "18:42" today, "Thu 06:04" otherwise.
+function stamp(iso: string | null | undefined): string {
+  if (!iso) return "never";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "?";
+  const time = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString("en-GB", { weekday: "short" })} ${time}`;
 }
 
 const RANGES = [14, 30, 90] as const;
@@ -74,6 +89,7 @@ const C = {
   limit: "#f87171",
   deficit: "#e879f9",
   netOk: "#22c55e",
+  netLine: "#cbd5e1",
   netOver: "#ef4444",
   weight: "#e2e8f0",
   target: "#34d399",
@@ -120,12 +136,12 @@ function CaloriesTooltip({ active, payload, label }: { active?: boolean; payload
     <div className="rounded-lg bg-slate-950/95 border border-white/10 px-3 py-2 text-xs space-y-0.5 shadow-lg">
       <div className="font-medium text-slate-200 mb-1">{longDate(label)}</div>
       <div style={{ color: C.eaten }}>Eaten: {kcal(d.eaten)} kcal</div>
-      <div style={{ color: C.burnt }}>Burnt: {kcal(d.burnt)} kcal{d.resting != null ? ` (${kcal(d.resting)} resting)` : ""}</div>
+      <div style={{ color: C.burnt }}>Burnt{d.partial ? " so far" : ""}: {kcal(d.burnt)} kcal{d.resting != null ? ` (${kcal(d.resting)} resting)` : ""}</div>
       <div style={{ color: C.exercise }}>Exercise: {kcal(d.exercise)} kcal</div>
 
       {d.net != null && (
         <div className={d.net <= 0 ? "text-emerald-300" : "text-rose-300"}>
-          Net (eaten − burnt): {d.net > 0 ? "+" : d.net < 0 ? "−" : ""}{kcal(Math.abs(d.net))} kcal ({d.net <= 0 ? "deficit" : "gain"})
+          Net (eaten − burnt){d.partial ? " so far" : ""}: {d.net > 0 ? "+" : d.net < 0 ? "−" : ""}{kcal(Math.abs(d.net))} kcal ({d.net <= 0 ? "deficit" : "gain"})
         </div>
       )}
       {d.proteinG != null && (
@@ -141,6 +157,40 @@ function inlineMd(text: string): React.ReactNode[] {
     part.startsWith("**") && part.endsWith("**")
       ? <strong key={i} className="text-slate-100 font-semibold">{part.slice(2, -2)}</strong>
       : <span key={i}>{part}</span>);
+}
+
+// Splits the summary at its bold/# heading lines: [{ title, body }]. Text
+// before the first heading becomes an untitled section.
+function summarySections(text: string): { title: string | null; body: string }[] {
+  const out: { title: string | null; body: string[] }[] = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    const h = line.match(/^\*\*([^*]+)\*\*:?$/) ?? line.match(/^#{1,4}\s+(.*)$/);
+    if (h) out.push({ title: h[1].trim(), body: [] });
+    else {
+      if (!out.length) out.push({ title: null, body: [] });
+      out[out.length - 1].body.push(raw);
+    }
+  }
+  return out.map(s => ({ title: s.title, body: s.body.join("\n").trim() })).filter(s => s.title || s.body);
+}
+
+// Opens the Coach page and sends `message` there as the user's message.
+function useDiscussWithCoach() {
+  const router = useRouter();
+  return (message: string) => {
+    try { window.sessionStorage.setItem("coach.discuss", message); } catch {}
+    router.push("/coach");
+  };
+}
+
+function DiscussButton({ onClick, label }: { onClick: () => void; label: string }) {
+  return (
+    <button onClick={onClick} title={label}
+      className="shrink-0 text-[11px] px-2 py-0.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 transition-colors">
+      💬 Discuss
+    </button>
+  );
 }
 
 function SummaryMarkdown({ text }: { text: string }) {
@@ -175,9 +225,24 @@ function SummaryPanel() {
   const [s, setS] = useState<SummaryState | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
 
-  const poll = useCallback(async (method: "GET" | "POST") => {
+  const discuss = useDiscussWithCoach();
+
+  // Click the title to minimise; remembered in this browser.
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return window.localStorage.getItem("nutrition.summaryCollapsed") === "1"; } catch { return false; }
+  });
+  const toggleCollapsed = () => setCollapsed(c => {
+    try { window.localStorage.setItem("nutrition.summaryCollapsed", c ? "0" : "1"); } catch {}
+    return !c;
+  });
+
+  // Bumped by the refresh button to restart polling after a forced rewrite.
+  const [run, setRun] = useState(0);
+  const [forcing, setForcing] = useState(false);
+
+  const poll = useCallback(async (method: "GET" | "POST", force = false) => {
     try {
-      const res = await fetch("/api/nutrition/summary", { method });
+      const res = await fetch(`/api/nutrition/summary${force ? "?force=1" : ""}`, { method });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || `Failed (${res.status})`);
       setS(d);
@@ -204,22 +269,57 @@ function SummaryPanel() {
       // Writing: check back soon. Waiting for the service: every minute.
       timer = setTimeout(() => tick(false), d?.writing ? 10_000 : 60_000);
     };
-    tick(true);
+    // After a refresh the server is already writing: start by checking in.
+    if (run > 0) timer = setTimeout(() => tick(false), 10_000); else tick(true);
     return () => { stopped = true; if (timer) clearTimeout(timer); };
-  }, [poll]);
+  }, [poll, run]);
+
+  // Write a fresh summary now (thinking mode, in the background; can take a few minutes).
+  async function regenerate() {
+    setForcing(true);
+    const d = await poll("POST", true);
+    setForcing(false);
+    if (d?.writing) setRun(r => r + 1);
+  }
 
   const waiting = s?.due && !s.writing;
   return (
     <Card>
-      <div className="flex items-center justify-between gap-3 mb-3">
-        <h2 className="text-sm font-semibold text-slate-300">🧠 AI summary · last 14 days</h2>
-        {s?.summary && (
-          <span className="text-[11px] text-slate-500 text-right">
-            {whenLabel(s.summary.createdAt)}{s.summary.model ? ` · ${s.summary.model}` : ""}
-          </span>
-        )}
+      <div className={`flex items-center justify-between gap-3 ${collapsed ? "" : "mb-3"}`}>
+        <button onClick={toggleCollapsed} aria-expanded={!collapsed}
+          className="flex items-center gap-2 text-sm font-semibold text-slate-300 hover:text-slate-100 transition-colors text-left"
+          title={collapsed ? "Show the summary" : "Minimise the summary"}>
+          <span className={`text-[10px] text-slate-500 transition-transform ${collapsed ? "-rotate-90" : ""}`}>▼</span>
+          🧠 AI summary · last 14 days
+        </button>
+        <div className="flex items-center gap-3">
+          {s?.summary && (
+            <span className="text-[11px] text-slate-500 text-right">
+              {whenLabel(s.summary.createdAt)}{s.summary.model ? ` · ${s.summary.model}` : ""}
+            </span>
+          )}
+          {s?.summary && (
+            <DiscussButton label="Discuss the whole summary with the coach" onClick={() => discuss(
+              `Let's discuss my nutrition summary for ${s.summary!.periodStart} to ${s.summary!.periodEnd}:\n\n${s.summary!.content}`,
+            )} />
+          )}
+          <button
+            onClick={regenerate}
+            disabled={forcing || !!s?.writing}
+            title="Write a fresh summary now (uses thinking; can take a few minutes)"
+            aria-label="Write a fresh summary now"
+            className="text-slate-500 hover:text-slate-200 disabled:opacity-50 transition-colors -m-1 p-1"
+          >
+            <svg viewBox="0 0 24 24" className={`h-4 w-4 ${forcing || s?.writing ? "animate-spin" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+          </button>
+        </div>
       </div>
-      {s?.writing && <p className="text-xs text-emerald-300 mb-3 animate-pulse">Writing today&apos;s summary…</p>}
+      {!collapsed && <>
+      {s?.writing && <p className="text-xs text-emerald-300 mb-3 animate-pulse">Writing the summary (thinking mode; this can take a few minutes)…</p>}
+      {s?.result?.status === "unavailable" && !s.due && <p className="text-xs text-amber-300 mb-3">Couldn&apos;t refresh: {s.result.reason}.</p>}
       {waiting && (
         <p className="text-xs text-amber-300 mb-3">
           Today&apos;s summary is due. {s.result?.status === "unavailable" ? `${s.result.reason}; ` : ""}checking again every minute.
@@ -231,12 +331,27 @@ function SummaryPanel() {
         <p className="text-sm text-slate-500">Loading…</p>
       ) : s.summary ? (
         <>
-          <SummaryMarkdown text={s.summary.content} />
+          <div className="space-y-3">
+            {summarySections(s.summary.content).map((sec, i) => (
+              <div key={i}>
+                {sec.title && (
+                  <div className="flex items-center justify-between gap-3 mb-1">
+                    <h3 className="text-sm font-semibold text-slate-100">{sec.title}</h3>
+                    <DiscussButton label={`Discuss "${sec.title}" with the coach`} onClick={() => discuss(
+                      `Let's discuss the "${sec.title}" section of my nutrition summary for ${s.summary!.periodStart} to ${s.summary!.periodEnd}:\n\n${sec.body}`,
+                    )} />
+                  </div>
+                )}
+                {sec.body && <SummaryMarkdown text={sec.body} />}
+              </div>
+            ))}
+          </div>
           {!s.due && <p className="text-[11px] text-slate-500 mt-3">Next summary from {whenLabel(s.nextAt)}.</p>}
         </>
       ) : (
         <p className="text-sm text-slate-500">No summary yet.</p>
       )}
+      </>}
     </Card>
   );
 }
@@ -265,12 +380,24 @@ export function NutritionClient() {
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || `Failed (${res.status})`);
       setData(d);
+      setLoadedAt(Date.now());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
     }
   }, []);
+  const [loadedAt, setLoadedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => { load(range); }, [range, load]);
+  // Reload every 15 minutes (today's burn is refreshed from Garmin at most
+  // that often), and tick the countdown every 30s.
+  useEffect(() => {
+    const t = setInterval(() => {
+      setNow(Date.now());
+      if (loadedAt != null && Date.now() - loadedAt >= AUTO_REFRESH_MS) load(range);
+    }, 30_000);
+    return () => clearInterval(t);
+  }, [loadedAt, load, range]);
 
   // Pull the latest weigh-ins from Garmin Connect, then reload the page data.
   const [weightRefresh, setWeightRefresh] = useState<{ busy: boolean; msg: string | null }>({ busy: false, msg: null });
@@ -320,9 +447,20 @@ export function NutritionClient() {
     // One row per date shared by every series, so the tooltip shows the
     // values for that date: weigh-ins in the past, projections from today
     // on (a point each week, plus the goal date and the end).
-    type Row = { t: number; kg?: number } & Partial<Record<Projection["method"], number>>;
+    type Row = { t: number; kg?: number; fit?: number; avg?: number } & Partial<Record<Projection["method"], number>>;
     const rows = new Map<number, Row>();
     for (const h of history) rows.set(h.t, { t: h.t, kg: h.kg });
+
+    // The fitted trend line through the window's weigh-ins (where "Scale
+    // trend" gets its rate), drawn back across the past dates it was fitted on.
+    const fit = data.trendFit;
+    if (fit) {
+      const f0 = toMs(fit.startDate), f1 = toMs(fit.endDate);
+      for (const ms of [f0, f1]) if (!rows.has(ms)) rows.set(ms, { t: ms });
+      rows.forEach(r => {
+        if (r.t >= f0 && r.t <= f1) r.fit = fit.startKg + (fit.endKg - fit.startKg) * ((r.t - f0) / (f1 - f0 || 1));
+      });
+    }
     const projTimes = new Set<number>([todayMs, endMs]);
     for (let ms = todayMs; ms < endMs; ms += 7 * DAY_MS) projTimes.add(ms);
     if (cfg?.goalDate && toMs(cfg.goalDate) > todayMs && toMs(cfg.goalDate) <= endMs) projTimes.add(toMs(cfg.goalDate));
@@ -337,13 +475,21 @@ export function NutritionClient() {
       }
       rows.set(ms, row);
     });
+    // The 7-day average held flat from today to the goal date (or the chart's
+    // end): where you'd be if your weight didn't change.
+    const avgEnd = cfg?.goalDate && toMs(cfg.goalDate) > todayMs ? Math.min(toMs(cfg.goalDate), endMs) : endMs;
+    if (!rows.has(avgEnd)) rows.set(avgEnd, { t: avgEnd });
+    rows.forEach(r => { if (r.t >= todayMs && r.t <= avgEnd) r.avg = anchor; });
     const points = Array.from(rows.values()).sort((a, b) => a.t - b.t);
 
-    const ys = points.flatMap(r => [r.kg, ...data.projections.map(p => r[p.method])]).filter((v): v is number => v != null);
+    const ys = points.flatMap(r => [r.kg, r.fit, ...data.projections.map(p => r[p.method])]).filter((v): v is number => v != null);
     if (target != null) ys.push(target);
     const lo = Math.min(...ys), hi = Math.max(...ys);
     const pad = Math.max(0.5, (hi - lo) * 0.08);
-    return { points, startMs: history[0]?.t ?? startMs, endMs, domain: [lo - pad, hi + pad] as [number, number] };
+    return {
+      points, startMs: history[0]?.t ?? startMs, endMs, domain: [lo - pad, hi + pad] as [number, number],
+      anchor, avgFrom: todayMs - 6 * DAY_MS, todayMs,
+    };
   }, [data, cfg, today]);
 
   const weightTick = (kg: number) => {
@@ -362,7 +508,33 @@ export function NutritionClient() {
         <div className="max-w-[100rem] mx-auto px-4 h-14 flex items-center justify-between gap-3">
           <Link href="/dashboard" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">← Dashboard</Link>
           <span className="font-bold text-green-400 text-lg tracking-tight">🥗 Nutrition</span>
-          <Link href="/settings?tab=nutrition" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">Goals</Link>
+          <div className="flex items-center gap-3 min-w-0">
+            {data && (() => {
+              const s = data.sources;
+              const next = loadedAt != null ? Math.max(0, Math.ceil((loadedAt + AUTO_REFRESH_MS - now) / 60_000)) : null;
+              const nextWeight = new Date(now); // hourly Garmin weigh-in job runs at :37
+              nextWeight.setMinutes(37, 0, 0);
+              if (nextWeight.getTime() <= now) nextWeight.setHours(nextWeight.getHours() + 1);
+              const detail = [
+                `Page updated ${loadedAt ? stamp(new Date(loadedAt).toISOString()) : "-"}; next auto-refresh in ${next ?? "-"} min`,
+                `Garmin weigh-ins fetched ${stamp(s.garminWeight)} (hourly at :37, next ${stamp(nextWeight.toISOString())}, and when this page opens)`,
+                `Today's calories burnt from Garmin ${stamp(s.todayBurn)} (at most every 15 min)`,
+                `Lose It! food from the phone ${stamp(s.food)} (phone checks every ~15 min)`,
+                `GarminDB sync ${stamp(s.garminDb)} (daily 06:00 and after new activities)`,
+              ].join("\n");
+              return (
+                <span className="hidden md:inline text-[11px] text-slate-500 truncate" title={detail}>
+                  Updated {loadedAt ? stamp(new Date(loadedAt).toISOString()) : "-"}
+                  {" · "}weight {stamp(s.garminWeight)}
+                  {" · "}burn {stamp(s.todayBurn)}
+                  {" · "}food {stamp(s.food)}
+                  {" · "}GarminDB {stamp(s.garminDb)}
+                  {" · "}next refresh {next ?? "-"}m
+                </span>
+              );
+            })()}
+            <Link href="/settings?tab=nutrition" className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0">Goals</Link>
+          </div>
         </div>
       </header>
 
@@ -437,7 +609,7 @@ export function NutritionClient() {
                 value={`${kcal(todayRow?.eaten ?? 0)} kcal`}
                 sub={<>
                   <div>{todayRow?.net != null
-                    ? <>net {todayRow.net > 0 ? "+" : "−"}{kcal(Math.abs(todayRow.net))} (burnt {kcal(todayRow.burnt)})</>
+                    ? <>net {todayRow.net > 0 ? "+" : "−"}{kcal(Math.abs(todayRow.net))} (burnt {kcal(todayRow.burnt)}{todayRow.partial ? " so far" : ""})</>
                     : "Garmin burn not in yet"}</div>
                   {cfg.dailyCalorieLimit != null
                     ? (() => {
@@ -469,6 +641,8 @@ export function NutritionClient() {
               })()}
             </div>
 
+            <SummaryPanel />
+
             {/* Calories chart */}
             <Card>
               <div className="flex items-center justify-between gap-3 mb-3">
@@ -497,15 +671,20 @@ export function NutritionClient() {
                       <span style={{ opacity: hidden.has(String((entry as { dataKey?: unknown }).dataKey)) ? 0.35 : 1 }}>{value}</span>
                     )}
                   />
-                  <Bar dataKey="net" name="Net (eaten − burnt)" fill={C.netOk} radius={[2, 2, 0, 0]} hide={hidden.has("net")}>
-                    {data.days.map(d => (
-                      <Cell key={d.date} fill={d.net != null && d.net > 0 ? C.netOver : C.netOk} />
-                    ))}
-                  </Bar>
                   <Bar dataKey="eaten" name="Eaten" fill={C.eaten} radius={[2, 2, 0, 0]} hide={hidden.has("eaten")} />
                   <Bar dataKey="exercise" name="Exercise" fill={C.exercise} radius={[2, 2, 0, 0]} hide={hidden.has("exercise")} />
                   <Bar dataKey="burnt" name="Burnt" fill={C.burnt} radius={[2, 2, 0, 0]} hide={hidden.has("burnt")} />
                   <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" />
+                  {/* Net (eaten − burnt) as a line: dots green on a deficit, red on a gain. */}
+                  <Line dataKey="net" name="Net (eaten − burnt)" stroke={C.netLine} strokeWidth={2} connectNulls={false}
+                    isAnimationActive={false} hide={hidden.has("net")}
+                    dot={(p: { cx?: number; cy?: number; payload?: DayRow; index?: number }) => {
+                      const v = p.payload?.net;
+                      if (v == null || p.cx == null || p.cy == null) return <g key={p.index} />;
+                      return <circle key={p.index} cx={p.cx} cy={p.cy} r={p.payload?.partial ? 4 : 3.5}
+                        fill={p.payload?.partial ? "transparent" : v > 0 ? C.netOver : C.netOk}
+                        stroke={v > 0 ? C.netOver : C.netOk} strokeWidth={2} />;
+                    }} />
                   {cfg.dailyCalorieLimit != null && (
                     <ReferenceLine y={cfg.dailyCalorieLimit} stroke={C.limit} strokeDasharray="6 4"
                       label={{ value: `Limit ${kcal(cfg.dailyCalorieLimit)}`, fill: C.limit, fontSize: 10, position: "insideTopRight" }} />
@@ -516,7 +695,7 @@ export function NutritionClient() {
                 Last {data.averages.windowDays} days (not counting today): avg eaten {kcal(data.averages.eaten)} kcal on{" "}
                 {data.averages.loggedDays} logged days · avg burnt {kcal(data.averages.burnt)} · avg exercise {kcal(data.averages.exercise)} ·
                 avg net {data.averages.net == null ? "—" : `${data.averages.net > 0 ? "+" : "−"}${kcal(Math.abs(data.averages.net))} kcal`}.
-                Net bars (eaten − burnt) go below zero on a deficit (green) and above on a gain (red). Click a legend entry to hide it.
+                The net line (eaten − burnt) dips below zero on a deficit (green dots) and rises above on a gain (red); today's hollow dot is "so far" and updates through the day. Click a legend entry to hide it.
                 Days with nothing logged in Lose It! are left out of the eaten average.
               </p>
             </Card>
@@ -554,12 +733,32 @@ export function NutritionClient() {
                       <Line dataKey="kg" name="Weigh-ins" stroke="none" legendType="circle" connectNulls={false}
                         dot={{ r: 3, fill: C.weight, stroke: "none" }} activeDot={{ r: 5, fill: C.weight, stroke: "none" }}
                         isAnimationActive={false} />
+                      {/* Fitted trend over the window's weigh-ins: the basis of "Scale trend" */}
+                      {data.trendFit && (
+                        <Line dataKey="fit" name={`Trend fit (last ${cfg.trendDays} days)`} stroke={PROJ_COLORS.trend} strokeOpacity={0.55}
+                          strokeWidth={2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
+                      )}
+                      {/* The 7-day average, held flat to the goal date (no change) */}
+                      <Line dataKey="avg" name="7-day avg (if unchanged)" stroke="#fbbf24" strokeOpacity={0.8} strokeWidth={2}
+                        strokeDasharray="2 5" connectNulls dot={false} activeDot={false} isAnimationActive={false} />
+                      {/* The 7-day average every projection starts from */}
+                      <ReferenceLine segment={[{ x: weightChart.avgFrom, y: weightChart.anchor }, { x: weightChart.todayMs, y: weightChart.anchor }]}
+                        stroke="#fbbf24" strokeWidth={4} ifOverflow="extendDomain"
+                        label={{ value: "7-day avg", fill: "#fbbf24", fontSize: 10, position: "insideBottomLeft" }} />
                       {data.projections.map(p => (
                         <Line key={p.method} dataKey={p.method} name={p.label} stroke={PROJ_COLORS[p.method]} connectNulls
                           strokeWidth={2} strokeDasharray="5 4" dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
                       ))}
                     </ComposedChart>
                   </ResponsiveContainer>
+                )}
+                {weightChart && (
+                  <p className="text-xs text-slate-500 mt-2">
+                    How the projections are made: the faint purple line is the straight line fitted through your weigh-ins over the last {cfg.trendDays} days;
+                    its slope is the Scale trend rate. Every projection starts from your 7-day average weight (yellow bar), not a single weigh-in,
+                    so one heavy or light day doesn&apos;t swing it; the dotted yellow line carries that average flat to the goal date, i.e. no change. Sticking to your limit uses calories instead: your {cfg.dailyCalorieLimit ?? "—"} kcal
+                    limit against your average Garmin burn.
+                  </p>
                 )}
               </Card>
 
@@ -630,8 +829,6 @@ export function NutritionClient() {
                 )}
               </Card>
             </div>
-
-            <SummaryPanel />
           </>
         )}
       </main>

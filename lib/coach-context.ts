@@ -3,7 +3,7 @@ import { getDb } from "@/lib/db";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { fetchRunnaSchedule, type RunnaPastRun, type RunnaWorkout } from "@/lib/runna-schedule";
 import { listRaces } from "@/lib/races";
-import { getDayRecovery } from "@/lib/garmin-connect";
+import { getDayRecovery, refreshTodayBurn } from "@/lib/garmin-connect";
 import { buildNutritionDashboard, type NutritionDashboard } from "@/lib/nutrition-dashboard";
 import { formatWeight, formatWeightDelta } from "@/lib/weight-format";
 import { listRunFeedback, effortLabel, FEEL_LABELS, type RunFeedback } from "@/lib/run-feedback";
@@ -531,7 +531,7 @@ async function dayByDaySection(
       lines.push(f?.eaten == null
         ? "  FOOD: not logged"
         : `  FOOD: eaten ${f.eaten} kcal${f.proteinG != null ? ` (P ${Math.round(f.proteinG)}g C ${Math.round(f.carbsG ?? 0)}g F ${Math.round(f.fatG ?? 0)}g)` : ""}`
-          + (f.burnt != null ? `, burnt ${f.burnt}, net ${f.net! > 0 ? "+" : ""}${f.net}` : date === today ? " so far" : ""));
+          + (f.burnt != null ? `, burnt ${f.burnt}${f.partial ? " so far" : ""}, net ${f.net! > 0 ? "+" : ""}${f.net}${f.partial ? " so far" : ""}` : date === today ? " so far" : ""));
     }
   }
   return lines;
@@ -634,6 +634,7 @@ export async function buildCoachContext(): Promise<CoachContext> {
   const pastRuns = schedule?.ok ? schedule.pastRuns : [];
   const zones = await getCurrentHrZones().catch(() => null);
   let nutrition: NutritionDashboard | null = null;
+  await refreshTodayBurn(localDate(new Date())).catch(() => null);
   try { nutrition = buildNutritionDashboard(14); } catch {}
   const detailStart = localDate(new Date(Date.now() - (DETAIL_DAYS - 1) * 86_400_000));
   const feedback = listRunFeedback(localDate(new Date(Date.now() - RECENT_RUN_DAYS * 86_400_000)));
