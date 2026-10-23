@@ -63,6 +63,17 @@ PaceSync is a self-hosted Next.js app (running on a Raspberry Pi) that started a
 
 ## Prerequisites
 
+### Hardware
+
+PaceSync is currently running on this setup, which covers every feature in this README:
+
+- **Raspberry Pi 5**: hosts the PaceSync web app, the CSV/SQLite data, GarminDB sync and all scheduled jobs. It is the only machine that has to be on for everything except local-LLM features.
+- **Windows PC with an NVIDIA RTX 3080**: runs the local AI (Ollama) through the [AI_DJ](https://github.com/niblarto/AI_DJ) service on the PC. PaceSync calls it over the local network for AI DJ mixes and, when the Local LLM backend is selected, for the coach and nutrition summaries. See [AI DJ Mix](#ai-dj-mix-optional).
+
+Nothing here is a strict requirement: any Pi or Debian box can host the app, and the Claude and Gemini backends need no GPU at all. This is simply the tested configuration.
+
+### Software
+
 - Pi OS / Debian
 - Python 3 with `paramiko` installed on your **local machine** (for deployment)
 - A [Spotify Developer](https://developer.spotify.com/dashboard) app
