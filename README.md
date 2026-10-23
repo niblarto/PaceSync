@@ -1,33 +1,63 @@
-# PaceSync — Running Playlist Manager
+# PaceSync — Running Playlist, Coach & Nutrition
 
-A Next.js web app for managing a Spotify running playlist based on heart rate zones. Runs as a self-hosted service on a Raspberry Pi.
+PaceSync is a self-hosted Next.js app (running on a Raspberry Pi) that started as a Spotify running-playlist manager built around heart-rate zones and has grown into a personal running hub: pace-matched AI DJ mixes for every Runna workout, an AI running coach that reads your Garmin data, a nutrition and weight tracker fed by Lose It! and Garmin, and a native Android companion app.
 
 ![PaceSync landing page](docs/screenshots/landing.png)
 
-**Features**
+## Features at a glance
+
+### Music & playlists
 - Browse tracks by BPM / heart rate zone (Z1–Z5)
 - **Multiple playlists**: manage several Spotify playlists/libraries side by side, switch the active one, or delete one (locally and optionally unfollow on Spotify) from **Settings**
 - Add tracks from BBC Radio playlists directly to Spotify — with BPM data fetched automatically. BBC programme cards live on their own **BBC Radio** page (`/bbc`), linked from the dashboard header
 - Click any track to play it **instantly on your active Spotify device** (falls back to opening the app/web player if nothing's active)
-- Delete tracks from Spotify and local CSV simultaneously
+- Delete tracks from Spotify and the library simultaneously
 - Import and auto-save your Exportify CSV export — supports append/overwrite and a browse-then-save review step before anything is written
-- Runna training calendar integration with zone suggestions and per-pace BPM filter buttons (driven by your real Garmin cadence data)
 - **Song matching**: filter the playlist to songs similar to any track (BPM, musical key, energy)
-- **Song suggestions**: discover new tracks *not* in your playlist that match a seed track by style or tempo (via Last.fm / Deezer / ReccoBeats), and add them to the playlist with one click
-- **Automatic BPM enrichment**: tracks without BPM data are looked up on ReccoBeats automatically, with a Deezer-ISRC fallback for tracks ReccoBeats doesn't know by Spotify ID — and a manual **save-to-playlist / re-import** round-trip in the dashboard for anything neither source can match (see [Tracks without BPM data](#tracks-without-bpm-data))
-- **Check for missing data**: a per-playlist heal sweep in Settings that backfills missing Spotify URIs, genres, and audio features in one pass, with a live status/log and Spotify rate-limit awareness — plus workbook import (FreeYourMusic/Chosic) for bulk backfills (see [Checking for missing library data](#checking-for-missing-library-data))
-- **🎧 AI DJ Mix** (optional): build a pace-matched playlist for any Runna workout — including strength sessions (up-tempo, high-energy, any BPM) — with a live progress bar, per-segment LLM detail, per-run-type BPM limits, and a pin option so a mix survives future rule changes. Choose a **Local LLM** (Ollama, via the [AI_DJ companion app](https://github.com/niblarto/AI_DJ)), **Claude**, or **Gemini** as the backend, with a prompt log and usage/cost tracking in Settings. See [AI DJ Mix](#ai-dj-mix-optional) below
-- **Editing an AI DJ mix in place**: drag tracks to reorder (in the tracklist or directly in the pace/BPM chart), click a chart track to play it, right-click for a per-track menu (replace by BPM, remove, delete), or Ctrl+click several adjacent tracks and right-click to **remix** them as a group — discarding the selection and refilling its combined duration with fresh exact-BPM matches. See [Editing a Mix](#editing-a-mix) below
-- **Replace-by-BPM online search**: constrain the online top-up to a specific artist or genre (typeahead, with a **force online lookup** toggle to bypass the library) and/or a Low/Medium/High energy band — genre search is backed by a real [Discogs](https://www.discogs.com) genre/style lookup (with a verified library-genre-to-Discogs-style mapping table) rather than guessing, and automatically tops up any shortfall from the wider library with a warning if a narrow search can't fill the requested length. See [Editing a Mix](#editing-a-mix) below
-- **Pace Pro**: a separate pace-planning tool (`/pace-pro`) for building a custom split/mix outside of Runna — splits editor, its own saved-mix library, and a **Send to Dashboard** handoff so a Pace Pro mix can be edited, remixed and saved using the same dashboard tools as a Runna-built mix
+- **Song suggestions**: discover new tracks *not* in your playlist that match a seed track by style or tempo (via Last.fm / Deezer / ReccoBeats), and add them with one click
+- **Song Crawler**: a background job that walks Deezer's artist radio from a seed artist (or a Spotify artist/album/playlist link), BPM-checks every track and adds matches to your library — see [Song Crawler](#song-crawler)
+- **Automatic BPM enrichment**: tracks without BPM data are looked up on ReccoBeats automatically, with a Deezer-ISRC fallback — and a manual **save-to-playlist / re-import** round-trip for anything neither source can match (see [Tracks without BPM data](#tracks-without-bpm-data))
+- **Check for missing data**: a per-playlist heal sweep that backfills missing Spotify URIs, genres and audio features, plus workbook import (FreeYourMusic/Chosic) for bulk backfills (see [Checking for missing library data](#checking-for-missing-library-data))
 - Dedup playlist, to remove duplicate tracks
-- Garmin activity stats: pace/cadence/HR charts and activity summaries, read directly from a local [GarminDB](https://github.com/tcgoetz/GarminDB) database
-- **Strava integration** (optional): a `/strava` stats page (recent activities, HR zones), and automatic syncing of Runna workout titles/planned steps onto new Strava activities via webhook. See [Strava Integration](#strava-integration) below
-- **Weather** (optional): Met Office forecast shown on the Runna schedule card for each run's scheduled time — see [Settings → Integrations](#settings--integrations)
-- Weekly cron job to keep the playlist fresh:-
-    - Pull down the tracks of the last show, for the BBC programmes that are currently subcribed to
-    - Upload to the active Spotify playlist, then dedupe it.
-- Push notifications (ntfy.sh) for every automated job that touches a playlist — what was added, where, and tappable Spotify links per track, or a clear error if something failed
+
+### Running & training
+- Runna training calendar integration with zone suggestions and per-pace BPM filter buttons (driven by your real Garmin cadence data)
+- **🎧 AI DJ Mix**: build a pace-matched playlist for any Runna workout — including strength sessions and rest days — with a live progress bar, per-run-type BPM limits, and a pin option so a mix survives future rule changes. Local LLM (Ollama, via the [AI_DJ companion app](https://github.com/niblarto/AI_DJ)), **Claude** or **Gemini** backends. See [AI DJ Mix](#ai-dj-mix-optional)
+- **Editing a mix in place**: drag to reorder (in the list or the pace/BPM chart), replace by BPM, remove, or remix several adjacent tracks as a group. See [Editing a Mix](#editing-a-mix)
+- **Pace Pro** (`/pace-pro`): build a mix from a Garmin PacePro split plan, with its own saved-mix library
+- **Races** (`/races`): a durable list of upcoming and completed races, each with its own page for the course route, Garmin course link and Pace Pro plan — see [Races](#races)
+- Garmin activity stats: pace/cadence/HR charts and lap tables, read from a local [GarminDB](https://github.com/tcgoetz/GarminDB) database, plus the Garmin Connect Personal API for HRV and laps
+- **Post-run ratings**: effort (1–10) and feel (1–5) plus notes on each run's Summary card, read by the Coach
+- **Strava integration** (optional): a `/strava` stats page and automatic syncing of Runna workout titles/steps onto new Strava activities via webhook
+- **Weather** (optional): Met Office forecast on the Runna schedule card for each run's scheduled time
+
+### 🧠 AI running coach (`/coach`)
+- Chat with a coach that reads your last 7 days in full (plan vs actual per day, judged splits, ratings, sleep/HRV/resting HR, food) plus 28 days of earlier runs, 12 weeks of volume, races and nutrition — rebuilt for every message
+- **Weekly report** every Sunday evening, or **Write now** for the last 7 days; each report can be discussed or deleted
+- **Coaching memory**: finished conversations are summarised and the most relevant are recalled later
+- Local model (with **thinking mode** for reports), Claude or Gemini — and Gemini/Claude can **fall back to the local model** when their limit is hit
+- **🌐 Web search** answers (Ollama web search, with cited sources)
+- See [AI Running Coach](#ai-running-coach)
+
+### 🥗 Nutrition & weight (`/nutrition`)
+- Daily calories eaten (Lose It!, via Android Health Connect), burnt and exercise (Garmin), with a daily net line and your calorie limit
+- Exact current weight from Garmin, a 7-day average, target weight and goal date (stones & pounds, pounds or kg)
+- Projections — scale trend, calories eaten vs burnt, sticking to your limit — capped at a safe 2 lb/week, with the fitted trend shown on the chart
+- A daily **AI nutrition summary** with per-section "Discuss with coach" buttons
+- See [Nutrition & Weight](#nutrition--weight)
+
+### 📱 Android companion app
+- Native Kotlin/Compose app: Schedule, Summary, Coach, Nutrition and Song Crawler tabs, route maps, pace charts and AI DJ mix building
+- Push notifications via Firebase (replacing ntfy on the phone)
+- Syncs Lose It! nutrition from Health Connect to the server every 15 minutes
+- See [Android Companion App](#android-companion-app)
+
+### Automation & notifications
+- **Scheduled jobs** (Settings → Scheduled Jobs): weekly BBC refresh, nightly AI DJ pre-build, daily digest, library ↔ Spotify sync, nightly heal sweep, broken-tracklist check, weekly coach report, hourly nutrition summary check and hourly Garmin weigh-ins — each with editable times and **Run now**. See [Scheduled Jobs](#scheduled-jobs)
+- Push notifications (ntfy.sh and/or the Android app) for every automated job, with tappable Spotify links per track, or a clear error if something failed
+
+### Security
+- A local username/password login with **TOTP two-factor authentication** in front of the Spotify sign-in — see [Login & Two-Factor Authentication](#login--two-factor-authentication)
 
 ---
 
@@ -77,6 +107,7 @@ Edit `.env.local` and fill in all required values:
 | `GARMINDB_LOG_PATH` | optional | Path to the GarminDB sync log file |
 | `STRAVA_CLIENT_ID` | optional | From your [Strava API app](https://www.strava.com/settings/api) — can also be set in **Settings → Strava** after deploy |
 | `STRAVA_CLIENT_SECRET` | optional | From your Strava API app — can also be set in **Settings → Strava** after deploy |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | optional | Firebase service-account key (full JSON on one line) — only needed to send push notifications to the [Android app](#android-companion-app) |
 
 To find your **playlist ID**: open the playlist on [open.spotify.com](https://open.spotify.com), copy the URL — the ID is the string after `/playlist/`.
 
@@ -127,7 +158,7 @@ This will:
 2. Upload all source files to the Pi over SSH/SFTP
 3. Run `npm install` and `npm run build` on the Pi
 4. Install and start a `systemd` service (`running-playlist`)
-5. Set up a weekly cron job (Fridays at 14:00) to refresh the playlist
+5. Install the scheduled jobs (cron) if they're missing — weekly BBC refresh, AI DJ pre-build, daily digest, library sync, heal sweep, broken-tracklist check, weekly coach report, nutrition summary and Garmin weigh-ins (see [Scheduled Jobs](#scheduled-jobs)). Existing jobs, including any times you've changed, are left alone.
 
 The app will be available at `http://<pi-ip>:5005`.
 
@@ -149,7 +180,7 @@ PaceSync needs your Spotify playlist as a CSV file with BPM data. Exportify is a
 
 ## 6. Upload the CSV to PaceSync
 
-1. Open the app and sign in with Spotify.
+1. Open the app, sign in with your local username/password (see [Login & Two-Factor Authentication](#login--two-factor-authentication)), then with Spotify.
 2. Go to **Settings**.
 3. Under **Import Playlist**, click **Browse CSV** and select the file downloaded from Exportify.
 4. Enter a playlist name (this becomes both the Spotify playlist name and the local CSV filename, e.g. `Uber-Running` → `public/Uber-Running.csv`), choose **Overwrite** or **Append**, and click **Save**.
@@ -314,6 +345,8 @@ The mixing engine is **[AI_DJ](https://github.com/niblarto/AI_DJ)**, a companion
 - The playlist is sized to the workout's slowest projected duration (from Runna's own estimate) rather than padded with arbitrary extra tracks; section changes land on track boundaries so a song never cuts off mid-way when the pace changes.
 - **Candidate pool per section**: every track that survives a section's BPM/energy filter is sent to the LLM in that section's prompt — there's no fixed sample size or truncation. If BPM/energy is too tight to find enough tracks, the filter widens in steps until at least a floor amount is available (see [AI_DJ's README](https://github.com/niblarto/AI_DJ#workout-mode-runna) for the exact mechanics).
 
+**Rest days** get a mix too, built without the AI DJ: two hours of songs you haven't run to yet, in the order they were added to your library — a way to work through new additions on an easy day.
+
 **Using it:**
 1. Expand any runnable workout — or a strength session — in the **Runna Schedule** card and click **🎧 AI DJ Mix**. A live progress bar tracks each section as it builds.
 2. The mix populates the **central track list card** — it does *not* save to Spotify automatically. From there:
@@ -335,7 +368,7 @@ Track selection within each section can happen three ways, chosen per the **Sett
 
 - **Local LLM** (via the [AI_DJ](https://github.com/niblarto/AI_DJ) service): calls a local [Ollama](https://ollama.com) model (`qwen3.5:9b` by default) running on a separate always-on-required PC, with a mood-aware prompt per section (e.g. *"Hard effort — driving, motivating, relentless"* for work, *"Recovery — calm"* for rest) to pick and order tracks from the BPM/energy-filtered candidate pool.
 - **Claude**: calls the Claude API directly — model and effort level (low/medium/high/xhigh/max) are selectable in Settings. Requires a Claude API key with prepaid credit at [console.anthropic.com](https://console.anthropic.com).
-- **Gemini**: calls the Gemini API directly — model selectable in Settings. Has a free tier (with a low daily request cap per model/project) before requiring billing.
+- **Gemini**: calls the Gemini API directly — **Flash 3.8** or **Flash 3.5 Lite**, selectable in Settings. Has a free tier (with a low daily request cap per model/project) before requiring billing. (Gemini 2.5 has been withdrawn for new API users; saved settings that still name it are moved to the 3.x models automatically.)
 - **No LLM at all**: tracks are chosen purely by [bpm_matcher](bpm_matcher/)'s weighted distance — a deterministic greedy nearest-neighbour chain over BPM, Camelot key, energy, danceability and valence. This is the automatic fallback (see below), not a separate toggle.
 
 **Claude and Gemini mixes run on the Pi itself** via a small bridge script (`scripts/ai_dj_bridge.py`), calling the vendored `ai_dj` package directly — they don't depend on the separate AI DJ service PC being on at all. Only the **Local LLM** provider needs that service reachable, since it's the one running Ollama.
@@ -355,7 +388,7 @@ Track selection within each section can happen three ways, chosen per the **Sett
 1. **Run the [AI_DJ](https://github.com/niblarto/AI_DJ) service** somewhere on your network (a PC with Ollama for LLM-assisted mixes, or the Pi itself with `--no-llm` for the deterministic-only mode — it's pure Python, no GPU required). Clone the repo and follow its README.
 2. Install [Ollama](https://ollama.com/download) and pull a model: `ollama pull qwen3.5:9b` (or set a different model — see the [AI_DJ README](https://github.com/niblarto/AI_DJ#setup)).
 3. If the service runs on a separate machine from the Pi, **allow inbound traffic on its port through the firewall** — and if using Windows, scope the rule to cover whatever network profile that connection uses (Private *and* Public), since Windows can silently reclassify a network and drop a Private-only rule.
-4. In PaceSync, go to **Settings**, scroll to the bottom of the **middle column**, and find the **🎧 AI DJ** card:
+4. In PaceSync, go to **Settings → Integrations** and find the **🎧 AI DJ** card:
    - Select **Local LLM**, enter the service's URL (e.g. `http://192.168.1.50:8765`) and click **Save**.
    - A live connection indicator appears next to the URL field — green "Connected · LLM ready" (or "no LLM (distance-chain only)" if running with `--no-llm`), red with the failure reason if unreachable. It's checked automatically as you type and every 60 seconds while the page is open, and there's a refresh icon to re-check on demand.
    - Once a URL is saved, flip the **enable** toggle to start showing the AI DJ Mix button on Runna workouts.
@@ -403,6 +436,29 @@ A separate pace-planning page (`/pace-pro`, linked from the dashboard) for build
 2. Build a pace-matched track listing from the splits, the same way as any other AI DJ mix (see [AI DJ Mix](#ai-dj-mix-optional) above for how tracks are picked) — including the same Save to Spotify, pin, and remix options.
 3. Pace Pro keeps its **own saved-mix library**, separate from Runna's pinned-per-workout mixes, so you can build and revisit multiple pacing strategies (e.g. different race-day plans) independently.
 4. **Send to Dashboard** hands the current Pace Pro mix off to the main dashboard's central track list — from there it can be edited, reordered, and remixed using all the same tools as a Runna-built mix (see [Editing a Mix](#editing-a-mix) above), then optionally **saved back to its Pace Pro library** with any edits applied.
+
+---
+
+## Song Crawler
+
+**Settings → Tracklist → Song Crawler** grows your library automatically. Start it from an artist name or a Spotify artist/album/playlist link and it:
+
+- Walks Deezer's "artist radio" breadth-first from the seed artist(s) — optionally checking each artist's whole catalogue first — with limits on how many artists to visit and how far to spread.
+- BPM-checks every track it finds (ReccoBeats/Deezer) and adds matches to your library, resolving the Spotify URI via ISRC rather than Spotify's search API.
+- Can stop after a set number of tracks for review, so you can listen to (and remove) what it added before carrying on.
+- Runs **on the server**: the page just polls its numbered log, so closing the browser (or the phone app's Crawler tab) doesn't stop it. The last crawl's log survives a reload; a server restart ends a running crawl and reports it as interrupted.
+
+---
+
+## Races
+
+![Races page](docs/screenshots/races.png)
+
+The **Races** page (`/races`, linked from the dashboard) keeps a durable list of your races, independent of whatever Runna's feed says on a given day (Runna's feed can drop a race, re-tag it late, or never know about one booked outside the plan).
+
+- Add upcoming races directly, or tick **Race** on a Garmin activity page to record a completed one; races in the live Runna feed are suggested.
+- Each race has its own page (`/races/[id]`) with the course route — from a linked past Garmin activity or a Garmin Connect course (paste its URL/ID) — and a linked **Pace Pro** plan.
+- Upcoming races (with the exact days to go) and recent results are part of what the [AI Running Coach](#ai-running-coach) reads.
 
 ---
 
@@ -468,6 +524,13 @@ same topic as the other push notifications below.
 
 > **Sync status card:** Settings also shows a live sync status card with a log tail and a "Sync now" button. This launches GarminDB through a small wrapper script that timestamps each log line (so tqdm progress bars can be parsed) and reads back from a fixed log path. If you want that card to work, write a timestamping wrapper around `garmindb_cli.py` on the Pi (it just needs to prefix each output line with a time and write to a log file) and set `GARMINDB_SYNC_WRAPPER`, `GARMINDB_PYTHON_BIN`, and `GARMINDB_LOG_PATH` in `.env.local` to match your paths. Without it, you can still sync GarminDB manually via cron/SSH — only the status card's live log and "Sync now" button won't work.
 
+### Garmin Connect Personal API and direct Garmin Connect calls
+
+GarminDB stays the main store, but it has two gaps PaceSync fills from Garmin directly:
+
+- **Garmin Connect Personal API** (Settings → Integrations → Garmin Personal API): Garmin's official read-only access to your own data. Make a key in Garmin Connect Web (valid for up to a year, shown once) and paste it in; PaceSync exchanges it for 24-hour access tokens as needed. Used for **HRV** (GarminDB has none) and for workout laps (GarminDB imports them empty).
+- **Today's figures**: GarminDB only stores a day once it's over, so PaceSync reads a few things straight from Garmin Connect using GarminDB's own sign-in: your **weigh-ins** (hourly, and when the Nutrition page opens), **today's calories burnt so far** (at most every 15 minutes) and **last night's sleep, resting HR and HRV** for the Coach (at most every 30 minutes). Renewed sign-in tokens are written back so GarminDB's next sync keeps working.
+
 ### Notes
 
 - GarminDB occasionally fails to download a FIT file for an activity that Garmin Connect only stores as GPX (no FIT archived) — those activities won't have per-second speed/cadence data, which is a Garmin Connect limitation, not a PaceSync or GarminDB bug.
@@ -499,12 +562,110 @@ Once you've reviewed and saved an AI DJ mix's pacing for a run (see [AI DJ Mix](
 
 ---
 
+## AI Running Coach
+
+![Coach page](docs/screenshots/coach.png)
+
+The **Coach** page (`/coach`, and the Android app's Coach tab) is a chat with an AI running coach that knows your training. The page is a column of full-width tiles — **Conversation**, **📋 Weekly report**, **Training data the coach sees** and **🧠 Coaching memory** — each minimised or expanded by clicking its title (remembered in your browser).
+
+**What the coach reads** — rebuilt from scratch before every message and report, and shown in full in the *Training data* tile:
+
+- **Day by day, last 7 days**: for each day, the Runna plan; everything done (runs in full detail with heart rate, cadence, zones, training load and weather, plus walks and strength sessions); your **effort/feel rating**; **splits judged against the plan**; that day's **recovery** (sleep, HRV, resting HR, stress, body battery) and **food**.
+- **Judged splits**: pace comparisons are worked out in code, not left to the model. A split from 15 s/mi faster to 5 s/mi slower than its target is a hit (✓); much faster is ⚠; slower than that is ✗; easy/conversational running at or slower than its cap is correct. Structured sessions use the watch's workout laps (warm-up, reps, rests, cool-down); progressive runs use the per-segment splits.
+- Earlier runs (days 8–28) as one-liners, 12 weeks of weekly volume (runs plus other sessions), the next 10 days of the Runna plan, upcoming races with the exact days to go, your HR zones and VO2max, and your weight goal, trend and fuelling.
+- Nothing is duplicated, and dates and counts are pre-calculated, so a smaller local model has nothing to guess.
+
+**Weekly report**: written every Sunday at 19:00 (Mon–Sun, editable in Scheduled Jobs) and sent as a push notification; **Write now** reviews the last 7 days up to today. Sections: Verdict, Plan vs actual (one line per day with plan → done, load, split verdicts, effort and sleep), Load & recovery, Next week / Next 7 days (exact dates), Fuelling & weight, and Race readiness. Each report has **💬 Discuss with coach** and **Delete**.
+
+**Coaching memory**: each finished conversation (start a **New conversation** to finish one) is summarised and stored with two embeddings — bge-large via Ollama on the AI DJ PC, and all-MiniLM on the Pi so recall still works with the PC off. The 3 most relevant memories from the last 30 days are recalled into each reply.
+
+**Which AI answers** (Settings → Integrations → 🧠 Coach): the **local model** on the AI DJ service PC, **Claude** or **Gemini**.
+- Reports and the nutrition summary run the local model in **thinking mode** (slower, much more careful with numbers; they run in the background with a 15-minute limit). Chat stays fast.
+- **Fall back to the local model** (on by default): when Claude or Gemini reports its quota, rate limit or credit is used up, the same request goes to the local model and the reply is labelled.
+
+**🌐 Web search**: type a question and press 🌐 instead of Send. PaceSync searches the web with **Ollama's web search API** (a free key from [ollama.com/settings/keys](https://ollama.com/settings/keys), saved in the Coach settings card and tested before saving), then your coach AI answers from the results plus your training data, citing them [1], [2]… with a clickable **Sources** list. Without an Ollama key it uses Gemini with Google Search, which needs a paid Gemini key.
+
+**Freshness**: the Android app sends your latest Lose It! food before each coach message or report, and the Coach tab's **↻** button also refreshes laps, weather, HRV and zones on the server.
+
+---
+
+## Nutrition & Weight
+
+![Nutrition page](docs/screenshots/nutrition.png)
+
+The **Nutrition** page (`/nutrition`, and the Android app's Nutrition tab) tracks food, calories burnt and weight against a goal.
+
+**Where the data comes from**
+- **Food** — calories, protein, carbs and fat — from **Lose It!** via Android **Health Connect** (Lose It! has no public API). Turn on Lose It! → Profile → Automatic Tracking → Health Connect, then grant the PaceSync app access in its Settings. The phone sends changes to the server every ~15 minutes (see [Android Companion App](#android-companion-app)).
+- **Calories burnt and exercise** from Garmin: past days from GarminDB, today's "so far" figure straight from Garmin Connect.
+- **Weight** from Garmin only — Garmin is treated as the source of truth, so copies of its readings written to Health Connect by other apps are ignored. Fetched hourly by the server and when the page opens; the **↻** icon on the weight tile fetches it on demand.
+
+**Goals** (Settings → Nutrition): target weight (entered in stones & pounds, pounds or kg), goal date and daily calorie limit, plus how many days projections are based on (default 28) and kcal per kg (default 7,700). A goal date that would need more than **2 lb a week** can't be saved — the date picker won't go earlier than the earliest safe date.
+
+**The page**
+- A status line by **Goals** shows when each source was last refreshed (weight, burn, food, GarminDB) and when the page next auto-refreshes (every 15 minutes).
+- Tiles: exact current weight (with when it was measured) and 7-day average, target and how much to go, goal date and the weekly rate needed, calories eaten today against your limit, and the 7-day average net.
+- **🧠 AI summary** of the last 14 days — written each day after 05:00 once the AI is reachable (see below), with a ↻ button to write a fresh one, **💬 Discuss** buttons for the whole summary or any section (opens the Coach and sends it), and minimise-by-title.
+- **Daily calories** chart (14/30/90 days, remembered): eaten, exercise and burnt bars, a **net line** (eaten − burnt; green below zero = deficit, red = gain; today's hollow dot is "so far"), and the limit line. Click a legend entry to hide a series.
+- **Weight and projections** chart: weigh-ins, the straight line fitted through the last 28 days (the basis of the scale trend), the 7-day average (where every projection starts) carried flat to the goal date, the target and goal date, and a dashed line per projection.
+- **Projections**: *Scale trend* (from the weigh-ins), *Calories eaten vs burnt* (from logged days) and *Sticking to your limit* (your limit vs your average burn) — each with the projected weight on the goal date and when the target is reached. Rates are capped at 2 lb/week.
+
+**Daily AI summary timing**: a summary is due from 05:00 each day. An hourly job writes it as soon as the AI DJ service (local model) is reachable; if you open the page while one is due, the page checks every minute and writes it when it can. After that, nothing new is written until 05:00 the next day — unless you press ↻.
+
+---
+
+## Android Companion App
+
+<!-- ![Android app — Nutrition tab](docs/screenshots/android-nutrition.png) -->
+
+A native Kotlin/Compose app in [`android/`](android/), sideloaded rather than published. Full setup (JDK, Firebase, signing in with a mobile token) is in [`android/README.md`](android/README.md).
+
+- **Tabs**: Schedule, Summary, Coach, Nutrition and Song Crawler; Settings from the cog.
+- **Runs**: activity detail with the route map (street or satellite, with an animated "run" arrow), a landscape pace chart, route picker, pinned tracklists and AI DJ mix building.
+- **Coach**: chat (with 🌐 web search), weekly reports (write, discuss, delete) and memory.
+- **Nutrition**: the same tiles and charts as the web page; tap a chart to open it full screen in landscape with pinch-to-zoom and drag-to-scroll.
+- **Health Connect sync**: reads Lose It! nutrition (and needs background access). Every 15 minutes it checks Health Connect's changes feed and sends the server only the days whose food changed; it also syncs when you open the app, the Nutrition or Coach tab, and before each coach message.
+- **Push notifications** via Firebase Cloud Messaging, alongside or instead of ntfy.
+- **Auth**: a bearer token minted on the web (Settings → Notifications → Mobile App, re-checking your password and TOTP) and pasted into the app.
+
+---
+
+## Scheduled Jobs
+
+**Settings → Scheduled Jobs** lists the cron jobs `deploy.py` installs on the Pi, with editable times, on/off toggles and **Run now**:
+
+| Job | Default | What it does |
+|---|---|---|
+| BBC weekly refresh | Fri 14:00 | Latest episodes of your BBC programmes → active playlist, then dedupe |
+| AI DJ pre-build | daily 15:30 | Builds tomorrow's mix (or uses a pinned one) and saves it to "Today's Run" |
+| AI DJ morning retry | daily 06:00 | Retries the pre-build if last night's failed |
+| Daily digest | 06:30 | Push with today's Runna session and the first track of today's playlist |
+| Library ↔ Spotify sync | daily 16:30 | Two-way sync of the library and its Spotify playlist |
+| Heal sweep | daily 02:00 | Backfills missing library data |
+| Broken tracklist check | daily 08:00 | Notifies when an upcoming or Pace Pro tracklist contains a deleted track |
+| Weekly coach report | Sun 19:00 | The Coach's weekly report, with a push notification |
+| GarminDB sync | daily 06:00 | Downloads new Garmin data (also triggered a couple of minutes after a new Strava activity) |
+| Nutrition summary | hourly at :07 | Writes the daily AI nutrition summary once it's due and the AI is reachable |
+| Garmin weigh-ins | hourly at :37 | Fetches the latest weigh-ins from Garmin Connect |
+
+The two hourly jobs aren't shown in the table (they have no time to edit).
+
+---
+
+## Login & Two-Factor Authentication
+
+The whole app sits behind a local username/password login (with **TOTP** two-factor authentication once enrolled) before the Spotify sign-in. Passwords are scrypt-hashed and the TOTP secret is standard RFC 6238, so Google Authenticator, LastPass Authenticator and similar apps all work. Manage it in **Settings → Security**. The credentials live in `pacesync.db` and are never overwritten by a redeploy.
+
+---
+
 ## Settings → Integrations
 
 A few optional third-party lookups are configured here as simple API key fields (each stored on the Pi, same as the other Settings keys):
 
 - **Discogs** (used by the dashboard's ♻ Replace/Remix **Genre** search — see [Editing a Mix](#editing-a-mix) above): a free personal access token from [discogs.com/settings/developers](https://www.discogs.com/settings/developers) (click **Generate token** — no need to register an application for this). Without a token, genre search silently falls back to a library-only heuristic instead of Discogs' real genre/style-tagged release database.
 - **Met Office** (weather on the Runna schedule card): see the Weather card in Settings for its own API key + postcode fields.
+- **🧠 Coach**: which AI the Coach uses (local / Claude / Gemini), the fall-back-to-local option, and the **🌐 web search key** (Ollama) — see [AI Running Coach](#ai-running-coach).
+- **Garmin Personal API**: key for HRV and laps — see [Garmin Connect Personal API](#garmin-connect-personal-api-and-direct-garmin-connect-calls).
 
 ---
 
@@ -530,7 +691,10 @@ Alternatively, set `NTFY_TOPIC` in `.env.local` before deploying — the Setting
 - The same treatment for the AI DJ pre-build: track count, destination playlist, and per-track links (or "📌 Pinned Mix Ready" if a pinned mix was used instead of a fresh build)
 - A daily "Garmin sync finished" (or failed, with the exit status) push when the GarminDB cron completes
 - Error notifications (with high priority) if anything goes wrong
+- The weekly coach report's verdict, the daily digest, and broken-tracklist warnings
 - A **Send test** button next to the topic field in Settings, to confirm delivery without waiting for a scheduled job
+
+The [Android app](#android-companion-app) receives the same notifications through Firebase Cloud Messaging when `FIREBASE_SERVICE_ACCOUNT_JSON` is set.
 
 > Notifications are sent via ntfy's JSON publish format rather than HTTP headers, so titles with emoji (e.g. "🎧 AI DJ Mix Ready") deliver reliably — HTTP headers are Latin-1 only and would silently drop the notification.
 
