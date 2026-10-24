@@ -25,6 +25,8 @@ import com.pacesync.app.R
 // runs out of image because a BitmapShader with TileMode.REPEAT wraps the
 // source image infinitely in both directions.
 //
+// `dim` (0..1) lays the app's background colour over the image to make it fainter.
+//
 // Two overloads: one for LazyColumn and one for a plain Column.verticalScroll
 // (ScrollState.value IS already a continuous pixel offset, used as-is).
 //
@@ -41,6 +43,7 @@ import com.pacesync.app.R
 @Composable
 fun ScrollingBackground(
     imageRes: Int = R.drawable.apk_background,
+    dim: Float = 0f,
     content: @Composable (Modifier) -> Unit,
 ) {
     var scrollPx by remember { mutableFloatStateOf(0f) }
@@ -52,20 +55,21 @@ fun ScrollingBackground(
             }
         }
     }
-    ScrollingBackgroundImpl(scrollPx, imageRes, Modifier.nestedScroll(nestedScrollConnection)) { m -> content(m) }
+    ScrollingBackgroundImpl(scrollPx, imageRes, dim, Modifier.nestedScroll(nestedScrollConnection)) { m -> content(m) }
 }
 
 @Composable
 fun ScrollingBackground(
     scrollState: ScrollState,
     imageRes: Int = R.drawable.apk_background,
+    dim: Float = 0f,
     content: @Composable () -> Unit,
 ) {
-    ScrollingBackgroundImpl(scrollState.value.toFloat(), imageRes, Modifier) { content() }
+    ScrollingBackgroundImpl(scrollState.value.toFloat(), imageRes, dim, Modifier) { content() }
 }
 
 @Composable
-private fun ScrollingBackgroundImpl(scrollPx: Float, imageRes: Int, contentModifier: Modifier, content: @Composable (Modifier) -> Unit) {
+private fun ScrollingBackgroundImpl(scrollPx: Float, imageRes: Int, dim: Float, contentModifier: Modifier, content: @Composable (Modifier) -> Unit) {
     val resources = LocalContext.current.resources
     val androidBitmap = remember(imageRes) { BitmapFactory.decodeResource(resources, imageRes) }
 
@@ -108,6 +112,11 @@ private fun ScrollingBackgroundImpl(scrollPx: Float, imageRes: Int, contentModif
                     )
                 }
                 canvas.nativeCanvas.drawRect(0f, 0f, size.width, size.height, paint)
+                // Dim: the app's background colour over the image, so it reads as a faint texture.
+                if (dim > 0f) {
+                    val scrim = android.graphics.Paint().apply { color = 0xFF0F172A.toInt(); alpha = (dim.coerceIn(0f, 1f) * 255).toInt() }
+                    canvas.nativeCanvas.drawRect(0f, 0f, size.width, size.height, scrim)
+                }
             }
         }
         content(contentModifier)

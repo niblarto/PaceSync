@@ -10,7 +10,13 @@ import android.view.WindowManager
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.window.DialogWindowProvider
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.material3.TextButton
@@ -26,6 +32,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Column
@@ -66,7 +74,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.pacesync.app.R
 import com.pacesync.app.health.NutritionSync
 import com.pacesync.app.network.NutritionApi
 import com.pacesync.app.network.PaceSyncApi
@@ -75,6 +85,7 @@ import com.pacesync.app.network.dto.NutritionDayRow
 import com.pacesync.app.network.dto.NutritionSummaryStateDto
 import com.pacesync.app.network.dto.ProjectionDto
 import com.pacesync.app.ui.coach.CoachMarkdown
+import com.pacesync.app.ui.common.ScrollingBackground
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalDate
@@ -167,9 +178,11 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
     }
     LaunchedEffect(range) { if (data != null) load() }
 
+    val scrollState = rememberScrollState()
+    ScrollingBackground(scrollState, imageRes = R.drawable.apk_background_summary) {
     PullToRefreshBox(isRefreshing = refreshing, onRefresh = { scope.launch { fullRefresh() } }, modifier = Modifier.fillMaxSize()) {
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
+            Modifier.fillMaxSize().verticalScroll(scrollState).padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             // Pushes Lose It! food/weight from Health Connect, pulls Garmin's
@@ -219,20 +232,21 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
             Spacer(Modifier.height(8.dp))
         }
     }
+    }
 
     val d = data
     if (fullscreen != null && d != null) {
         val close = { fullscreen = null }
         when (fullscreen) {
-            "calories" -> CaloriesFullscreen(d, range, onRange = { r -> range = r; prefs.edit().putInt("range", r).apply() }, onClose = close)
-            else -> WeightFullscreen(d, d.config.weightUnit, onClose = close)
+            "calories" -> CaloriesFullscreen(d, range, onRange = { r -> range = r; prefs.edit().putInt("range", r).apply() }, refreshing = refreshing, onRefresh = { if (!refreshing) scope.launch { fullRefresh() } }, onClose = close)
+            else -> WeightFullscreen(d, d.config.weightUnit, refreshing = refreshing, onRefresh = { if (!refreshing) scope.launch { fullRefresh() } }, onClose = close)
         }
     }
 }
 
 @Composable
 private fun Section(title: String? = null, trailing: (@Composable () -> Unit)? = null, content: @Composable () -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.88f))) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (title != null || trailing != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -247,7 +261,7 @@ private fun Section(title: String? = null, trailing: (@Composable () -> Unit)? =
 
 @Composable
 private fun Tile(label: String, value: String, modifier: Modifier, action: (@Composable () -> Unit)? = null, sub: @Composable () -> Unit = {}) {
-    Card(modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+    Card(modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.88f))) {
         Column(Modifier.fillMaxSize().padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.weight(1f))
@@ -327,7 +341,6 @@ private fun CaloriesCard(d: NutritionDashboardDto, range: Int, onExpand: () -> U
     }) {
         CaloriesChart(d.days, d.config.dailyCalorieLimit, d.config.minDailyCalories, hidden, selected = null, onTap = { onExpand() })
         CaloriesLegend(hidden) { hidden = it }
-        Small("Tap the chart to open it full screen. Net line = eaten − burnt (green dot deficit, red gain; hollow = today so far). The white tip on each eaten bar is as tall as that day's exercise bar, so the yellow below it is eaten − exercise (if you burnt more than you ate, the white reaches below zero). A red eaten bar (with a slightly lighter red tip) and a red net dot mean less than ${kcal(d.config.minDailyCalories)} kcal was eaten that day, the daily minimum; today stays red until it's reached.")
         val a = d.averages
         Small(
             "Last ${a.windowDays} days (not today): avg eaten ${kcal(a.eaten)} on ${a.loggedDays} logged days · avg burnt ${kcal(a.burnt)} · " +
@@ -337,9 +350,10 @@ private fun CaloriesCard(d: NutritionDashboardDto, range: Int, onExpand: () -> U
 }
 
 // Legend: tap an entry to hide/show that series.
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CaloriesLegend(hidden: Set<String>, onChange: (Set<String>) -> Unit) {
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             listOf("net" to "Net", "eaten" to "Eaten", "exercise" to "Exercise", "burnt" to "Burnt").forEach { (key, label) ->
                 val color = when (key) { "net" -> NC.netLine; "eaten" -> NC.eaten; "exercise" -> NC.exercise; else -> NC.burnt }
                 val off = key in hidden
@@ -390,8 +404,11 @@ private fun weightChartData(d: NutritionDashboardDto): WeightChartData? {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun WeightLegend(d: NutritionDashboardDto) {
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    // Wraps onto a second line when the entries don't fit across (a plain Row squeezed the last
+    // ones to nothing and broke their text letter by letter into a very tall column).
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         LegendDot(NC.weight, "Weigh-ins")
         LegendDot(NC.postRun, "Post-run")
         LegendDot(NC.avg, "7-day avg")
@@ -410,7 +427,6 @@ private fun WeightCard(d: NutritionDashboardDto, unit: String, onExpand: () -> U
     Section("Weight and projections") {
         WeightChart(chart, unit, selected = null, onTap = { onExpand() })
         WeightLegend(d)
-        Small("Tap the chart to open it full screen. Faint purple: trend fitted through the last ${d.config.trendDays} days of weigh-ins; yellow: 7-day average, dotted flat to the goal date. Green dots: weigh-ins taken within 3 hours after a run, left out of the trend and given their own green line and projection.")
     }
 }
 
@@ -478,6 +494,8 @@ private fun FullscreenChart(
     leftDp: Int,
     onClose: () -> Unit,
     rightDp: Int = 0,
+    refreshing: Boolean = false,
+    onRefresh: () -> Unit = {},
     controls: @Composable () -> Unit = {},
     overlay: @Composable BoxScope.() -> Unit = {},
     footer: @Composable () -> Unit,
@@ -519,30 +537,81 @@ private fun FullscreenChart(
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(title, style = MaterialTheme.typography.titleSmall)
-                Small("Pinch to zoom · drag to scroll · tap for values")
-                Spacer(Modifier.weight(1f))
+                // A fixed one-line header: the hint gives way (and ellipsizes) before anything
+                // wraps, and nothing is added to it while zoomed, so zooming never changes its
+                // height or the chart's size.
+                Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, softWrap = false)
+                Text(
+                    "Pinch to zoom · drag to scroll · tap for values · pull down to sync",
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary,
+                    maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                )
                 controls()
-                if (zoom > 1.01f) TextButton(onClick = { zoom = 1f; offset = 0f }) { Text("Reset zoom") }
-                TextButton(onClick = onClose) { Text("✕ Close") }
+                TextButton(onClick = onClose) { Text("✕ Close", maxLines = 1, softWrap = false) }
             }
             Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Box(
                     Modifier.weight(1f).fillMaxHeight()
                         .onSizeChanged { widthPx = it.width }
                         .pointerInput(Unit) {
-                            detectTransformGestures { centroid, pan, gestureZoom, _ ->
-                                val plotW = (widthPx - leftPx - rightPx).coerceAtLeast(1f)
-                                val newZoom = (zoom * gestureZoom).coerceIn(1f, 12f)
-                                val anchor = centroid.x - leftPx
-                                val newOffset = (offset + anchor) * (newZoom / zoom) - anchor - pan.x
-                                zoom = newZoom
-                                offset = newOffset.coerceIn(0f, plotW * (newZoom - 1f))
+                            // Pinch to zoom and drag to scroll the date axis, as before; and a clear
+                            // single-finger pull straight down syncs all the weight and calorie data
+                            // (the same sync as pull-to-refresh on the portrait screen).
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false)
+                                val slop = viewConfiguration.touchSlop
+                                var pastSlop = false
+                                var zoomMotion = 0f
+                                var panMotion = 0f
+                                var pinched = false
+                                var pullY = 0f
+                                var driftX = 0f
+                                do {
+                                    val event = awaitPointerEvent()
+                                    if (event.changes.any { it.isConsumed }) break
+                                    if (event.changes.count { it.pressed } > 1) pinched = true
+                                    val gestureZoom = event.calculateZoom()
+                                    val pan = event.calculatePan()
+                                    if (!pastSlop) {
+                                        zoomMotion += abs(1 - gestureZoom) * event.calculateCentroidSize(useCurrent = false)
+                                        panMotion += pan.getDistance()
+                                        if (zoomMotion > slop || panMotion > slop) pastSlop = true
+                                    }
+                                    if (pastSlop && (gestureZoom != 1f || pan != androidx.compose.ui.geometry.Offset.Zero)) {
+                                        val centroid = event.calculateCentroid(useCurrent = false)
+                                        val plotW = (widthPx - leftPx - rightPx).coerceAtLeast(1f)
+                                        val newZoom = (zoom * gestureZoom).coerceIn(1f, 12f)
+                                        val anchor = centroid.x - leftPx
+                                        val newOffset = (offset + anchor) * (newZoom / zoom) - anchor - pan.x
+                                        zoom = newZoom
+                                        offset = newOffset.coerceIn(0f, plotW * (newZoom - 1f))
+                                        if (!pinched) { pullY += pan.y; driftX += abs(pan.x) }
+                                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                                    }
+                                } while (event.changes.any { it.pressed })
+                                if (!pinched && pullY > 90.dp.toPx() && driftX < pullY * 0.5f) onRefresh()
                             }
                         },
                 ) {
                     chart(Modifier.fillMaxSize(), zoom, offset)
                     overlay() // floats over the chart, so showing or hiding it never resizes the chart
+                    if (refreshing) {
+                        Row(
+                            Modifier.align(Alignment.TopCenter).padding(top = 6.dp).clip(RoundedCornerShape(20.dp))
+                                .background(Color(0xF00F172A)).padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Small("Syncing weight and calories…")
+                        }
+                    }
+                    // Only shown while zoomed in, floating at the top right so the header stays put.
+                    if (zoom > 1.01f) {
+                        TextButton(
+                            onClick = { zoom = 1f; offset = 0f },
+                            modifier = Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 4.dp),
+                        ) { Text("Reset zoom", maxLines = 1, softWrap = false) }
+                    }
                 }
             }
             footer()
@@ -560,11 +629,11 @@ private fun BoxScope.FloatingDetail(onDismiss: () -> Unit, content: @Composable 
 }
 
 @Composable
-private fun CaloriesFullscreen(d: NutritionDashboardDto, range: Int, onRange: (Int) -> Unit, onClose: () -> Unit) {
+private fun CaloriesFullscreen(d: NutritionDashboardDto, range: Int, onRange: (Int) -> Unit, refreshing: Boolean, onRefresh: () -> Unit, onClose: () -> Unit) {
     var hidden by remember { mutableStateOf(setOf<String>()) }
     var selected by remember(d) { mutableStateOf<Int?>(null) }
     FullscreenChart(
-        "Daily calories", CAL_LEFT_DP, onClose,
+        "Daily calories", CAL_LEFT_DP, onClose, refreshing = refreshing, onRefresh = onRefresh,
         controls = { RANGES.forEach { r -> FilterChip(selected = range == r, onClick = { onRange(r) }, label = { Text("${r}d") }) } },
         overlay = {
             selected?.let { i -> d.days.getOrNull(i) }?.let { day -> FloatingDetail({ selected = null }) { DayDetail(day) } }
@@ -581,13 +650,13 @@ private fun CaloriesFullscreen(d: NutritionDashboardDto, range: Int, onRange: (I
 }
 
 @Composable
-private fun WeightFullscreen(d: NutritionDashboardDto, unit: String, onClose: () -> Unit) {
+private fun WeightFullscreen(d: NutritionDashboardDto, unit: String, refreshing: Boolean, onRefresh: () -> Unit, onClose: () -> Unit) {
     val maybe = remember(d) { weightChartData(d) }
     var selected by remember(d) { mutableStateOf<LocalDate?>(null) }
     if (maybe == null) return
     val chart: WeightChartData = maybe
     FullscreenChart(
-        "Weight and projections", 0, onClose, rightDp = WEIGHT_AXIS_DP,
+        "Weight and projections", 0, onClose, rightDp = WEIGHT_AXIS_DP, refreshing = refreshing, onRefresh = onRefresh,
         overlay = {
             selected?.let { date -> FloatingDetail({ selected = null }) { WeightDetail(d, chart, unit, date) } }
         },

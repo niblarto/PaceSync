@@ -48,8 +48,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import android.content.Context
 import androidx.compose.ui.platform.LocalContext
+import com.pacesync.app.R
 import com.pacesync.app.health.NutritionSync
 import com.pacesync.app.network.CoachApi
+import com.pacesync.app.ui.common.ScrollingBackground
 import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.CoachMemory
 import com.pacesync.app.network.dto.CoachMessage
@@ -112,9 +114,11 @@ fun CoachScreen(coachApi: CoachApi, api: PaceSyncApi) {
 
     LaunchedEffect(Unit) { sync() }
 
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    // The image scrolls with whichever tab's list is being dragged (nested scroll), as on the other tabs.
+    ScrollingBackground(imageRes = R.drawable.apk_background, dim = 0.82f) { bgModifier ->
+    Column(bgModifier.fillMaxSize()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TabRow(selectedTabIndex = tab, modifier = Modifier.weight(1f)) {
+            TabRow(selectedTabIndex = tab, modifier = Modifier.weight(1f), containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)) {
                 listOf("Chat", "Report", "Memory").forEachIndexed { i, label ->
                     Tab(selected = tab == i, onClick = { tab = i }, text = { Text(label) })
                 }
@@ -140,6 +144,7 @@ fun CoachScreen(coachApi: CoachApi, api: PaceSyncApi) {
             1 -> ReportTab(coachApi, sync) { msg -> queued = msg; tab = 0 }
             else -> MemoryTab(coachApi)
         }
+    }
     }
 }
 
@@ -200,7 +205,10 @@ private fun ChatTab(coachApi: CoachApi, queued: String?, sync: suspend () -> Uni
     }
 
     Column(Modifier.fillMaxSize().imePadding()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)).padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(model, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.weight(1f))
             if (confirmNew) {
                 TextButton(onClick = {
@@ -244,7 +252,10 @@ private fun ChatTab(coachApi: CoachApi, queued: String?, sync: suspend () -> Uni
 
         error?.let { Text(it, color = Color(0xFFF87171), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 12.dp)) }
 
-        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)).padding(8.dp),
+            verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
@@ -274,7 +285,7 @@ private fun Bubble(m: CoachMessage) {
             Modifier
                 .widthIn(max = 340.dp)
                 .clip(RoundedCornerShape(16.dp))
-                .background(if (mine) Color(0x4010B981) else MaterialTheme.colorScheme.surfaceVariant)
+                .background(if (mine) Color(0x4010B981) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.88f))
                 .padding(12.dp),
         ) {
             if (mine) Text(m.content, style = MaterialTheme.typography.bodyMedium) else CoachMarkdown(m.content)
@@ -368,7 +379,7 @@ private fun ReportTab(coachApi: CoachApi, sync: suspend () -> Unit, onDiscuss: (
                         }
                     }
                 }
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.88f))) {
                     Box(Modifier.padding(12.dp)) { CoachMarkdown(r.content) }
                 }
                 if (idx == 0) {
@@ -407,7 +418,7 @@ private fun MemoryTab(coachApi: CoachApi) {
         if (summarising) item { Text("Saving the last conversation to memory…", color = VIOLET, style = MaterialTheme.typography.bodySmall) }
         if (memories?.isEmpty() == true) item { Text("Nothing saved yet.", color = MaterialTheme.colorScheme.secondary) }
         items(memories ?: emptyList(), key = { it.id }) { m ->
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.88f))) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(memoryDate(m.dateId), style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
