@@ -7,6 +7,7 @@ import { resolveByIsrc } from "@/lib/track-enrich";
 import { addTracksToLibrary } from "@/lib/library-add";
 import { healActiveCsv } from "@/lib/csv-heal";
 import { cronNotify } from "@/lib/cron-notify";
+import { parseBpmSpec, type BpmSpecResult } from "@/lib/bpm-spec";
 import { getFreshToken } from "@/lib/tokenStore";
 
 // Song Crawler as a server-side background job (Settings > Tracklist).
@@ -19,7 +20,6 @@ import { getFreshToken } from "@/lib/tokenStore";
 // reload; a server restart ends a running crawl (reported as interrupted).
 
 const DOUBLETIME_THRESHOLD = 95; // mirrors MixPaceChart / replace-candidates
-const BPM_TOLERANCE = 1;
 export const DEFAULT_MAX_ARTISTS = 50;
 export const MAX_ARTISTS_CAP = 2000;
 const RADIO_LIMIT = 25;
@@ -44,10 +44,47 @@ interface LinkTrack { id: string; uri: string; name: string; artist: string; dur
 
 // open.spotify.com/album/<id> or /playlist/<id> (any ?si=… is ignored), or
 // spotify:album:<id> / spotify:playlist:<id>.
-export function parseSpotifyLink(link: string | undefined): { kind: "album" | "playlist"; id: string } | null {
+export function parseSpotifyLink(link: string | undefined): { kind: "album" | "playlist" | "artist"; id: string } | null {
   if (!link) return null;
-  const m = link.trim().match(/(?:open\.spotify\.com\/(?:intl-[a-z]+\/)?|spotify:)(album|playlist)[/:]([A-Za-z0-9]{10,})/);
-  return m ? { kind: m[1] as "album" | "playlist", id: m[2] } : null;
+  const m = link.trim().match(/(?:open\.spotify\.com\/(?:intl-[a-z]+\/)?|spotify:)(album|playlist|artist)[/:]([A-Za-z0-9]{10,})/);
+  return m ? { kind: m[1] as "album" | "playlist" | "artist", id: m[2] } : null;
+}
+
+// An artist link names one specific artist. Spotify and Deezer artist ids
+// don't map to each other, and several Deezer artists can share a name, so
+// the link's artist is read from Spotify's public embed page (no login) —
+// name plus top-track titles — and the matching Deezer artist is picked by
+// those titles (see findArtist in runCrawl). oEmbed gives just the name if
+// the embed page can't be read.
+async function fetchSpotifyArtist(id: string): Promise<{ name: string; topTitles: string[] } | null> {
+  try {
+    const res = await fetch(`https://open.spotify.com/embed/artist/${id}`, {
+      headers: { "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36" },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (res.ok) {
+      const html = await res.text();
+      const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+      if (m) {
+        const data = JSON.parse(m[1]) as { props?: { pageProps?: { state?: { data?: { entity?: {
+          name?: string; title?: string; trackList?: { title?: string }[];
+        } } } } } };
+        const entity = data.props?.pageProps?.state?.data?.entity;
+        const name = (entity?.name ?? entity?.title)?.trim();
+        if (name) return { name, topTitles: (entity?.trackList ?? []).map(t => t.title ?? "").filter(Boolean) };
+      }
+    }
+  } catch { /* fall through to oEmbed */ }
+  try {
+    const res = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(`https://open.spotify.com/artist/${id}`)}`, {
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    const d = await res.json() as { title?: string };
+    return d.title?.trim() ? { name: d.title.trim(), topTitles: [] } : null;
+  } catch {
+    return null;
+  }
 }
 
 // Fallback for playlists the Spotify API won't list: Spotify's public embed
@@ -162,10 +199,14 @@ function resolveSources(p: CrawlParams): CrawlSources {
 
 export interface CrawlParams {
   artist: string;
-  /** open.spotify.com album or playlist link — its tracks are BPM-checked
+  /** open.spotify.com artist link (crawls that artist), or album / playlist
+      link — its tracks are BPM-checked
       directly, and its artists join the typed artist as starting points
       for radio / related. */
   link?: string;
+  /** "120-122", "121,145,167" or a mix — see lib/bpm-spec.ts. Supersedes
+      bpm / bpmMin+bpmMax, which older clients (the Android app) still send. */
+  bpmSpec?: string;
   bpm?: number;
   bpmMin?: number;
   bpmMax?: number;
@@ -283,16 +324,25 @@ export function requestStopCrawl(): boolean {
   return true;
 }
 
+// The effective-BPM bands a crawl accepts, from bpmSpec or the legacy fields.
+function crawlBands(p: CrawlParams): BpmSpecResult {
+  if (p.bpmSpec?.trim()) return parseBpmSpec(p.bpmSpec);
+  if (p.bpmMin && p.bpmMax && p.bpmMin > 0 && p.bpmMax >= p.bpmMin) return parseBpmSpec(`${p.bpmMin}-${p.bpmMax}`);
+  if (p.bpm && p.bpm > 0) return parseBpmSpec(String(p.bpm));
+  return { ok: false, error: "a bpm, range or list of bpms is required" };
+}
+
 export function startCrawl(params: CrawlParams): { ok: true; id: string } | { ok: false; error: string } {
   load();
   if (isCrawlRunning()) return { ok: false, error: "A crawl is already running — stop it first." };
-  const isRange = !!params.bpmMin && !!params.bpmMax && params.bpmMin > 0 && params.bpmMax >= params.bpmMin;
+  const bandsRes = crawlBands(params);
   if (params.link?.trim() && !parseSpotifyLink(params.link)) {
-    return { ok: false, error: "Album / Playlist must be an open.spotify.com album or playlist link" };
+    return { ok: false, error: "The link must be an open.spotify.com artist, album or playlist link" };
   }
-  if ((!params.artist?.trim() && !params.link?.trim()) || (!isRange && !(params.bpm && params.bpm > 0))) {
-    return { ok: false, error: "an artist or an album/playlist link, and a bpm (or bpmMin/bpmMax range), are required" };
+  if (!params.artist?.trim() && !params.link?.trim()) {
+    return { ok: false, error: "an artist or an album/playlist link is required" };
   }
+  if (!bandsRes.ok) return { ok: false, error: `BPM: ${bandsRes.error}` };
   store.stopRequested = false;
   // Songs from earlier crawls not yet accepted or deleted carry over — the
   // list is a review queue that persists across crawls. Ones no longer in
@@ -319,13 +369,30 @@ export function startCrawl(params: CrawlParams): { ok: true; id: string } | { ok
 async function runCrawl(job: CrawlJob) {
   const p = job.params;
   const maxArtists = Math.min(Math.max(Math.round(Number(p.maxArtists) || DEFAULT_MAX_ARTISTS), 1), MAX_ARTISTS_CAP);
-  const isRange = !!p.bpmMin && !!p.bpmMax && p.bpmMin > 0 && p.bpmMax >= p.bpmMin;
-  const lo = isRange ? effective(p.bpmMin!) : effective(p.bpm!) - BPM_TOLERANCE;
-  const hi = isRange ? effective(p.bpmMax!) : effective(p.bpm!) + BPM_TOLERANCE;
-  const targetLabel = isRange ? `${Math.round(lo)}–${Math.round(hi)} BPM` : `${Math.round(effective(p.bpm!))} BPM (±${BPM_TOLERANCE})`;
+  const bandsRes = crawlBands(p);
+  const bands = bandsRes.ok ? bandsRes.bands : [];
+  const inBands = (eff: number) => bands.some(b => eff >= b.lo && eff <= b.hi);
+  const targetLabel = `${bandsRes.ok ? bandsRes.label : "?"} BPM`;
   const stopped = () => store.stopRequested;
-  const artist = (p.artist ?? "").trim();
-  const linkRef = parseSpotifyLink(p.link);
+  let artist = (p.artist ?? "").trim();
+  // Top-track titles of the artist a pasted artist link points at — used to
+  // pick the right Deezer artist when several share the name.
+  let artistHintTitles: string[] = [];
+  const parsedLink = parseSpotifyLink(p.link);
+  // Artist links name the artist to crawl; only album / playlist links have tracks.
+  const linkRef = parsedLink && parsedLink.kind !== "artist" ? { kind: parsedLink.kind, id: parsedLink.id } : null;
+  if (parsedLink?.kind === "artist") {
+    const linked = await fetchSpotifyArtist(parsedLink.id);
+    const name = linked?.name;
+    if (!linked || !name) {
+      log("Couldn't read the artist's name from that Spotify link", "error");
+      return finish(job, "done");
+    }
+    if (artist && artist.toLowerCase() !== name.toLowerCase()) log(`Using the linked artist "${name}" instead of the typed "${artist}"`, "warn");
+    artist = name;
+    artistHintTitles = linked.topTitles;
+    job.linkName = name;
+  }
   const src = resolveSources(p);
   const doCatalogue = src.artist;
   const spreads = src.radio || src.related;
@@ -357,11 +424,25 @@ async function runCrawl(job: CrawlJob) {
 
   // Seed: exact (case-insensitive) artist-name match, same rule as
   // lib/deezer-artist-top.ts so "Hybrid" never becomes "Hybrid Minds".
-  const findArtist = async (name: string) => {
-    const found = await deezer<{ data?: { id: number; name: string }[] }>(`/search/artist?q=${encodeURIComponent(name)}&limit=25`);
-    return found?.data?.find(a => a.name.trim().toLowerCase() === name.trim().toLowerCase()) ?? null;
+  // With hintTitles (from a pasted Spotify artist link), several same-named
+  // Deezer artists are told apart by how many of the Spotify artist's top
+  // tracks appear in theirs; no match falls back to the most-followed.
+  const findArtist = async (name: string, hintTitles: string[] = []) => {
+    const found = await deezer<{ data?: { id: number; name: string; nb_fan?: number }[] }>(`/search/artist?q=${encodeURIComponent(name)}&limit=25`);
+    const matches = (found?.data ?? []).filter(a => a.name.trim().toLowerCase() === name.trim().toLowerCase());
+    if (matches.length <= 1 || hintTitles.length === 0) return matches[0] ?? null;
+    const norm = (t: string) => t.toLowerCase().replace(/\s*[([-].*$/, "").replace(/[^a-z0-9À-￿]+/g, " ").trim();
+    const wanted = new Set(hintTitles.map(norm).filter(Boolean));
+    let best = { artist: matches[0], score: -1 };
+    for (const cand of matches) {
+      const top = await deezer<{ data?: { title: string }[] }>(`/artist/${cand.id}/top?limit=50`);
+      const score = (top?.data ?? []).filter(t => wanted.has(norm(t.title))).length;
+      if (score > best.score || (score === best.score && (cand.nb_fan ?? 0) > (best.artist.nb_fan ?? 0))) best = { artist: cand, score };
+    }
+    log(`${matches.length} Deezer artists are called "${name}" — picked the one (${best.artist.nb_fan?.toLocaleString() ?? "?"} fans) sharing ${Math.max(best.score, 0)} of the linked artist's top tracks`);
+    return best.artist;
   };
-  const seed = artist ? await findArtist(artist) : null;
+  const seed = artist ? await findArtist(artist, artistHintTitles) : null;
   if (artist && !seed) log(`No exact Deezer artist match for "${artist}"`, "warn");
 
   // Album / playlist link: its tracks, read from Spotify.
@@ -440,7 +521,7 @@ async function runCrawl(job: CrawlJob) {
     if (tempo == null) { log(`  ${label}: no BPM available`); return; }
 
     const eff = effRounded(tempo);
-    if (!(eff >= lo && eff <= hi)) { log(`  ${label}: ${bpmLabel(tempo)}`); return; }
+    if (!inBands(eff)) { log(`  ${label}: ${bpmLabel(tempo)}`); return; }
 
     if (!isrc) { log(`  ${label}: ${Math.round(tempo)} BPM matches, but no ISRC to resolve on Spotify`, "warn"); return; }
     if (!resolved) resolved = await resolveByIsrc(isrc).catch(() => null);
@@ -518,7 +599,7 @@ async function runCrawl(job: CrawlJob) {
         if (knownUris.has(t.uri) || (f?.isrc && knownIsrcs.has(f.isrc))) { log(`  ${label}: already in library`); continue; }
         if (f?.tempo == null) { log(`  ${label}: no BPM available`); continue; }
         const tempo = f.tempo;
-        if (!(effRounded(tempo) >= lo && effRounded(tempo) <= hi)) { log(`  ${label}: ${bpmLabel(tempo)}`); continue; }
+        if (!inBands(effRounded(tempo))) { log(`  ${label}: ${bpmLabel(tempo)}`); continue; }
         const result = await addTracksToLibrary([{
           uri: t.uri, isrc: f.isrc, name: t.name, artist: t.artist, tempo,
           key: f.key, mode: f.mode, energy: f.energy, danceability: f.danceability, valence: f.valence,
@@ -633,7 +714,8 @@ async function finish(job: CrawlJob, outcome: "done" | "stopped") {
   persist(true);
 
   const p = job.params;
-  const bpm = p.bpmMin && p.bpmMax ? `${p.bpmMin}–${p.bpmMax}` : `${p.bpm}`;
+  const bpmRes = crawlBands(p);
+  const bpm = bpmRes.ok ? bpmRes.label : `${p.bpm}`;
   const mins = Math.round((Date.parse(job.finishedAt) - Date.parse(job.startedAt)) / 60000);
   const s = resolveSources(p);
   const scopeNote = s.radio || s.related ? `artist ${job.crawled} of ${job.totalArtists}` : "artist's own tracks";

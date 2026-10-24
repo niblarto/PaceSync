@@ -330,6 +330,7 @@ FILES = [
     ('app/api/tracks/replace-candidates-budget/route.ts', 'app/api/tracks/replace-candidates-budget/route.ts'),
     ('app/api/tracks/song-crawler/route.ts',     'app/api/tracks/song-crawler/route.ts'),
     ('lib/song-crawler.ts',                        'lib/song-crawler.ts'),
+    ('lib/bpm-spec.ts',                            'lib/bpm-spec.ts'),
     ('lib/library-delete.ts',                      'lib/library-delete.ts'),
     ('lib/rest-day-mix.ts',                        'lib/rest-day-mix.ts'),
     ('lib/rest-day-mix-shared.ts',                 'lib/rest-day-mix-shared.ts'),

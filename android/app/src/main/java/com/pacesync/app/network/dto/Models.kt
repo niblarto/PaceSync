@@ -412,9 +412,8 @@ data class CrawlSources(val artist: Boolean, val radio: Boolean, val related: Bo
 data class StartCrawlRequest(
     val artist: String,
     val link: String? = null,
-    val bpm: Double? = null,
-    val bpmMin: Double? = null,
-    val bpmMax: Double? = null,
+    // "170", a range "120-122", or exact matches "121,145,167" (lib/bpm-spec.ts).
+    val bpmSpec: String,
     val maxArtists: Int,
     val sources: CrawlSources,
     val reviewLimit: Int? = null,
@@ -436,6 +435,7 @@ data class CrawlAddedTrack(val uri: String, val name: String, val artist: String
 data class CrawlParamsDto(
     val artist: String = "",
     val link: String? = null,
+    val bpmSpec: String? = null,
     val bpm: Double? = null,
     val bpmMin: Double? = null,
     val bpmMax: Double? = null,

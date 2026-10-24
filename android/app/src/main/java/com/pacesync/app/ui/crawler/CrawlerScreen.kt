@@ -84,8 +84,13 @@ fun CrawlerScreen(api: PaceSyncApi) {
 
     var artist by remember { mutableStateOf(prefs.getString("artist", "") ?: "") }
     var link by remember { mutableStateOf(prefs.getString("link", "") ?: "") }
-    var bpm by remember { mutableStateOf(prefs.getString("bpm", "") ?: "") }
-    var bpmMax by remember { mutableStateOf(prefs.getString("bpmMax", "") ?: "") }
+    // "170", a range "120-122", or exact matches "121,145,167". Older saves kept
+    // a range's top in a separate "bpmMax" pref.
+    var bpm by remember {
+        val b = prefs.getString("bpm", "") ?: ""
+        val m = prefs.getString("bpmMax", "") ?: ""
+        mutableStateOf(if (b.isNotBlank() && (m.toDoubleOrNull() ?: 0.0) > (b.toDoubleOrNull() ?: 0.0)) "$b-$m" else b)
+    }
     var maxArtists by remember { mutableStateOf(prefs.getString("maxArtists", "50") ?: "50") }
     var reviewLimit by remember { mutableStateOf(prefs.getString("reviewLimit", "") ?: "") }
     var srcArtist by remember { mutableStateOf(prefs.getBoolean("srcArtist", false)) }
@@ -95,7 +100,7 @@ fun CrawlerScreen(api: PaceSyncApi) {
     fun saveInputs() {
         prefs.edit()
             .putString("artist", artist).putString("link", link)
-            .putString("bpm", bpm).putString("bpmMax", bpmMax).putString("maxArtists", maxArtists).putString("reviewLimit", reviewLimit)
+            .putString("bpm", bpm).remove("bpmMax").putString("maxArtists", maxArtists).putString("reviewLimit", reviewLimit)
             .putBoolean("srcArtist", srcArtist).putBoolean("srcRadio", srcRadio).putBoolean("srcRelated", srcRelated)
             .apply()
     }
@@ -136,10 +141,8 @@ fun CrawlerScreen(api: PaceSyncApi) {
     }
 
     fun start() {
-        val b = bpm.toDoubleOrNull()
-        val bMax = bpmMax.toDoubleOrNull()?.takeIf { b != null && it > b }
-        if ((artist.isBlank() && link.isBlank()) || b == null || b <= 0) {
-            message = "Enter an artist or an album/playlist link, and a BPM"
+        if ((artist.isBlank() && link.isBlank()) || !bpmSpecValid(bpm)) {
+            message = "Enter an artist or an album/playlist link, and a BPM (170, 120-122 or 121,145,167)"
             return
         }
         if (!srcArtist && !srcRadio && !srcRelated && link.isBlank()) {
@@ -152,9 +155,7 @@ fun CrawlerScreen(api: PaceSyncApi) {
             val req = StartCrawlRequest(
                 artist = artist.trim(),
                 link = link.trim().ifBlank { null },
-                bpm = if (bMax == null) b else null,
-                bpmMin = if (bMax != null) b else null,
-                bpmMax = bMax,
+                bpmSpec = bpm.trim(),
                 maxArtists = maxArtists.toIntOrNull()?.takeIf { it > 0 } ?: 50,
                 sources = CrawlSources(srcArtist, srcRadio, srcRelated),
                 reviewLimit = reviewLimit.toIntOrNull()?.takeIf { it > 0 },
@@ -213,19 +214,16 @@ fun CrawlerScreen(api: PaceSyncApi) {
                     )
                     OutlinedTextField(
                         value = link, onValueChange = { link = it }, enabled = !running,
-                        label = { Text("Album / Playlist (Spotify link)") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                        isError = link.isNotBlank() && !Regex("open\\.spotify\\.com/(?:intl-[a-z]+/)?(album|playlist)/|spotify:(album|playlist):").containsMatchIn(link),
+                        label = { Text("Artist / Album / Playlist (Spotify link)") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        isError = link.isNotBlank() && !Regex("open\\.spotify\\.com/(?:intl-[a-z]+/)?(album|playlist|artist)/|spotify:(album|playlist|artist):").containsMatchIn(link),
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             value = bpm, onValueChange = { bpm = it }, enabled = !running,
-                            label = { Text("BPM") }, singleLine = true, modifier = Modifier.weight(1f),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        )
-                        OutlinedTextField(
-                            value = bpmMax, onValueChange = { bpmMax = it }, enabled = !running,
-                            label = { Text("Max") }, singleLine = true, modifier = Modifier.weight(1f),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            label = { Text("BPM") }, singleLine = true, modifier = Modifier.weight(2f),
+                            placeholder = { Text("170 · 120-122 · 121,145,167") },
+                            isError = bpm.isNotBlank() && !bpmSpecValid(bpm),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                         )
                         OutlinedTextField(
                             value = maxArtists, onValueChange = { maxArtists = it },
@@ -282,8 +280,9 @@ fun CrawlerScreen(api: PaceSyncApi) {
                     "interrupted" -> "Last crawl (interrupted)"; else -> "Last crawl"
                 }
                 val what = listOfNotNull(j.params.artist.ifBlank { null }, j.linkName).joinToString(" + ")
-                val bpmText = if (j.params.bpmMin != null && j.params.bpmMax != null)
-                    "${j.params.bpmMin.toInt()}–${j.params.bpmMax.toInt()}" else "${j.params.bpm?.toInt() ?: ""}"
+                val bpmText = j.params.bpmSpec?.takeIf { it.isNotBlank() }
+                    ?: if (j.params.bpmMin != null && j.params.bpmMax != null)
+                        "${j.params.bpmMin.toInt()}–${j.params.bpmMax.toInt()}" else "${j.params.bpm?.toInt() ?: ""}"
                 val parts = listOfNotNull(
                     "$label: $what",
                     "$bpmText BPM",
@@ -369,5 +368,18 @@ fun CrawlerScreen(api: PaceSyncApi) {
             }
             Spacer(Modifier.width(1.dp).height(8.dp))
         }
+    }
+}
+
+// Mirrors lib/bpm-spec.ts: comma-separated BPMs and/or low-high ranges.
+private val BPM_SPEC_PART = Regex("""\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)?""")
+
+private fun bpmSpecValid(spec: String): Boolean {
+    val parts = spec.split(',', ';').map { it.trim() }.filter { it.isNotEmpty() }
+    if (parts.isEmpty()) return false
+    return parts.all { part ->
+        if (!BPM_SPEC_PART.matches(part)) return@all false
+        val nums = part.split(Regex("[-–—]")).mapNotNull { it.trim().toDoubleOrNull() }
+        nums.isNotEmpty() && nums.all { it > 0 } && (nums.size < 2 || nums[1] >= nums[0])
     }
 }
