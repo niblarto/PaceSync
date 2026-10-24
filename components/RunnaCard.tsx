@@ -3,6 +3,8 @@
 import { useState, useEffect, useMemo, useRef, forwardRef, useImperativeHandle } from "react";
 import { FortnightFacts } from "./FortnightFacts";
 import { ScheduleBriefPanel } from "./ScheduleBriefPanel";
+import { TrainingReadinessLine } from "./TrainingReadinessLine";
+import { BodyBatteryLine } from "./BodyBatteryLine";
 import Link from "next/link";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 import type { TrackWithBPM } from "@/types";
@@ -1680,7 +1682,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
 
       {!loading && !error && workouts.length > 0 && (
         <div ref={scrollRef} className="overflow-y-auto max-h-[700px] no-scrollbar divide-y divide-white/10">
-          {workouts.map(w => {
+          {workouts.map((w, wi) => {
             const meta = TYPE_META[w.type];
             const isOpen = expanded === w.uid;
             const isRun = w.type !== "strength" && w.type !== "rest";
@@ -1758,6 +1760,9 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                         {weather[w.date].windMph}mph · at {weather[w.date].sampledAt}
                       </p>
                     )}
+                    {/* Only the first item in the list (today's or the next one, even a rest day) */}
+                    {wi === 0 && garminConfigured && <TrainingReadinessLine />}
+                    {wi === 0 && garminConfigured && <BodyBatteryLine />}
                     <div className="space-y-0">
                       {(() => {
                         // Saved Pace Pro splits replace the mixed segments

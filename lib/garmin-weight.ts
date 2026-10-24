@@ -64,6 +64,29 @@ function db() {
   return d;
 }
 
+// A GET against Garmin Connect's own API (connectapi.garmin.com) with the same
+// sign-in as the weigh-in sync: for data the Personal API doesn't offer, such as
+// Training Readiness. Unofficial, so it can change without notice.
+export async function garminConnectGet<T>(path: string): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
+  const tokens = loadTokens();
+  if (!tokens) return { ok: false, error: "Garmin sign-in not found (is GarminDB set up?)" };
+  const get = (token: string) => fetch(`https://connectapi.garmin.com${path}`, {
+    headers: { Authorization: `Bearer ${token}` }, cache: "no-store", signal: AbortSignal.timeout(20_000),
+  });
+  try {
+    let res = await get(tokens.di_token);
+    if (res.status === 401 || res.status === 403) {
+      const fresh = await refreshDiToken(tokens);
+      if (!fresh) return { ok: false, error: "Garmin sign-in expired and couldn't be renewed" };
+      res = await get(fresh);
+    }
+    if (!res.ok) return { ok: false, error: `Garmin request failed (${res.status})` };
+    return { ok: true, data: await res.json() as T };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Garmin request failed" };
+  }
+}
+
 // When weigh-ins were last fetched from Garmin Connect (ISO), if ever.
 export function lastGarminWeightFetch(): string | null {
   const row = db().prepare("SELECT MAX(fetched_at) AS at FROM garmin_weights").get() as { at: string | null };
