@@ -1,4 +1,4 @@
-import { loadBpmOverrides, RUN_KINDS } from "./bpm-overrides";
+import { loadBpmOverrides, kindBpmRange, RUN_KINDS } from "./bpm-overrides";
 
 const DOUBLETIME_THRESHOLD = 95;
 
@@ -10,13 +10,7 @@ const DOUBLETIME_THRESHOLD = 95;
 // are expected to have a max set.
 export function libraryBpmRange(): { min: number; max: number } {
   const overrides = loadBpmOverrides();
-  const bounds = RUN_KINDS.map(kind => {
-    const o = overrides[kind];
-    return {
-      min: typeof o?.min === "number" ? o.min : 0,
-      max: typeof o?.max === "number" ? o.max : Infinity,
-    };
-  });
+  const bounds = RUN_KINDS.map(kind => kindBpmRange(overrides, kind));
   return {
     min: Math.min(...bounds.map(b => b.min)),
     max: Math.max(...bounds.map(b => b.max)),

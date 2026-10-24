@@ -4,7 +4,7 @@ import { authOptions } from "@/lib/auth";
 import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
 import { readAllTracks } from "@/lib/tracks-store";
 import { getPlayedCounts } from "@/lib/todays-run-history";
-import { loadBpmOverrides, RUN_KINDS } from "@/lib/bpm-overrides";
+import { loadBpmOverrides, kindBpmRange, RUN_KINDS } from "@/lib/bpm-overrides";
 
 // Reports how much of the library falls within a BPM range the AI DJ mixer
 // could actually pick a track for. Each run kind (warmup/work/easy/cooldown
@@ -52,12 +52,7 @@ export async function GET() {
     // (min, max) per kind — no override falls back to no bound (0, Infinity),
     // except "work" which has no Settings override at all and gets the
     // assumed 180 ceiling described above.
-    const kindBounds = RUN_KINDS.map(kind => {
-      const o = overrides[kind];
-      const min = typeof o?.min === "number" ? o.min : 0;
-      const max = typeof o?.max === "number" ? o.max : Infinity;
-      return { min, max };
-    });
+    const kindBounds = RUN_KINDS.map(kind => kindBpmRange(overrides, kind));
     const isInAnyKindRange = (bpm: number): boolean =>
       kindBounds.some(b => bpm >= b.min && bpm <= b.max);
 

@@ -1098,6 +1098,12 @@ export function GarminActivityClient({ id }: { id: string }) {
                         ) : (
                           <span className="flex-1 min-w-0 truncate">{t.name} <span className="opacity-60">— {t.artist}</span></span>
                         )}
+                        <span
+                          className="shrink-0 tabular-nums text-slate-400 w-16 text-right"
+                          title={t.tempo != null && t.tempo < 95 ? `${Math.round(t.tempo)} BPM half-time, counts as ${Math.round(t.tempo * 2)}` : "Track BPM"}
+                        >
+                          {t.tempo != null && t.tempo > 0 ? `${Math.round(t.tempo < 95 ? t.tempo * 2 : t.tempo)} BPM` : "—"}
+                        </span>
                         <span className="shrink-0 tabular-nums" title="actual / expected pace per mile">
                           {t.actualPaceSec ? fmtPaceSecs(t.actualPaceSec) : "—"}
                           {t.targetPaceSec ? ` / ${fmtPaceSecs(t.targetPaceSec)}` : ""}

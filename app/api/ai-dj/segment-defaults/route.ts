@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { loadCadenceBuckets, loadKindCadenceBuckets } from "@/lib/ai-dj-mix";
-import { loadBpmOverrides, type RunKind } from "@/lib/bpm-overrides";
+import { loadBpmOverrides, paceBpmKey, PACE_BPM_MIN_SEC, PACE_BPM_MAX_SEC, PACE_BPM_STEP_SEC, type RunKind } from "@/lib/bpm-overrides";
 import { getLastEasyPaceSec } from "@/lib/todays-run-history";
 
 // Advanced AI DJ Mix: the default BPM the mixer would aim for on each
@@ -61,6 +61,12 @@ export async function POST(req: NextRequest) {
     let targetBpm = paceBpm;
     if (targetBpm != null && o?.max != null) targetBpm = Math.min(targetBpm, o.max);
     if (targetBpm != null && o?.min != null) targetBpm = Math.max(targetBpm, o.min);
+    // "Work" paces with a Settings BPM aim at exactly that BPM.
+    if (kind === "work" && paceSec != null && paceSec >= PACE_BPM_MIN_SEC - 2.5 && paceSec <= PACE_BPM_MAX_SEC + 2.5) {
+      const snapped = Math.min(Math.max(Math.round(paceSec / PACE_BPM_STEP_SEC) * PACE_BPM_STEP_SEC, PACE_BPM_MIN_SEC), PACE_BPM_MAX_SEC);
+      const fixed = overrides.paceBpm?.[paceBpmKey(snapped)];
+      if (fixed) { targetBpm = fixed; paceBpm = fixed; }
+    }
     return { segment, kind, paceSec, paceBpm, targetBpm, min: o?.min ?? null, max: o?.max ?? null };
   });
   return NextResponse.json({ defaults });

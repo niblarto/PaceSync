@@ -314,6 +314,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     warmup: { min: "", max: "", sweet: "" }, work: { min: "", max: "", sweet: "" }, easy: { min: "", max: "", sweet: "" },
     cooldown: { min: "", max: "", sweet: "" }, rest: { min: "", max: "", sweet: "" },
   });
+  // Exact BPM per pace ("8:20" -> "172"), replacing the old Work / intervals range.
+  const [paceBpmOv, setPaceBpmOv] = useState<Record<string, string>>({});
   const [bpmOvSaving, setBpmOvSaving] = useState(false);
   const [bpmOvSaved, setBpmOvSaved] = useState(false);
   const [bpmOvError, setBpmOvError] = useState<string | null>(null);
@@ -1901,8 +1903,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   useEffect(() => {
     fetch("/api/settings/bpm-overrides")
       .then(r => r.json())
-      .then((d: { overrides?: Record<string, { min?: number; max?: number; sweet?: number }> }) => {
+      .then((d: { overrides?: Record<string, { min?: number; max?: number; sweet?: number }> & { paceBpm?: Record<string, number> } }) => {
         if (!d.overrides) return;
+        const pace = d.overrides.paceBpm;
+        if (pace) setPaceBpmOv(Object.fromEntries(Object.entries(pace).map(([k, v]) => [k, String(v)])));
         setBpmOv(prev => {
           const next = { ...prev };
           Object.keys(next).forEach(kind => {
@@ -1923,7 +1927,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       const res = await fetch("/api/settings/bpm-overrides", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ overrides: bpmOv }),
+        body: JSON.stringify({ overrides: bpmOv, paceBpm: paceBpmOv }),
       });
       const d = await res.json() as { error?: string };
       if (!res.ok) throw new Error(d.error ?? "Failed to save");
@@ -4237,7 +4241,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         <div>
           <h3 className="font-semibold text-slate-200">Run BPM limits</h3>
           <p className="text-sm text-slate-400 mt-1">
-            Min/max music BPM per run type for AI DJ mixes. Leave blank for automatic
+            Min/max music BPM per run type for AI DJ mixes (work segments at a specific
+            pace use the Pace BPM table below instead). Leave blank for automatic
             cadence matching — anything set here becomes a hard limit.
             Half-time tracks count at double tempo (an 87 BPM track counts as 174).
             Sweet spot is the preferred target within that range — tracks nearest it
@@ -4251,7 +4256,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           </div>
           {([
             ["warmup", "Warm up"],
-            ["work", "Work / intervals"],
             ["easy", "Easy / conversational"],
             ["cooldown", "Cool down"],
             ["rest", "Rest / recovery"],
@@ -4360,6 +4364,48 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               </div>
             );
           })}
+        </div>
+
+        {/* Pace → exact BPM for workout segments at a specific pace (replaces
+            the old Work / intervals range). The mixer snaps a segment's pace
+            to the nearest 5s step; blank steps and paces outside 6:50–8:55
+            fall back to automatic cadence matching. */}
+        <div className="pt-3 border-t border-white/10 space-y-2">
+          <div>
+            <h4 className="text-sm font-medium text-slate-200">Pace BPM</h4>
+            <p className="text-xs text-slate-400 mt-1">
+              The exact BPM for work segments at a specific pace (e.g. 8:20/mi), 6:50–8:55 in 5 second
+              steps. Half-time tracks count at double tempo. Leave blank for automatic cadence matching.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5">
+            {Array.from({ length: 26 }, (_, i) => {
+              const sec = 410 + i * 5;
+              const key = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+              const val = (paceBpmOv[key] ?? "").trim();
+              const bpm = val ? Number(val) : null;
+              const count = bpm !== null && Number.isFinite(bpm) && activeTracksLoaded
+                ? activeTracks.filter(t => [t.bpm, t.bpm * 2, t.bpm / 2].some(v => Math.round(v) === Math.round(bpm))).length
+                : null;
+              return (
+                <div key={key} className="flex items-center gap-3">
+                  <span className="text-sm text-slate-300 w-16 shrink-0">{key}/mi</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={paceBpmOv[key] ?? ""}
+                    onChange={e => { const v = e.target.value; setPaceBpmOv(o => ({ ...o, [key]: v })); setBpmOvSaved(false); }}
+                    placeholder="auto"
+                    className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-green-500"
+                  />
+                  <span className="text-xs text-slate-600">BPM</span>
+                  <span className={`text-xs ${count === 0 ? "text-amber-400/90" : "text-slate-500"}`}>
+                    {count === null ? "" : `${count} track${count === 1 ? "" : "s"}`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         </div>
         {bpmOvError && <p className="text-sm text-red-400">{bpmOvError}</p>}
         <button

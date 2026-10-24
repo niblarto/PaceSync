@@ -15,7 +15,40 @@ const KEY = "bpm_overrides";
 export type RunKind = "warmup" | "work" | "easy" | "cooldown" | "rest";
 export const RUN_KINDS: RunKind[] = ["warmup", "work", "easy", "cooldown", "rest"];
 
-export type BpmOverrides = Partial<Record<RunKind, { min?: number | null; max?: number | null; sweet?: number | null }>>;
+// "Work" segments don't use min/max/sweet: each pace from 6:50 to 8:55/mi
+// (5s steps) gets one exact BPM, stored as `paceBpm` ("8:20" -> 172) in the
+// same JSON blob. The mixer snaps a segment's pace to the nearest step.
+export const PACE_BPM_MIN_SEC = 410; // 6:50
+export const PACE_BPM_MAX_SEC = 535; // 8:55
+export const PACE_BPM_STEP_SEC = 5;
+
+export function paceBpmKey(sec: number): string {
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+
+export const PACE_BPM_KEYS: string[] = (() => {
+  const keys: string[] = [];
+  for (let s = PACE_BPM_MIN_SEC; s <= PACE_BPM_MAX_SEC; s += PACE_BPM_STEP_SEC) keys.push(paceBpmKey(s));
+  return keys;
+})();
+
+export type BpmOverrides = Partial<Record<RunKind, { min?: number | null; max?: number | null; sweet?: number | null }>> & {
+  paceBpm?: Record<string, number>;
+};
+
+// Usable BPM window for a run kind: its min/max override, or for "work" the
+// span of the per-pace BPMs. Unset sides are 0 / Infinity (no bound).
+export function kindBpmRange(overrides: BpmOverrides, kind: RunKind): { min: number; max: number } {
+  if (kind === "work") {
+    const vals = Object.values(overrides.paceBpm ?? {}).filter(v => Number.isFinite(v) && v > 0);
+    if (vals.length > 0) return { min: Math.min(...vals), max: Math.max(...vals) };
+  }
+  const o = overrides[kind];
+  return {
+    min: typeof o?.min === "number" ? o.min : 0,
+    max: typeof o?.max === "number" ? o.max : Infinity,
+  };
+}
 
 export function loadBpmOverrides(): BpmOverrides {
   const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(KEY) as { value_json: string } | undefined;
