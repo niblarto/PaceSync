@@ -36,6 +36,8 @@ import kotlin.math.min
 
 object NC {
     val eaten = Color(0xFFF59E0B)
+    val eatenLow = Color(0xFFFF0012) // eaten bar while under the daily minimum
+    val eatenLowTip = Color(0xFFEF4444) // its exercise tip, slightly lighter
     val burnt = Color(0xFF38BDF8)
     val exercise = Color(0xFF34D399)
     val netOk = Color(0xFF22C55E)
@@ -44,19 +46,21 @@ object NC {
     val limit = Color(0xFFF87171)
     val target = Color(0xFF34D399)
     val weight = Color(0xFFE2E8F0)
+    val postRun = Color(0xFF22C55E) // a post-run weigh-in
     val axis = Color(0xFF64748B)
     val grid = Color(0x14FFFFFF)
     val avg = Color(0xFFFBBF24)
     fun projection(method: String) = when (method) {
         "trend" -> Color(0xFFA78BFA)
         "energy" -> Color(0xFFF59E0B)
+        "postrun" -> Color(0xFF22C55E)
         else -> Color(0xFF38BDF8)
     }
 }
 
 // Left gutter (y labels) in dp, shared with the full-screen gesture maths.
 const val CAL_LEFT_DP = 44
-const val WEIGHT_LEFT_DP = 56
+const val WEIGHT_AXIS_DP = 56 // gutter on the right for the weight chart's y labels
 
 private val SHORT = DateTimeFormatter.ofPattern("d MMM")
 
@@ -82,6 +86,7 @@ private fun niceStep(range: Double): Double {
 fun CaloriesChart(
     days: List<NutritionDayRow>,
     limit: Double?,
+    minEaten: Double,
     hidden: Set<String>,
     selected: Int?,
     onTap: (Int) -> Unit,
@@ -107,7 +112,10 @@ fun CaloriesChart(
         val left = CAL_LEFT_DP.dp.toPx()
         val bottom = size.height - 20.dp.toPx()
         val top = 8.dp.toPx()
-        val values = days.flatMap { d -> listOfNotNull(d.net, d.eaten, d.exercise, d.burnt) } + listOfNotNull(limit)
+        // eaten − exercise (the bottom of the white tip) can be negative, so it sets the axis too.
+        val values = days.flatMap { d ->
+            listOfNotNull(d.net, d.eaten, d.exercise, d.burnt, if (d.eaten != null && d.exercise != null) d.eaten - d.exercise else null)
+        } + listOfNotNull(limit)
         val hi = (values.maxOrNull() ?: 1000.0).coerceAtLeast(500.0) * 1.08
         val lo = min(0.0, values.minOrNull() ?: 0.0) * 1.08
         fun y(v: Double) = (bottom - (v - lo) / (hi - lo) * (bottom - top)).toFloat()
@@ -133,9 +141,20 @@ fun CaloriesChart(
                 for (s in series) {
                     val v = when (s) { "eaten" -> d.eaten; "exercise" -> d.exercise; else -> d.burnt }
                     if (v != null) {
-                        val color = when (s) { "eaten" -> NC.eaten; "exercise" -> NC.exercise; else -> NC.burnt }
+                        // A day with less than the daily minimum eaten is red (today too, until it's reached).
+                        val under = s == "eaten" && v < minEaten
+                        val color = when (s) { "eaten" -> if (under) NC.eatenLow else NC.eaten; "exercise" -> NC.exercise; else -> NC.burnt }
                         val y0 = y(0.0); val y1 = y(v)
                         drawRect(color, Offset(x, min(y0, y1)), Size(barW, abs(y1 - y0).coerceAtLeast(1f)))
+                        // Exercise burns off part of what was eaten: a white section as tall as
+                        // the exercise bar, with its top level with the eaten bar's top, so
+                        // the yellow below it is eaten − exercise. If exercise is more than
+                        // was eaten, that is negative and the white reaches below zero.
+                        if (s == "eaten" && v > 0 && "exercise" !in hidden) {
+                            val ex = max(d.exercise ?: 0.0, 0.0)
+                            // The tip is white, or a slightly lighter red while under the minimum (still visible on the red bar).
+                            if (ex > 0) drawRect(if (under) NC.eatenLowTip else Color.White, Offset(x, y1), Size(barW, (y(v - ex) - y1).coerceAtLeast(1f)))
+                        }
                     }
                     x += barW
                 }
@@ -148,7 +167,7 @@ fun CaloriesChart(
                 }
                 days.forEachIndexed { i, d ->
                     val v = d.net ?: return@forEachIndexed
-                    val c = if (v > 0) NC.netOver else NC.netOk
+                    val c = if (v > 0 || (d.eaten != null && d.eaten < minEaten)) NC.netOver else NC.netOk
                     if (d.partial) drawCircle(c, 4.dp.toPx(), Offset(cx(i), y(v)), style = Stroke(2.dp.toPx()))
                     else drawCircle(c, 3.5f.dp.toPx(), Offset(cx(i), y(v)))
                 }
@@ -172,7 +191,7 @@ fun CaloriesChart(
 // ── Weight: weigh-ins (last 90 days) + a dashed projection line per method
 // from today's 7-day average, the 7-day average held flat to the goal date,
 // the trend line fitted through the window's weigh-ins, target and goal. ──
-data class ProjLine(val method: String, val kgPerWeek: Double)
+data class ProjLine(val method: String, val kgPerWeek: Double, val anchorKg: Double? = null)
 
 data class TrendFit(val start: LocalDate, val startKg: Double, val end: LocalDate, val endKg: Double)
 
@@ -185,6 +204,8 @@ data class WeightChartData(
     val goalDate: LocalDate?,
     val end: LocalDate,
     val fit: TrendFit? = null,
+    val postWeights: List<Pair<LocalDate, Double>> = emptyList(),
+    val postFit: TrendFit? = null,
 ) {
     val start: LocalDate get() = weights.firstOrNull()?.first ?: today.minusDays(30)
     val totalDays: Float get() = ChronoUnit.DAYS.between(start, end).toFloat().coerceAtLeast(1f)
@@ -192,8 +213,9 @@ data class WeightChartData(
 
 fun projectedKg(d: WeightChartData, line: ProjLine, date: LocalDate): Double {
     val days = ChronoUnit.DAYS.between(d.today, date).toDouble()
-    var kg = d.anchorKg + line.kgPerWeek / 7 * days
-    if (d.targetKg != null && line.kgPerWeek < 0 && d.anchorKg > d.targetKg) kg = max(kg, d.targetKg)
+    val from = line.anchorKg ?: d.anchorKg
+    var kg = from + line.kgPerWeek / 7 * days
+    if (d.targetKg != null && line.kgPerWeek < 0 && from > d.targetKg) kg = max(kg, d.targetKg)
     return kg
 }
 
@@ -213,38 +235,39 @@ fun WeightChart(
     Canvas(
         modifier.pointerInput(data) {
             detectTapGestures { o ->
-                val left = WEIGHT_LEFT_DP.dp.toPx()
-                val frac = ((o.x - left + off) / ((size.width - left) * z)).coerceIn(0f, 1f)
+                val axis = WEIGHT_AXIS_DP.dp.toPx()
+                val frac = ((o.x + off) / ((size.width - axis) * z)).coerceIn(0f, 1f)
                 tap(data.start.plusDays((frac * data.totalDays).toLong()))
             }
         },
     ) {
         val start = data.start
         val totalDays = data.totalDays
-        val left = WEIGHT_LEFT_DP.dp.toPx()
+        val left = 0f
+        val right = size.width - WEIGHT_AXIS_DP.dp.toPx() // the plot ends here; y labels sit to its right
         val bottom = size.height - 20.dp.toPx()
         val top = 8.dp.toPx()
-        val ys = data.weights.map { it.second } + data.lines.flatMap { l -> listOf(data.anchorKg, projectedKg(data, l, data.end)) } +
-            listOfNotNull(data.targetKg, data.fit?.startKg, data.fit?.endKg)
+        val ys = data.weights.map { it.second } + data.postWeights.map { it.second } +
+            data.lines.flatMap { l -> listOf(l.anchorKg ?: data.anchorKg, projectedKg(data, l, data.end)) } +
+            listOfNotNull(data.targetKg, data.fit?.startKg, data.fit?.endKg, data.postFit?.startKg, data.postFit?.endKg)
         val loRaw = ys.minOrNull() ?: 70.0
         val hiRaw = ys.maxOrNull() ?: 90.0
         val pad = max(0.5, (hiRaw - loRaw) * 0.08)
         val lo = loRaw - pad; val hi = hiRaw + pad
-        val plotW = (size.width - left) * zoom
+        val plotW = (right - left) * zoom
         fun x(d: LocalDate) = left + ChronoUnit.DAYS.between(start, d) / totalDays * plotW - offset
         fun y(kg: Double) = (bottom - (kg - lo) / (hi - lo) * (bottom - top)).toFloat()
         val small = labelPaint(NC.axis, 10.dp.toPx())
 
-        for (k in 0..4) {
-            val kg = lo + (hi - lo) * k / 4
-            drawLine(NC.grid, Offset(left, y(kg)), Offset(size.width, y(kg)), 1f)
-            text(weightTick(kg, unit), 2f, y(kg) + 4.dp.toPx(), small)
+        for (kg in weightTickValues(lo, hi, unit)) {
+            drawLine(NC.grid, Offset(left, y(kg)), Offset(right, y(kg)), 1f)
+            text(weightTick(kg, unit), right + 8.dp.toPx(), y(kg) + 4.dp.toPx(), small)
         }
         data.targetKg?.let {
-            drawLine(NC.target, Offset(left, y(it)), Offset(size.width, y(it)), 2f, pathEffect = DASH)
+            drawLine(NC.target, Offset(left, y(it)), Offset(right, y(it)), 2f, pathEffect = DASH)
             text("Target", left + 4.dp.toPx(), y(it) - 4.dp.toPx(), labelPaint(NC.target, 10.dp.toPx()))
         }
-        clipRect(left = left, top = 0f, right = size.width, bottom = size.height) {
+        clipRect(left = left, top = 0f, right = right + 6.dp.toPx(), bottom = size.height) {
             data.goalDate?.let {
                 if (!it.isBefore(start) && !it.isAfter(data.end)) {
                     drawLine(NC.target, Offset(x(it), top), Offset(x(it), bottom), 2f, pathEffect = DOT)
@@ -258,6 +281,10 @@ fun WeightChart(
             data.fit?.let { f ->
                 drawLine(NC.projection("trend").copy(alpha = 0.55f), Offset(x(f.start), y(f.startKg)), Offset(x(f.end), y(f.endKg)), 3f)
             }
+            // Fitted line through the post-run weigh-ins (basis of "Post-run trend").
+            data.postFit?.let { f ->
+                drawLine(NC.postRun.copy(alpha = 0.55f), Offset(x(f.start), y(f.startKg)), Offset(x(f.end), y(f.endKg)), 3f)
+            }
             // 7-day average: solid over the last week, dotted flat to the goal date (no change).
             drawLine(NC.avg, Offset(x(data.today.minusDays(6)), y(data.anchorKg)), Offset(x(data.today), y(data.anchorKg)), 8f)
             val avgEnd = data.goalDate?.takeIf { it.isAfter(data.today) && !it.isAfter(data.end) } ?: data.end
@@ -265,10 +292,11 @@ fun WeightChart(
 
             for (l in data.lines) {
                 val c = NC.projection(l.method)
-                val from = Offset(x(data.today), y(data.anchorKg))
+                val startKg = l.anchorKg ?: data.anchorKg
+                val from = Offset(x(data.today), y(startKg))
                 // A losing line runs to the target, then stays flat on it.
-                val hit = if (data.targetKg != null && l.kgPerWeek < 0 && data.anchorKg > data.targetKg) {
-                    data.today.plusDays(((data.targetKg - data.anchorKg) / (l.kgPerWeek / 7)).toLong())
+                val hit = if (data.targetKg != null && l.kgPerWeek < 0 && startKg > data.targetKg) {
+                    data.today.plusDays(((data.targetKg - startKg) / (l.kgPerWeek / 7)).toLong())
                 } else null
                 if (hit != null && hit.isBefore(data.end)) {
                     val at = Offset(x(hit), y(data.targetKg!!))
@@ -278,7 +306,40 @@ fun WeightChart(
                     drawLine(c, from, Offset(x(data.end), y(projectedKg(data, l, data.end))), 4f, pathEffect = DASH)
                 }
             }
+            // Where each projection meets the goal-date line, and where the 7-day
+            // average (held flat) ends: a dot and its weight, on a dark pill so it
+            // reads over the lines behind it, nudged apart so none overprint.
+            val endMarks = mutableListOf<Triple<Color, Double, LocalDate>>()
+            data.goalDate?.let { g ->
+                if (g.isAfter(data.today) && !g.isAfter(data.end)) {
+                    data.lines.forEach { l -> endMarks += Triple(NC.projection(l.method), projectedKg(data, l, g), g) }
+                }
+            }
+            if (avgEnd.isAfter(data.today)) endMarks += Triple(NC.avg, data.anchorKg, avgEnd)
+            var lastY = -1_000f
+            for ((c, kg, at) in endMarks.sortedByDescending { it.second }) {
+                val px = x(at)
+                val py = y(kg)
+                drawCircle(Color(0xFFF8FAFC), 5.5f.dp.toPx(), Offset(px, py))
+                drawCircle(c, 4.dp.toPx(), Offset(px, py))
+                val ly = max(py, lastY + 22.dp.toPx())
+                lastY = ly
+                val label = weightShort(kg, unit)
+                val paint = labelPaint(Color(0xFFF8FAFC), 12.dp.toPx(), Paint.Align.CENTER).apply { isFakeBoldText = true }
+                val w = paint.measureText(label) + 14.dp.toPx()
+                val h = 18.dp.toPx()
+                val rightEdge = px - 8.dp.toPx()
+                val corner = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx())
+                drawRoundRect(Color(0xF00F172A), Offset(rightEdge - w, ly - h / 2), Size(w, h), corner)
+                drawRoundRect(c, Offset(rightEdge - w, ly - h / 2), Size(w, h), corner, style = Stroke(1.5f.dp.toPx()))
+                text(label, rightEdge - w / 2, ly + 4.5f.dp.toPx(), paint)
+            }
             for ((d, kg) in data.weights) drawCircle(NC.weight, 3.dp.toPx(), Offset(x(d), y(kg)))
+            // Post-run weigh-ins in green.
+            for ((d, kg) in data.postWeights) {
+                drawCircle(Color(0xFF052E16), 4.5f.dp.toPx(), Offset(x(d), y(kg)))
+                drawCircle(NC.postRun, 3.5f.dp.toPx(), Offset(x(d), y(kg)))
+            }
 
             // x labels: every N days so they're ~70dp apart
             val pxPerDay = plotW / totalDays
@@ -286,7 +347,7 @@ fun WeightChart(
             var d = start
             while (!d.isAfter(data.end)) {
                 val cx = x(d)
-                if (cx >= left - 30 && cx <= size.width + 30) {
+                if (cx >= left - 30 && cx <= right + 30) {
                     text(d.format(SHORT), cx, size.height - 4.dp.toPx(), labelPaint(NC.axis, 10.dp.toPx(), Paint.Align.CENTER))
                 }
                 d = d.plusDays(every.toLong())

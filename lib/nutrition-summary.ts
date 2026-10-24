@@ -143,7 +143,7 @@ function dataText(): { text: string; start: string; end: string } {
   });
   const c = dash.config;
   const goals = [
-    `Current weight: ${dash.current ? `${formatWeight(dash.current.kg, unit)} (7-day avg ${formatWeight(dash.current.avg7Kg, unit)})` : "unknown"}`,
+    `Current weight: ${dash.current ? `${formatWeight(dash.current.kg, unit)}${dash.current.postRun ? " (post-run, reads light; latest regular " + formatWeight(dash.current.regularKg, unit) + ")" : ""} (7-day avg ${formatWeight(dash.current.avg7Kg, unit)})` : "unknown"}`,
     `Target weight: ${formatWeight(c.targetWeightKg, unit)}`,
     `Goal date: ${c.goalDate ?? "not set"}`,
     `Daily calorie limit (eaten): ${c.dailyCalorieLimit ?? "not set"} kcal`,

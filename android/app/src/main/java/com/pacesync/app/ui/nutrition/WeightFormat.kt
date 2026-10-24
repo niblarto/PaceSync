@@ -1,6 +1,7 @@
 package com.pacesync.app.ui.nutrition
 
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
@@ -38,13 +39,45 @@ fun formatWeightDelta(kg: Double, unit: String): String {
     return "$sign${"%.1f".format(lb)} lb"
 }
 
-// Short axis label: "13st 2", "185", "84".
+// Short axis label: "13st 2", "185", "84". Stone is rounded to whole pounds
+// first, so a whole stone reads "13st 0", never "12st 14".
 fun weightTick(kg: Double, unit: String): String = when (unit) {
     "kg" -> kg.roundToInt().toString()
     "lb" -> (kg * LB_PER_KG).roundToInt().toString()
     else -> {
-        val lb = kg * LB_PER_KG
-        val st = floor(lb / 14).toInt()
-        "${st}st ${(lb - st * 14).roundToInt()}"
+        val totalLb = (kg * LB_PER_KG).roundToInt()
+        "${totalLb / 14}st ${totalLb % 14}"
     }
+}
+
+// Weight written beside a chart point: "12st 9.5", "185.3 lb", "84.1 kg".
+fun weightShort(kg: Double, unit: String): String = when (unit) {
+    "kg" -> "%.1f kg".format(kg)
+    "lb" -> "%.1f lb".format(kg * LB_PER_KG)
+    else -> {
+        val totalLb = kg * LB_PER_KG
+        var st = floor(totalLb / 14).toInt()
+        var lb = totalLb - st * 14
+        if ("%.1f".format(lb).toDouble() >= 14.0) { st += 1; lb -= 14 }
+        "${st}st ${"%.1f".format(lb)}"
+    }
+}
+
+// Where the weight chart's y axis gets its grid lines and labels (kg). In
+// stone: every half stone (7 lb), so the labels are only ever whole or half
+// stones; every whole stone instead if the range is so big that would crowd.
+// Other units: five even steps.
+fun weightTickValues(lo: Double, hi: Double, unit: String): List<Double> {
+    val even = (0..4).map { lo + (hi - lo) * it / 4 }
+    if (unit != "st") return even
+    val loLb = lo * LB_PER_KG
+    val hiLb = hi * LB_PER_KG
+    val step = if ((hiLb - loLb) / 7.0 > 12) 14.0 else 7.0
+    val ticks = mutableListOf<Double>()
+    var lb = ceil(loLb / step) * step
+    while (lb <= hiLb + 1e-9) {
+        ticks += lb / LB_PER_KG
+        lb += step
+    }
+    return if (ticks.isEmpty()) even else ticks
 }

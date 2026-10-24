@@ -158,6 +158,13 @@ FILES = [
     ('app/api/garmin/route-point/route.ts',       'app/api/garmin/route-point/route.ts'),
     ('lib/saved-routes.ts',                       'lib/saved-routes.ts'),
     ('app/api/garmin/saved-routes/route.ts',      'app/api/garmin/saved-routes/route.ts'),
+    ('lib/coach-brief.ts',                        'lib/coach-brief.ts'),
+    ('app/api/coach/brief/route.ts',              'app/api/coach/brief/route.ts'),
+    ('app/api/cron/coach-brief/route.ts',         'app/api/cron/coach-brief/route.ts'),
+    ('components/BriefBullets.tsx',               'components/BriefBullets.tsx'),
+    ('components/FortnightFacts.tsx',              'components/FortnightFacts.tsx'),
+    ('components/ScheduleBriefPanel.tsx',          'components/ScheduleBriefPanel.tsx'),
+    ('app/api/coach/fortnight/route.ts',           'app/api/coach/fortnight/route.ts'),
     ('app/routes/page.tsx',                      'app/routes/page.tsx'),
     ('components/RoutePlannerClient.tsx',         'components/RoutePlannerClient.tsx'),
     ('hooks/useRouteMap.ts',                      'hooks/useRouteMap.ts'),
@@ -752,6 +759,16 @@ nutrition_cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/nutrition-summary' || {{ (crontab -l 2>/dev/null; echo '{nutrition_cron_line}') | crontab -; }}""")
+
+print('  Ensuring cron job (schedule summary, every 15 min; refreshes it when the Runna plan has changed and the AI DJ service is up)...')
+brief_cron_log = f'/home/{PI["user"]}/cron-coach-brief.log'
+brief_cron_line = (
+    f'*/15 * * * * curl -s -m 60 -o {brief_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/coach-brief '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+# Replaces any older entry, so a changed schedule here takes effect on deploy.
+run(ssh, f"""crontab -l 2>/dev/null | grep -v '/api/cron/coach-brief' | {{ cat; echo '{brief_cron_line}'; }} | crontab -""")
 
 print('  Ensuring cron job (Garmin weigh-ins, hourly)...')
 weight_cron_log = f'/home/{PI["user"]}/cron-garmin-weight.log'

@@ -3,7 +3,7 @@ import path from "path";
 import { getDb } from "@/lib/db";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { getNutritionDays } from "@/lib/nutrition";
-import { getGarminApiWeights, lastGarminWeightFetch } from "@/lib/garmin-weight";
+import { getGarminApiWeights, getGarminWeightSamples, lastGarminWeightFetch } from "@/lib/garmin-weight";
 import { cachedTodayBurn } from "@/lib/garmin-connect";
 import { loadNutritionConfig, type NutritionConfig } from "@/lib/nutrition-config";
 
@@ -37,13 +37,14 @@ export interface DayRow {
 }
 
 export interface Projection {
-  method: "trend" | "energy" | "plan";
+  method: "trend" | "energy" | "plan" | "postrun";
   label: string;
   basis: string; // short explanation of the inputs
   kgPerWeek: number;
   weightAtGoalKg: number | null; // null when there's no goal date
   hitDate: string | null; // when the target is reached at this rate
   hitStatus: "reached" | "on-course" | "never"; // never = wrong direction or > 10 years
+  anchorKg: number; // the weight this projection starts from today
   rawKgPerWeek: number; // the measured rate before the 2 lb/week cap
   capped: boolean; // kgPerWeek was limited to the max loss rate
 }
@@ -52,8 +53,15 @@ export interface NutritionDashboard {
   config: NutritionConfig;
   today: string;
   days: DayRow[]; // chart window, oldest first
-  weights: { date: string; kg: number }[]; // longer history for the weight chart
-  current: { kg: number; date: string; avg7Kg: number; measuredAt: string | null; source: "Garmin" | "Health Connect" } | null;
+  weights: { date: string; kg: number }[]; // longer history for the weight chart (the first weigh-in of each day)
+  postRunWeights: { date: string; kg: number }[]; // weigh-ins taken within 3 hours after a run finished
+  // The latest reading of any kind (so a post-run weigh-in shows as the current weight),
+  // with the 7-day average (regular weigh-ins only) and the latest regular weight.
+  current: {
+    kg: number; date: string; avg7Kg: number; measuredAt: string | null; source: "Garmin" | "Health Connect";
+    postRun: boolean; // the latest reading is a post-run one
+    regularKg: number; regularDate: string; // the latest regular weigh-in
+  } | null;
   averages: {
     eaten: number | null; burnt: number | null; exercise: number | null; deficit: number | null; net: number | null;
     loggedDays: number; windowDays: number;
@@ -64,6 +72,8 @@ export interface NutritionDashboard {
   // The straight line fitted through the weigh-ins in the trend window, so
   // the chart can show where the "Scale trend" projection comes from.
   trendFit: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
+  // The same for the post-run weigh-ins (basis of the "Post-run trend" projection).
+  postRunFit: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
   // When each data source was last refreshed (ISO timestamps).
   sources: {
     garminWeight: string | null; // weigh-ins from Garmin Connect (hourly + page refresh)
@@ -131,6 +141,25 @@ function garminWeights(since: string): Map<string, number> {
   return out;
 }
 
+// When each run started and finished (local wall-clock times, as GarminDB stores them).
+function garminRuns(since: string): { startMs: number; endMs: number }[] {
+  const out: { startMs: number; endMs: number }[] = [];
+  const db = openGarmin("garmin_activities.db");
+  if (!db) return out;
+  try {
+    const rows = db.prepare(
+      "SELECT start_time AS s, elapsed_time AS e FROM activities WHERE LOWER(sport) LIKE '%run%' AND DATE(start_time) >= ?",
+    ).all(since) as { s: string; e: string | null }[];
+    for (const r of rows) {
+      const startMs = new Date(r.s.slice(0, 19).replace(" ", "T")).getTime();
+      const m = (r.e ?? "").match(/^(\d+):(\d+):(\d+(?:\.\d+)?)/);
+      if (isNaN(startMs) || !m) continue;
+      out.push({ startMs, endMs: startMs + (Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])) * 1000 });
+    }
+  } catch {} finally { db.close(); }
+  return out;
+}
+
 function garminExercise(since: string): Map<string, number> {
   const out = new Map<string, number>();
   const db = openGarmin("garmin_activities.db");
@@ -147,8 +176,8 @@ function garminExercise(since: string): Map<string, number> {
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 
 // Least-squares line through the points (y = intercept + slope·x).
-function linearFit(points: { x: number; y: number }[]): { slope: number; intercept: number } | null {
-  if (points.length < 4) return null;
+function linearFit(points: { x: number; y: number }[], minPoints = 4): { slope: number; intercept: number } | null {
+  if (points.length < minPoints) return null;
   const xs = points.map(p => p.x);
   if (Math.max(...xs) - Math.min(...xs) < 7) return null;
   const mx = mean(xs)!;
@@ -184,7 +213,7 @@ function project(
   // Projected weight never goes below the target once it's reached.
   const atGoal = weightAtGoalKg != null && target != null && kgPerDay < 0 && anchorKg > target
     ? Math.max(weightAtGoalKg, target) : weightAtGoalKg;
-  return { method, label, basis, kgPerWeek: kgPerDay * 7, rawKgPerWeek: rawKgPerDay * 7, capped, weightAtGoalKg: atGoal, hitDate, hitStatus };
+  return { method, label, basis, kgPerWeek: kgPerDay * 7, anchorKg, rawKgPerWeek: rawKgPerDay * 7, capped, weightAtGoalKg: atGoal, hitDate, hitStatus };
 }
 
 function dataSources(today: string): NutritionDashboard["sources"] {
@@ -202,6 +231,11 @@ function dataSources(today: string): NutritionDashboard["sources"] {
   try { garminWeight = lastGarminWeightFetch(); } catch {}
   return { garminWeight, todayBurn: burn ? new Date(burn.at).toISOString() : null, food, garminDb };
 }
+
+// Weigh-ins closer together than this are the same weigh-in (a re-weigh).
+const REWEIGH_MS = 20 * 60_000;
+// A weigh-in this soon after a run finishes is a post-run weigh-in.
+const POST_RUN_WINDOW_MS = 3 * 3_600_000;
 
 export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
   const config = { ...loadNutritionConfig() };
@@ -228,9 +262,41 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
   const weightMap = garminWeights(weightSince);
   const apiWeights = getGarminApiWeights(weightSince);
   for (const w of apiWeights) weightMap.set(w.date, w.kg);
+  // Individual weigh-ins. A weigh-in taken within POST_RUN_WINDOW_MS after a run
+  // finished (from the Garmin activities) is post-run: it reads light (sweat), so
+  // it is kept out of the weights, the 7-day average and the Scale trend, and is
+  // plotted and projected on its own. Readings within 20 minutes of each other are
+  // one weigh-in (a re-weigh; the later reading stands). Of the rest, the first
+  // of a day is its weight; later ones are ignored. Where individual readings
+  // exist they replace the day's single value from the older sources, which
+  // could be a post-run reading.
+  const samples = getGarminWeightSamples(weightSince);
+  const runs = garminRuns(weightSince);
+  const samplesByDay = new Map<string, { at: number; kg: number }[]>();
+  for (const s of samples) samplesByDay.set(s.date, [...(samplesByDay.get(s.date) ?? []), { at: Date.parse(s.measuredAt), kg: s.kg }]);
+  const postRunMap = new Map<string, number>();
+  const regularAt = new Map<string, number>();
+  const postRunAt = new Map<string, number>();
+  samplesByDay.forEach((list, date) => {
+    const sessions: { at: number; kg: number }[] = [];
+    for (const r of list) {
+      const prev = sessions[sessions.length - 1];
+      if (prev && r.at - prev.at <= REWEIGH_MS) sessions[sessions.length - 1] = r;
+      else sessions.push(r);
+    }
+    const afterRun = (at: number) => runs.some(run => run.endMs <= at && at - run.endMs <= POST_RUN_WINDOW_MS);
+    const post = sessions.find(x => afterRun(x.at));
+    const regular = sessions.find(x => !afterRun(x.at));
+    weightMap.delete(date);
+    if (regular) { weightMap.set(date, regular.kg); regularAt.set(date, regular.at); }
+    if (post) { postRunMap.set(date, post.kg); postRunAt.set(date, post.at); }
+  });
   const fromGarmin = weightMap.size > 0;
   if (!fromGarmin) nutrition.forEach((d, date) => { if (d.weightKg != null) weightMap.set(date, d.weightKg); });
   const weights = Array.from(weightMap.entries())
+    .map(([date, kg]) => ({ date, kg: Math.round(kg * 1000) / 1000 }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const postRunWeights = Array.from(postRunMap.entries())
     .map(([date, kg]) => ({ date, kg: Math.round(kg * 1000) / 1000 }))
     .sort((a, b) => a.date.localeCompare(b.date));
 
@@ -261,13 +327,26 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
   // Current weight: latest reading, plus the average of readings in the
   // 7 days up to it (smooths daily water swings; used as the projection start).
   const last = weights[weights.length - 1];
-  const current = last
+  // The latest reading overall: a post-run one counts if it is newer than the latest
+  // regular weigh-in (same day: by time; a later day always wins).
+  const lastPost = postRunWeights[postRunWeights.length - 1];
+  const postIsLatest = !!lastPost && (!last
+    || lastPost.date > last.date
+    || (lastPost.date === last.date && (postRunAt.get(lastPost.date) ?? 0) > (regularAt.get(last.date) ?? 0)));
+  const current = last || lastPost
     ? {
-        kg: last.kg,
-        date: last.date,
-        measuredAt: apiWeights.find(w => w.date === last.date)?.measuredAt ?? null,
+        kg: postIsLatest ? lastPost.kg : last.kg,
+        date: postIsLatest ? lastPost.date : last.date,
+        measuredAt: postIsLatest
+          ? new Date(postRunAt.get(lastPost.date) ?? Date.now()).toISOString()
+          : samples.find(s => s.date === last.date)?.measuredAt ?? apiWeights.find(w => w.date === last.date)?.measuredAt ?? null,
         source: fromGarmin ? "Garmin" as const : "Health Connect" as const,
-        avg7Kg: Math.round(mean(weights.filter(w => daysBetween(w.date, last.date) < 7).map(w => w.kg))! * 100) / 100,
+        avg7Kg: last
+          ? Math.round(mean(weights.filter(w => daysBetween(w.date, last.date) < 7).map(w => w.kg))! * 100) / 100
+          : lastPost.kg,
+        postRun: postIsLatest,
+        regularKg: (last ?? lastPost).kg,
+        regularDate: (last ?? lastPost).date,
       }
     : null;
 
@@ -291,6 +370,7 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
   const projections: Projection[] = [];
   let required: NutritionDashboard["required"] = null;
   let trendFit: NutritionDashboard["trendFit"] = null;
+  let postRunFit: NutritionDashboard["postRunFit"] = null;
   if (current) {
     const anchor = current.avg7Kg;
     const trendPts = weights
@@ -304,6 +384,19 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
         startDate: windowStart, startKg: r2(fit.intercept),
         endDate: today, endKg: r2(fit.intercept + fit.slope * daysBetween(windowStart, today)),
       };
+    }
+    // The post-run weigh-ins get their own line, starting from where that line is
+    // today (they read lower than the morning weight, so not from the 7-day average).
+    const postPts = postRunWeights
+      .filter(w => w.date >= windowStart)
+      .map(w => ({ x: daysBetween(windowStart, w.date), y: w.kg }));
+    const postFit = linearFit(postPts, 3);
+    if (postFit) {
+      const r3 = (n: number) => Math.round(n * 1000) / 1000;
+      const startKg = postFit.intercept;
+      const endKg = postFit.intercept + postFit.slope * daysBetween(windowStart, today);
+      postRunFit = { startDate: windowStart, startKg: r3(startKg), endDate: today, endKg: r3(endKg) };
+      projections.push(project("postrun", "Post-run trend", `${postPts.length} post-run weigh-ins over the last ${config.trendDays} days`, postFit.slope, endKg, today, config));
     }
     if (logged.length >= 3) {
       const balance = mean(logged.map(d => d.eaten! - d.burnt!))!;
@@ -333,5 +426,5 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
     }
   }
 
-  return { config, today, days, weights, current, averages, projections, required, trendFit, sources: dataSources(today) };
+  return { config, today, days, weights, postRunWeights, current, averages, projections, required, trendFit, postRunFit, sources: dataSources(today) };
 }

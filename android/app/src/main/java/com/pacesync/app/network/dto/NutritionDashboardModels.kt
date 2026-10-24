@@ -10,6 +10,7 @@ data class NutritionConfigDto(
     val targetWeightKg: Double? = null,
     val goalDate: String? = null,
     val dailyCalorieLimit: Double? = null,
+    val minDailyCalories: Double = 1400.0, // eating less than this in a day shows red
     val weightUnit: String = "st",
     val trendDays: Int = 28,
     val kcalPerKg: Double = 7700.0,
@@ -41,6 +42,8 @@ data class CurrentWeightDto(
     val avg7Kg: Double,
     val measuredAt: String? = null,
     val source: String? = null,
+    val postRun: Boolean = false, // the latest reading is a post-run one
+    val regularKg: Double? = null, // the latest regular (pre-breakfast) weight
 )
 
 @Serializable
@@ -58,7 +61,7 @@ data class NutritionAveragesDto(
 
 @Serializable
 data class ProjectionDto(
-    val method: String, // trend | energy | plan
+    val method: String, // trend | energy | plan | postrun
     val label: String,
     val basis: String,
     val kgPerWeek: Double,
@@ -67,6 +70,7 @@ data class ProjectionDto(
     val hitStatus: String, // reached | on-course | never
     val rawKgPerWeek: Double = 0.0,
     val capped: Boolean = false,
+    val anchorKg: Double? = null, // where this projection starts today (the post-run line starts lower than the 7-day average)
 )
 
 @Serializable
@@ -78,11 +82,13 @@ data class NutritionDashboardDto(
     val today: String,
     val days: List<NutritionDayRow> = emptyList(),
     val weights: List<WeightPoint> = emptyList(),
+    val postRunWeights: List<WeightPoint> = emptyList(), // weigh-ins taken within 3 hours after a run
     val current: CurrentWeightDto? = null,
     val averages: NutritionAveragesDto = NutritionAveragesDto(),
     val projections: List<ProjectionDto> = emptyList(),
     val required: RequiredDto? = null,
     val trendFit: TrendFitDto? = null,
+    val postRunFit: TrendFitDto? = null,
 )
 
 @Serializable

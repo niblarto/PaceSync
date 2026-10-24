@@ -79,9 +79,9 @@ fun PaceSyncApp(container: AppContainer) {
     // or (Pace Chart) deliberately have no header at all to save vertical
     // space on a cramped landscape layout.
     val topBarTitle = when {
-        currentRoute == Dest.Schedule.route -> "Schedule"
-        currentRoute == Dest.Summary.route -> "Summary"
-        currentRoute == Dest.Crawler.route -> "Song Crawler"
+        currentRoute == Dest.Schedule.route -> "🏃 Schedule"
+        currentRoute == Dest.Summary.route -> "✅ Summary"
+        currentRoute == Dest.Crawler.route -> "🔍 Song Crawler"
         currentRoute == Dest.Coach.route -> "🧠 Coach"
         currentRoute == Dest.Nutrition.route -> "🥗 Nutrition"
         currentRoute == Dest.Settings.route -> "Settings"

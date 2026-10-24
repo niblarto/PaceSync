@@ -49,6 +49,15 @@ function db() {
         measured_at TEXT NOT NULL,
         fetched_at TEXT NOT NULL
       );
+      -- Every individual weigh-in (garmin_weights above keeps only the day's
+      -- latest): the first of a day is the usual pre-breakfast reading, a second
+      -- is post-run.
+      CREATE TABLE IF NOT EXISTS garmin_weight_samples (
+        measured_at TEXT PRIMARY KEY,
+        date TEXT NOT NULL,
+        weight_kg REAL NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_garmin_weight_samples_date ON garmin_weight_samples(date);
     `);
     ready = true;
   }
@@ -79,18 +88,31 @@ function ymd(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// All weigh-ins since `since`, oldest first.
+export function getGarminWeightSamples(since: string): { date: string; kg: number; measuredAt: string }[] {
+  return db().prepare(
+    "SELECT date, weight_kg AS kg, measured_at AS measuredAt FROM garmin_weight_samples WHERE date >= ? ORDER BY measured_at",
+  ).all(since) as { date: string; kg: number; measuredAt: string }[];
+}
+
 export type WeightRefreshResult =
   | { ok: true; days: number; latest: { date: string; kg: number } | null }
   | { ok: false; error: string };
 
-// Fetches the last `days` days of weigh-ins and stores the latest one per day.
+// Fetches the last `days` days of weigh-ins and stores every one, plus the latest
+// per day. The first time (no individual weigh-ins stored yet) it reaches back 120
+// days so the charts have their history.
 export async function refreshGarminWeights(days = 30): Promise<WeightRefreshResult> {
   const tokens = loadTokens();
   if (!tokens) return { ok: false, error: "Garmin sign-in not found (is GarminDB set up?)" };
+  const haveSamples = (db().prepare("SELECT COUNT(*) AS n FROM garmin_weight_samples").get() as { n: number }).n > 0;
+  const span = haveSamples ? days : Math.max(days, 120);
   const end = new Date();
   const start = new Date(end);
-  start.setDate(start.getDate() - (days - 1));
-  const url = `https://connectapi.garmin.com/weight-service/weight/dateRange?startDate=${ymd(start)}&endDate=${ymd(end)}`;
+  start.setDate(start.getDate() - (span - 1));
+  // The "range" call with includeAll returns every weigh-in of a day (what Garmin's
+  // own site shows); "dateRange" returns only the latest of each day.
+  const url = `https://connectapi.garmin.com/weight-service/weight/range/${ymd(start)}/${ymd(end)}?includeAll=true`;
   const get = (token: string) => fetch(url, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store", signal: AbortSignal.timeout(20_000) });
 
   let res: Response;
@@ -106,10 +128,14 @@ export async function refreshGarminWeights(days = 30): Promise<WeightRefreshResu
   }
   if (!res.ok) return { ok: false, error: `Garmin weight request failed (${res.status})` };
 
-  const data = await res.json() as { dateWeightList?: WeightSample[] };
+  const data = await res.json() as { dailyWeightSummaries?: { summaryDate?: string; allWeightMetrics?: WeightSample[] }[] };
+  const samples: WeightSample[] = [];
+  for (const day of data.dailyWeightSummaries ?? []) {
+    for (const m of day.allWeightMetrics ?? []) samples.push({ ...m, calendarDate: m.calendarDate || day.summaryDate || "" });
+  }
   // Latest weigh-in per calendar day.
   const byDay = new Map<string, WeightSample>();
-  for (const s of data.dateWeightList ?? []) {
+  for (const s of samples) {
     if (!s.calendarDate || !s.weight) continue;
     const prev = byDay.get(s.calendarDate);
     if (!prev || (s.timestampGMT ?? 0) > (prev.timestampGMT ?? 0)) byDay.set(s.calendarDate, s);
@@ -121,8 +147,16 @@ export async function refreshGarminWeights(days = 30): Promise<WeightRefreshResu
     ON CONFLICT(date) DO UPDATE SET weight_kg = excluded.weight_kg, body_fat = excluded.body_fat,
       measured_at = excluded.measured_at, fetched_at = excluded.fetched_at
   `);
+  const putSample = db().prepare(`
+    INSERT INTO garmin_weight_samples (measured_at, date, weight_kg) VALUES (?, ?, ?)
+    ON CONFLICT(measured_at) DO UPDATE SET date = excluded.date, weight_kg = excluded.weight_kg
+  `);
   let latest: { date: string; kg: number } | null = null;
   db().transaction(() => {
+    for (const s of samples) {
+      if (!s.calendarDate || !s.weight) continue;
+      putSample.run(new Date(s.timestampGMT ?? s.date ?? Date.now()).toISOString(), s.calendarDate, s.weight / 1000);
+    }
     byDay.forEach((s, date) => {
       const kg = s.weight! / 1000; // exact (Garmin records grams)
       upsert.run(date, kg, s.bodyFat ?? null, new Date(s.timestampGMT ?? s.date ?? Date.now()).toISOString(), now);

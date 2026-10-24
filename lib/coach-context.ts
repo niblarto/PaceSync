@@ -545,7 +545,8 @@ function nutritionSection(n: NutritionDashboard | null): string[] {
   const u = c.weightUnit;
   const lines = ["## Weight & nutrition (food from Lose It!, burn and weigh-ins from Garmin)"];
   if (n.current) {
-    lines.push(`- Current weight: ${formatWeight(n.current.kg, u)} (${n.current.kg.toFixed(1)} kg) on ${n.current.date}; 7-day average ${formatWeight(n.current.avg7Kg, u)}`);
+    const c0 = n.current;
+    lines.push(`- Latest weight: ${formatWeight(c0.kg, u)} (${c0.kg.toFixed(1)} kg) on ${c0.date}${c0.postRun ? " — a post-run weigh-in, which reads light from sweat" : ""}; 7-day average ${formatWeight(c0.avg7Kg, u)}${c0.postRun ? `; latest regular (pre-breakfast) weight ${formatWeight(c0.regularKg, u)} on ${c0.regularDate}` : ""}`);
   }
   const goal = [
     c.targetWeightKg != null ? `target ${formatWeight(c.targetWeightKg, u)}` : "",
@@ -624,6 +625,95 @@ function profileSection(acts: ActivityRow[], zones: HrZones | null): string[] {
   }
   if (vo2 != null) lines.push(`- Garmin VO2max estimate: ${vo2}`);
   return lines.length ? ["## Athlete profile", ...lines] : [];
+}
+
+export interface FortnightFacts {
+  /** The Training bullet, written from the data (not by the AI). */
+  trainingLine: string;
+  /** The Recovery bullet (sleep, resting HR, load), also from the data; "" if there is none. */
+  recoveryLine: string;
+  /** The same figures as a block for the AI's prompt. */
+  text: string;
+  runs: number;
+  miles: number;
+}
+
+// The last 14 days (today and the 13 before) added up in code. A language
+// model can't be trusted to total distances scattered across a long context
+// (it only gets full detail for the last 7 days), so the dashboard's two-week
+// summary states these figures itself.
+export function fortnightFacts(now = new Date()): FortnightFacts {
+  const end = localDate(now);
+  const start = localDate(new Date(now.getTime() - 13 * 86_400_000));
+  const lastWeekStart = localDate(new Date(now.getTime() - 6 * 86_400_000));
+  const acts = loadActivities(start).filter(a => a.start_time.slice(0, 10) <= end);
+  const runs = acts.filter(isRun);
+  const miles = (xs: ActivityRow[]) => xs.reduce((sum, a) => sum + (a.distance ?? 0), 0);
+  const runMi = miles(runs);
+  const runSec = runs.reduce((sum, a) => sum + secs(a.moving_time ?? a.elapsed_time), 0);
+  const recent = runs.filter(r => r.start_time.slice(0, 10) >= lastWeekStart);
+  const before = runs.filter(r => r.start_time.slice(0, 10) < lastWeekStart);
+  const longest = runs.reduce((m, a) => Math.max(m, a.distance ?? 0), 0);
+  const load = Math.round(runs.reduce((sum, a) => sum + (a.training_load ?? 0), 0));
+
+  // Everything that isn't a run, grouped: walks (with distance) and the rest by type.
+  const others = acts.filter(a => !isRun(a));
+  const walks = others.filter(a => (a.sport ?? "").toLowerCase().includes("walk"));
+  const rest = others.filter(a => !walks.includes(a));
+  const restLabel = (a: ActivityRow) => ((a.sport ?? "").toLowerCase() === "fitness_equipment" ? a.sub_sport : a.sport) ?? "other";
+  const restCounts = new Map<string, number>();
+  for (const a of rest) {
+    const k = restLabel(a).replace(/_/g, " ");
+    restCounts.set(k, (restCounts.get(k) ?? 0) + 1);
+  }
+  const alsoParts: string[] = [];
+  if (walks.length) alsoParts.push(`${walks.length} walk${walks.length === 1 ? "" : "s"} (${miles(walks).toFixed(1)}mi)`);
+  restCounts.forEach((n, k) => alsoParts.push(`${n} ${k}`));
+  const also = alsoParts.length ? ` Also ${alsoParts.join(", ")}.` : "";
+
+  // Sleep and resting HR for the same 14 days, from GarminDB.
+  const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  const recParts: string[] = [];
+  const gdb = openGarmin("garmin.db");
+  if (gdb) {
+    try {
+      const rows = gdb.prepare(`
+        SELECT DATE(d.day) AS day, d.rhr, s.total_sleep, s.score, s.qualifier
+        FROM daily_summary d LEFT JOIN sleep s ON DATE(s.day) = DATE(d.day)
+        WHERE DATE(d.day) >= ? AND DATE(d.day) <= ?
+      `).all(start, end) as { day: string; rhr: number | null; total_sleep: string | null; score: number | null; qualifier: string | null }[];
+      const scores = rows.map(r => r.score).filter((x): x is number => x != null);
+      if (scores.length) {
+        const poor = rows.filter(r => (r.qualifier ?? "").toUpperCase() === "POOR").length;
+        const sleepAvg = avg(rows.filter(r => r.total_sleep).map(r => secs(r.total_sleep)));
+        const hm = sleepAvg ? `${Math.floor(sleepAvg / 3600)}h${String(Math.round((sleepAvg % 3600) / 60)).padStart(2, "0")}` : null;
+        recParts.push(`sleep score averaged ${Math.round(avg(scores)!)} (range ${Math.min(...scores)}–${Math.max(...scores)}; ${poor} of ${scores.length} nights rated poor)${hm ? `, ${hm} a night` : ""}`);
+      }
+      const rhrNow = avg(rows.filter(r => r.day >= lastWeekStart && r.rhr != null).map(r => r.rhr as number));
+      const rhrBefore = avg(rows.filter(r => r.day < lastWeekStart && r.rhr != null).map(r => r.rhr as number));
+      if (rhrNow != null && rhrBefore != null) recParts.push(`resting HR ${rhrNow.toFixed(0)} in the last 7 days vs ${rhrBefore.toFixed(0)} the 7 before`);
+    } catch {} finally {
+      gdb.close();
+    }
+  }
+  const loadOf = (xs: ActivityRow[]) => Math.round(xs.reduce((sum, a) => sum + (a.training_load ?? 0), 0));
+  if (runs.length) recParts.push(`running load ${loadOf(recent)} in the last 7 days vs ${loadOf(before)} the 7 before`);
+  const recoveryLine = recParts.length ? `**Recovery:** ${recParts.join("; ")}.` : "";
+
+  const trainingLine = runs.length === 0
+    ? `**Training:** no runs in the last 14 days.${also}`
+    : `**Training:** ${runs.length} run${runs.length === 1 ? "" : "s"}, ${runMi.toFixed(1)}mi in 14 days (last 7 days ${miles(recent).toFixed(1)}mi in ${recent.length}, the 7 before ${miles(before).toFixed(1)}mi in ${before.length}); longest ${longest.toFixed(1)}mi, average pace ${pace(runSec, runMi)}.${also}`;
+
+  const lines = [
+    `## TWO-WEEK TOTALS (${start} to ${end}, 14 days) — added up by the app, so they are exact`,
+    `- Runs: ${runs.length}, ${runMi.toFixed(2)}mi in total, moving time ${clock(runSec)}, average pace ${pace(runSec, runMi)}, longest ${longest.toFixed(2)}mi, training load ${load}`,
+    `- Last 7 days (${lastWeekStart} to ${end}): ${recent.length} runs, ${miles(recent).toFixed(2)}mi. The 7 days before (${start} to ${localDate(new Date(now.getTime() - 7 * 86_400_000))}): ${before.length} runs, ${miles(before).toFixed(2)}mi`,
+    ...(alsoParts.length ? [`- Other sessions: ${alsoParts.join(", ")}`] : []),
+    ...(recParts.length ? [`- Recovery: ${recParts.join("; ")}`] : []),
+    "- Runs, newest first:",
+    ...runs.map(r => `  - ${weekday(r.start_time.slice(0, 10))} ${r.start_time.slice(0, 10)}: ${(r.distance ?? 0).toFixed(2)}mi, ${pace(secs(r.moving_time ?? r.elapsed_time), r.distance)}`),
+  ];
+  return { trainingLine, recoveryLine, text: lines.join("\n"), runs: runs.length, miles: runMi };
 }
 
 export async function buildCoachContext(): Promise<CoachContext> {

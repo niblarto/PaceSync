@@ -1,6 +1,8 @@
 ﻿"use client";
 
 import { useState, useEffect, useMemo, useRef, forwardRef, useImperativeHandle } from "react";
+import { FortnightFacts } from "./FortnightFacts";
+import { ScheduleBriefPanel } from "./ScheduleBriefPanel";
 import Link from "next/link";
 import type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/app/api/runna/workouts/route";
 import type { TrackWithBPM } from "@/types";
@@ -452,6 +454,8 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
         </h2>
         <p className="text-xs text-slate-500 mt-0.5">Last 8 days</p>
       </div>
+
+      <FortnightFacts />
 
       {loading && (
         <div className="divide-y divide-white/10">
@@ -1653,6 +1657,8 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
           {refreshing ? "Refreshing…" : "Refresh"}
         </button>
       </div>
+
+      <ScheduleBriefPanel />
 
       {loading && (
         <div className="divide-y divide-white/10">

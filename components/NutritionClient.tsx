@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Bar, CartesianGrid, ComposedChart, Legend, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
+  Bar, CartesianGrid, ComposedChart, Legend, Line, ReferenceDot, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { formatWeight, formatWeightDelta, LB_PER_KG, type WeightUnit } from "@/lib/weight-format";
 
@@ -33,13 +33,14 @@ interface SummaryState {
   result?: { status: "fresh" | "writing" | "unavailable"; reason?: string };
 }
 interface Projection {
-  method: "trend" | "energy" | "plan";
+  method: "trend" | "energy" | "plan" | "postrun";
   label: string;
   basis: string;
   kgPerWeek: number;
   weightAtGoalKg: number | null;
   hitDate: string | null;
   hitStatus: "reached" | "on-course" | "never";
+  anchorKg?: number; // where this projection starts today (the 7-day average, or the post-run line)
   rawKgPerWeek: number;
   capped: boolean;
 }
@@ -48,6 +49,7 @@ interface Dashboard {
     targetWeightKg: number | null;
     goalDate: string | null;
     dailyCalorieLimit: number | null;
+    minDailyCalories?: number; // eating less than this in a day shows red
     weightUnit: WeightUnit;
     trendDays: number;
     kcalPerKg: number;
@@ -55,7 +57,8 @@ interface Dashboard {
   today: string;
   days: DayRow[];
   weights: { date: string; kg: number }[];
-  current: { kg: number; date: string; avg7Kg: number; measuredAt: string | null; source: "Garmin" | "Health Connect" } | null;
+  postRunWeights?: { date: string; kg: number }[]; // weigh-ins taken within 3 hours after a run
+  current: { kg: number; date: string; avg7Kg: number; measuredAt: string | null; source: "Garmin" | "Health Connect"; postRun?: boolean; regularKg?: number; regularDate?: string } | null;
   averages: {
     eaten: number | null; burnt: number | null; exercise: number | null; deficit: number | null; net: number | null;
     loggedDays: number; windowDays: number; deficit7: number | null; deficit7Days: number;
@@ -63,6 +66,7 @@ interface Dashboard {
   projections: Projection[];
   required: { kgPerWeek: number; dailyBalance: number; intake: number | null } | null;
   trendFit: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
+  postRunFit?: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
   sources: { garminWeight: string | null; todayBurn: string | null; food: string | null; garminDb: string | null };
 }
 
@@ -80,7 +84,52 @@ function stamp(iso: string | null | undefined): string {
 const RANGES = [14, 30, 90] as const;
 const RANGE_KEY = "nutrition.chartRange";
 const DAY_MS = 86_400_000;
-const PROJ_COLORS: Record<Projection["method"], string> = { trend: "#a78bfa", energy: "#f59e0b", plan: "#38bdf8" };
+// Rectangle with rounded top corners, as the bars have.
+function topRounded(x: number, y: number, w: number, h: number, r: number): string {
+  const k = Math.max(0, Math.min(r, w / 2, h));
+  return `M${x},${y + h} L${x},${y + k} Q${x},${y} ${x + k},${y} L${x + w - k},${y} Q${x + w},${y} ${x + w},${y + k} L${x + w},${y + h} Z`;
+}
+
+// A day on which less than the daily minimum has been eaten (today counts: it
+// stays red until the minimum is reached).
+function underMinimum(d: DayRow | undefined, minKcal: number): boolean {
+  return d?.eaten != null && d.eaten < minKcal;
+}
+
+// The Eaten bar. Its top part is white and as tall as that day's exercise (the
+// Exercise bar), so the amber below it is eaten − exercise. If exercise is
+// more than was eaten that is negative: the white covers the whole bar and
+// carries on below the zero line.
+function EatenBar({ x = 0, y = 0, width = 0, height = 0, payload, showTip, minKcal }: {
+  x?: number; y?: number; width?: number; height?: number; payload?: DayRow; showTip: boolean;
+  minKcal: number;
+}) {
+  if (height <= 0 || width <= 0) return null;
+  const eaten = payload?.eaten ?? 0;
+  const low = underMinimum(payload, minKcal);
+  const exercise = showTip ? Math.max(payload?.exercise ?? 0, 0) : 0;
+  const tipH = eaten > 0 ? height * (exercise / eaten) : 0; // pixels per kcal is height / eaten
+  return (
+    <g>
+      <path d={topRounded(x, y, width, height, 2)} fill={low ? "#ff0012" : C.eaten} />
+      {/* The exercise tip is white, or a slightly lighter red (#ef4444 on #ff0012) while under the minimum, so it still shows against the bar */}
+      {tipH > 0 && <path d={topRounded(x, y, width, tipH, 2)} fill={low ? "#ef4444" : "#ffffff"} />}
+    </g>
+  );
+}
+
+const PROJ_COLORS: Record<Projection["method"], string> = { trend: "#a78bfa", energy: "#f59e0b", plan: "#38bdf8", postrun: "#22c55e" };
+
+// y-axis grid lines for a weight chart in stone: every half stone (7 lb), so
+// the labels are only ever whole or half stones (every whole stone if the range
+// is big enough that this would crowd). Same as the app's chart.
+function halfStoneTicks(lo: number, hi: number): number[] {
+  const loLb = lo * LB_PER_KG, hiLb = hi * LB_PER_KG;
+  const step = (hiLb - loLb) / 7 > 12 ? 14 : 7;
+  const out: number[] = [];
+  for (let lb = Math.ceil(loLb / step) * step; lb <= hiLb + 1e-9; lb += step) out.push(lb / LB_PER_KG);
+  return out;
+}
 
 const C = {
   eaten: "#f59e0b",
@@ -434,7 +483,7 @@ export function NutritionClient() {
   // current 7-day average out to the later of the goal date / hit date.
   const weightChart = useMemo(() => {
     if (!data || !data.current || !today) return null;
-    const startMs = toMs(today) - 90 * DAY_MS;
+    const startMs = toMs(today) - 56 * DAY_MS;
     const history = data.weights.filter(w => toMs(w.date) >= startMs).map(w => ({ t: toMs(w.date), kg: w.kg }));
     const anchor = data.current.avg7Kg;
     const candidates = [toMs(today) + 60 * DAY_MS];
@@ -447,9 +496,17 @@ export function NutritionClient() {
     // One row per date shared by every series, so the tooltip shows the
     // values for that date: weigh-ins in the past, projections from today
     // on (a point each week, plus the goal date and the end).
-    type Row = { t: number; kg?: number; fit?: number; avg?: number } & Partial<Record<Projection["method"], number>>;
+    type Row = { t: number; kg?: number; post?: number; fit?: number; postFit?: number; avg?: number } & Partial<Record<Projection["method"], number>>;
     const rows = new Map<number, Row>();
     for (const h of history) rows.set(h.t, { t: h.t, kg: h.kg });
+    // Post-run weigh-ins (taken soon after a run), drawn in green.
+    for (const w of data.postRunWeights ?? []) {
+      const t = toMs(w.date);
+      if (t < startMs) continue;
+      const row = rows.get(t) ?? { t };
+      row.post = w.kg;
+      rows.set(t, row);
+    }
 
     // The fitted trend line through the window's weigh-ins (where "Scale
     // trend" gets its rate), drawn back across the past dates it was fitted on.
@@ -461,6 +518,15 @@ export function NutritionClient() {
         if (r.t >= f0 && r.t <= f1) r.fit = fit.startKg + (fit.endKg - fit.startKg) * ((r.t - f0) / (f1 - f0 || 1));
       });
     }
+    // The same for the line fitted through the post-run weigh-ins.
+    const pfit = data.postRunFit;
+    if (pfit) {
+      const f0 = toMs(pfit.startDate), f1 = toMs(pfit.endDate);
+      for (const ms of [f0, f1]) if (!rows.has(ms)) rows.set(ms, { t: ms });
+      rows.forEach(r => {
+        if (r.t >= f0 && r.t <= f1) r.postFit = pfit.startKg + (pfit.endKg - pfit.startKg) * ((r.t - f0) / (f1 - f0 || 1));
+      });
+    }
     const projTimes = new Set<number>([todayMs, endMs]);
     for (let ms = todayMs; ms < endMs; ms += 7 * DAY_MS) projTimes.add(ms);
     if (cfg?.goalDate && toMs(cfg.goalDate) > todayMs && toMs(cfg.goalDate) <= endMs) projTimes.add(toMs(cfg.goalDate));
@@ -468,9 +534,10 @@ export function NutritionClient() {
       const row = rows.get(ms) ?? { t: ms };
       const days = (ms - todayMs) / DAY_MS;
       for (const p of data.projections) {
-        let kg = anchor + (p.kgPerWeek / 7) * days;
+        const from = p.anchorKg ?? anchor;
+        let kg = from + (p.kgPerWeek / 7) * days;
         // A losing projection stops at the target once it gets there.
-        if (target != null && p.kgPerWeek < 0 && anchor > target) kg = Math.max(kg, target);
+        if (target != null && p.kgPerWeek < 0 && from > target) kg = Math.max(kg, target);
         row[p.method] = kg;
       }
       rows.set(ms, row);
@@ -482,22 +549,60 @@ export function NutritionClient() {
     rows.forEach(r => { if (r.t >= todayMs && r.t <= avgEnd) r.avg = anchor; });
     const points = Array.from(rows.values()).sort((a, b) => a.t - b.t);
 
-    const ys = points.flatMap(r => [r.kg, r.fit, ...data.projections.map(p => r[p.method])]).filter((v): v is number => v != null);
+    const ys = points.flatMap(r => [r.kg, r.post, r.fit, r.postFit, ...data.projections.map(p => r[p.method])]).filter((v): v is number => v != null);
     if (target != null) ys.push(target);
     const lo = Math.min(...ys), hi = Math.max(...ys);
     const pad = Math.max(0.5, (hi - lo) * 0.08);
+    const domain: [number, number] = [lo - pad, hi + pad];
+
+    // The weight where each projection crosses the goal-date line, and at the
+    // end of the 7-day average (held flat), to dot and label. Labels are nudged
+    // apart (about 22px minimum) so close values don't overprint each other.
+    const goalMs = cfg?.goalDate ? toMs(cfg.goalDate) : null;
+    const rawMarks: { key: string; ms: number; kg: number; color: string }[] = [];
+    if (goalMs != null && goalMs > todayMs && goalMs <= endMs) {
+      const days = (goalMs - todayMs) / DAY_MS;
+      for (const p of data.projections) {
+        const from = p.anchorKg ?? anchor;
+        let kg = from + (p.kgPerWeek / 7) * days;
+        if (target != null && p.kgPerWeek < 0 && from > target) kg = Math.max(kg, target);
+        rawMarks.push({ key: p.method, ms: goalMs, kg, color: PROJ_COLORS[p.method] });
+      }
+    }
+    if (avgEnd > todayMs) rawMarks.push({ key: "avg", ms: avgEnd, kg: anchor, color: "#fbbf24" });
+    const pxPerKg = 250 / (domain[1] - domain[0]); // the plot is about 250px tall
+    let lastPx = -Infinity;
+    const endMarks = rawMarks.sort((a, b) => b.kg - a.kg).map(m => {
+      const px = (domain[1] - m.kg) * pxPerKg;
+      const at = Math.max(px, lastPx + 22);
+      lastPx = at;
+      return { ...m, dy: at - px };
+    });
+    const stoneTicks = unit === "st" ? halfStoneTicks(domain[0], domain[1]) : [];
     return {
-      points, startMs: history[0]?.t ?? startMs, endMs, domain: [lo - pad, hi + pad] as [number, number],
-      anchor, avgFrom: todayMs - 6 * DAY_MS, todayMs,
+      points, startMs: history[0]?.t ?? startMs, endMs, domain,
+      anchor, avgFrom: todayMs - 6 * DAY_MS, todayMs, endMarks,
+      ticks: stoneTicks.length > 0 ? stoneTicks : undefined,
     };
   }, [data, cfg, today]);
+
+  // "12st 9.5", "185.3 lb" or "84.1 kg": the weight written beside a goal-date dot.
+  const weightShort = (kg: number) => {
+    if (unit === "kg") return `${kg.toFixed(1)} kg`;
+    const lb = kg * LB_PER_KG;
+    if (unit === "lb") return `${lb.toFixed(1)} lb`;
+    let st = Math.floor(lb / 14);
+    let rest = lb - st * 14;
+    if (Number(rest.toFixed(1)) >= 14) { st += 1; rest -= 14; }
+    return `${st}st ${rest.toFixed(1)}`;
+  };
 
   const weightTick = (kg: number) => {
     if (unit === "kg") return `${kg.toFixed(0)}`;
     const lb = kg * LB_PER_KG;
     if (unit === "lb") return `${lb.toFixed(0)}`;
-    const st = Math.floor(lb / 14);
-    return `${st}st ${Math.round(lb - st * 14)}`;
+    const total = Math.round(lb); // whole pounds first, so a whole stone reads "13st 0", never "12st 14"
+    return `${Math.floor(total / 14)}st ${total % 14}`;
   };
 
   return (
@@ -566,8 +671,12 @@ export function NutritionClient() {
                           {data.current.kg.toFixed(2)} kg · {data.current.measuredAt
                             ? new Date(data.current.measuredAt).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
                             : longDate(data.current.date)} · {data.current.source}
+                          {data.current.postRun && <span className="text-emerald-400"> · post-run</span>}
                         </div>
                         <div className="text-slate-500">7-day avg {formatWeight(data.current.avg7Kg, unit)}</div>
+                        {data.current.postRun && data.current.regularKg != null && (
+                          <div className="text-slate-500">Morning {formatWeight(data.current.regularKg, unit)}</div>
+                        )}
                       </>
                     : "No weigh-ins yet"}
                   {weightRefresh.msg && <div className="text-slate-500 mt-0.5">{weightRefresh.msg}</div>}
@@ -662,7 +771,8 @@ export function NutritionClient() {
                 <ComposedChart data={data.days} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={1} barCategoryGap="20%">
                   <CartesianGrid strokeDasharray="3 3" stroke={C.grid} vertical={false} />
                   <XAxis dataKey="date" tickFormatter={shortDate} tick={{ fill: C.axis, fontSize: 10 }} axisLine={{ stroke: C.grid }} tickLine={false} minTickGap={16} />
-                  <YAxis tick={{ fill: C.axis, fontSize: 10 }} axisLine={false} tickLine={false} width={44} />
+                  <YAxis tick={{ fill: C.axis, fontSize: 10 }} axisLine={false} tickLine={false} width={44}
+                    domain={[(min: number) => Math.min(min, ...data.days.map(d => (d.eaten ?? 0) - (d.exercise ?? 0))), "auto"]} />
                   <Tooltip content={<CaloriesTooltip />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
                   <Legend
                     wrapperStyle={{ fontSize: 11, color: C.axis, cursor: "pointer" }}
@@ -671,7 +781,9 @@ export function NutritionClient() {
                       <span style={{ opacity: hidden.has(String((entry as { dataKey?: unknown }).dataKey)) ? 0.35 : 1 }}>{value}</span>
                     )}
                   />
-                  <Bar dataKey="eaten" name="Eaten" fill={C.eaten} radius={[2, 2, 0, 0]} hide={hidden.has("eaten")} />
+                  <Bar dataKey="eaten" name="Eaten" fill={C.eaten} radius={[2, 2, 0, 0]} hide={hidden.has("eaten")}
+                    shape={(p: unknown) => <EatenBar {...(p as { x?: number; y?: number; width?: number; height?: number; payload?: DayRow })}
+                      showTip={!hidden.has("exercise")} minKcal={cfg.minDailyCalories ?? 1400} />} />
                   <Bar dataKey="exercise" name="Exercise" fill={C.exercise} radius={[2, 2, 0, 0]} hide={hidden.has("exercise")} />
                   <Bar dataKey="burnt" name="Burnt" fill={C.burnt} radius={[2, 2, 0, 0]} hide={hidden.has("burnt")} />
                   <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" />
@@ -681,9 +793,11 @@ export function NutritionClient() {
                     dot={(p: { cx?: number; cy?: number; payload?: DayRow; index?: number }) => {
                       const v = p.payload?.net;
                       if (v == null || p.cx == null || p.cy == null) return <g key={p.index} />;
+                      // Red on a gain, and on a day under the minimum eaten.
+                      const red = v > 0 || underMinimum(p.payload, cfg.minDailyCalories ?? 1400);
                       return <circle key={p.index} cx={p.cx} cy={p.cy} r={p.payload?.partial ? 4 : 3.5}
-                        fill={p.payload?.partial ? "transparent" : v > 0 ? C.netOver : C.netOk}
-                        stroke={v > 0 ? C.netOver : C.netOk} strokeWidth={2} />;
+                        fill={p.payload?.partial ? "transparent" : red ? C.netOver : C.netOk}
+                        stroke={red ? C.netOver : C.netOk} strokeWidth={2} />;
                     }} />
                   {cfg.dailyCalorieLimit != null && (
                     <ReferenceLine y={cfg.dailyCalorieLimit} stroke={C.limit} strokeDasharray="6 4"
@@ -697,6 +811,8 @@ export function NutritionClient() {
                 avg net {data.averages.net == null ? "—" : `${data.averages.net > 0 ? "+" : "−"}${kcal(Math.abs(data.averages.net))} kcal`}.
                 The net line (eaten − burnt) dips below zero on a deficit (green dots) and rises above on a gain (red); today's hollow dot is "so far" and updates through the day. Click a legend entry to hide it.
                 Days with nothing logged in Lose It! are left out of the eaten average.
+                The white tip on each Eaten bar is as tall as that day&apos;s Exercise bar, so the amber below it is eaten − exercise (if you burnt more than you ate, the white reaches below zero).
+                A red Eaten bar (with a slightly lighter red tip) and a red net dot mean less than {kcal(cfg.minDailyCalories ?? 1400)} kcal was eaten that day, the daily minimum; today stays red until it&apos;s reached.
               </p>
             </Card>
 
@@ -712,7 +828,7 @@ export function NutritionClient() {
                       <XAxis dataKey="t" type="number" scale="time" domain={[weightChart.startMs, weightChart.endMs]}
                         tickFormatter={t => shortDate(msToYmd(t))} tick={{ fill: C.axis, fontSize: 10 }}
                         axisLine={{ stroke: C.grid }} tickLine={false} minTickGap={24} />
-                      <YAxis type="number" domain={weightChart.domain} tickFormatter={weightTick}
+                      <YAxis type="number" orientation="right" domain={weightChart.domain} ticks={weightChart.ticks} tickFormatter={weightTick}
                         tick={{ fill: C.axis, fontSize: 10 }} axisLine={false} tickLine={false} width={unit === "st" ? 58 : 40} />
                       <Tooltip
                         contentStyle={{ background: "rgba(2,6,23,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
@@ -730,9 +846,17 @@ export function NutritionClient() {
                       )}
                       <ReferenceLine x={toMs(today)} stroke="rgba(255,255,255,0.2)" />
                       {/* Weigh-ins as dots only (no connecting line) */}
-                      <Line dataKey="kg" name="Weigh-ins" stroke="none" legendType="circle" connectNulls={false}
+                      <Line dataKey="kg" name="Weigh-ins" stroke={C.weight} strokeOpacity={0} legendType="circle" connectNulls={false}
                         dot={{ r: 3, fill: C.weight, stroke: "none" }} activeDot={{ r: 5, fill: C.weight, stroke: "none" }}
                         isAnimationActive={false} />
+                      {/* Post-run weigh-ins (taken soon after a run), in green */}
+                      <Line dataKey="post" name="Post-run weigh-ins" stroke={PROJ_COLORS.postrun} strokeOpacity={0} legendType="circle" connectNulls={false}
+                        dot={{ r: 4, fill: PROJ_COLORS.postrun, stroke: "#052e16", strokeWidth: 1 }} activeDot={{ r: 5, fill: PROJ_COLORS.postrun, stroke: "none" }}
+                        isAnimationActive={false} />
+                      {data.postRunFit && (
+                        <Line dataKey="postFit" name={`Post-run fit (last ${cfg.trendDays} days)`} stroke={PROJ_COLORS.postrun} strokeOpacity={0.55}
+                          strokeWidth={2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
+                      )}
                       {/* Fitted trend over the window's weigh-ins: the basis of "Scale trend" */}
                       {data.trendFit && (
                         <Line dataKey="fit" name={`Trend fit (last ${cfg.trendDays} days)`} stroke={PROJ_COLORS.trend} strokeOpacity={0.55}
@@ -749,6 +873,32 @@ export function NutritionClient() {
                         <Line key={p.method} dataKey={p.method} name={p.label} stroke={PROJ_COLORS[p.method]} connectNulls
                           strokeWidth={2} strokeDasharray="5 4" dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
                       ))}
+                      {/* Each projection's weight where it meets the goal date, and the 7-day average's weight at its end */}
+                      {weightChart.endMarks.map(m => (
+                        <ReferenceDot key={`end-${m.key}`} x={m.ms} y={m.kg} r={4}
+                          fill={m.color} stroke="#f8fafc" strokeWidth={1.5} ifOverflow="extendDomain"
+                          label={{
+                            content: props => {
+                              const vb = (props as { viewBox?: { x: number; y: number; width: number; height: number } }).viewBox;
+                              if (!vb) return null;
+                              // White text on a dark pill edged in the line's colour, so it
+                              // reads over the dashed line and gridlines behind it.
+                              const text = weightShort(m.kg);
+                              const w = text.length * 7 + 14;
+                              const cy = vb.y + vb.height / 2 + m.dy;
+                              const right = vb.x - 8;
+                              return (
+                                <g>
+                                  <rect x={right - w} y={cy - 9} width={w} height={18} rx={4}
+                                    fill="#0f172a" fillOpacity={0.94} stroke={m.color} strokeWidth={1.5} />
+                                  <text x={right - w / 2} y={cy + 4.5} textAnchor="middle" fill="#f8fafc" fontSize={12} fontWeight={700}>
+                                    {text}
+                                  </text>
+                                </g>
+                              );
+                            },
+                          }} />
+                      ))}
                     </ComposedChart>
                   </ResponsiveContainer>
                 )}
@@ -756,7 +906,7 @@ export function NutritionClient() {
                   <p className="text-xs text-slate-500 mt-2">
                     How the projections are made: the faint purple line is the straight line fitted through your weigh-ins over the last {cfg.trendDays} days;
                     its slope is the Scale trend rate. Every projection starts from your 7-day average weight (yellow bar), not a single weigh-in,
-                    so one heavy or light day doesn&apos;t swing it; the dotted yellow line carries that average flat to the goal date, i.e. no change. Sticking to your limit uses calories instead: your {cfg.dailyCalorieLimit ?? "—"} kcal
+                    so one heavy or light day doesn&apos;t swing it. A weigh-in taken within 3 hours after a run finished (from your Garmin activities) is taken as post-run: those are the green dots, left out of everything above and given their own green fitted line and "Post-run trend" projection, which starts from where that line is today; the dotted yellow line carries that average flat to the goal date, i.e. no change. Sticking to your limit uses calories instead: your {cfg.dailyCalorieLimit ?? "—"} kcal
                     limit against your average Garmin burn.
                   </p>
                 )}

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { fetchRunnaSchedule } from "@/lib/runna-schedule";
 import { pruneStalePinsAgainstSchedule } from "@/lib/pinned-mixes";
 import { hasApiAccess } from "@/lib/mobile-auth";
+import { ensureBrief } from "@/lib/coach-brief";
 
 export type { RunnaWorkout, RunnaPastRun, WorkoutType } from "@/lib/runna-schedule";
 
@@ -23,6 +24,11 @@ export async function GET(req: NextRequest) {
   } catch (e) {
     console.warn("[runna/workouts] stale-pin cleanup failed:", e);
   }
+
+  // If the plan has changed since the schedule panel's AI sentence was written,
+  // rewrite it as soon as the AI DJ service is up (a no-op when it's current;
+  // runs in the background).
+  void ensureBrief().catch(() => {});
 
   return NextResponse.json({ workouts: result.workouts, pastRuns: result.pastRuns });
 }
