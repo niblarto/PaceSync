@@ -61,6 +61,8 @@ export async function POST(req: NextRequest) {
     let targetBpm = paceBpm;
     if (targetBpm != null && o?.max != null) targetBpm = Math.min(targetBpm, o.max);
     if (targetBpm != null && o?.min != null) targetBpm = Math.max(targetBpm, o.min);
+    // A sweet spot is the BPM that run type aims at exactly.
+    if (o?.sweet != null && o.sweet > 0) targetBpm = o.sweet;
     // "Work" paces with a Settings BPM aim at exactly that BPM.
     if (kind === "work" && paceSec != null && paceSec >= PACE_BPM_MIN_SEC - 2.5 && paceSec <= PACE_BPM_MAX_SEC + 2.5) {
       const snapped = Math.min(Math.max(Math.round(paceSec / PACE_BPM_STEP_SEC) * PACE_BPM_STEP_SEC, PACE_BPM_MIN_SEC), PACE_BPM_MAX_SEC);

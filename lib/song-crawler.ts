@@ -8,6 +8,7 @@ import { addTracksToLibrary } from "@/lib/library-add";
 import { healActiveCsv } from "@/lib/csv-heal";
 import { cronNotify } from "@/lib/cron-notify";
 import { parseBpmSpec, type BpmSpecResult } from "@/lib/bpm-spec";
+import { splitArtistList } from "@/lib/artist-list";
 import { getFreshToken } from "@/lib/tokenStore";
 
 // Song Crawler as a server-side background job (Settings > Tracklist).
@@ -374,10 +375,15 @@ async function runCrawl(job: CrawlJob) {
   const inBands = (eff: number) => bands.some(b => eff >= b.lo && eff <= b.hi);
   const targetLabel = `${bandsRes.ok ? bandsRes.label : "?"} BPM`;
   const stopped = () => store.stopRequested;
-  let artist = (p.artist ?? "").trim();
-  // Top-track titles of the artist a pasted artist link points at — used to
-  // pick the right Deezer artist when several share the name.
-  let artistHintTitles: string[] = [];
+  // Several artists can be typed, comma separated (a "quoted, name" keeps
+  // its commas); each is crawled.
+  const artistNames: string[] = [];
+  for (const n of splitArtistList(p.artist ?? "")) {
+    if (!artistNames.some(x => x.toLowerCase() === n.toLowerCase())) artistNames.push(n);
+  }
+  // Top-track titles of the artist a pasted artist link points at, by name -
+  // used to pick the right Deezer artist when several share the name.
+  const hintTitlesByName = new Map<string, string[]>();
   const parsedLink = parseSpotifyLink(p.link);
   // Artist links name the artist to crawl; only album / playlist links have tracks.
   const linkRef = parsedLink && parsedLink.kind !== "artist" ? { kind: parsedLink.kind, id: parsedLink.id } : null;
@@ -388,9 +394,10 @@ async function runCrawl(job: CrawlJob) {
       log("Couldn't read the artist's name from that Spotify link", "error");
       return finish(job, "done");
     }
-    if (artist && artist.toLowerCase() !== name.toLowerCase()) log(`Using the linked artist "${name}" instead of the typed "${artist}"`, "warn");
-    artist = name;
-    artistHintTitles = linked.topTitles;
+    const typed = artistNames.findIndex(x => x.toLowerCase() === name.toLowerCase());
+    if (typed >= 0) artistNames.splice(typed, 1);
+    artistNames.unshift(name); // the exact artist from the link goes first
+    hintTitlesByName.set(name.toLowerCase(), linked.topTitles);
     job.linkName = name;
   }
   const src = resolveSources(p);
@@ -398,7 +405,7 @@ async function runCrawl(job: CrawlJob) {
   const spreads = src.radio || src.related;
   const parts = [
     linkRef && `the ${linkRef.kind}'s tracks`,
-    src.artist && artist && `${artist}'s own tracks`,
+    src.artist && artistNames.length > 0 && `${artistNames.join(", ")}'s own tracks`,
     src.radio && "artist radio",
     src.related && "related artists' top tracks",
   ].filter(Boolean).join(" + ");
@@ -442,8 +449,14 @@ async function runCrawl(job: CrawlJob) {
     log(`${matches.length} Deezer artists are called "${name}" — picked the one (${best.artist.nb_fan?.toLocaleString() ?? "?"} fans) sharing ${Math.max(best.score, 0)} of the linked artist's top tracks`);
     return best.artist;
   };
-  const seed = artist ? await findArtist(artist, artistHintTitles) : null;
-  if (artist && !seed) log(`No exact Deezer artist match for "${artist}"`, "warn");
+  const seeds: { id: number; name: string }[] = [];
+  for (const name of artistNames) {
+    if (stopped()) break;
+    const found = await findArtist(name, hintTitlesByName.get(name.toLowerCase()) ?? []);
+    if (!found) { log(`No exact Deezer artist match for "${name}"`, "warn"); continue; }
+    if (seeds.some(x => x.id === found.id)) continue;
+    seeds.push({ id: found.id, name: found.name });
+  }
 
   // Album / playlist link: its tracks, read from Spotify.
   let linkTracks: LinkTrack[] = [];
@@ -457,8 +470,8 @@ async function runCrawl(job: CrawlJob) {
       log(`${linkRef.kind === "album" ? "Album" : "Playlist"}: ${res.name} — ${linkTracks.length} track${linkTracks.length === 1 ? "" : "s"}`);
     }
   }
-  if (!seed && linkTracks.length === 0) return finish(job, "done");
-  job.totalArtists = seed ? 1 : 0;
+  if (seeds.length === 0 && linkTracks.length === 0) return finish(job, "done");
+  job.totalArtists = 0;
 
   // Review limit: hold the crawl while too many songs await review.
   const reviewLimit = () => {
@@ -545,10 +558,66 @@ async function runCrawl(job: CrawlJob) {
     }
   };
 
-  // Optional catalogue pass: every track credited to the seed artist across
-  // all their releases, before any radio. Tracks credited to someone else
-  // (side projects, guest-led tracks) are skipped.
-  if (doCatalogue && seed && !stopped()) {
+  // One crawl: radio / related from the given starting artists, with its own
+  // queue and its own Max artists budget. Every typed artist (and the
+  // album's / playlist's artists) is a separate crawl, run one after another.
+  // skipTopFor: artists whose whole catalogue was already checked, so their
+  // top tracks are skipped.
+  const crawlFrom = async (starts: { id: number; name: string }[], skipTopFor: Set<number>) => {
+    const queue = [...starts];
+    const queuedArtists = new Set<number>(starts.map(x => x.id));
+    const crawlBase = job.totalArtists; // artists counted by earlier crawls in this job
+    job.totalArtists = crawlBase + queuedArtists.size;
+    const enqueue = (a: { id: number; name: string }) => {
+      if (queuedArtists.has(a.id) || queuedArtists.size >= maxArtists) return;
+      queuedArtists.add(a.id);
+      job.totalArtists = crawlBase + queuedArtists.size;
+      if (queuedArtists.size === maxArtists) {
+        log(`Reached ${maxArtists} artists — no more will be added; finishing the ${queue.length + 1} still queued.`, "warn");
+      }
+      queue.push(a);
+    };
+
+    while (queue.length > 0 && !stopped()) {
+      const current = queue.shift()!;
+      job.crawled++;
+      const what = [src.radio && "radio", src.related && "top tracks + related"].filter(Boolean).join(", ");
+      log(`[${job.crawled}/${job.totalArtists}] ${current.name} — ${what} (${queue.length} still queued)`);
+
+      if (src.related) {
+        // Queue related artists first so they sit alongside the radio finds.
+        const rel = await deezer<{ data?: { id: number; name: string }[] }>(`/artist/${current.id}/related?limit=${RELATED_LIMIT}`);
+        const related = rel?.data ?? [];
+        if (related.length) log(`  related: ${related.map(a => a.name).join(", ")}`);
+        for (const a of related) enqueue({ id: a.id, name: a.name });
+        if (!skipTopFor.has(current.id) && !stopped()) {
+          const top = await deezer<{ data?: DeezerRadioTrack[] }>(`/artist/${current.id}/top?limit=${TOP_TRACKS_LIMIT}`);
+          for (const t of top?.data ?? []) {
+            if (stopped()) break;
+            await checkTrack(t);
+          }
+        }
+      }
+
+      if (src.radio && !stopped()) {
+        const radio = await deezer<{ data?: DeezerRadioTrack[] }>(`/artist/${current.id}/radio?limit=${RADIO_LIMIT}`);
+        if (!radio?.data?.length) { log(`  no radio for ${current.name}`, "warn"); continue; }
+        for (const t of radio.data) {
+          if (stopped()) break;
+          enqueue({ id: t.artist.id, name: t.artist.name });
+          await checkTrack(t);
+        }
+      }
+    }
+  };
+
+  // Each artist, one after another: catalogue pass (every track credited to
+  // them across all their releases; tracks credited to someone else are
+  // skipped), then radio / related from them.
+  for (let si = 0; si < seeds.length && !stopped(); si++) {
+    const seed = seeds[si];
+    if (seeds.length > 1) log(`── Artist ${si + 1} of ${seeds.length}: ${seed.name} ──`);
+    if (doCatalogue) {
     const albums: { id: number; title: string }[] = [];
     let next: string | null = `/artist/${seed.id}/albums?limit=100`;
     while (next && !stopped()) {
@@ -569,6 +638,8 @@ async function runCrawl(job: CrawlJob) {
       }
     }
     if (!stopped()) log(spreads ? `Finished ${seed.name}'s catalogue — moving on to ${[src.radio && "radio", src.related && "related artists"].filter(Boolean).join(" and ")}.` : `Finished ${seed.name}'s catalogue.`);
+    }
+    if (spreads && !stopped()) await crawlFrom([seed], new Set(doCatalogue ? [seed.id] : []));
   }
 
   // Every track on the album/playlist — BPM via ReccoBeats straight from
@@ -618,69 +689,19 @@ async function runCrawl(job: CrawlJob) {
     }
   }
 
-  const queue: { id: number; name: string }[] = seed ? [seed] : [];
-  const queuedArtists = new Set<number>(seed ? [seed.id] : []);
-  const enqueue = (a: { id: number; name: string }) => {
-    if (queuedArtists.has(a.id) || queuedArtists.size >= maxArtists) return;
-    queuedArtists.add(a.id);
-    job.totalArtists = queuedArtists.size;
-    if (queuedArtists.size === maxArtists) {
-      log(`Reached ${maxArtists} artists — no more will be added; finishing the ${queue.length + 1} still queued.`, "warn");
-    }
-    queue.push(a);
-  };
-
-  // The album's/playlist's artists join the queue as starting points for
-  // radio / related (first credited artist of each track, exact Deezer
-  // name match, within Max artists).
+  // The album's/playlist's artists are one more crawl, starting from them
+  // (first credited artist of each track, exact Deezer name match, within
+  // Max artists).
   if (spreads && linkTracks.length > 0 && !stopped()) {
     const names = Array.from(new Set(linkTracks.map(t => t.artist.split(",")[0].trim()).filter(Boolean)));
-    const found: string[] = [];
+    const starts: { id: number; name: string }[] = [];
     for (const name of names) {
-      if (stopped() || queuedArtists.size >= maxArtists) break;
+      if (stopped() || starts.length >= maxArtists) break;
       const a = await findArtist(name);
-      if (a && !queuedArtists.has(a.id)) {
-        queuedArtists.add(a.id);
-        queue.push({ id: a.id, name: a.name });
-        found.push(a.name);
-      }
+      if (a && !starts.some(x => x.id === a.id)) starts.push({ id: a.id, name: a.name });
     }
-    job.totalArtists = queuedArtists.size;
-    log(`Starting artists from the ${linkRef!.kind}: ${found.length ? found.join(", ") : "none found on Deezer"}`);
-  }
-
-  while (spreads && queue.length > 0 && !stopped()) {
-    const current = queue.shift()!;
-    job.crawled++;
-    const what = [src.radio && "radio", src.related && "top tracks + related"].filter(Boolean).join(", ");
-    log(`[${job.crawled}/${queuedArtists.size}] ${current.name} — ${what} (${queue.length} still queued)`);
-
-    if (src.related) {
-      // Queue related artists first so they sit alongside the radio finds.
-      const rel = await deezer<{ data?: { id: number; name: string }[] }>(`/artist/${current.id}/related?limit=${RELATED_LIMIT}`);
-      const related = rel?.data ?? [];
-      if (related.length) log(`  related: ${related.map(a => a.name).join(", ")}`);
-      for (const a of related) enqueue({ id: a.id, name: a.name });
-      // Top tracks — skipped for the typed artist when their whole
-      // catalogue was already checked above.
-      if (!(doCatalogue && seed && current.id === seed.id) && !stopped()) {
-        const top = await deezer<{ data?: DeezerRadioTrack[] }>(`/artist/${current.id}/top?limit=${TOP_TRACKS_LIMIT}`);
-        for (const t of top?.data ?? []) {
-          if (stopped()) break;
-          await checkTrack(t);
-        }
-      }
-    }
-
-    if (src.radio && !stopped()) {
-      const radio = await deezer<{ data?: DeezerRadioTrack[] }>(`/artist/${current.id}/radio?limit=${RADIO_LIMIT}`);
-      if (!radio?.data?.length) { log(`  no radio for ${current.name}`, "warn"); continue; }
-      for (const t of radio.data) {
-        if (stopped()) break;
-        enqueue({ id: t.artist.id, name: t.artist.name });
-        await checkTrack(t);
-      }
-    }
+    log(`Starting artists from the ${linkRef!.kind}: ${starts.length ? starts.map(a => a.name).join(", ") : "none found on Deezer"}`);
+    await crawlFrom(starts, new Set());
   }
 
   const n = `${job.added} track${job.added === 1 ? "" : "s"} added`;

@@ -944,15 +944,46 @@ internal suspend fun playOnActiveDevice(context: android.content.Context, api: P
     val result = runCatching { api.playTrack(PlayRequest(uri)) }
     val response = result.getOrNull()
     when {
-        response?.isSuccessful == true -> Unit
+        response?.isSuccessful == true -> {
+            // Spotify answers "OK" to a play command even when the phone's Spotify app is
+            // asleep and ignores it (Android puts it to sleep in the background): the
+            // current song stops and nothing starts. So check the track really started,
+            // and if not, wake Spotify with a one-off launch and send the command again.
+            if (!playbackStarted(api, uri)) {
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+                android.widget.Toast.makeText(context, "Waking Spotify…", android.widget.Toast.LENGTH_SHORT).show()
+                kotlinx.coroutines.delay(2500)
+                runCatching { api.playTrack(PlayRequest(uri)) }
+            }
+        }
         response?.code() == 409 -> {
             runCatching {
                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             }
             android.widget.Toast.makeText(context, "Opening Spotify to start playback…", android.widget.Toast.LENGTH_SHORT).show()
         }
+        // Say what actually failed: a server or Spotify error is not "couldn't reach the server".
+        response != null -> {
+            val detail = response.errorBody()?.string()?.let {
+                runCatching { kotlinx.serialization.json.Json.parseToJsonElement(it).jsonObject["error"]?.jsonPrimitive?.content }.getOrNull()
+            }
+            android.widget.Toast.makeText(context, detail ?: "Playback failed (${response.code()})", android.widget.Toast.LENGTH_LONG).show()
+        }
         else -> android.widget.Toast.makeText(context, "Couldn't reach PaceSync server", android.widget.Toast.LENGTH_SHORT).show()
     }
+}
+
+// True once Spotify reports `uri` as the playing track - polled for a few seconds, as
+// the state takes a moment to catch up after a play command.
+private suspend fun playbackStarted(api: PaceSyncApi, uri: String): Boolean {
+    repeat(6) {
+        kotlinx.coroutines.delay(750)
+        val st = runCatching { api.getPlaybackState() }.getOrNull()?.body()
+        if (st != null && st.isPlaying && st.trackUri == uri) return true
+    }
+    return false
 }
 
 // Draws each track's name + pace/BPM inside a block whose x-position and

@@ -378,11 +378,16 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
       .map(w => ({ x: daysBetween(windowStart, w.date), y: w.kg }));
     const fit = linearFit(trendPts);
     if (fit) {
-      projections.push(project("trend", "Scale trend", `${trendPts.length} weigh-ins over the last ${config.trendDays} days`, fit.slope, anchor, today, config));
+      // The scale trend continues from where its own fitted line is today (the
+      // same line its rate comes from), so the projection joins it without a jump -
+      // like the post-run trend below. The calorie-based projections still start
+      // from the steadier 7-day average.
       const r2 = (n: number) => Math.round(n * 1000) / 1000;
+      const trendEndKg = fit.intercept + fit.slope * daysBetween(windowStart, today);
+      projections.push(project("trend", "Scale trend", `${trendPts.length} weigh-ins over the last ${config.trendDays} days`, fit.slope, trendEndKg, today, config));
       trendFit = {
         startDate: windowStart, startKg: r2(fit.intercept),
-        endDate: today, endKg: r2(fit.intercept + fit.slope * daysBetween(windowStart, today)),
+        endDate: today, endKg: r2(trendEndKg),
       };
     }
     // The post-run weigh-ins get their own line, starting from where that line is

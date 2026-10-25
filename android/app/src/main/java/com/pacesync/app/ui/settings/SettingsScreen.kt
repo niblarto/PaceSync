@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.pacesync.app.R
 import com.pacesync.app.data.TokenStore
+import com.pacesync.app.network.NutritionApi
 import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.CronJobUpdate
 import com.pacesync.app.network.dto.FcmTokenRequest
@@ -49,7 +50,7 @@ import kotlinx.coroutines.tasks.await
 // the web Settings cron table reads/writes (lib/cron-schedule.ts), so a
 // change made here round-trips there and vice versa.
 @Composable
-fun SettingsScreen(tokenStore: TokenStore, api: PaceSyncApi) {
+fun SettingsScreen(tokenStore: TokenStore, api: PaceSyncApi, nutritionApi: NutritionApi) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var tokenInput by remember { mutableStateOf(tokenStore.getToken() ?: "") }
@@ -170,6 +171,10 @@ fun SettingsScreen(tokenStore: TokenStore, api: PaceSyncApi) {
             }
             digestStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         }
+
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
+        NutritionSettingsSection(nutritionApi)
 
         HorizontalDivider(Modifier.padding(vertical = 8.dp))
 

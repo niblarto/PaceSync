@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar, CartesianGrid, ComposedChart, Legend, Line, ReferenceDot, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
@@ -40,7 +40,7 @@ interface Projection {
   weightAtGoalKg: number | null;
   hitDate: string | null;
   hitStatus: "reached" | "on-course" | "never";
-  anchorKg?: number; // where this projection starts today (the 7-day average, or the post-run line)
+  anchorKg?: number; // where this projection starts today (the 7-day average, or the end of its own fitted trend line)
   rawKgPerWeek: number;
   capped: boolean;
 }
@@ -405,6 +405,132 @@ function SummaryPanel() {
   );
 }
 
+// Wheel / drag / touch zoom for a chart's numeric x-domain, like the tracklist
+// chart: wheel zooms around the cursor (a sideways swipe pans), dragging pans,
+// pinch zooms and one finger pans on touch. `domain` is null at full view.
+function useChartZoom(dataMin: number, dataMax: number, minSpan: number) {
+  // A callback ref held in state: the charts only mount once their data has
+  // loaded, so the listeners must attach when the element appears, not at
+  // the component's first render.
+  const [el, setEl] = useState<HTMLDivElement | null>(null);
+  const [domain, setDomain] = useState<[number, number] | null>(null);
+  const domainRef = useRef(domain);
+  domainRef.current = domain;
+  const bounds = useRef({ dataMin, dataMax, minSpan });
+  bounds.current = { dataMin, dataMax, minSpan };
+
+  const apply = useCallback((lo: number, hi: number) => {
+    const { dataMin: min, dataMax: max } = bounds.current;
+    const full = max - min;
+    const span = Math.min(full, hi - lo);
+    let l = Math.max(min, lo);
+    let h = l + span;
+    if (h > max) { h = max; l = h - span; }
+    setDomain(span >= full - 1e-6 ? null : [l, h]);
+  }, []);
+  const reset = useCallback(() => setDomain(null), []);
+
+  useEffect(() => {
+    if (!el) return;
+    const valid = () => bounds.current.dataMax > bounds.current.dataMin;
+    const cur = (): [number, number] => domainRef.current ?? [bounds.current.dataMin, bounds.current.dataMax];
+    const frac = (x: number) => {
+      const r = el.getBoundingClientRect();
+      return Math.min(1, Math.max(0, (x - r.left) / Math.max(1, r.width)));
+    };
+    const zoomAround = (lo: number, hi: number, f: number, factor: number) => {
+      const center = lo + f * (hi - lo);
+      const span = Math.max(bounds.current.minSpan, (hi - lo) * factor);
+      apply(center - f * span, center - f * span + span);
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      if (!valid()) return;
+      e.preventDefault();
+      const [lo, hi] = cur();
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        const d = (e.deltaX / Math.max(1, el.getBoundingClientRect().width)) * (hi - lo);
+        apply(lo + d, hi + d);
+        return;
+      }
+      zoomAround(lo, hi, frac(e.clientX), e.deltaY > 0 ? 1.25 : 0.8);
+    };
+
+    let drag: { x: number; lo: number; hi: number } | null = null;
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 0 || !valid()) return;
+      const [lo, hi] = cur();
+      drag = { x: e.clientX, lo, hi };
+    };
+    const onMove = (e: MouseEvent) => {
+      if (!drag) return;
+      const d = ((e.clientX - drag.x) / Math.max(1, el.getBoundingClientRect().width)) * (drag.hi - drag.lo);
+      if (Math.abs(e.clientX - drag.x) > 2) el.style.cursor = "grabbing";
+      apply(drag.lo - d, drag.hi - d);
+    };
+    const onUp = () => { drag = null; el.style.cursor = ""; };
+
+    let panX: number | null = null;
+    let panFrom: [number, number] | null = null;
+    let pinchDist: number | null = null;
+    let pinchFrom: [number, number] | null = null;
+    let pinchFrac = 0.5;
+    const dist = (a: Touch, b: Touch) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const onTouchStart = (e: TouchEvent) => {
+      if (!valid()) return;
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        panX = null;
+        pinchDist = dist(e.touches[0], e.touches[1]);
+        pinchFrom = cur();
+        pinchFrac = frac((e.touches[0].clientX + e.touches[1].clientX) / 2);
+      } else if (e.touches.length === 1) {
+        pinchDist = null;
+        panX = e.touches[0].clientX;
+        panFrom = cur();
+      }
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (!valid()) return;
+      if (e.touches.length === 2 && pinchDist != null && pinchFrom) {
+        e.preventDefault();
+        const scale = pinchDist / Math.max(1, dist(e.touches[0], e.touches[1]));
+        zoomAround(pinchFrom[0], pinchFrom[1], pinchFrac, scale);
+      } else if (e.touches.length === 1 && panX != null && panFrom && domainRef.current) {
+        // One finger pans only when zoomed in, so the page still scrolls at full view.
+        e.preventDefault();
+        const d = ((e.touches[0].clientX - panX) / Math.max(1, el.getBoundingClientRect().width)) * (panFrom[1] - panFrom[0]);
+        apply(panFrom[0] - d, panFrom[1] - d);
+      }
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length === 0) { panX = null; pinchDist = null; }
+      else if (e.touches.length === 1) { pinchDist = null; panX = e.touches[0].clientX; panFrom = cur(); }
+    };
+
+    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("mousedown", onDown);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    el.addEventListener("touchstart", onTouchStart, { passive: false });
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    el.addEventListener("touchend", onTouchEnd);
+    el.addEventListener("touchcancel", onTouchEnd);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("mousedown", onDown);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("touchend", onTouchEnd);
+      el.removeEventListener("touchcancel", onTouchEnd);
+    };
+  }, [el, apply]);
+
+  return { ref: setEl, domain, reset };
+}
+
 export function NutritionClient() {
   // Chart range is remembered in this browser across refreshes.
   const [range, setRangeState] = useState<(typeof RANGES)[number]>(() => {
@@ -473,6 +599,13 @@ export function NutritionClient() {
     if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
+
+  // Chart zoom (wheel / drag / pinch). The calories chart is categorical, so
+  // its zoom window is a span of day indices, at least a week wide.
+  const nDays = data?.days.length ?? 0;
+  const calZoom = useChartZoom(0, Math.max(0, nDays - 1), 6);
+  const resetCalZoom = calZoom.reset;
+  useEffect(() => { resetCalZoom(); }, [range, resetCalZoom]);
 
   const unit = data?.config.weightUnit ?? "st";
   const cfg = data?.config;
@@ -585,6 +718,35 @@ export function NutritionClient() {
       ticks: stoneTicks.length > 0 ? stoneTicks : undefined,
     };
   }, [data, cfg, today]);
+
+  // The days shown in the calories chart (all, or the zoomed span).
+  const calDomain = calZoom.domain;
+  const visibleDays = useMemo(() => {
+    if (!data) return [];
+    if (!calDomain) return data.days;
+    const lo = Math.max(0, Math.round(calDomain[0]));
+    const hi = Math.min(data.days.length - 1, Math.round(calDomain[1]));
+    return data.days.slice(lo, hi + 1);
+  }, [data, calDomain]);
+
+  const wZoom = useChartZoom(weightChart?.startMs ?? 0, weightChart?.endMs ?? 0, 3 * DAY_MS);
+  const wDomain = wZoom.domain;
+
+  // Weight chart's y-axis refitted to the weights inside the zoomed span.
+  const weightZoomY = useMemo(() => {
+    if (!weightChart || !wDomain || !data) return null;
+    const [l, r] = wDomain;
+    const ys = weightChart.points
+      .filter(p => p.t >= l && p.t <= r)
+      .flatMap(p => [p.kg, p.post, p.fit, p.postFit, p.avg, ...data.projections.map(pr => p[pr.method])])
+      .filter((v): v is number => v != null);
+    if (ys.length === 0) return null;
+    const lo = Math.min(...ys), hi = Math.max(...ys);
+    const pad = Math.max(0.3, (hi - lo) * 0.12);
+    const domain: [number, number] = [lo - pad, hi + pad];
+    const ticks = unit === "st" ? halfStoneTicks(domain[0], domain[1]) : [];
+    return { domain, ticks: ticks.length >= 2 ? ticks : undefined };
+  }, [weightChart, wDomain, data, unit]);
 
   // "12st 9.5", "185.3 lb" or "84.1 kg": the weight written beside a goal-date dot.
   const weightShort = (kg: number) => {
@@ -756,7 +918,13 @@ export function NutritionClient() {
             <Card>
               <div className="flex items-center justify-between gap-3 mb-3">
                 <h2 className="text-sm font-semibold text-slate-300">Daily calories</h2>
-                <div className="flex gap-1">
+                <div className="flex items-center gap-1">
+                  {calDomain
+                    ? <button onClick={calZoom.reset}
+                        className="text-xs px-2.5 py-1 mr-1 rounded-lg border border-sky-500/40 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 transition-colors">
+                        Reset zoom
+                      </button>
+                    : <span className="hidden sm:inline text-[11px] text-slate-600 mr-2">scroll to zoom · drag to pan</span>}
                   {RANGES.map(r => (
                     <button key={r} onClick={() => setRange(r)}
                       className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
@@ -767,12 +935,13 @@ export function NutritionClient() {
                   ))}
                 </div>
               </div>
+              <div ref={calZoom.ref} className={`select-none ${calDomain ? "cursor-grab" : ""}`}>
               <ResponsiveContainer width="100%" height={320}>
-                <ComposedChart data={data.days} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={1} barCategoryGap="20%">
+                <ComposedChart data={visibleDays} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={1} barCategoryGap="20%">
                   <CartesianGrid strokeDasharray="3 3" stroke={C.grid} vertical={false} />
                   <XAxis dataKey="date" tickFormatter={shortDate} tick={{ fill: C.axis, fontSize: 10 }} axisLine={{ stroke: C.grid }} tickLine={false} minTickGap={16} />
                   <YAxis tick={{ fill: C.axis, fontSize: 10 }} axisLine={false} tickLine={false} width={44}
-                    domain={[(min: number) => Math.min(min, ...data.days.map(d => (d.eaten ?? 0) - (d.exercise ?? 0))), "auto"]} />
+                    domain={[(min: number) => Math.min(min, ...visibleDays.map(d => (d.eaten ?? 0) - (d.exercise ?? 0))), "auto"]} />
                   <Tooltip content={<CaloriesTooltip />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
                   <Legend
                     wrapperStyle={{ fontSize: 11, color: C.axis, cursor: "pointer" }}
@@ -805,6 +974,7 @@ export function NutritionClient() {
                   )}
                 </ComposedChart>
               </ResponsiveContainer>
+              </div>
               <p className="text-xs text-slate-500 mt-2">
                 Last {data.averages.windowDays} days (not counting today): avg eaten {kcal(data.averages.eaten)} kcal on{" "}
                 {data.averages.loggedDays} logged days · avg burnt {kcal(data.averages.burnt)} · avg exercise {kcal(data.averages.exercise)} ·
@@ -822,13 +992,23 @@ export function NutritionClient() {
                 {!weightChart ? (
                   <p className="text-sm text-slate-500">No weigh-ins yet.</p>
                 ) : (
+                  <div ref={wZoom.ref} className={`select-none ${wDomain ? "cursor-grab" : ""}`}>
+                  <div className="flex justify-end mb-1 min-h-[1.5rem]">
+                    {wDomain
+                      ? <button onClick={wZoom.reset}
+                          className="text-xs px-2.5 py-1 rounded-lg border border-sky-500/40 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 transition-colors">
+                          Reset zoom
+                        </button>
+                      : <span className="text-[11px] text-slate-600">scroll to zoom · drag to pan</span>}
+                  </div>
                   <ResponsiveContainer width="100%" height={320}>
                     <ComposedChart data={weightChart.points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={C.grid} />
-                      <XAxis dataKey="t" type="number" scale="time" domain={[weightChart.startMs, weightChart.endMs]}
+                      <XAxis dataKey="t" type="number" scale="time" domain={wDomain ?? [weightChart.startMs, weightChart.endMs]} allowDataOverflow={!!wDomain}
                         tickFormatter={t => shortDate(msToYmd(t))} tick={{ fill: C.axis, fontSize: 10 }}
                         axisLine={{ stroke: C.grid }} tickLine={false} minTickGap={24} />
-                      <YAxis type="number" orientation="right" domain={weightChart.domain} ticks={weightChart.ticks} tickFormatter={weightTick}
+                      <YAxis type="number" orientation="right" domain={weightZoomY?.domain ?? weightChart.domain}
+                        ticks={weightZoomY ? weightZoomY.ticks : weightChart.ticks} allowDataOverflow={!!weightZoomY} tickFormatter={weightTick}
                         tick={{ fill: C.axis, fontSize: 10 }} axisLine={false} tickLine={false} width={unit === "st" ? 58 : 40} />
                       <Tooltip
                         contentStyle={{ background: "rgba(2,6,23,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
@@ -867,16 +1047,16 @@ export function NutritionClient() {
                         strokeDasharray="2 5" connectNulls dot={false} activeDot={false} isAnimationActive={false} />
                       {/* The 7-day average every projection starts from */}
                       <ReferenceLine segment={[{ x: weightChart.avgFrom, y: weightChart.anchor }, { x: weightChart.todayMs, y: weightChart.anchor }]}
-                        stroke="#fbbf24" strokeWidth={4} ifOverflow="extendDomain"
+                        stroke="#fbbf24" strokeWidth={4} ifOverflow={wDomain ? "hidden" : "extendDomain"}
                         label={{ value: "7-day avg", fill: "#fbbf24", fontSize: 10, position: "insideBottomLeft" }} />
                       {data.projections.map(p => (
                         <Line key={p.method} dataKey={p.method} name={p.label} stroke={PROJ_COLORS[p.method]} connectNulls
                           strokeWidth={2} strokeDasharray="5 4" dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
                       ))}
                       {/* Each projection's weight where it meets the goal date, and the 7-day average's weight at its end */}
-                      {weightChart.endMarks.map(m => (
+                      {weightChart.endMarks.filter(m => !wDomain || (m.ms >= wDomain[0] && m.ms <= wDomain[1])).map(m => (
                         <ReferenceDot key={`end-${m.key}`} x={m.ms} y={m.kg} r={4}
-                          fill={m.color} stroke="#f8fafc" strokeWidth={1.5} ifOverflow="extendDomain"
+                          fill={m.color} stroke="#f8fafc" strokeWidth={1.5} ifOverflow={wDomain ? "hidden" : "extendDomain"}
                           label={{
                             content: props => {
                               const vb = (props as { viewBox?: { x: number; y: number; width: number; height: number } }).viewBox;
@@ -901,12 +1081,13 @@ export function NutritionClient() {
                       ))}
                     </ComposedChart>
                   </ResponsiveContainer>
+                  </div>
                 )}
                 {weightChart && (
                   <p className="text-xs text-slate-500 mt-2">
                     How the projections are made: the faint purple line is the straight line fitted through your weigh-ins over the last {cfg.trendDays} days;
-                    its slope is the Scale trend rate. Every projection starts from your 7-day average weight (yellow bar), not a single weigh-in,
-                    so one heavy or light day doesn&apos;t swing it. A weigh-in taken within 3 hours after a run finished (from your Garmin activities) is taken as post-run: those are the green dots, left out of everything above and given their own green fitted line and "Post-run trend" projection, which starts from where that line is today; the dotted yellow line carries that average flat to the goal date, i.e. no change. Sticking to your limit uses calories instead: your {cfg.dailyCalorieLimit ?? "—"} kcal
+                    its slope is the Scale trend rate. The Scale trend continues from where that purple line is today, so it joins it without a jump. The calorie projections start from your 7-day average weight (yellow bar), not a single weigh-in,
+                    so one heavy or light day doesn&apos;t swing them. A weigh-in taken within 3 hours after a run finished (from your Garmin activities) is taken as post-run: those are the green dots, left out of everything above and given their own green fitted line and "Post-run trend" projection, which starts from where that line is today; the dotted yellow line carries that average flat to the goal date, i.e. no change. Sticking to your limit uses calories instead: your {cfg.dailyCalorieLimit ?? "—"} kcal
                     limit against your average Garmin burn.
                   </p>
                 )}

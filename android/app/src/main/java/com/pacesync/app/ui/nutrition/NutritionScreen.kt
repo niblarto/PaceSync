@@ -640,8 +640,8 @@ private fun CaloriesFullscreen(d: NutritionDashboardDto, range: Int, onRange: (I
         },
         footer = {
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                CaloriesLegend(hidden) { hidden = it }
-                Box(Modifier.weight(1f)) { Small("Tap a day for its details.") }
+                Box(Modifier.weight(1f)) { CaloriesLegend(hidden) { hidden = it } }
+                Text("Tap a day for its details.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, maxLines = 1, softWrap = false)
             }
         },
     ) { modifier, zoom, offset ->
@@ -661,9 +661,13 @@ private fun WeightFullscreen(d: NutritionDashboardDto, unit: String, refreshing:
             selected?.let { date -> FloatingDetail({ selected = null }) { WeightDetail(d, chart, unit, date) } }
         },
         footer = {
+            // The legend takes the leftover width and wraps; the hint keeps its own one-line
+            // width. (Giving the hint the leftover instead left it almost no width once the
+            // legend filled the line, so it wrapped a letter per line into a column hundreds
+            // of pixels tall that squeezed the chart to nothing.)
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                WeightLegend(d)
-                Box(Modifier.weight(1f)) { Small("Tap a date for its values.") }
+                Box(Modifier.weight(1f)) { WeightLegend(d) }
+                Text("Tap a date for its values.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, maxLines = 1, softWrap = false)
             }
         },
     ) { modifier, zoom, offset ->

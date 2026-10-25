@@ -30,6 +30,38 @@ export function paceToTargetBpm(paceSec: number, cadenceBuckets: Record<string, 
   return fallbackBpm(paceSec);
 }
 
+export interface TargetBpmBasis {
+  method: "garmin" | "fallback";
+  bpm: number;
+  /** garmin: the 5s pace bucket used, how far it is from the typed pace, and
+      the average cadence (steps/min) recorded in it before rounding. */
+  bucketSec?: number;
+  offsetSec?: number;
+  rawSpm?: number;
+  /** fallback: the formula's unclamped value, and whether the clamp applied. */
+  formulaBpm?: number;
+  clamped?: boolean;
+}
+
+// How paceToTargetBpm reached its number — same steps, returned for display.
+export function explainTargetBpm(paceSec: number, cadenceBuckets: Record<string, number> | null): TargetBpmBasis {
+  if (cadenceBuckets) {
+    let bestBucket: number | null = null;
+    let bestDist = Infinity;
+    for (const key of Object.keys(cadenceBuckets)) {
+      const dist = Math.abs(Number(key) - paceSec);
+      if (dist < bestDist) { bestDist = dist; bestBucket = Number(key); }
+    }
+    if (bestBucket != null && bestDist <= 15) {
+      const rawSpm = cadenceBuckets[String(bestBucket)];
+      return { method: "garmin", bpm: Math.round(rawSpm), bucketSec: bestBucket, offsetSec: bestBucket - paceSec, rawSpm };
+    }
+  }
+  const formulaBpm = 171 + (555 - paceSec) / 30;
+  const bpm = fallbackBpm(paceSec);
+  return { method: "fallback", bpm, formulaBpm, clamped: bpm !== Math.round(formulaBpm) };
+}
+
 const WORK_TOLERANCE_BPM = 3.0; // ai_dj/workout.py's BPM_TOLERANCES[0] — the
 // tightest band a "work" (hard-effort, e.g. tempo/interval pace) segment
 // ever uses before widening.

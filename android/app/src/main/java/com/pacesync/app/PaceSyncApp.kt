@@ -194,7 +194,7 @@ fun PaceSyncApp(container: AppContainer) {
                     navController.popBackStack()
                 }
             }
-            composable(Dest.Settings.route) { SettingsScreen(container.tokenStore, container.api) }
+            composable(Dest.Settings.route) { SettingsScreen(container.tokenStore, container.api, container.nutritionApi) }
             composable(Dest.Crawler.route) { CrawlerScreen(container.api) }
             composable(Dest.Coach.route) { CoachScreen(container.coachApi, container.api) }
             composable(Dest.Nutrition.route) { NutritionScreen(container.nutritionApi, container.api) }

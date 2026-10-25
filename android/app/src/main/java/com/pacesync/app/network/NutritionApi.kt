@@ -3,6 +3,8 @@ package com.pacesync.app.network
 import com.pacesync.app.BuildConfig
 import com.pacesync.app.data.TokenStore
 import com.pacesync.app.network.dto.NutritionDashboardDto
+import com.pacesync.app.network.dto.NutritionSettingsDto
+import com.pacesync.app.network.dto.NutritionSettingsRequest
 import com.pacesync.app.network.dto.NutritionSummaryStateDto
 import com.pacesync.app.network.dto.WeightRefreshDto
 import kotlinx.serialization.json.Json
@@ -10,6 +12,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
+import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Query
@@ -24,6 +27,13 @@ interface NutritionApi {
     // Pull the latest weigh-ins from Garmin Connect.
     @POST("api/nutrition/weight-refresh")
     suspend fun refreshWeight(): Response<WeightRefreshDto>
+
+    // Settings -> Nutrition goals (the same ones the web Settings page edits).
+    @GET("api/settings/nutrition")
+    suspend fun getSettings(): Response<NutritionSettingsDto>
+
+    @POST("api/settings/nutrition")
+    suspend fun saveSettings(@Body body: NutritionSettingsRequest): Response<NutritionSettingsDto>
 
     @GET("api/nutrition/summary")
     suspend fun getSummary(): Response<NutritionSummaryStateDto>

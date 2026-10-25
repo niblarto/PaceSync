@@ -10,6 +10,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { parseBpmSpec } from "@/lib/bpm-spec";
+import { ArtistListInput } from "@/components/ArtistListInput";
 import { useSession } from "next-auth/react";
 import type { RunningZone } from "@/types";
 import { BbcBrowserCard } from "@/components/BbcBrowserCard";
@@ -317,6 +318,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   });
   // Exact BPM per pace ("8:20" -> "172"), replacing the old Work / intervals range.
   const [paceBpmOv, setPaceBpmOv] = useState<Record<string, string>>({});
+  // Cadence-derived suggested BPM per pace step, shown in brackets beside each box.
+  const [paceBpmSuggest, setPaceBpmSuggest] = useState<Record<string, number>>({});
   const [bpmOvSaving, setBpmOvSaving] = useState(false);
   const [bpmOvSaved, setBpmOvSaved] = useState(false);
   const [bpmOvError, setBpmOvError] = useState<string | null>(null);
@@ -355,6 +358,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [paceAnalysisError, setPaceAnalysisError] = useState<string | null>(null);
   const [paceAnalysisResult, setPaceAnalysisResult] = useState<{
     paceSec: number; targetBpm: number; cadenceSource: "garmin" | "fallback"; windowSec: number;
+    tableBpm?: { key: string; bpm: number | null } | null;
+    basis?: { method: "garmin" | "fallback"; bpm: number; bucketSec?: number; offsetSec?: number; rawSpm?: number; formulaBpm?: number; clamped?: boolean; runs?: number; records?: number };
     fitsCount: number; tooSlowCount: number;
     tracks: { uri: string | null; name: string; artist: string; tempo: number; targetPaceSec: number; segment: string; date: string; workoutTitle: string; fit: "fits" | "too-slow"; effectiveBpm: number; diff: number }[];
   } | null>(null);
@@ -1895,6 +1900,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setGeminiKeySaving(false);
     }
   }
+
+  useEffect(() => {
+    fetch("/api/settings/pace-bpm-suggestions")
+      .then(r => r.json())
+      .then((d: { suggestions?: Record<string, number> }) => { if (d.suggestions) setPaceBpmSuggest(d.suggestions); })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetch("/api/settings/bpm-overrides")
@@ -4241,8 +4253,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             pace use the Pace BPM table below instead). Leave blank for automatic
             cadence matching — anything set here becomes a hard limit.
             Half-time tracks count at double tempo (an 87 BPM track counts as 174).
-            Sweet spot is the preferred target within that range — tracks nearest it
-            are offered to the mixer first, but it never excludes anything (unlike min/max).
+            Sweet spot is the exact BPM that run type's mixes aim for (it must sit inside
+            min–max): all of its tracks come from that BPM, stepping to the nearest BPM
+            with tracks only if none exist there. Leave it blank to follow the run's pace.
           </p>
         </div>
         <div className="space-y-2">
@@ -4367,12 +4380,26 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             to the nearest 5s step; blank steps and paces outside 6:50–8:55
             fall back to automatic cadence matching. */}
         <div className="pt-3 border-t border-white/10 space-y-2">
-          <div>
-            <h4 className="text-sm font-medium text-slate-200">Pace BPM</h4>
-            <p className="text-xs text-slate-400 mt-1">
-              The exact BPM for work segments at a specific pace (e.g. 8:20/mi), 6:50–8:55 in 5 second
-              steps. Half-time tracks count at double tempo. Leave blank for automatic cadence matching.
-            </p>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h4 className="text-sm font-medium text-slate-200">Pace BPM</h4>
+              <p className="text-xs text-slate-400 mt-1">
+                The exact BPM for work segments at a specific pace (e.g. 8:20/mi), 6:50–8:55 in 5 second
+                steps. Half-time tracks count at double tempo. Leave blank for automatic cadence matching.
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                if (Object.keys(paceBpmSuggest).length === 0) return;
+                if (!window.confirm("Replace every Pace BPM field with its suggested (bracketed) BPM? Your current values will be overwritten — press “Save BPM limits” afterwards to keep the change.")) return;
+                setPaceBpmOv(Object.fromEntries(Object.entries(paceBpmSuggest).map(([k, v]) => [k, String(v)])));
+                setBpmOvSaved(false);
+              }}
+              disabled={Object.keys(paceBpmSuggest).length === 0}
+              className="shrink-0 rounded-lg bg-slate-700/80 hover:bg-slate-600/80 disabled:opacity-40 text-slate-200 text-xs px-3 py-1.5 transition-colors"
+            >
+              Use defaults
+            </button>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5">
             {Array.from({ length: 26 }, (_, i) => {
@@ -4386,6 +4413,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               return (
                 <div key={key} className="flex items-center gap-3">
                   <span className="text-sm text-slate-300 w-16 shrink-0">{key}/mi</span>
+                  <span className="text-xs text-slate-500 font-mono w-9 shrink-0 text-right" title="Suggested BPM for this pace (your measured cadence)">
+                    {paceBpmSuggest[key] != null ? `(${paceBpmSuggest[key]})` : ""}
+                  </span>
                   <input
                     type="number"
                     min={0}
@@ -6808,19 +6838,16 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
         <div className="flex flex-wrap items-end gap-2">
           <label className="text-xs text-slate-500 space-y-1 flex-1 min-w-[12rem]">
-            <span className="block">Artist</span>
-            <input
-              list="crawler-artist-options"
+            <span className="block">Artist <span className="text-slate-600" title={'Separate artists with commas. Put a name that contains commas in quotes: "Earth, Wind & Fire", The Levellers'}>(comma separate several)</span></span>
+            <ArtistListInput
               value={crawlerArtist}
-              onChange={e => setCrawlerArtist(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
+              onChange={setCrawlerArtist}
+              options={crawlerArtistOptions}
+              onEnter={() => void startSongCrawler()}
               disabled={crawlerRunning}
               placeholder="Type to filter artists…"
               className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500"
             />
-            <datalist id="crawler-artist-options">
-              {crawlerArtistOptions.map(a => <option key={a} value={a} />)}
-            </datalist>
           </label>
           <label className="text-xs text-slate-500 space-y-1 flex-1 min-w-[14rem]" title="Spotify artist link (crawls that artist), or an album / playlist link — every track on it is BPM-checked, and its artists are used as starting points for Radio / Related">
             <span className="block">Artist / Album / Playlist link</span>
@@ -7515,6 +7542,87 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
               {paceAnalysisResult.cadenceSource === "garmin" ? "from measured Garmin cadence" : "estimated (no Garmin cadence data at this pace)"}
             </span>
           </div>
+
+          {/* Suggested BPM for the analysed pace — the cadence-derived target,
+              checked against the library and the Pace BPM table (BPM tab). */}
+          {(() => {
+            const suggested = paceAnalysisResult.targetBpm;
+            const sec = paceAnalysisResult.paceSec;
+            const inTable = sec >= 408 && sec <= 537;
+            const snapped = Math.min(Math.max(Math.round(sec / 5) * 5, 410), 535);
+            const key = `${Math.floor(snapped / 60)}:${String(snapped % 60).padStart(2, "0")}`;
+            // The SAVED value (from the server, as of this analysis) is what
+            // mixes use; the on-page field may hold a newer, unsaved edit.
+            const current = inTable ? (paceAnalysisResult.tableBpm ? (paceAnalysisResult.tableBpm.bpm != null ? String(paceAnalysisResult.tableBpm.bpm) : null) : paceBpmOv[key]?.trim() || null) : null;
+            const edited = inTable ? paceBpmOv[key]?.trim() || null : null;
+            const hasUnsavedEdit = inTable && edited !== current;
+            const libCount = activeTracksLoaded
+              ? activeTracks.filter(t => [t.bpm, t.bpm * 2, t.bpm / 2].some(v => Math.round(v) === suggested)).length
+              : null;
+            return (
+              <div className="rounded-lg border border-green-500/30 bg-green-500/5 px-4 py-3 space-y-1.5">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="text-sm text-slate-300">
+                    Suggested BPM: <span className="font-mono text-lg text-green-400">{suggested}</span>
+                  </span>
+                  <span className="text-xs text-slate-500">
+                    {paceAnalysisResult.cadenceSource === "garmin" ? "your measured Garmin cadence at this pace" : "estimated — no Garmin cadence data near this pace"}
+                    {libCount !== null && ` · ${libCount} library track${libCount === 1 ? "" : "s"} at exactly ${suggested} (half-time counted)`}
+                  </span>
+                </div>
+                {paceAnalysisResult.basis && (() => {
+                  const b = paceAnalysisResult.basis;
+                  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+                  return (
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      <span className="text-slate-500">How it was reached: </span>
+                      {b.method === "garmin" && b.bucketSec != null && b.rawSpm != null ? (
+                        <>
+                          the cadence bucket nearest {fmt(sec)}/mi is {fmt(b.bucketSec)}–{fmt(b.bucketSec + 4)}/mi
+                          {b.offsetSec === 0 ? " (the pace itself)" : ` (${Math.abs(b.offsetSec ?? 0)}s ${(b.offsetSec ?? 0) > 0 ? "faster" : "slower"} than typed)`}.
+                          Across {b.runs != null && b.records != null
+                            ? <><span className="font-mono text-slate-300">{b.runs}</span> run{b.runs === 1 ? "" : "s"} ({b.records.toLocaleString()} Garmin records)</>
+                            : "every running record your Garmin logged"} at that pace, your average cadence was{" "}
+                          <span className="font-mono text-slate-300">{b.rawSpm.toFixed(1)} steps/min</span>, which rounds to{" "}
+                          <span className="font-mono text-green-400">{b.bpm}</span>. One step per beat, so music at that BPM matches your stride.
+                        </>
+                      ) : (
+                        <>
+                          no recorded cadence within 15s/mi of this pace, so the fallback formula was used: 171 + (555 − {sec}) ÷ 30 ={" "}
+                          <span className="font-mono text-slate-300">{b.formulaBpm?.toFixed(1)}</span>
+                          {b.clamped ? ", limited to the 164–180 range," : ""} → <span className="font-mono text-green-400">{b.bpm}</span>.
+                        </>
+                      )}
+                    </p>
+                  );
+                })()}
+                {inTable ? (
+                  <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+                    <span>
+                      Saved Pace BPM table ({key}/mi):{" "}
+                      <span className={`font-mono ${current && Number(current) !== suggested ? "text-amber-400" : "text-slate-300"}`}>{current ?? "not set (automatic)"}</span>
+                    </span>
+                    {hasUnsavedEdit && (
+                      <span className="text-sky-300">
+                        the field on the BPM tab now says <span className="font-mono">{edited ?? "blank"}</span> (unsaved — press “Save BPM limits”)
+                      </span>
+                    )}
+                    {current !== String(suggested) && edited !== String(suggested) && (
+                      <button
+                        onClick={() => { setPaceBpmOv(o => ({ ...o, [key]: String(suggested) })); setBpmOvSaved(false); }}
+                        className="rounded-md bg-green-500/90 hover:bg-green-400 text-black font-semibold px-2.5 py-1 transition-colors"
+                      >
+                        Use {suggested} for {key}
+                      </button>
+                    )}
+                    {current === String(suggested) && <span className="text-green-400">✓ saved value matches</span>}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500">Outside the Pace BPM table (6:50–8:55/mi), so mixes use automatic cadence matching here.</p>
+                )}
+              </div>
+            );
+          })()}
 
           <div className="flex items-center gap-4 text-sm">
             <span className="flex items-center gap-1.5">

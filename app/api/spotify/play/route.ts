@@ -32,15 +32,35 @@ export async function POST(req: NextRequest) {
   // Best-effort — fails harmlessly (404) when no device is active yet.
   const shuffleOff = () => fetch(`${BASE}/me/player/shuffle?state=false`, { method: "PUT", headers: auth }).catch(() => null);
 
-  if (isPlaylist) await shuffleOff();
+  // A single track is started as "this track, from its album" rather than as a bare
+  // `uris: [track]`. Spotify answers 204 to the bare form, but the phone's app has
+  // been stopping the current song and never starting the new one (measured: the
+  // bare form with or without a device id did nothing; the album context played).
+  // If the album can't be looked up, fall back to the bare form.
+  let albumUri: string | null = null;
+  if (!isPlaylist) {
+    const trackId = uri!.split(":")[2];
+    const tr = await fetch(`${BASE}/tracks/${trackId}?market=from_token`, { headers: auth })
+      .then(r => (r.ok ? r.json() : null)).catch(() => null) as { album?: { uri?: string } } | null;
+    albumUri = tr?.album?.uri ?? null;
+  }
+  const asContext = isPlaylist || albumUri != null;
+
+  // Context plays follow the device's shuffle setting, which would pick a random
+  // track instead of the one asked for - so shuffle is switched off first.
+  if (asContext) await shuffleOff();
   const res = await fetch(`${BASE}/me/player/play`, {
     method: "PUT",
     headers: { ...auth, "Content-Type": "application/json" },
-    body: JSON.stringify(isPlaylist ? { context_uri: contextUri, offset: { position: 0 } } : { uris: [uri] }),
+    body: JSON.stringify(
+      isPlaylist ? { context_uri: contextUri, offset: { position: 0 } }
+        : albumUri ? { context_uri: albumUri, offset: { uri } }
+        : { uris: [uri] },
+    ),
   });
   // Spotify can re-apply the device's shuffle setting as a new context
   // starts — turn it off again once playback is running.
-  if (isPlaylist && res.status === 204) await shuffleOff();
+  if (asContext && res.status === 204) await shuffleOff();
 
   if (res.status === 204) {
     return NextResponse.json({ ok: true });

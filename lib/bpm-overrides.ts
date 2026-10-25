@@ -37,11 +37,16 @@ export type BpmOverrides = Partial<Record<RunKind, { min?: number | null; max?: 
 };
 
 // Usable BPM window for a run kind: its min/max override, or for "work" the
-// span of the per-pace BPMs. Unset sides are 0 / Infinity (no bound).
+// per-pace BPMs' lowest value (less tolerance) and up. Unset sides are 0 /
+// Infinity (no bound).
 export function kindBpmRange(overrides: BpmOverrides, kind: RunKind): { min: number; max: number } {
   if (kind === "work") {
     const vals = Object.values(overrides.paceBpm ?? {}).filter(v => Number.isFinite(v) && v > 0);
-    if (vals.length > 0) return { min: Math.min(...vals), max: Math.max(...vals) };
+    // A work segment accepts tracks up to 3 BPM below its target and has no
+    // upper limit (running faster than target is never a mismatch), and its
+    // exact-BPM lock can step out to neighbouring BPMs — so usable work
+    // music is everything from the lowest table BPM less that tolerance up.
+    if (vals.length > 0) return { min: Math.min(...vals) - 3, max: Infinity };
   }
   const o = overrides[kind];
   return {

@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getPlayedTracksNearPace } from "@/lib/todays-run-history";
-import { loadCadenceBuckets } from "@/lib/ai-dj-mix";
-import { paceToTargetBpm, classifyPaceFit, PACE_ANALYSIS_WINDOW_SEC as PACE_WINDOW_SEC } from "@/lib/pace-analysis";
+import { loadCadenceBuckets, loadCadenceBucketStats } from "@/lib/ai-dj-mix";
+import { paceToTargetBpm, explainTargetBpm, classifyPaceFit, PACE_ANALYSIS_WINDOW_SEC as PACE_WINDOW_SEC } from "@/lib/pace-analysis";
+import { loadBpmOverrides, paceBpmKey, PACE_BPM_MIN_SEC, PACE_BPM_MAX_SEC } from "@/lib/bpm-overrides";
 import { readAllTracks } from "@/lib/tracks-store";
 import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
 
@@ -38,6 +39,18 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     paceSec, targetBpm,
+    // What's SAVED for this pace in the Pace BPM table (what mixes actually use).
+    tableBpm: (() => {
+      if (paceSec < PACE_BPM_MIN_SEC - 2.5 || paceSec > PACE_BPM_MAX_SEC + 2.5) return null;
+      const snapped = Math.min(Math.max(Math.round(paceSec / 5) * 5, PACE_BPM_MIN_SEC), PACE_BPM_MAX_SEC);
+      const key = paceBpmKey(snapped);
+      return { key, bpm: loadBpmOverrides().paceBpm?.[key] ?? null };
+    })(),
+    basis: (() => {
+      const b = explainTargetBpm(paceSec, cadenceBuckets);
+      const stats = b.bucketSec != null ? loadCadenceBucketStats(b.bucketSec) : null;
+      return { ...b, runs: stats?.runs, records: stats?.records };
+    })(),
     cadenceSource: cadenceBuckets ? "garmin" : "fallback",
     windowSec: PACE_WINDOW_SEC,
     tracks,

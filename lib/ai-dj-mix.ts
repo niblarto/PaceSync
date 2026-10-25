@@ -49,6 +49,32 @@ export type AiDjProgress = (current: number, total: number, segment: string, det
 export type AiDjLlmEvent = { system: string; user: string; ok: boolean; response?: string; error?: string };
 export type AiDjLlmCallback = (event: AiDjLlmEvent) => void;
 
+// How much data sits behind one loadCadenceBuckets() bucket: the runs it
+// came from and the cadence records in it (same filters as that query).
+export function loadCadenceBucketStats(bucketSec: number): { runs: number; records: number } | null {
+  const config = loadGarminConfig();
+  if (!config) return null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+    const db = new Database(join(config.dbPath, "garmin_activities.db"), { readonly: true, fileMustExist: true });
+    db.pragma("busy_timeout = 30000");
+    const row = db.prepare(`
+      SELECT COUNT(DISTINCT r.activity_id) AS runs, COUNT(*) AS records
+      FROM activity_records r
+      JOIN activities a ON a.activity_id = r.activity_id
+      WHERE LOWER(a.sport) LIKE '%running%'
+        AND r.speed > 0.3 AND r.speed IS NOT NULL
+        AND r.cadence IS NOT NULL AND r.cadence > 10
+        AND CAST(3600.0 / r.speed / 5 AS INTEGER) * 5 = ?
+    `).get(bucketSec) as { runs: number; records: number } | undefined;
+    db.close();
+    return row ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // Real cadence per 5s pace bucket from GarminDB (sec/mi -> SPM), sent to the
 // remote AI DJ service so its pace->BPM uses measured turnover instead of a
 // linear guess — the service host has no Garmin data of its own.
