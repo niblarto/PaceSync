@@ -1,8 +1,11 @@
 "use client";
 
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { useSession } from "next-auth/react";
 import { playInSpotify } from "@/components/TrackRow";
+import { SongProgressBar } from "@/components/SongProgressBar";
+import { queueCrawlerLookup } from "@/lib/crawler-lookup-client";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 
 // Settings -> Tracklist -> "Genre explorer" — same 3-tier main genre ->
@@ -60,6 +63,9 @@ export function GenreExplorer() {
   const [moveBusy, setMoveBusy] = useState(false);
   const [moveMsg, setMoveMsg] = useState<string | null>(null);
   const [moveError, setMoveError] = useState<string | null>(null);
+  // Right-click on a track: Play, or Lookup (send its artist to the Song Crawler).
+  const [trackMenu, setTrackMenu] = useState<{ x: number; y: number; uri: string; artist: string } | null>(null);
+  const [lookupMsg, setLookupMsg] = useState<{ text: string; error: boolean } | null>(null);
 
 // Unconditional fetch — always hits the server regardless of what
   // `hierarchy` currently holds, and deliberately does NOT null it out
@@ -123,6 +129,12 @@ export function GenreExplorer() {
         setTagTracks(prev => ({ ...prev, [genre]: d.error || !d.tracks ? "error" : d.tracks }));
       })
       .catch(() => setTagTracks(prev => ({ ...prev, [genre]: "error" })));
+  }
+
+  async function lookupArtist(artist: string) {
+    setTrackMenu(null);
+    const r = await queueCrawlerLookup([artist]);
+    setLookupMsg({ text: r.message, error: !r.ok });
   }
 
   function playTrack(uri: string) {
@@ -219,13 +231,18 @@ export function GenreExplorer() {
 
   return (
     <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
-      <button
-        onClick={toggleOpen}
-        className="w-full flex items-center justify-between gap-4 p-5 text-left hover:bg-slate-800/40 transition-colors"
-      >
-        <h3 className="font-semibold text-slate-200">🧭 Genre explorer</h3>
-        <span className={`text-slate-500 text-sm transition-transform ${open ? "rotate-180" : ""}`}>▾</span>
-      </button>
+      {/* The playing / seek bar sits beside the title, so a track can be followed and seeked while
+          browsing. It is interactive, so the header isn't one big button (no button inside a
+          button): the title and the arrow are the toggles. */}
+      <div className="flex items-center gap-4 hover:bg-slate-800/40 transition-colors">
+        <button onClick={toggleOpen} className="flex items-center text-left p-5 pr-0 shrink-0">
+          <h3 className="font-semibold text-slate-200">🧭 Genre explorer</h3>
+        </button>
+        <SongProgressBar className="flex-1 min-w-0" />
+        <button onClick={toggleOpen} aria-label={open ? "Collapse" : "Expand"} className="p-5 pl-0 text-slate-500 text-sm shrink-0">
+          <span className={`inline-block transition-transform ${open ? "rotate-180" : ""}`}>▾</span>
+        </button>
+      </div>
       {open && (
         <div className="border-t border-white/10 p-5 space-y-3">
           <p className="text-xs text-slate-500">
@@ -239,6 +256,11 @@ export function GenreExplorer() {
             placeholder="Filter genres…"
             className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500"
           />
+          {lookupMsg && (
+            <p className={`text-xs ${lookupMsg.error ? "text-red-400" : "text-sky-300"}`}>
+              {lookupMsg.text} <button onClick={() => setLookupMsg(null)} className="text-slate-500 hover:text-slate-300 underline">Dismiss</button>
+            </p>
+          )}
           {moveMsg && (
             <p className="text-xs text-emerald-400">
               {moveMsg} <button onClick={() => setMoveMsg(null)} className="text-slate-500 hover:text-slate-300 underline">Dismiss</button>
@@ -337,10 +359,13 @@ export function GenreExplorer() {
                                   {Array.isArray(tracks) && tracks.length === 0 && <p className="text-xs text-slate-600 py-1">No tracks.</p>}
                                   {Array.isArray(tracks) && tracks.map(t => (
                                     <div key={t.uri}>
-                                      <div className="flex items-center gap-2 py-0.5">
+                                      <div
+                                        className="flex items-center gap-2 py-0.5"
+                                        onContextMenu={e => { e.preventDefault(); setTrackMenu({ x: e.clientX, y: e.clientY, uri: t.uri, artist: t.artist }); }}
+                                      >
                                         <button
                                           onClick={() => playTrack(t.uri)}
-                                          title="Play in Spotify"
+                                          title="Play on your active Spotify device · right-click for Play / Lookup"
                                           className={`text-xs flex-1 min-w-0 text-left truncate ${playingUri === t.uri ? "text-orange-400" : "text-slate-300 hover:text-white"}`}
                                         >
                                           {t.name} <span className="text-slate-600">— {t.artist}</span>
@@ -403,6 +428,32 @@ export function GenreExplorer() {
             {allTags.map(g => <option key={g} value={g} />)}
           </datalist>
         </div>
+      )}
+      {/* Portalled to <body>: this panel's backdrop-blur would otherwise make it the containing
+          block for position:fixed and put the menu at the wrong spot. */}
+      {trackMenu && createPortal(
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setTrackMenu(null)} onContextMenu={e => { e.preventDefault(); setTrackMenu(null); }} />
+          <div
+            className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl py-1 w-40"
+            style={{ left: Math.min(trackMenu.x, window.innerWidth - 170), top: Math.min(trackMenu.y, window.innerHeight - 100) }}
+          >
+            <button
+              onClick={() => { const uri = trackMenu.uri; setTrackMenu(null); playTrack(uri); }}
+              className="w-full text-left px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800 transition-colors"
+            >
+              ▶ Play
+            </button>
+            <button
+              onClick={() => void lookupArtist(trackMenu.artist)}
+              title="Send this artist to the Song Crawler: now if no crawl is running, otherwise queued"
+              className="w-full text-left px-3 py-1.5 text-sm text-sky-300 hover:bg-sky-500/15 transition-colors"
+            >
+              🔎 Lookup
+            </button>
+          </div>
+        </>,
+        document.body,
       )}
     </div>
   );

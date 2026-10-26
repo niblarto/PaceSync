@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { useSession } from "next-auth/react";
 import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
 import Link from "next/link";
-import { FunnelIcon, SparklesIcon, MetronomeIcon, TrashIcon, MiniSpinner, handleArtError, openSpotifyAppFirst } from "./TrackRow";
+import { FunnelIcon, SparklesIcon, MetronomeIcon, TrashIcon, MiniSpinner, handleArtError, openSpotifyAppFirst, playOnActiveDevice } from "./TrackRow";
 import { FloatingCard } from "./FloatingCard";
 import { useRunningPlaylist, getRunningPlaylist } from "./useRunningPlaylist";
 import { DeletedTracksReview, type RejectedTrack } from "./DeletedTracksReview";
@@ -61,25 +61,12 @@ function BbcTrackRow({ track, index, onSimilar, onSuggest, suggestBusy, onDelete
     openSpotifyAppFirst(`spotify:track:${trackId}`, `https://open.spotify.com/track/${trackId}`);
   }
 
+  // Plays on the active Spotify device first (your phone, if that's what's playing), then the
+  // local fallbacks - see playOnActiveDevice in TrackRow.
   async function playTrack() {
     if (!trackId) return;
-    const token = await freshSpotifyToken();
-    if (token) {
-      try {
-        const res = await spotifyFetch("https://api.spotify.com/v1/me/player/play", {
-          method: "PUT",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ uris: [`spotify:track:${trackId}`] }),
-        });
-        if (res.ok) {
-          // Bring the app forward on the track's page so its main panel
-          // reflects what's now playing (the API only switches the audio).
-          window.location.href = `spotify:track:${trackId}`;
-          return;
-        }
-      } catch { /* fall through */ }
-    }
-    openInSpotify();
+    const token = await freshSpotifyToken().catch(() => null);
+    await playOnActiveDevice(`spotify:track:${trackId}`, token);
   }
 
   // A track is only ever flagged ineligible once it has a confirmed-missing

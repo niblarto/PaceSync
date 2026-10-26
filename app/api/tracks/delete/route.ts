@@ -5,8 +5,10 @@ import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist
 import { readTracksByUris, deleteTracksByUri, regenerateCsvFile } from "@/lib/tracks-store";
 import { recordDeletedTracks } from "@/lib/deleted-tracks";
 import { findBrokenTracklists } from "@/lib/broken-tracklists";
+import { ensureSpotifyRemovalsStarted, queueSpotifyRemovals } from "@/lib/spotify-removals";
 
-// CSV-only deletion — Spotify removal is handled client-side with the browser token.
+// Library (CSV) deletion. The Spotify playlist removal is QUEUED here (lib/spotify-removals.ts: batched,
+// kept on disk and retried after a rate limit) rather than sent from the browser and forgotten.
 // Accepts either a single spotifyUri (back-compat) or a spotifyUris batch, doing one
 // CSV read/write for the whole batch instead of a round-trip per track.
 export async function DELETE(req: NextRequest) {
@@ -25,6 +27,10 @@ export async function DELETE(req: NextRequest) {
   const fullUris = new Set(uris.map(u => u.startsWith("spotify:track:") ? u : `spotify:track:${u}`));
 
   const csvFile = loadRunningPlaylistConfig().csvFile;
+  // Queue the removal from the Spotify playlist whether or not the CSV still has the row: a
+  // track already gone from the library can still be on the playlist.
+  ensureSpotifyRemovalsStarted();
+  queueSpotifyRemovals(Array.from(fullUris));
   try {
     const matched = readTracksByUris(csvFile, Array.from(fullUris));
     const removedRows: { uri: string; name?: string; artist?: string }[] = matched.map(t => ({

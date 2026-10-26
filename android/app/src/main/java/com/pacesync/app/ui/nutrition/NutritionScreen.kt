@@ -399,7 +399,10 @@ private fun weightChartData(d: NutritionDashboardDto): WeightChartData? {
         val fit = d.trendFit?.let { f ->
             runCatching { TrendFit(LocalDate.parse(f.startDate), f.startKg, LocalDate.parse(f.endDate), f.endKg) }.getOrNull()
         }
-        WeightChartData(weights, today, cur.avg7Kg, d.projections.map { ProjLine(it.method, it.kgPerWeek, it.anchorKg) }, d.config.targetWeightKg, goal, end, fit, postWeights, postFit)
+        val fit7 = d.trendFit7?.let { f ->
+            runCatching { TrendFit(LocalDate.parse(f.startDate), f.startKg, LocalDate.parse(f.endDate), f.endKg) }.getOrNull()
+        }
+        WeightChartData(weights, today, cur.avg7Kg, d.projections.map { ProjLine(it.method, it.kgPerWeek, it.anchorKg) }, d.config.targetWeightKg, goal, end, fit, postWeights, postFit, fit7)
     }
 }
 

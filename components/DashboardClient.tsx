@@ -3033,6 +3033,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             )}
             <Link href="/coach" className={NAV_LINK}>Coach</Link>
             <Link href="/nutrition" className={NAV_LINK}>Nutrition</Link>
+            <Link href="/crawler" className={NAV_LINK}>Crawler</Link>
             <Link href="/pace-pro" className={NAV_LINK}>Pace Pro</Link>
             <Link href="/races" className={NAV_LINK}>Races</Link>
             <Link href="/routes" className={NAV_LINK}>Routes</Link>
@@ -4236,6 +4237,14 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
       )}
 
       {chartAiRemixPrompt && (() => {
+        // Pre-fill the target with the selected tracks' own BPM (their median, half-time tracks
+        // counted at double, same as the mixer reads them) so the box isn't empty.
+        const selBpms = (aiDjMix?.tracks ?? [])
+          .filter(t => chartSelectedUris.has(t.uri) && t.bpm > 0)
+          .map(t => (t.bpm < 95 ? t.bpm * 2 : t.bpm))
+          .sort((x, y) => x - y);
+        const mid = selBpms.length ? (selBpms[Math.floor((selBpms.length - 1) / 2)] + selBpms[Math.floor(selBpms.length / 2)]) / 2 : null;
+        const defaultBpm = mid != null ? Math.round(mid) : undefined;
         return (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setChartAiRemixPrompt(null)} />
@@ -4264,8 +4273,15 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     name="bpm"
                     type="number"
                     autoFocus
+                    defaultValue={defaultBpm}
+                    onFocus={e => e.currentTarget.select()}
                     className="w-24 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-green-500 font-mono"
                   />
+                  {selBpms.length > 0 && (
+                    <span className="block text-[11px] text-slate-600">
+                      Selected tracks: {selBpms[0] === selBpms[selBpms.length - 1] ? `${Math.round(selBpms[0])}` : `${Math.round(selBpms[0])}–${Math.round(selBpms[selBpms.length - 1])}`} BPM
+                    </span>
+                  )}
                 </label>
                 <p className="text-[11px] text-slate-600">The AI DJ will pick library tracks at this BPM to fill these tracks' combined length, same tolerances as everywhere else.</p>
                 <button type="submit" className="w-full rounded-lg bg-purple-500 hover:bg-purple-400 text-black font-semibold text-xs px-3 py-1.5 transition-colors">

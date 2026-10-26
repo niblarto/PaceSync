@@ -28,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -35,6 +36,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +51,11 @@ import androidx.compose.ui.unit.sp
 import com.pacesync.app.R
 import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.CrawlAddedTrack
+import com.pacesync.app.network.dto.CrawlClearQueueRequest
+import com.pacesync.app.network.dto.CrawlControlRequest
+import com.pacesync.app.network.dto.CrawlRemoveQueuedRequest
+import com.pacesync.app.network.dto.CrawlInputsRequest
+import com.pacesync.app.network.dto.CrawlInputsSaved
 import com.pacesync.app.network.dto.CrawlJobDto
 import com.pacesync.app.network.dto.CrawlLine
 import com.pacesync.app.network.dto.CrawlRemoveRequest
@@ -105,12 +112,58 @@ fun CrawlerScreen(api: PaceSyncApi) {
             .apply()
     }
 
+    // The form's settings are kept on the SERVER, shared with the web page: loaded when this screen
+    // opens, saved a moment after each edit, and re-read every 10 seconds so a change made on the web
+    // shows up here - unless there is an edit of ours that hasn't been saved yet. (The phone's own
+    // copy above is only the quick first paint.)
+    data class FormSnap(
+        val artist: String, val link: String, val bpm: String, val maxArtists: String, val reviewLimit: String,
+        val srcArtist: Boolean, val srcRadio: Boolean, val srcRelated: Boolean,
+    )
+    val snap = FormSnap(artist, link, bpm, maxArtists, reviewLimit, srcArtist, srcRadio, srcRelated)
+    val latestSnap by rememberUpdatedState(snap)
+    var inputsLoaded by remember { mutableStateOf(false) }
+    var syncedSnap by remember { mutableStateOf<FormSnap?>(null) } // the values last known to match the server
+    var inputsStamp by remember { mutableStateOf<String?>(null) }  // the server's updatedAt for those
+    fun applyServerInputs(i: CrawlInputsSaved) {
+        artist = i.artist; link = i.link; bpm = i.bpm; maxArtists = i.maxArtists; reviewLimit = i.reviewLimit
+        srcArtist = i.sources.artist; srcRadio = i.sources.radio; srcRelated = i.sources.related
+        syncedSnap = FormSnap(i.artist, i.link, i.bpm, i.maxArtists, i.reviewLimit, i.sources.artist, i.sources.radio, i.sources.related)
+        inputsStamp = i.updatedAt
+        saveInputs()
+    }
+    LaunchedEffect(Unit) {
+        val server = runCatching { api.getCrawlInputs() }.getOrNull()?.takeIf { it.isSuccessful }?.body()?.inputs
+        if (server?.updatedAt != null) applyServerInputs(server)
+        inputsLoaded = true // if the server has nothing yet, the phone's values are saved up next
+    }
+    LaunchedEffect(snap, inputsLoaded) {
+        if (!inputsLoaded || snap == syncedSnap) return@LaunchedEffect
+        delay(600)
+        val saved = runCatching {
+            api.saveCrawlInputs(CrawlInputsRequest(snap.artist, snap.link, snap.bpm, snap.maxArtists, snap.reviewLimit,
+                CrawlSources(snap.srcArtist, snap.srcRadio, snap.srcRelated)))
+        }.getOrNull()?.takeIf { it.isSuccessful }?.body()?.inputs
+        if (saved != null) { syncedSnap = snap; inputsStamp = saved.updatedAt }
+    }
+    LaunchedEffect(inputsLoaded) {
+        if (!inputsLoaded) return@LaunchedEffect
+        while (true) {
+            delay(10_000)
+            if (latestSnap != syncedSnap) continue // an edit of ours is still unsaved
+            val server = runCatching { api.getCrawlInputs() }.getOrNull()?.takeIf { it.isSuccessful }?.body()?.inputs ?: continue
+            if (server.updatedAt != null && server.updatedAt != inputsStamp) applyServerInputs(server)
+        }
+    }
+
     var job by remember { mutableStateOf<CrawlJobDto?>(null) }
     val lines = remember { mutableStateListOf<CrawlLine>() }
     var since by remember { mutableStateOf(0) }
     var message by remember { mutableStateOf<String?>(null) }
     var menuFor by remember { mutableStateOf<String?>(null) }
     var playingUri by remember { mutableStateOf<String?>(null) }
+    var reviewPlaylist by remember { mutableStateOf<String?>(null) }
+    var queue by remember { mutableStateOf<List<String>>(emptyList()) } // artists waiting for their own crawl
     var pollNonce by remember { mutableStateOf(0) }
     var playNonce by remember { mutableStateOf(0) } // re-reads the playback bar after a tap
 
@@ -120,6 +173,8 @@ fun CrawlerScreen(api: PaceSyncApi) {
         val resp = runCatching { api.getCrawl(since) }.getOrNull() ?: return
         if (!resp.isSuccessful) return
         val body = resp.body() ?: return
+        reviewPlaylist = body.reviewPlaylist
+        queue = body.queue
         val j = body.job ?: run { job = null; return }
         if (job?.id != null && job?.id != j.id && since > 0) {
             // A different crawl started (e.g. from the web) — reload its log.
@@ -174,16 +229,74 @@ fun CrawlerScreen(api: PaceSyncApi) {
         }
     }
 
+    // Lookup: crawl this song's artist - now if nothing is running, otherwise queued behind the
+    // crawl in progress (the server runs the queue one artist after another). Uses the BPM /
+    // sources / limits currently entered above.
+    fun lookup(t: CrawlAddedTrack) {
+        menuFor = null
+        if (!bpmSpecValid(bpm)) { message = "Enter a BPM (170, 120-122 or 121,145,167) first"; return }
+        val name = t.artist.substringBefore(';').trim()
+        if (name.isEmpty()) return
+        artist = if (name.contains(',')) "\"$name\"" else name // show who was looked up in the Artist field
+        saveInputs()
+        scope.launch {
+            val req = StartCrawlRequest(
+                artist = if (name.contains(',')) "\"$name\"" else name,
+                bpmSpec = bpm.trim(),
+                maxArtists = maxArtists.toIntOrNull()?.takeIf { it > 0 } ?: 50,
+                sources = CrawlSources(srcArtist, srcRadio, srcRelated),
+                reviewLimit = reviewLimit.toIntOrNull()?.takeIf { it > 0 },
+                enqueue = true,
+            )
+            val resp = runCatching { api.startCrawl(req) }.getOrNull()
+            if (resp == null) { message = "Couldn't reach PaceSync server"; return@launch }
+            if (!resp.isSuccessful) {
+                message = resp.errorBody()?.string()?.let {
+                    runCatching { Json.parseToJsonElement(it).jsonObject["error"]?.jsonPrimitive?.content }.getOrNull()
+                } ?: "Couldn't look up $name (${resp.code()})"
+                return@launch
+            }
+            val body = resp.body()
+            message = if (body?.started == true) "Crawling $name now" else "$name queued (${body?.queued ?: 0} waiting)"
+            pollNonce++
+        }
+    }
+
     fun stop() {
         scope.launch { runCatching { api.stopCrawl() }; pollNonce++ }
+    }
+
+    // Paused with the Pause button (not the review limit), or a stopped / interrupted crawl that
+    // can carry on from where it got to: the button then reads Resume.
+    val userPaused = job?.status == "paused" && job?.pauseReason == "user"
+    val canResume = !running && job?.resumable == true
+    fun pauseOrResume() {
+        scope.launch {
+            val resuming = userPaused || canResume
+            val resp = runCatching { api.crawlControl(CrawlControlRequest(if (resuming) "resume" else "pause")) }.getOrNull()
+            if (resp != null && !resp.isSuccessful) message = "Couldn't ${if (resuming) "resume" else "pause"} (${resp.code()})"
+            pollNonce++
+        }
     }
 
     // reason: "accepted" (keep), "deleted" (out + on the deleted list) or
     // "removed" (out of the library/playlist, but can be re-added later).
     fun removeAdded(t: CrawlAddedTrack, reason: String) {
         menuFor = null
+        val before = job?.addedTracks?.map { it.uri } ?: emptyList()
         job = job?.copy(addedTracks = job!!.addedTracks.filter { it.uri != t.uri })
         scope.launch {
+            // If this is the song that's playing, carry on with the next one in the list.
+            val st = runCatching { api.getPlaybackState() }.getOrNull()?.body()
+            if (st != null && st.isPlaying && st.trackUri == t.uri) {
+                val at = before.indexOf(t.uri)
+                val next = before.drop(at + 1).firstOrNull() ?: before.take(at).firstOrNull()
+                if (next != null) {
+                    playingUri = next
+                    playOnActiveDevice(context, api, next, reviewPlaylist)
+                    playNonce++
+                }
+            }
             runCatching {
                 api.crawlRemoveAdded(CrawlRemoveRequest(t.uri, reason, deleteFromLibrary = reason != "accepted"))
             }
@@ -191,10 +304,23 @@ fun CrawlerScreen(api: PaceSyncApi) {
         }
     }
 
+    // Plays from the "PaceSync review" playlist when it holds the song, so Spotify goes on to
+    // the next one in the list by itself.
     fun play(uri: String) {
         menuFor = null
         playingUri = uri
-        scope.launch { playOnActiveDevice(context, api, uri); playNonce++ }
+        scope.launch { playOnActiveDevice(context, api, uri, reviewPlaylist); playNonce++ }
+    }
+
+    // Keep the highlight on whatever is really playing (the playlist moves on by itself).
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(4000)
+            val st = runCatching { api.getPlaybackState() }.getOrNull()?.body() ?: continue
+            if (st.isPlaying && st.trackUri != null) {
+                playingUri = if (job?.addedTracks?.any { it.uri == st.trackUri } == true) st.trackUri else null
+            }
+        }
     }
 
     val scroll = rememberScrollState()
@@ -262,6 +388,12 @@ fun CrawlerScreen(api: PaceSyncApi) {
                             onClick = { start() }, enabled = !running,
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0D9488), contentColor = Color.White),
                         ) { Text("Crawl") }
+                        if (running || canResume) {
+                            OutlinedButton(
+                                onClick = { pauseOrResume() },
+                                enabled = canResume || job?.status == "running" || userPaused,
+                            ) { Text(if (userPaused || canResume) "▶ Resume" else "⏸ Pause") }
+                        }
                         if (running) {
                             OutlinedButton(onClick = { stop() }, enabled = job?.status == "running" || job?.status == "paused") {
                                 Text(if (job?.status == "running" || job?.status == "paused") "Stop" else "Stopping…")
@@ -275,7 +407,7 @@ fun CrawlerScreen(api: PaceSyncApi) {
             // ── Status ──
             job?.let { j ->
                 val label = when (j.status) {
-                    "running" -> "Running"; "paused" -> "Paused (review limit)"; "stopping" -> "Stopping"; "healing" -> "Filling in data"
+                    "running" -> "Running"; "paused" -> if (j.pauseReason == "user") "Paused" else "Paused (review limit)"; "stopping" -> "Stopping"; "healing" -> "Filling in data"
                     "stopped" -> "Last crawl (stopped)"; "error" -> "Last crawl (error)"
                     "interrupted" -> "Last crawl (interrupted)"; else -> "Last crawl"
                 }
@@ -300,6 +432,31 @@ fun CrawlerScreen(api: PaceSyncApi) {
                         fontWeight = FontWeight.Medium,
                         color = if (running) TEAL else MaterialTheme.colorScheme.onSurface,
                     )
+                }
+            }
+
+            // ── Queue: artists added with Lookup, crawled one after another ──
+            if (queue.isNotEmpty()) {
+                Card(colors = cardColors, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Queued for crawling (${queue.size})", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                            TextButton(onClick = {
+                                queue = emptyList()
+                                scope.launch { runCatching { api.crawlClearQueue(CrawlClearQueueRequest(true)) }; pollNonce++ }
+                            }) { Text("Clear all") }
+                        }
+                        queue.forEachIndexed { i, name ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("${i + 1}.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(26.dp))
+                                Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                                TextButton(onClick = {
+                                    queue = queue.filter { it != name }
+                                    scope.launch { runCatching { api.crawlRemoveQueued(CrawlRemoveQueuedRequest(name)) }; pollNonce++ }
+                                }) { Text("✕") }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -360,6 +517,7 @@ fun CrawlerScreen(api: PaceSyncApi) {
                                 DropdownMenuItem(text = { Text("✓ Accept", color = TEAL) }, onClick = { removeAdded(t, "accepted") })
                                 DropdownMenuItem(text = { Text("🗑 Delete", color = RED) }, onClick = { removeAdded(t, "deleted") })
                                 DropdownMenuItem(text = { Text("↩ Remove (can re-add)", color = AMBER) }, onClick = { removeAdded(t, "removed") })
+                                DropdownMenuItem(text = { Text("🔎 Lookup") }, onClick = { lookup(t) })
                             }
                         }
                         HorizontalDivider()
@@ -374,7 +532,7 @@ fun CrawlerScreen(api: PaceSyncApi) {
 // Mirrors lib/bpm-spec.ts: comma-separated BPMs and/or low-high ranges.
 private val BPM_SPEC_PART = Regex("""\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)?""")
 
-private fun bpmSpecValid(spec: String): Boolean {
+internal fun bpmSpecValid(spec: String): Boolean {
     val parts = spec.split(',', ';').map { it.trim() }.filter { it.isNotEmpty() }
     if (parts.isEmpty()) return false
     return parts.all { part ->

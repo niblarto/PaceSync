@@ -61,7 +61,7 @@ data class NutritionAveragesDto(
 
 @Serializable
 data class ProjectionDto(
-    val method: String, // trend | energy | plan | postrun
+    val method: String, // trend | trend7 | energy | plan | postrun
     val label: String,
     val basis: String,
     val kgPerWeek: Double,
@@ -88,6 +88,7 @@ data class NutritionDashboardDto(
     val projections: List<ProjectionDto> = emptyList(),
     val required: RequiredDto? = null,
     val trendFit: TrendFitDto? = null,
+    val trendFit7: TrendFitDto? = null,
     val postRunFit: TrendFitDto? = null,
 )
 

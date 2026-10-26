@@ -87,10 +87,12 @@ export async function buildAndSaveMixesFor(targetDate: string, label: "pre-build
   let targetWorkouts = schedule.workouts.filter(w => w.date === targetDate && isRunnableWorkout(w));
 
   // Morning retry only: don't rebuild/overwrite a workout the evening job (or
-  // a manual save) already covered — only fill genuinely empty slots.
+  // a manual save) already covered — only fill genuinely empty slots. "Covered" means it was
+  // actually SAVED to "Today's Run" (a today's-run entry exists). A pinned mix alone doesn't
+  // count: the pre-build can fail after pinning (e.g. Spotify rate-limiting the playlist
+  // save) and the retry must then save that pinned mix, which the loop below uses as is.
   if (label === "morning retry") {
-    const covered = await Promise.all(targetWorkouts.map(async w =>
-      !!(await getPinnedMix(w.date, w.title)) || !!getTodaysRunEntry(w.date, w.title)));
+    const covered = await Promise.all(targetWorkouts.map(async w => !!getTodaysRunEntry(w.date, w.title)));
     targetWorkouts = targetWorkouts.filter((_, i) => !covered[i]);
   }
 

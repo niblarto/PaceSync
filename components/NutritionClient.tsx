@@ -33,7 +33,7 @@ interface SummaryState {
   result?: { status: "fresh" | "writing" | "unavailable"; reason?: string };
 }
 interface Projection {
-  method: "trend" | "energy" | "plan" | "postrun";
+  method: "trend" | "trend7" | "energy" | "plan" | "postrun";
   label: string;
   basis: string;
   kgPerWeek: number;
@@ -66,6 +66,7 @@ interface Dashboard {
   projections: Projection[];
   required: { kgPerWeek: number; dailyBalance: number; intake: number | null } | null;
   trendFit: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
+  trendFit7: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
   postRunFit?: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
   sources: { garminWeight: string | null; todayBurn: string | null; food: string | null; garminDb: string | null };
 }
@@ -118,7 +119,7 @@ function EatenBar({ x = 0, y = 0, width = 0, height = 0, payload, showTip, minKc
   );
 }
 
-const PROJ_COLORS: Record<Projection["method"], string> = { trend: "#a78bfa", energy: "#f59e0b", plan: "#38bdf8", postrun: "#22c55e" };
+const PROJ_COLORS: Record<Projection["method"], string> = { trend: "#a78bfa", trend7: "#fb7185", energy: "#f59e0b", plan: "#38bdf8", postrun: "#22c55e" };
 
 // y-axis grid lines for a weight chart in stone: every half stone (7 lb), so
 // the labels are only ever whole or half stones (every whole stone if the range
@@ -629,7 +630,7 @@ export function NutritionClient() {
     // One row per date shared by every series, so the tooltip shows the
     // values for that date: weigh-ins in the past, projections from today
     // on (a point each week, plus the goal date and the end).
-    type Row = { t: number; kg?: number; post?: number; fit?: number; postFit?: number; avg?: number } & Partial<Record<Projection["method"], number>>;
+    type Row = { t: number; kg?: number; post?: number; fit?: number; fit7?: number; postFit?: number; avg?: number } & Partial<Record<Projection["method"], number>>;
     const rows = new Map<number, Row>();
     for (const h of history) rows.set(h.t, { t: h.t, kg: h.kg });
     // Post-run weigh-ins (taken soon after a run), drawn in green.
@@ -649,6 +650,15 @@ export function NutritionClient() {
       for (const ms of [f0, f1]) if (!rows.has(ms)) rows.set(ms, { t: ms });
       rows.forEach(r => {
         if (r.t >= f0 && r.t <= f1) r.fit = fit.startKg + (fit.endKg - fit.startKg) * ((r.t - f0) / (f1 - f0 || 1));
+      });
+    }
+    // The line fitted through just the last 7 days.
+    const fit7 = data.trendFit7;
+    if (fit7) {
+      const f0 = toMs(fit7.startDate), f1 = toMs(fit7.endDate);
+      for (const ms of [f0, f1]) if (!rows.has(ms)) rows.set(ms, { t: ms });
+      rows.forEach(r => {
+        if (r.t >= f0 && r.t <= f1) r.fit7 = fit7.startKg + (fit7.endKg - fit7.startKg) * ((r.t - f0) / (f1 - f0 || 1));
       });
     }
     // The same for the line fitted through the post-run weigh-ins.
@@ -682,7 +692,7 @@ export function NutritionClient() {
     rows.forEach(r => { if (r.t >= todayMs && r.t <= avgEnd) r.avg = anchor; });
     const points = Array.from(rows.values()).sort((a, b) => a.t - b.t);
 
-    const ys = points.flatMap(r => [r.kg, r.post, r.fit, r.postFit, ...data.projections.map(p => r[p.method])]).filter((v): v is number => v != null);
+    const ys = points.flatMap(r => [r.kg, r.post, r.fit, r.fit7, r.postFit, ...data.projections.map(p => r[p.method])]).filter((v): v is number => v != null);
     if (target != null) ys.push(target);
     const lo = Math.min(...ys), hi = Math.max(...ys);
     const pad = Math.max(0.5, (hi - lo) * 0.08);
@@ -738,7 +748,7 @@ export function NutritionClient() {
     const [l, r] = wDomain;
     const ys = weightChart.points
       .filter(p => p.t >= l && p.t <= r)
-      .flatMap(p => [p.kg, p.post, p.fit, p.postFit, p.avg, ...data.projections.map(pr => p[pr.method])])
+      .flatMap(p => [p.kg, p.post, p.fit, p.fit7, p.postFit, p.avg, ...data.projections.map(pr => p[pr.method])])
       .filter((v): v is number => v != null);
     if (ys.length === 0) return null;
     const lo = Math.min(...ys), hi = Math.max(...ys);
@@ -1038,6 +1048,10 @@ export function NutritionClient() {
                           strokeWidth={2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
                       )}
                       {/* Fitted trend over the window's weigh-ins: the basis of "Scale trend" */}
+                      {data.trendFit7 && (
+                        <Line dataKey="fit7" name="Trend fit (last 7 weigh-ins)" stroke={PROJ_COLORS.trend7} strokeOpacity={0.55}
+                          strokeWidth={2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
+                      )}
                       {data.trendFit && (
                         <Line dataKey="fit" name={`Trend fit (last ${cfg.trendDays} days)`} stroke={PROJ_COLORS.trend} strokeOpacity={0.55}
                           strokeWidth={2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
@@ -1086,7 +1100,7 @@ export function NutritionClient() {
                 {weightChart && (
                   <p className="text-xs text-slate-500 mt-2">
                     How the projections are made: the faint purple line is the straight line fitted through your weigh-ins over the last {cfg.trendDays} days;
-                    its slope is the Scale trend rate. The Scale trend continues from where that purple line is today, so it joins it without a jump. The calorie projections start from your 7-day average weight (yellow bar), not a single weigh-in,
+                    its slope is the Scale trend rate. The rose line does the same through just your last 7 weigh-ins (post-run ones aren't counted), however many days that spans: a more immediate, but noisier, read. The Scale trend continues from where that purple line is today, so it joins it without a jump. The calorie projections start from your 7-day average weight (yellow bar), not a single weigh-in,
                     so one heavy or light day doesn&apos;t swing them. A weigh-in taken within 3 hours after a run finished (from your Garmin activities) is taken as post-run: those are the green dots, left out of everything above and given their own green fitted line and "Post-run trend" projection, which starts from where that line is today; the dotted yellow line carries that average flat to the goal date, i.e. no change. Sticking to your limit uses calories instead: your {cfg.dailyCalorieLimit ?? "—"} kcal
                     limit against your average Garmin burn.
                   </p>

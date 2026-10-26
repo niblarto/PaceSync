@@ -9,6 +9,8 @@ import { healActiveCsv } from "@/lib/csv-heal";
 import { cronNotify } from "@/lib/cron-notify";
 import { parseBpmSpec, type BpmSpecResult } from "@/lib/bpm-spec";
 import { splitArtistList } from "@/lib/artist-list";
+import { recordCrawledArtist } from "@/lib/crawled-artists";
+import { ensureReviewSyncStarted, reviewPlaylistUri, scheduleReviewSync } from "@/lib/review-playlist";
 import { getFreshToken } from "@/lib/tokenStore";
 
 // Song Crawler as a server-side background job (Settings > Tracklist).
@@ -220,8 +222,32 @@ export interface CrawlParams {
   mode?: CrawlMode;
 }
 
+// Where the crawl had got to, saved as it goes, so a crawl that was interrupted (the server
+// restarted, it crashed) or stopped can carry on from there instead of starting again: at the
+// release being checked, the artist being visited (with the artists still queued), or the batch of
+// album / playlist tracks. Tracks already added are in the library and are skipped on the way.
+export interface CrawlCheckpoint {
+  stage: "seeds" | "catalogue" | "spread" | "linkTracks" | "linkSpread";
+  seeds: { id: number; name: string }[];
+  seedIndex: number;
+  album: number;      // catalogue: the release being checked
+  linkBatch: number;  // link tracks: the batch of 40 being checked
+  queue: { id: number; name: string }[]; // spread: artists still to visit, the one being visited first
+  queued: number[];
+  crawlBase: number;
+  skipTopFor: number[];
+}
+
+const freshCheckpoint = (): CrawlCheckpoint => ({
+  stage: "seeds", seeds: [], seedIndex: 0, album: 0, linkBatch: 0, queue: [], queued: [], crawlBase: 0, skipTopFor: [],
+});
+
 export interface CrawlJob {
   id: string;
+  // Not sent to the page (it is large); `resumable` tells the page whether it can continue.
+  checkpoint?: CrawlCheckpoint;
+  // Why status is "paused": the review limit, or the user's own pause button.
+  pauseReason?: "review" | "user";
   params: CrawlParams;
   status: CrawlStatus;
   startedAt: string;
@@ -239,8 +265,15 @@ export interface CrawlJob {
 }
 
 // Survives Next.js module re-evaluation within the one server process.
-const g = globalThis as unknown as { __songCrawler?: { job: CrawlJob | null; stopRequested: boolean; loaded: boolean; lastSave: number } };
-const store = (g.__songCrawler ??= { job: null, stopRequested: false, loaded: false, lastSave: 0 });
+const g = globalThis as unknown as { __songCrawler?: { job: CrawlJob | null; stopRequested: boolean; loaded: boolean; lastSave: number; queue?: CrawlParams[]; userPaused?: boolean } };
+const store = (g.__songCrawler ??= { job: null, stopRequested: false, loaded: false, lastSave: 0, queue: [] });
+store.queue ??= [];
+// Artists waiting for their own crawl (right-click > Lookup on a song under review). They run
+// one after another once the crawl in progress finishes; kept on disk so a restart keeps them.
+const QUEUE_PATH = path.join(process.cwd(), "song-crawler-queue.json");
+function persistQueue() {
+  try { writeFileSync(QUEUE_PATH, JSON.stringify(store.queue ?? []), "utf8"); } catch { /* best-effort */ }
+}
 
 function persist(force = false) {
   if (!store.job) return;
@@ -255,6 +288,7 @@ function persist(force = false) {
 function load() {
   if (store.loaded) return;
   store.loaded = true;
+  try { store.queue = JSON.parse(readFileSync(QUEUE_PATH, "utf8")) as CrawlParams[]; } catch { /* no queue saved */ }
   try {
     const saved = JSON.parse(readFileSync(STATE_PATH, "utf8")) as CrawlJob;
     if (["running", "paused", "stopping", "healing"].includes(saved.status)) {
@@ -275,12 +309,31 @@ function log(msg: string, level: CrawlLevel = "info") {
   persist();
 }
 
-export function getCrawl(sinceSeq = 0): { job: Omit<CrawlJob, "log"> | null; lines: CrawlLine[] } {
+// The review list in order, for the "PaceSync review" Spotify playlist to mirror.
+function reviewUris(): string[] {
+  load();
+  return (store.job?.addedTracks ?? []).map(t => t.uri);
+}
+
+// The review playlist's Spotify URI once it exists and has been synced (null before
+// that). The first call after a restart also kicks off a sync to rebuild its state.
+export function getReviewPlaylistUri(): string | null {
+  ensureReviewSyncStarted(reviewUris);
+  return reviewPlaylistUri();
+}
+
+// A stopped / interrupted / failed crawl that saved where it got to can carry on from there.
+function isResumable(job: CrawlJob | null): boolean {
+  return !!job?.checkpoint && ["interrupted", "stopped", "error"].includes(job.status);
+}
+
+export function getCrawl(sinceSeq = 0): { job: (Omit<CrawlJob, "log" | "checkpoint"> & { resumable: boolean }) | null; lines: CrawlLine[] } {
   load();
   const job = store.job;
   if (!job) return { job: null, lines: [] };
-  const { log: lines, ...meta } = job;
-  return { job: meta, lines: lines.filter(l => l.seq >= sinceSeq) };
+  const { log: lines, checkpoint: _checkpoint, ...meta } = job;
+  void _checkpoint;
+  return { job: { ...meta, resumable: isResumable(job) }, lines: lines.filter(l => l.seq >= sinceSeq) };
 }
 
 // Drops a song from the crawl's added list and notes it in the log —
@@ -298,6 +351,7 @@ export function removeCrawlAddedTrack(uri: string, reason: "deleted" | "accepted
   else if (reason === "removed") log(`  ↩ Removed ${t.name} — ${t.artist} from the library (can be re-added)`, "warn");
   else log(`  ✗ Deleted ${t.name} — ${t.artist} from the library`, "warn");
   persist(true);
+  scheduleReviewSync(reviewUris);
   return true;
 }
 
@@ -320,9 +374,109 @@ export function isCrawlRunning(): boolean {
 export function requestStopCrawl(): boolean {
   if (!isCrawlRunning() || (store.job!.status !== "running" && store.job!.status !== "paused")) return false;
   store.stopRequested = true;
+  store.userPaused = false;
   store.job!.status = "stopping";
+  if (store.queue!.length > 0) {
+    log(`Cleared the ${store.queue!.length} queued artist${store.queue!.length === 1 ? "" : "s"}.`, "warn");
+    store.queue = [];
+    persistQueue();
+  }
   log("Stop requested — finishing the current track, then filling in missing data…", "warn");
   return true;
+}
+
+// Pause button: the crawl holds at the next track (see waitIfPaused in runCrawl).
+export function requestPauseCrawl(): boolean {
+  load();
+  if (!isCrawlRunning() || store.job!.status !== "running") return false;
+  store.userPaused = true;
+  log("Pause requested - the crawl will pause after the current track.", "warn");
+  return true;
+}
+
+// Resume button: un-pauses a paused crawl, or carries on an interrupted / stopped one from the
+// point it had reached.
+export function resumeCrawl(): { ok: true; kind: "unpaused" | "restarted" } | { ok: false; error: string } {
+  load();
+  if (store.userPaused) { store.userPaused = false; return { ok: true, kind: "unpaused" }; }
+  if (isCrawlRunning()) return { ok: false, error: "The crawl is already running." };
+  const job = store.job;
+  if (!job || !isResumable(job)) return { ok: false, error: "There is no interrupted crawl to resume." };
+  store.stopRequested = false;
+  store.userPaused = false;
+  job.status = "running";
+  job.finishedAt = null;
+  job.pauseReason = undefined;
+  log("Resuming from where the crawl left off…");
+  persist(true);
+  void runCrawl(job, true).catch(e => {
+    if (store.job) { store.job.status = "error"; store.job.finishedAt = new Date().toISOString(); }
+    log(`Crawl failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+    persist(true);
+  });
+  return { ok: true, kind: "restarted" };
+}
+
+function queueLabel(p: CrawlParams): string {
+  return splitArtistList(p.artist ?? "").join(", ") || (p.link ?? "");
+}
+
+// The artists waiting for their turn, in order.
+export function getCrawlQueue(): string[] {
+  load();
+  return store.queue!.map(queueLabel);
+}
+
+// Takes one artist (by its queue label, case-insensitive) out of the queue.
+export function removeQueuedCrawl(label: string): boolean {
+  load();
+  const i = store.queue!.findIndex(q => queueLabel(q).toLowerCase() === label.toLowerCase());
+  if (i < 0) return false;
+  store.queue!.splice(i, 1);
+  persistQueue();
+  return true;
+}
+
+export function clearCrawlQueue(): number {
+  load();
+  const n = store.queue!.length;
+  store.queue = [];
+  persistQueue();
+  return n;
+}
+
+// Lookup: starts a crawl for these params now if none is running, otherwise adds it to the
+// queue (skipping an artist that is already crawling or queued). Queued crawls run
+// sequentially as each one finishes (startNextQueued, from finish()).
+export function enqueueCrawl(params: CrawlParams): { ok: true; started: boolean; queued: number } | { ok: false; error: string } {
+  load();
+  const bands = crawlBands(params);
+  if (!bands.ok) return { ok: false, error: `BPM: ${bands.error}` };
+  if (splitArtistList(params.artist ?? "").length === 0) return { ok: false, error: "an artist is required" };
+  if (!isCrawlRunning()) {
+    const r = startCrawl(params);
+    return r.ok ? { ok: true, started: true, queued: store.queue!.length } : r;
+  }
+  const label = queueLabel(params).toLowerCase();
+  const running = store.job ? queueLabel(store.job.params).toLowerCase() : "";
+  if (label === running || store.queue!.some(q => queueLabel(q).toLowerCase() === label)) {
+    return { ok: true, started: false, queued: store.queue!.length };
+  }
+  store.queue!.push(params);
+  persistQueue();
+  log(`Queued ${queueLabel(params)} (${store.queue!.length} waiting)`);
+  return { ok: true, started: false, queued: store.queue!.length };
+}
+
+// After a crawl finishes normally: start the next queued one (skipping any that can't start).
+function startNextQueued() {
+  while (store.queue!.length > 0) {
+    const next = store.queue!.shift()!;
+    persistQueue();
+    const r = startCrawl(next);
+    if (r.ok) return;
+    log(`Couldn't start the queued crawl for ${queueLabel(next)}: ${r.error}`, "error");
+  }
 }
 
 // The effective-BPM bands a crawl accepts, from bpmSpec or the legacy fields.
@@ -345,6 +499,7 @@ export function startCrawl(params: CrawlParams): { ok: true; id: string } | { ok
   }
   if (!bandsRes.ok) return { ok: false, error: `BPM: ${bandsRes.error}` };
   store.stopRequested = false;
+  store.userPaused = false;
   // Songs from earlier crawls not yet accepted or deleted carry over — the
   // list is a review queue that persists across crawls. Ones no longer in
   // the library (deleted elsewhere) are dropped.
@@ -357,6 +512,7 @@ export function startCrawl(params: CrawlParams): { ok: true; id: string } | { ok
     id: randomUUID(), params, status: "running",
     startedAt: new Date().toISOString(), finishedAt: null,
     added: 0, addedTracks: carried, crawled: 0, totalArtists: 0, checked: 0, nextSeq: 0, log: [],
+    checkpoint: freshCheckpoint(),
   };
   persist(true);
   void runCrawl(store.job).catch(e => {
@@ -367,8 +523,17 @@ export function startCrawl(params: CrawlParams): { ok: true; id: string } | { ok
   return { ok: true, id: store.job.id };
 }
 
-async function runCrawl(job: CrawlJob) {
+async function runCrawl(job: CrawlJob, resume = false) {
   const p = job.params;
+  const ck: CrawlCheckpoint = (job.checkpoint ??= freshCheckpoint());
+  // What a resumed crawl picks up from (read before the checkpoint is overwritten as it goes).
+  const resumeStage = resume ? ck.stage : null;
+  const resumeSeed = resume ? ck.seedIndex : 0;
+  const resumeAlbum = resume ? ck.album : 0;
+  const resumeLinkBatch = resume ? ck.linkBatch : 0;
+  const restoredSpread = resume && (ck.stage === "spread" || ck.stage === "linkSpread")
+    ? { queue: ck.queue.slice(), queued: ck.queued.slice(), crawlBase: ck.crawlBase, skipTopFor: ck.skipTopFor.slice() }
+    : null;
   const maxArtists = Math.min(Math.max(Math.round(Number(p.maxArtists) || DEFAULT_MAX_ARTISTS), 1), MAX_ARTISTS_CAP);
   const bandsRes = crawlBands(p);
   const bands = bandsRes.ok ? bandsRes.bands : [];
@@ -449,13 +614,17 @@ async function runCrawl(job: CrawlJob) {
     log(`${matches.length} Deezer artists are called "${name}" — picked the one (${best.artist.nb_fan?.toLocaleString() ?? "?"} fans) sharing ${Math.max(best.score, 0)} of the linked artist's top tracks`);
     return best.artist;
   };
-  const seeds: { id: number; name: string }[] = [];
-  for (const name of artistNames) {
-    if (stopped()) break;
-    const found = await findArtist(name, hintTitlesByName.get(name.toLowerCase()) ?? []);
-    if (!found) { log(`No exact Deezer artist match for "${name}"`, "warn"); continue; }
-    if (seeds.some(x => x.id === found.id)) continue;
-    seeds.push({ id: found.id, name: found.name });
+  const resumedSeeds = resume && ck.seeds.length > 0;
+  const seeds: { id: number; name: string }[] = resumedSeeds ? ck.seeds.slice() : [];
+  if (!resumedSeeds) {
+    for (const name of artistNames) {
+      if (stopped()) break;
+      const found = await findArtist(name, hintTitlesByName.get(name.toLowerCase()) ?? []);
+      if (!found) { log(`No exact Deezer artist match for "${name}"`, "warn"); continue; }
+      if (seeds.some(x => x.id === found.id)) continue;
+      seeds.push({ id: found.id, name: found.name });
+    }
+    ck.seeds = seeds;
   }
 
   // Album / playlist link: its tracks, read from Spotify.
@@ -471,7 +640,7 @@ async function runCrawl(job: CrawlJob) {
     }
   }
   if (seeds.length === 0 && linkTracks.length === 0) return finish(job, "done");
-  job.totalArtists = 0;
+  if (!resume) job.totalArtists = 0;
 
   // Review limit: hold the crawl while too many songs await review.
   const reviewLimit = () => {
@@ -482,6 +651,7 @@ async function runCrawl(job: CrawlJob) {
     let lim = reviewLimit();
     if (!lim || job.addedTracks.length < lim || stopped()) return;
     job.status = "paused";
+    job.pauseReason = "review";
     log(`Paused — ${job.addedTracks.length} songs awaiting review (limit ${lim}). Accept, delete or remove some to carry on.`, "warn");
     persist(true);
     while (!stopped()) {
@@ -491,7 +661,24 @@ async function runCrawl(job: CrawlJob) {
     }
     if (!stopped()) {
       job.status = "running";
+      job.pauseReason = undefined;
       log(`Resumed — ${job.addedTracks.length} awaiting review.`);
+      persist(true);
+    }
+  };
+
+  // The user's Pause button: hold here (at a track boundary) until Resume or Stop.
+  const waitIfPaused = async () => {
+    if (!store.userPaused || stopped()) return;
+    job.status = "paused";
+    job.pauseReason = "user";
+    log("Paused. Press Resume to carry on.", "warn");
+    persist(true);
+    while (store.userPaused && !stopped()) await sleep(1000);
+    if (!stopped()) {
+      job.status = "running";
+      job.pauseReason = undefined;
+      log("Resumed.");
       persist(true);
     }
   };
@@ -501,6 +688,8 @@ async function runCrawl(job: CrawlJob) {
 
   // BPM-checks one Deezer track and, on a match, adds it to the library.
   const checkTrack = async (t: DeezerRadioTrack, isrcHint?: string | null, durationHintSec?: number | null) => {
+    await waitIfPaused();
+    if (stopped()) return;
     await waitForReview();
     if (stopped()) return;
     if (seenTracks.has(t.id)) return;
@@ -552,6 +741,7 @@ async function runCrawl(job: CrawlJob) {
     if (result.added > 0) {
       job.added++;
       job.addedTracks.push({ uri: resolved.uri, name: t.title, artist: t.artist.name, bpm: Math.round(tempo) });
+      scheduleReviewSync(reviewUris);
       log(`  ✓ ADDED ${label} (${bpmLabel(tempo)})`, "match");
     } else {
       log(`  ${label}: matches, but was previously deleted from the library — skipped`, "warn");
@@ -563,10 +753,18 @@ async function runCrawl(job: CrawlJob) {
   // album's / playlist's artists) is a separate crawl, run one after another.
   // skipTopFor: artists whose whole catalogue was already checked, so their
   // top tracks are skipped.
-  const crawlFrom = async (starts: { id: number; name: string }[], skipTopFor: Set<number>) => {
-    const queue = [...starts];
-    const queuedArtists = new Set<number>(starts.map(x => x.id));
-    const crawlBase = job.totalArtists; // artists counted by earlier crawls in this job
+  const crawlFrom = async (
+    starts: { id: number; name: string }[], skipTopFor: Set<number>, stage: "spread" | "linkSpread",
+    restored?: { queue: { id: number; name: string }[]; queued: number[]; crawlBase: number; skipTopFor: number[] } | null,
+  ) => {
+    // A resumed crawl rebuilds the queue as it stood when the artist being visited began.
+    const queue = restored ? restored.queue.slice() : [...starts];
+    const queuedArtists = new Set<number>(restored ? restored.queued : starts.map(x => x.id));
+    const crawlBase = restored ? restored.crawlBase : job.totalArtists; // artists counted by earlier crawls in this job
+    if (restored) {
+      skipTopFor = new Set(restored.skipTopFor);
+      job.crawled = Math.max(0, job.crawled - 1); // the artist being re-visited was already counted
+    }
     job.totalArtists = crawlBase + queuedArtists.size;
     const enqueue = (a: { id: number; name: string }) => {
       if (queuedArtists.has(a.id) || queuedArtists.size >= maxArtists) return;
@@ -579,8 +777,19 @@ async function runCrawl(job: CrawlJob) {
     };
 
     while (queue.length > 0 && !stopped()) {
+      await waitIfPaused();
+      if (stopped()) break;
       const current = queue.shift()!;
+      // Saved at the start of each artist: an interruption carries on from this one.
+      ck.stage = stage;
+      ck.queue = [current, ...queue];
+      ck.queued = Array.from(queuedArtists);
+      ck.crawlBase = crawlBase;
+      ck.skipTopFor = Array.from(skipTopFor);
+      persist(true);
       job.crawled++;
+      const addedBefore = job.added;
+      try {
       const what = [src.radio && "radio", src.related && "top tracks + related"].filter(Boolean).join(", ");
       log(`[${job.crawled}/${job.totalArtists}] ${current.name} — ${what} (${queue.length} still queued)`);
 
@@ -608,16 +817,28 @@ async function runCrawl(job: CrawlJob) {
           await checkTrack(t);
         }
       }
+      } finally {
+        // Logged once the artist was fully done (not when the crawl was stopped part-way through it).
+        if (!stopped()) recordCrawledArtist({ id: current.id, name: current.name, added: job.added - addedBefore });
+      }
     }
   };
 
   // Each artist, one after another: catalogue pass (every track credited to
   // them across all their releases; tracks credited to someone else are
   // skipped), then radio / related from them.
-  for (let si = 0; si < seeds.length && !stopped(); si++) {
+  const firstSeed = resumeStage === "linkTracks" || resumeStage === "linkSpread" ? seeds.length : resumeSeed;
+  for (let si = firstSeed; si < seeds.length && !stopped(); si++) {
     const seed = seeds[si];
+    const resumingThisSeed = si === resumeSeed && resume;
     if (seeds.length > 1) log(`── Artist ${si + 1} of ${seeds.length}: ${seed.name} ──`);
-    if (doCatalogue) {
+    ck.seedIndex = si;
+    // On a resume that was already past this artist's catalogue (visiting artists), skip it.
+    const catalogueDone = resumingThisSeed && resumeStage === "spread";
+    const startAlbum = resumingThisSeed && resumeStage === "catalogue" ? resumeAlbum : 0;
+    if (doCatalogue && !catalogueDone) {
+    ck.stage = "catalogue";
+    const addedAtCatalogueStart = job.added;
     const albums: { id: number; title: string }[] = [];
     let next: string | null = `/artist/${seed.id}/albums?limit=100`;
     while (next && !stopped()) {
@@ -626,8 +847,13 @@ async function runCrawl(job: CrawlJob) {
       next = page?.next ? page.next.replace("https://api.deezer.com", "") : null;
     }
     log(`All tracks by ${seed.name}: ${albums.length} release${albums.length === 1 ? "" : "s"} to check`);
-    for (let i = 0; i < albums.length; i++) {
+    if (startAlbum > 0) log(`Resuming at release ${startAlbum + 1} of ${albums.length}`);
+    for (let i = startAlbum; i < albums.length; i++) {
       if (stopped()) break;
+      await waitIfPaused();
+      if (stopped()) break;
+      ck.album = i;
+      persist(true);
       const album = albums[i];
       const tracks = await deezer<{ data?: DeezerAlbumTrack[] }>(`/album/${album.id}/tracks?limit=200`);
       const own = (tracks?.data ?? []).filter(t => t.artist?.id === seed.id);
@@ -637,16 +863,24 @@ async function runCrawl(job: CrawlJob) {
         await checkTrack(t, t.isrc ?? null, t.duration ?? null);
       }
     }
+    if (!stopped()) recordCrawledArtist({ id: seed.id, name: seed.name, added: job.added - addedAtCatalogueStart });
     if (!stopped()) log(spreads ? `Finished ${seed.name}'s catalogue — moving on to ${[src.radio && "radio", src.related && "related artists"].filter(Boolean).join(" and ")}.` : `Finished ${seed.name}'s catalogue.`);
     }
-    if (spreads && !stopped()) await crawlFrom([seed], new Set(doCatalogue ? [seed.id] : []));
+    if (spreads && !stopped()) {
+      await crawlFrom([seed], new Set(doCatalogue ? [seed.id] : []), "spread", catalogueDone ? restoredSpread : null);
+    }
   }
 
   // Every track on the album/playlist — BPM via ReccoBeats straight from
   // the Spotify track id (40 per request), added on a match.
-  if (linkTracks.length > 0 && !stopped()) {
+  if (linkTracks.length > 0 && !stopped() && resumeStage !== "linkSpread") {
     log(`Checking the ${linkRef!.kind}'s ${linkTracks.length} tracks…`);
-    for (let i = 0; i < linkTracks.length && !stopped(); i += 40) {
+    for (let i = resumeStage === "linkTracks" ? resumeLinkBatch * 40 : 0; i < linkTracks.length && !stopped(); i += 40) {
+      await waitIfPaused();
+      if (stopped()) break;
+      ck.stage = "linkTracks";
+      ck.linkBatch = i / 40;
+      persist(true);
       const batch = linkTracks.slice(i, i + 40);
       type Recco = { href?: string; isrc?: string; tempo?: number; key?: number; mode?: number; energy?: number; danceability?: number; valence?: number };
       let content: Recco[] = [];
@@ -681,6 +915,7 @@ async function runCrawl(job: CrawlJob) {
         if (result.added > 0) {
           job.added++;
           job.addedTracks.push({ uri: t.uri, name: t.name, artist: t.artist, bpm: Math.round(tempo) });
+          scheduleReviewSync(reviewUris);
           log(`  ✓ ADDED ${label} (${bpmLabel(tempo)})`, "match");
         } else {
           log(`  ${label}: matches, but was previously deleted from the library — skipped`, "warn");
@@ -693,15 +928,17 @@ async function runCrawl(job: CrawlJob) {
   // (first credited artist of each track, exact Deezer name match, within
   // Max artists).
   if (spreads && linkTracks.length > 0 && !stopped()) {
-    const names = Array.from(new Set(linkTracks.map(t => t.artist.split(",")[0].trim()).filter(Boolean)));
     const starts: { id: number; name: string }[] = [];
-    for (const name of names) {
-      if (stopped() || starts.length >= maxArtists) break;
-      const a = await findArtist(name);
-      if (a && !starts.some(x => x.id === a.id)) starts.push({ id: a.id, name: a.name });
+    if (!(resumeStage === "linkSpread" && restoredSpread)) {
+      const names = Array.from(new Set(linkTracks.map(t => t.artist.split(",")[0].trim()).filter(Boolean)));
+      for (const name of names) {
+        if (stopped() || starts.length >= maxArtists) break;
+        const a = await findArtist(name);
+        if (a && !starts.some(x => x.id === a.id)) starts.push({ id: a.id, name: a.name });
+      }
+      log(`Starting artists from the ${linkRef!.kind}: ${starts.length ? starts.map(a => a.name).join(", ") : "none found on Deezer"}`);
     }
-    log(`Starting artists from the ${linkRef!.kind}: ${starts.length ? starts.map(a => a.name).join(", ") : "none found on Deezer"}`);
-    await crawlFrom(starts, new Set());
+    await crawlFrom(starts, new Set(), "linkSpread", resumeStage === "linkSpread" ? restoredSpread : null);
   }
 
   const n = `${job.added} track${job.added === 1 ? "" : "s"} added`;
@@ -741,7 +978,9 @@ async function finish(job: CrawlJob, outcome: "done" | "stopped") {
   const s = resolveSources(p);
   const scopeNote = s.radio || s.related ? `artist ${job.crawled} of ${job.totalArtists}` : "artist's own tracks";
   const what = [p.artist?.trim(), job.linkName].filter(Boolean).join(" + ") || "Song Crawler";
-  await cronNotify(
+  const moreQueued = outcome === "done" && store.queue!.length > 0;
+  // With more artists queued, only the last crawl sends the notification.
+  if (!moreQueued) await cronNotify(
     `${what} · ${bpm} BPM — ${job.added} track${job.added === 1 ? "" : "s"} added, ${scopeNote}, ~${mins} min.`,
     {
       title: outcome === "stopped" ? "🕸 Song Crawler stopped" : "🕸 Song Crawler finished",
@@ -750,4 +989,5 @@ async function finish(job: CrawlJob, outcome: "done" | "stopped") {
       priority: job.added > 0 ? "default" : "low",
     },
   ).catch(() => {});
+  if (moreQueued) startNextQueued();
 }

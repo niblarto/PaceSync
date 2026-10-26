@@ -1,5 +1,3 @@
-import { freshSpotifyToken, spotifyFetch } from "@/lib/spotify-browser";
-import { getRunningPlaylist } from "@/components/useRunningPlaylist";
 import { notifyTracklistsChanged } from "@/components/useBrokenTracklists";
 
 // Shared client-side delete flow: removes a track from the live Spotify
@@ -34,18 +32,9 @@ import { notifyTracklistsChanged } from "@/components/useBrokenTracklists";
 // imports. The parameter stays (rather than removing it and updating every
 // call site) so this fix applies everywhere at once.
 export function deleteTrackFromLibrary(uri: string, playlistId: string | null, skipDeletedLog?: boolean): void {
-  void playlistId; // superseded by getRunningPlaylist() below — see comment above
-  getRunningPlaylist().then(({ id }) => {
-    if (!id) return;
-    return freshSpotifyToken().then(token => {
-      if (!token) return;
-      return spotifyFetch(`https://api.spotify.com/v1/playlists/${id}/items`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ items: [{ uri }] }),
-      });
-    });
-  }).catch(err => console.error("[delete] Spotify fetch error:", err));
+  void playlistId; // the server removes it from the active playlist itself - see below
+  // The Spotify playlist removal is queued server-side by /api/tracks/delete (batched, kept on
+  // disk, retried after a rate limit) rather than fired from here and forgotten.
   fetch("/api/tracks/delete", {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
@@ -61,18 +50,6 @@ export function deleteTrackFromLibrary(uri: string, playlistId: string | null, s
 // tracks and one library request for the lot (multi-select delete).
 export function deleteTracksFromLibrary(uris: string[], skipDeletedLog?: boolean): Promise<void> {
   if (uris.length === 0) return Promise.resolve();
-  getRunningPlaylist().then(async ({ id }) => {
-    if (!id) return;
-    const token = await freshSpotifyToken();
-    if (!token) return;
-    for (let i = 0; i < uris.length; i += 100) {
-      await spotifyFetch(`https://api.spotify.com/v1/playlists/${id}/items`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ items: uris.slice(i, i + 100).map(uri => ({ uri })) }),
-      });
-    }
-  }).catch(err => console.error("[delete] Spotify fetch error:", err));
   return fetch("/api/tracks/delete", {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },

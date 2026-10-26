@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { getFreshToken } from "@/lib/tokenStore";
+import { reviewPlaylistContains, reviewPlaylistUri } from "@/lib/review-playlist";
 
 const BASE = "https://api.spotify.com/v1";
 
@@ -10,6 +11,13 @@ const BASE = "https://api.spotify.com/v1";
 // PaceSync stays in the foreground on the phone. Requires an already-open
 // Spotify session on some device (phone, desktop, speaker, etc.) — the Web
 // API can't launch the app itself, only command an existing session.
+// A track from the Song Crawler's review list can start the "PaceSync review" playlist
+// at that track, so Spotify carries on down the list by itself. Only when the playlist
+// really holds the track yet (it is synced in batches); otherwise it plays on its own.
+function reviewStart(contextUri: string, uri: string): boolean {
+  return contextUri === reviewPlaylistUri() && reviewPlaylistContains(uri);
+}
+
 export async function POST(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
@@ -19,7 +27,7 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null) as { uri?: string; contextUri?: string } | null;
   const uri = body?.uri;
   const contextUri = body?.contextUri;
-  const isPlaylist = !!contextUri?.startsWith("spotify:playlist:");
+  const isPlaylist = !!contextUri?.startsWith("spotify:playlist:") && !(uri && !reviewStart(contextUri as string, uri));
   if (!isPlaylist && !uri?.startsWith("spotify:track:")) {
     return NextResponse.json({ error: "uri (spotify:track:<id>) or contextUri (spotify:playlist:<id>) required" }, { status: 400 });
   }
@@ -53,7 +61,7 @@ export async function POST(req: NextRequest) {
     method: "PUT",
     headers: { ...auth, "Content-Type": "application/json" },
     body: JSON.stringify(
-      isPlaylist ? { context_uri: contextUri, offset: { position: 0 } }
+      isPlaylist ? { context_uri: contextUri, offset: uri ? { uri } : { position: 0 } }
         : albumUri ? { context_uri: albumUri, offset: { uri } }
         : { uris: [uri] },
     ),

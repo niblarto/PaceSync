@@ -1,7 +1,7 @@
 import { activeCsvPath, loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
 import { readTracksByUris, deleteTracksByUri, regenerateCsvFile } from "@/lib/tracks-store";
 import { recordDeletedTracks } from "@/lib/deleted-tracks";
-import { getFreshToken } from "@/lib/tokenStore";
+import { queueSpotifyRemovals } from "@/lib/spotify-removals";
 
 // Server-side library delete for callers with no browser Spotify token (the
 // Android app's Song Crawler tab): removes the track from the library CSV
@@ -23,15 +23,8 @@ export async function deleteFromLibraryServer(uri: string, skipDeletedLog = fals
     } catch (e) { console.warn("[library-delete] deletion log failed:", e); }
     removed = true;
   }
+  // Queued (batched, retried after a rate limit) instead of one request per track.
   let spotify = false;
-  const token = await getFreshToken();
-  if (token.ok && config.id) {
-    const res = await fetch(`https://api.spotify.com/v1/playlists/${config.id}/items`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ items: [{ uri: fullUri }] }),
-    }).catch(() => null);
-    spotify = !!res?.ok;
-  }
+  if (config.id) { queueSpotifyRemovals([fullUri], config.id); spotify = true; }
   return { removed, spotify };
 }

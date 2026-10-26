@@ -417,13 +417,43 @@ data class StartCrawlRequest(
     val maxArtists: Int,
     val sources: CrawlSources,
     val reviewLimit: Int? = null,
+    // true = Lookup: start now if no crawl is running, otherwise join the server's queue.
+    val enqueue: Boolean = false,
 )
 
 @Serializable
 data class CrawlReviewLimitRequest(val reviewLimit: Int?)
 
 @Serializable
-data class StartCrawlResponse(val ok: Boolean = false, val id: String? = null, val error: String? = null)
+data class CrawlControlRequest(val crawlControl: String) // "pause" | "resume"
+
+@Serializable
+data class CrawlRemoveQueuedRequest(val removeQueued: String)
+
+@Serializable
+data class CrawlClearQueueRequest(val clearQueue: Boolean)
+
+// The crawler form's settings, kept on the server (api/tracks/song-crawler/inputs) so the web page and
+// this app always show the latest. The request has no defaults on purpose: the JSON encoder skips
+// default-valued fields, and a cleared field has to be sent as an explicit empty string.
+@Serializable
+data class CrawlInputsRequest(
+    val artist: String, val link: String, val bpm: String, val maxArtists: String, val reviewLimit: String,
+    val sources: CrawlSources,
+)
+
+@Serializable
+data class CrawlInputsSaved(
+    val artist: String = "", val link: String = "", val bpm: String = "", val maxArtists: String = "50", val reviewLimit: String = "",
+    val sources: CrawlSources = CrawlSources(artist = false, radio = true, related = false),
+    val updatedAt: String? = null,
+)
+
+@Serializable
+data class CrawlInputsResponse(val inputs: CrawlInputsSaved? = null)
+
+@Serializable
+data class StartCrawlResponse(val ok: Boolean = false, val id: String? = null, val error: String? = null, val started: Boolean = false, val queued: Int = 0)
 
 @Serializable
 data class CrawlLine(val seq: Int, val at: String, val level: String = "info", val msg: String)
@@ -453,10 +483,13 @@ data class CrawlJobDto(
     val totalArtists: Int = 0,
     val checked: Int? = null,
     val linkName: String? = null,
+    val pauseReason: String? = null, // "review" (review limit) or "user" (the Pause button) when status is "paused"
+    val resumable: Boolean = false,  // stopped / interrupted with a saved position it can carry on from
 )
 
 @Serializable
-data class CrawlStateResponse(val job: CrawlJobDto? = null, val lines: List<CrawlLine> = emptyList())
+// reviewPlaylist: the "PaceSync review" Spotify playlist mirroring the review list (null until synced).
+data class CrawlStateResponse(val job: CrawlJobDto? = null, val lines: List<CrawlLine> = emptyList(), val reviewPlaylist: String? = null, val queue: List<String> = emptyList())
 
 // reason "accepted" keeps the track; "deleted" + deleteFromLibrary has the
 // server delete it from the library and Spotify playlist.

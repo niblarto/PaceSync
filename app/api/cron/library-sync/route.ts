@@ -21,11 +21,17 @@ export async function POST(req: NextRequest) {
   console.log(
     `[library-sync] ${result.ok ? "ok" : `FAILED: ${result.error}`} — library ${result.libraryCount}, spotify ${result.spotifyCount}; ` +
     `+${result.addedToSpotify} to Spotify, +${result.importedToLibrary} to library, -${result.removedFromSpotify} from Spotify` +
-    ("skippedRemovals" in result && result.skippedRemovals ? `; skipped ${result.skippedRemovals} removals (over safety limit)` : ""),
+    ("skippedRemovals" in result && result.skippedRemovals ? `; skipped ${result.skippedRemovals} removals (over safety limit)` : "") +
+    ("skippedImports" in result && result.skippedImports ? `; skipped importing ${result.skippedImports} Spotify-only tracks (over safety limit)` : ""),
   );
 
   if (!result.ok) {
     await cronNotify(`Library ↔ Spotify sync failed: ${result.error}`, { title: "❌ Library sync failed", tags: "x", type: "sync-error", priority: "high" });
+  } else if ("skippedImports" in result && result.skippedImports) {
+    await cronNotify(
+      `${result.skippedImports} tracks are on the Spotify playlist but not in the library, and none were imported: that many is more likely tracks deleted from the library whose Spotify removal never went through. Check them before importing or removing by hand.`,
+      { title: "⚠ Library sync needs a look", tags: "warning", type: "sync-error" },
+    );
   } else if ("skippedRemovals" in result && result.skippedRemovals) {
     await cronNotify(
       `${result.skippedRemovals} tracks deleted from the library are still on Spotify — over the per-run safety limit, so none were removed. Check before removing them by hand.`,

@@ -63,6 +63,7 @@ import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.HistoryTrack
 import com.pacesync.app.network.dto.PlaybackActionRequest
 import com.pacesync.app.network.dto.PlayRequest
+import com.pacesync.app.ui.crawler.lookupArtistInCrawler
 import com.pacesync.app.network.dto.RemixDoneEvent
 import com.pacesync.app.network.dto.RemixRequest
 import kotlinx.coroutines.delay
@@ -940,8 +941,10 @@ private fun LegendDot(color: Color, label: String) {
 // the foreground just this once) purely to register it as an active
 // device; every call after that one goes through the remote endpoint and
 // PaceSync stays in front.
-internal suspend fun playOnActiveDevice(context: android.content.Context, api: PaceSyncApi, uri: String) {
-    val result = runCatching { api.playTrack(PlayRequest(uri)) }
+// contextUri: a playlist to play the track from, so Spotify carries on to the next song in it
+// (the server only uses it if the playlist really holds the track).
+internal suspend fun playOnActiveDevice(context: android.content.Context, api: PaceSyncApi, uri: String, contextUri: String? = null) {
+    val result = runCatching { api.playTrack(PlayRequest(uri, contextUri)) }
     val response = result.getOrNull()
     when {
         response?.isSuccessful == true -> {
@@ -955,7 +958,7 @@ internal suspend fun playOnActiveDevice(context: android.content.Context, api: P
                 }
                 android.widget.Toast.makeText(context, "Waking Spotify…", android.widget.Toast.LENGTH_SHORT).show()
                 kotlinx.coroutines.delay(2500)
-                runCatching { api.playTrack(PlayRequest(uri)) }
+                runCatching { api.playTrack(PlayRequest(uri, contextUri)) }
             }
         }
         response?.code() == 409 -> {
@@ -1192,6 +1195,17 @@ private fun TrackStrip(
                             onClick = {
                                 menuTrack = null
                                 track.uri?.let(onEnterSelectMode)
+                            },
+                        )
+                        // Send this track's artist to the Song Crawler (now, or queued behind a crawl in progress).
+                        DropdownMenuItem(
+                            text = { Text("Lookup artist") },
+                            onClick = {
+                                menuTrack = null
+                                scope.launch {
+                                    val msg = lookupArtistInCrawler(api, track.artist)
+                                    android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_LONG).show()
+                                }
                             },
                         )
                     } else {

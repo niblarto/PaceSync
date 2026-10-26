@@ -88,7 +88,10 @@ function formatMs(ms: number) {
 let playTicketCounter = 0;
 let playQueue: Promise<void> = Promise.resolve();
 
-export async function playInSpotify(uri: string, token?: string | null): Promise<void> {
+// This is the LOCAL attempt (this browser sends the play command, then deep-links the app on
+// this machine). Every track click goes through playOnActiveDevice below first, which only
+// falls back to this when Spotify has no active device or the server can't play it.
+async function playLocally(uri: string, token?: string | null): Promise<void> {
   const ticket = ++playTicketCounter;
   const isCurrent = () => ticket === playTicketCounter;
 
@@ -113,7 +116,7 @@ export async function playInSpotify(uri: string, token?: string | null): Promise
       } catch { /* fall through to opening the app */ }
     }
     if (!isCurrent()) return;
-    openInSpotify(uri);
+    openTrackLocally(uri);
   };
 
   // Chain onto the existing queue regardless of whether the previous call
@@ -122,6 +125,46 @@ export async function playInSpotify(uri: string, token?: string | null): Promise
   const next = playQueue.then(run, run);
   playQueue = next;
   return next;
+}
+
+// Plays a track on whichever Spotify device is ACTIVE - your phone if that is what is
+// playing - by asking the server (api/spotify/play, the same call the phone app uses),
+// rather than sending the command from this browser and then deep-linking the desktop
+// app. Only if there is no active device at all (or the server can't play it) does it fall
+// back to the local attempts: this browser's own play command, then opening the track in the
+// Spotify app / web player here. Serialized and ticketed so clicks in quick succession can't
+// land out of order.
+let activeDeviceTicket = 0;
+let activeDeviceQueue: Promise<void> = Promise.resolve();
+
+// contextUri: a playlist (the crawler's review playlist) to play the track from, so
+// Spotify carries on to the next song in it. The server only uses it if that playlist
+// really holds the track, and otherwise plays the track alone.
+export async function playOnActiveDevice(uri: string, token?: string | null, contextUri?: string | null): Promise<void> {
+  const ticket = ++activeDeviceTicket;
+  const isCurrent = () => ticket === activeDeviceTicket;
+  const run = async () => {
+    if (!isCurrent()) return;
+    try {
+      const res = await fetch("/api/spotify/play", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(contextUri ? { uri, contextUri } : { uri }),
+      });
+      if (!isCurrent() || res.ok) return;
+    } catch { /* fall through to opening the app */ }
+    if (!isCurrent()) return;
+    await playLocally(uri, token);
+  };
+  const next = activeDeviceQueue.then(run, run);
+  activeDeviceQueue = next;
+  return next;
+}
+
+// What every "click a track to play it" in the app calls: the active Spotify device first
+// (your phone, if that's what's playing), then the local fallbacks.
+export async function playInSpotify(uri: string, token?: string | null): Promise<void> {
+  return playOnActiveDevice(uri, token);
 }
 
 // Navigate to a spotify: URI (opens the desktop/mobile app); if the page
@@ -153,10 +196,16 @@ export function openSpotifyAppFirst(uri: string, webUrl: string) {
   window.addEventListener("blur", onBlur);
 }
 
-export function openInSpotify(uri: string) {
+// Open one track in the Spotify app / web player on THIS machine (the last-resort fallback).
+function openTrackLocally(uri: string) {
   const trackId = uri.split(":")?.[2];
   if (!trackId) return;
   openSpotifyAppFirst(`spotify:track:${trackId}`, `https://open.spotify.com/track/${trackId}`);
+}
+
+// Clicking a track to open / play it: the active Spotify device first, then opening it here.
+export function openInSpotify(uri: string) {
+  void playOnActiveDevice(uri, null).catch(() => {});
 }
 
 // App-first open for any open.spotify.com URL (playlist, track, album, …).

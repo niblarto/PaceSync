@@ -4,6 +4,7 @@ import { getFreshToken } from "@/lib/tokenStore";
 import { addTracksToLibrary } from "@/lib/library-add";
 import { findPreviouslyDeleted } from "@/lib/deleted-tracks";
 import { healActiveCsv } from "@/lib/csv-heal";
+import { flushSpotifyRemovals, pendingSpotifyRemovals, queueSpotifyRemovals } from "@/lib/spotify-removals";
 
 // Daily two-way sync between the local library and its Spotify playlist
 // (the "librarySync" cron job). Works purely off URIs already on both
@@ -18,7 +19,11 @@ import { healActiveCsv } from "@/lib/csv-heal";
 const API = "https://api.spotify.com/v1";
 const TRACK_URI_RE = /^spotify:track:[A-Za-z0-9]{22}$/;
 const CALL_GAP_MS = 400;
-const MAX_REMOVALS_PER_RUN = 100;
+const MAX_REMOVALS_PER_RUN = 1000;
+// More Spotify-only tracks than this is far more likely tracks removed from the library whose
+// Spotify removal never went through (e.g. during a rate limit) than that many added on Spotify
+// by hand, so they are NOT imported back - reported for a look instead.
+const MAX_IMPORTS_PER_RUN = 25;
 
 export interface LibrarySyncResult {
   ok: boolean;
@@ -29,6 +34,8 @@ export interface LibrarySyncResult {
   importedToLibrary: number;
   removedFromSpotify: number;
   skippedRemovals?: number;
+  skippedImports?: number;
+  queuedRemovals?: number;
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -83,6 +90,10 @@ export async function syncLibraryWithSpotify(): Promise<LibrarySyncResult> {
 
   const result: LibrarySyncResult = { ...base, ok: true, libraryCount: libraryUris.size, spotifyCount: spotify.size };
 
+  // Removals already queued (a delete whose Spotify request was rejected or is still waiting): not
+  // imported back and not counted again - the queue sends them.
+  const alreadyQueued = pendingSpotifyRemovals(config.id);
+
   // 1. Library-only -> Spotify.
   const toAdd = Array.from(libraryUris).filter(u => !spotify.has(u));
   for (let i = 0; i < toAdd.length; i += 100) {
@@ -95,7 +106,7 @@ export async function syncLibraryWithSpotify(): Promise<LibrarySyncResult> {
   }
 
   // 2. Spotify-only: deleted from the library -> remove; otherwise import.
-  const spotifyOnly = Array.from(spotify.keys()).filter(u => !libraryUris.has(u));
+  const spotifyOnly = Array.from(spotify.keys()).filter(u => !libraryUris.has(u) && !alreadyQueued.has(u));
   const deleted = findPreviouslyDeleted(spotifyOnly);
   const toRemove = spotifyOnly.filter(u => deleted[u]);
   const toImport = spotifyOnly.filter(u => !deleted[u]);
@@ -105,17 +116,16 @@ export async function syncLibraryWithSpotify(): Promise<LibrarySyncResult> {
     // problem than intent; leave Spotify alone and report it.
     result.skippedRemovals = toRemove.length;
   } else {
-    for (let i = 0; i < toRemove.length; i += 100) {
-      const chunk = toRemove.slice(i, i + 100);
-      const res = await spotifyCall(token.token, `${API}/playlists/${config.id}/items`, {
-        method: "DELETE", body: JSON.stringify({ items: chunk.map(uri => ({ uri })) }),
-      });
-      if (!res.ok) return { ...result, ok: false, error: `Removing from Spotify failed (${res.status})` };
-      result.removedFromSpotify += chunk.length;
-    }
+    // Queued, then sent through the shared removal queue (batched, retried after a rate limit).
+    queueSpotifyRemovals(toRemove, config.id);
+    result.queuedRemovals = toRemove.length;
   }
+  const flushed = await flushSpotifyRemovals().catch(() => null);
+  result.removedFromSpotify += flushed?.removed ?? 0;
 
-  if (toImport.length > 0) {
+  if (toImport.length > MAX_IMPORTS_PER_RUN) {
+    result.skippedImports = toImport.length;
+  } else if (toImport.length > 0) {
     const { added } = await addTracksToLibrary(toImport.map(uri => ({ uri, ...spotify.get(uri)! })));
     result.importedToLibrary = added;
     // Backfill BPM/duration/features/genres for the imported rows.

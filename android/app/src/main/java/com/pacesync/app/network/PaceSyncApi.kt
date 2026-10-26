@@ -130,6 +130,24 @@ interface PaceSyncApi {
     @POST("api/nutrition")
     suspend fun syncNutrition(@Body body: com.pacesync.app.network.dto.NutritionSyncRequest): Response<com.pacesync.app.network.dto.NutritionSyncResponse>
 
+    // The crawler form's saved settings, shared with the web page.
+    @GET("api/tracks/song-crawler/inputs")
+    suspend fun getCrawlInputs(): Response<com.pacesync.app.network.dto.CrawlInputsResponse>
+
+    @POST("api/tracks/song-crawler/inputs")
+    suspend fun saveCrawlInputs(@Body body: com.pacesync.app.network.dto.CrawlInputsRequest): Response<com.pacesync.app.network.dto.CrawlInputsResponse>
+
+    // The queue of artists waiting for their own crawl: take one out / clear it.
+    @HTTP(method = "PATCH", path = "api/tracks/song-crawler", hasBody = true)
+    suspend fun crawlRemoveQueued(@Body body: com.pacesync.app.network.dto.CrawlRemoveQueuedRequest): Response<Unit>
+
+    @HTTP(method = "PATCH", path = "api/tracks/song-crawler", hasBody = true)
+    suspend fun crawlClearQueue(@Body body: com.pacesync.app.network.dto.CrawlClearQueueRequest): Response<Unit>
+
+    // Pause button / Resume button (resumes a paused crawl, or carries on an interrupted one).
+    @HTTP(method = "PATCH", path = "api/tracks/song-crawler", hasBody = true)
+    suspend fun crawlControl(@Body body: com.pacesync.app.network.dto.CrawlControlRequest): Response<Unit>
+
     @HTTP(method = "PATCH", path = "api/tracks/song-crawler", hasBody = true)
     suspend fun crawlRemoveAdded(@Body body: com.pacesync.app.network.dto.CrawlRemoveRequest): Response<Unit>
 }

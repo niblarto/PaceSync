@@ -52,6 +52,7 @@ object NC {
     val avg = Color(0xFFFBBF24)
     fun projection(method: String) = when (method) {
         "trend" -> Color(0xFFA78BFA)
+        "trend7" -> Color(0xFFFB7185)
         "energy" -> Color(0xFFF59E0B)
         "postrun" -> Color(0xFF22C55E)
         else -> Color(0xFF38BDF8)
@@ -206,6 +207,7 @@ data class WeightChartData(
     val fit: TrendFit? = null,
     val postWeights: List<Pair<LocalDate, Double>> = emptyList(),
     val postFit: TrendFit? = null,
+    val fit7: TrendFit? = null,
 ) {
     val start: LocalDate get() = weights.firstOrNull()?.first ?: today.minusDays(30)
     val totalDays: Float get() = ChronoUnit.DAYS.between(start, end).toFloat().coerceAtLeast(1f)
@@ -249,7 +251,7 @@ fun WeightChart(
         val top = 8.dp.toPx()
         val ys = data.weights.map { it.second } + data.postWeights.map { it.second } +
             data.lines.flatMap { l -> listOf(l.anchorKg ?: data.anchorKg, projectedKg(data, l, data.end)) } +
-            listOfNotNull(data.targetKg, data.fit?.startKg, data.fit?.endKg, data.postFit?.startKg, data.postFit?.endKg)
+            listOfNotNull(data.targetKg, data.fit?.startKg, data.fit?.endKg, data.fit7?.startKg, data.fit7?.endKg, data.postFit?.startKg, data.postFit?.endKg)
         val loRaw = ys.minOrNull() ?: 70.0
         val hiRaw = ys.maxOrNull() ?: 90.0
         val pad = max(0.5, (hiRaw - loRaw) * 0.08)
@@ -280,6 +282,10 @@ fun WeightChart(
             // Fitted trend through the window's weigh-ins (basis of "Scale trend").
             data.fit?.let { f ->
                 drawLine(NC.projection("trend").copy(alpha = 0.55f), Offset(x(f.start), y(f.startKg)), Offset(x(f.end), y(f.endKg)), 3f)
+            }
+            // Fitted line through just the last 7 days (basis of "7-day trend").
+            data.fit7?.let { f ->
+                drawLine(NC.projection("trend7").copy(alpha = 0.55f), Offset(x(f.start), y(f.startKg)), Offset(x(f.end), y(f.endKg)), 3f)
             }
             // Fitted line through the post-run weigh-ins (basis of "Post-run trend").
             data.postFit?.let { f ->

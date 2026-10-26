@@ -37,7 +37,7 @@ export interface DayRow {
 }
 
 export interface Projection {
-  method: "trend" | "energy" | "plan" | "postrun";
+  method: "trend" | "trend7" | "energy" | "plan" | "postrun";
   label: string;
   basis: string; // short explanation of the inputs
   kgPerWeek: number;
@@ -72,6 +72,8 @@ export interface NutritionDashboard {
   // The straight line fitted through the weigh-ins in the trend window, so
   // the chart can show where the "Scale trend" projection comes from.
   trendFit: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
+  // The same over just the last 7 days: a more immediate read than the (configurable) trend window.
+  trendFit7: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
   // The same for the post-run weigh-ins (basis of the "Post-run trend" projection).
   postRunFit: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
   // When each data source was last refreshed (ISO timestamps).
@@ -176,10 +178,10 @@ function garminExercise(since: string): Map<string, number> {
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 
 // Least-squares line through the points (y = intercept + slope·x).
-function linearFit(points: { x: number; y: number }[], minPoints = 4): { slope: number; intercept: number } | null {
+function linearFit(points: { x: number; y: number }[], minPoints = 4, minSpanDays = 7): { slope: number; intercept: number } | null {
   if (points.length < minPoints) return null;
   const xs = points.map(p => p.x);
-  if (Math.max(...xs) - Math.min(...xs) < 7) return null;
+  if (Math.max(...xs) - Math.min(...xs) < minSpanDays) return null;
   const mx = mean(xs)!;
   const my = mean(points.map(p => p.y))!;
   let num = 0, den = 0;
@@ -370,6 +372,7 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
   const projections: Projection[] = [];
   let required: NutritionDashboard["required"] = null;
   let trendFit: NutritionDashboard["trendFit"] = null;
+  let trendFit7: NutritionDashboard["trendFit7"] = null;
   let postRunFit: NutritionDashboard["postRunFit"] = null;
   if (current) {
     const anchor = current.avg7Kg;
@@ -389,6 +392,19 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
         startDate: windowStart, startKg: r2(fit.intercept),
         endDate: today, endKg: r2(trendEndKg),
       };
+    }
+    // The same fit over just the LAST 7 regular weigh-ins (post-run ones aren't in `weights`),
+    // however many days they span, so it reacts to what is happening now. Fewer points and a
+    // shorter span are enough here than for the long window.
+    const last7 = weights.slice(-7);
+    const start7 = last7[0]?.date ?? today;
+    const pts7 = last7.map(w => ({ x: daysBetween(start7, w.date), y: w.kg }));
+    const fit7 = linearFit(pts7, 3, 4);
+    if (fit7) {
+      const end7Kg = fit7.intercept + fit7.slope * daysBetween(start7, today);
+      projections.push(project("trend7", "7-weigh-in trend", `the last ${pts7.length} weigh-ins (not counting post-run ones), ${start7} to ${last7[last7.length - 1].date}`, fit7.slope, end7Kg, today, config));
+      const r2b = (n: number) => Math.round(n * 1000) / 1000;
+      trendFit7 = { startDate: start7, startKg: r2b(fit7.intercept), endDate: today, endKg: r2b(end7Kg) };
     }
     // The post-run weigh-ins get their own line, starting from where that line is
     // today (they read lower than the morning weight, so not from the 7-day average).
@@ -431,5 +447,5 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
     }
   }
 
-  return { config, today, days, weights, postRunWeights, current, averages, projections, required, trendFit, postRunFit, sources: dataSources(today) };
+  return { config, today, days, weights, postRunWeights, current, averages, projections, required, trendFit, trendFit7, postRunFit, sources: dataSources(today) };
 }

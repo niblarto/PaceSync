@@ -10,6 +10,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { parseBpmSpec } from "@/lib/bpm-spec";
+import { formatArtistName } from "@/lib/artist-list";
 import { ArtistListInput } from "@/components/ArtistListInput";
 import { useSession } from "next-auth/react";
 import type { RunningZone } from "@/types";
@@ -20,7 +21,7 @@ import { invalidateRunningPlaylistCache } from "@/components/useRunningPlaylist"
 import { freshSpotifyToken, spotifyFetch, subscribeSpotifyRateLimit, fmtRateLimitDuration, type RateLimitState } from "@/lib/spotify-browser";
 import { deleteTrackFromLibrary, deleteTracksFromLibrary } from "@/lib/track-delete-client";
 import { DeletedTracksReview, type RejectedTrack } from "@/components/DeletedTracksReview";
-import { openInSpotify, playInSpotify, TrackRow } from "@/components/TrackRow";
+import { openInSpotify, playInSpotify, playOnActiveDevice, TrackRow } from "@/components/TrackRow";
 import { useRunningPlaylist, getRunningPlaylist } from "@/components/useRunningPlaylist";
 import { MixPaceChart, timelineToChartTracks } from "@/components/MixPaceChart";
 import { GenreExplorer } from "@/components/GenreExplorer";
@@ -703,44 +704,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const tracklistContainerRef = useRef<HTMLDivElement>(null);
   const tracklistSentinelRef = useRef<HTMLDivElement>(null);
 
-  // ── Song Crawler ── a server-side background job (lib/song-crawler.ts):
-  // it keeps running with the browser closed. This page starts/stops it and
-  // polls its log; only the form inputs are remembered in the browser.
-  interface CrawlerLine { level: "info" | "match" | "warn" | "error"; msg: string; at: string }
-  const [crawlerArtist, setCrawlerArtist] = useState("");
-  // open.spotify.com album / playlist link — crawled alongside (or instead of) the artist.
-  const [crawlerLink, setCrawlerLink] = useState("");
-  // "120-122" range, "121,145,167" exact list, or one BPM (±1) — lib/bpm-spec.ts.
-  const [crawlerBpm, setCrawlerBpm] = useState("");
-  const crawlerBpmValid = parseBpmSpec(crawlerBpm).ok;
-  // How many distinct artists a crawl may discover before it stops queuing.
-  const [crawlerMaxArtists, setCrawlerMaxArtists] = useState("50");
-  // Pause the crawl at this many songs awaiting review (empty = no limit).
-  const [crawlerReviewLimit, setCrawlerReviewLimit] = useState("");
-  // What to crawl — any combination (at least one): the artist's own
-  // tracks, artist radio, related artists.
-  const [crawlerSources, setCrawlerSources] = useState<{ artist: boolean; radio: boolean; related: boolean }>({ artist: false, radio: true, related: false });
-  const crawlerSpreads = crawlerSources.radio || crawlerSources.related;
-  const crawlerNoSource = !crawlerSources.artist && !crawlerSources.radio && !crawlerSources.related;
-  // Artists processed so far / artists found so far.
-  const [crawlerProgress, setCrawlerProgress] = useState<{ crawled: number; total: number } | null>(null);
-  // What the log below is from.
-  const [crawlerSeed, setCrawlerSeed] = useState<{ artist: string; bpmLabel: string; startedAt: string } | null>(null);
-  const [crawlerRunning, setCrawlerRunning] = useState(false);
-  const [crawlerStopping, setCrawlerStopping] = useState(false);
-  const [crawlerStatusText, setCrawlerStatusText] = useState<string | null>(null);
-  const [crawlerLog, setCrawlerLog] = useState<CrawlerLine[]>([]);
-  const [crawlerAdded, setCrawlerAdded] = useState(0);
-  const [crawlerChecked, setCrawlerChecked] = useState<number | null>(null);
-  // Songs the current/last crawl added — the list beside the log.
-  const [crawlerAddedTracks, setCrawlerAddedTracks] = useState<{ uri: string; name: string; artist: string; bpm: number }[]>([]);
-  const [crawlerPlayingUri, setCrawlerPlayingUri] = useState<string | null>(null);
-  const [crawlerMenu, setCrawlerMenu] = useState<{ x: number; y: number; uri: string; uris?: string[] } | null>(null);
-  // Awaiting-review multi-select: ctrl/cmd-click toggles, shift-click
-  // selects a range from the last clicked song.
-  const [crawlerSelected, setCrawlerSelected] = useState<Set<string>>(new Set());
-  const crawlerAnchorRef = useRef<string | null>(null);
-
   // ── Track Lookup ── (under the Song Crawler) everything Deezer/ReccoBeats
   // know about an artist + title; nothing is saved unless "Add to playlist".
   const [lookupArtist, setLookupArtist] = useState("");
@@ -752,10 +715,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [lookupPlayingId, setLookupPlayingId] = useState<number | null>(null);
   const [lookupAddingId, setLookupAddingId] = useState<number | null>(null);
   const lookupAudioRef = useRef<HTMLAudioElement | null>(null);
-  const crawlerJobIdRef = useRef<string | null>(null);
-  const crawlerSinceRef = useRef(0);
-  const crawlerWasRunningRef = useRef(false);
-  const crawlerLogRef = useRef<HTMLDivElement>(null);
   const [bulkDeleteArtist, setBulkDeleteArtist] = useState("");
   const [bulkDeleteTarget, setBulkDeleteTarget] = useState<{ kind: "genre" | "artist"; value: string; tracks: ManagedTrack[] } | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -1138,181 +1097,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     }
   }, []);
 
-  type CrawlJobMeta = {
-    id: string; status: "running" | "paused" | "stopping" | "healing" | "done" | "stopped" | "error" | "interrupted";
-    startedAt: string; added: number; crawled: number; totalArtists: number; checked?: number;
-    addedTracks?: { uri: string; name: string; artist: string; bpm: number }[];
-    params: { artist: string; bpmSpec?: string; bpm?: number; bpmMin?: number; bpmMax?: number };
-  };
-  const CRAWLER_STATUS_TEXT: Record<CrawlJobMeta["status"], string> = {
-    running: "Running", paused: "Paused — review limit reached", stopping: "Stopping", healing: "Filling in missing data",
-    done: "Last crawl", stopped: "Last crawl (stopped)", error: "Last crawl (failed)", interrupted: "Last crawl (interrupted)",
-  };
-
-  // Pulls new log lines (and status) for the server's current/last crawl.
-  const pollSongCrawler = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/tracks/song-crawler?since=${crawlerSinceRef.current}`);
-      if (!res.ok) return;
-      const d = await res.json() as { job: CrawlJobMeta | null; lines: { seq: number; at: string; level: CrawlerLine["level"]; msg: string }[] };
-      if (!d.job) return;
-      // A different crawl than the one shown — start its log from scratch.
-      if (d.job.id !== crawlerJobIdRef.current) {
-        crawlerJobIdRef.current = d.job.id;
-        if (crawlerSinceRef.current !== 0) {
-          crawlerSinceRef.current = 0;
-          setCrawlerLog([]);
-          return pollSongCrawler();
-        }
-        setCrawlerLog([]);
-      }
-      if (d.lines.length > 0) {
-        crawlerSinceRef.current = d.lines[d.lines.length - 1].seq + 1;
-        const mapped = d.lines.map(l => ({
-          level: l.level, msg: l.msg,
-          at: new Date(l.at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-        }));
-        setCrawlerLog(prev => [...prev, ...mapped].slice(-5000));
-      }
-      const job = d.job;
-      const running = job.status === "running" || job.status === "paused" || job.status === "stopping" || job.status === "healing";
-      setCrawlerRunning(running);
-      setCrawlerStopping(job.status === "stopping" || job.status === "healing");
-      setCrawlerStatusText(CRAWLER_STATUS_TEXT[job.status]);
-      setCrawlerAdded(job.added);
-      setCrawlerChecked(job.checked ?? null);
-      setCrawlerAddedTracks(job.addedTracks ?? []);
-      setCrawlerProgress(job.totalArtists > 0 ? { crawled: job.crawled, total: job.totalArtists } : null);
-      const p = job.params;
-      setCrawlerSeed({
-        artist: p.artist,
-        bpmLabel: p.bpmSpec?.trim() || (p.bpmMin && p.bpmMax ? `${Math.round(p.bpmMin)}–${Math.round(p.bpmMax)}` : String(Math.round(p.bpm ?? 0))),
-        startedAt: new Date(job.startedAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }),
-      });
-      // Crawl just ended while watching — show the tracks it added.
-      if (crawlerWasRunningRef.current && !running && job.added > 0) void loadTracklist();
-      crawlerWasRunningRef.current = running;
-    } catch { /* transient — next poll retries */ }
-  }, [loadTracklist]);
-
-  // Restore the current/last crawl on load; poll while one is running.
-  useEffect(() => { void pollSongCrawler(); }, [pollSongCrawler]);
-  useEffect(() => {
-    if (!crawlerRunning) return;
-    const id = setInterval(() => { void pollSongCrawler(); }, 2000);
-    return () => clearInterval(id);
-  }, [crawlerRunning, pollSongCrawler]);
-
-  async function startSongCrawler() {
-    if (crawlerRunning) return;
-    const artist = crawlerArtist.trim();
-    const link = crawlerLink.trim();
-    const bpmSpec = crawlerBpm.trim();
-    if ((!artist && !link) || !crawlerBpmValid || (crawlerNoSource && !link)) return;
-    const res = await fetch("/api/tracks/song-crawler", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        artist,
-        ...(link ? { link } : {}),
-        bpmSpec,
-        maxArtists: parseInt(crawlerMaxArtists, 10) > 0 ? parseInt(crawlerMaxArtists, 10) : 50,
-        reviewLimit: parseInt(crawlerReviewLimit, 10) > 0 ? parseInt(crawlerReviewLimit, 10) : null,
-        sources: crawlerSources,
-      }),
-    }).catch(() => null);
-    const d = res ? await res.json().catch(() => ({})) as { id?: string; error?: string } : { error: "Couldn't reach the server" };
-    if (!res?.ok || !d.id) {
-      setCrawlerLog(prev => [...prev, { level: "error", msg: d.error ?? "Couldn't start the crawl", at: new Date().toLocaleTimeString("en-GB") }]);
-      return;
-    }
-    crawlerJobIdRef.current = d.id;
-    crawlerSinceRef.current = 0;
-    crawlerWasRunningRef.current = true;
-    setCrawlerLog([]);
-    setCrawlerRunning(true);
-    void pollSongCrawler();
-  }
-
-  // Delete a crawled song from the library (and Spotify playlist) and drop
-  // it from the crawl's added list.
-  async function deleteCrawlerTrack(uri: string) {
-    setCrawlerMenu(null);
-    setCrawlerAddedTracks(prev => prev.filter(t => t.uri !== uri));
-    setTracklist(prev => prev?.filter(t => t.uri !== uri) ?? prev);
-    deleteTrackFromLibrary(uri, runningPlaylist.id);
-    await fetch("/api/tracks/song-crawler", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ removeAdded: uri }),
-    }).catch(() => null);
-    void pollSongCrawler();
-  }
-
-  // Multi-select Accept / Delete — one request for the lot.
-  // "removed": out of the library + playlist but not on the deleted list.
-  async function bulkCrawlerAction(uris: string[], action: "accepted" | "deleted" | "removed") {
-    setCrawlerMenu(null);
-    setCrawlerSelected(new Set());
-    const set = new Set(uris);
-    setCrawlerAddedTracks(prev => prev.filter(t => !set.has(t.uri)));
-    if (action !== "accepted") {
-      setTracklist(prev => prev?.filter(t => !set.has(t.uri)) ?? prev);
-      void deleteTracksFromLibrary(uris, action === "removed");
-    }
-    await fetch("/api/tracks/song-crawler", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ removeAdded: uris, reason: action }),
-    }).catch(() => null);
-    void pollSongCrawler();
-  }
-
-  function clickCrawlerTrack(e: React.MouseEvent, uri: string) {
-    if (e.shiftKey && crawlerAnchorRef.current) {
-      const order = crawlerAddedTracks.map(t => t.uri);
-      const a = order.indexOf(crawlerAnchorRef.current), b = order.indexOf(uri);
-      if (a >= 0 && b >= 0) {
-        const [lo, hi] = a < b ? [a, b] : [b, a];
-        const range = order.slice(lo, hi + 1);
-        setCrawlerSelected(prev => new Set([...(e.ctrlKey || e.metaKey ? Array.from(prev) : []), ...range]));
-        return;
-      }
-    }
-    if (e.ctrlKey || e.metaKey) {
-      crawlerAnchorRef.current = uri;
-      setCrawlerSelected(prev => {
-        const next = new Set(prev);
-        if (next.has(uri)) next.delete(uri); else next.add(uri);
-        return next;
-      });
-      return;
-    }
-    crawlerAnchorRef.current = uri;
-    setCrawlerSelected(new Set());
-    setCrawlerPlayingUri(uri);
-    void playInSpotify(uri, session?.accessToken);
-    ensurePlaying();
-  }
-
-  // Accept: keep the song in the library, just take it off the review list.
-  async function acceptCrawlerTrack(uri: string) {
-    setCrawlerMenu(null);
-    setCrawlerAddedTracks(prev => prev.filter(t => t.uri !== uri));
-    await fetch("/api/tracks/song-crawler", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ removeAdded: uri, reason: "accepted" }),
-    }).catch(() => null);
-    void pollSongCrawler();
-  }
-
-  async function stopSongCrawler() {
-    setCrawlerStopping(true);
-    await fetch("/api/tracks/song-crawler", { method: "DELETE" }).catch(() => null);
-    void pollSongCrawler();
-  }
-
   // Track Lookup results are kept in this browser until removed.
   const LOOKUP_STORE_KEY = "pacesync.trackLookup";
   const lookupLoadedRef = useRef(false);
@@ -1393,39 +1177,6 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       setLookupAddingId(null);
     }
   }
-
-  // Form inputs are remembered in this browser; the log lives on the server.
-  const CRAWLER_STORE_KEY = "pacesync.songCrawler.inputs";
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(CRAWLER_STORE_KEY);
-      if (!raw) return;
-      const saved = JSON.parse(raw) as { reviewLimit?: string; artist?: string; link?: string; bpm?: string; bpmMax?: string; maxArtists?: string; sources?: { artist: boolean; radio: boolean; related: boolean }; mode?: string; allTracks?: boolean };
-      if (saved.artist) setCrawlerArtist(saved.artist);
-      if (saved.link) setCrawlerLink(saved.link);
-      if (saved.reviewLimit) setCrawlerReviewLimit(saved.reviewLimit);
-      // Older saves kept the range's top in a separate field.
-      if (saved.bpm) setCrawlerBpm(saved.bpmMax && Number(saved.bpmMax) > Number(saved.bpm) ? `${saved.bpm}-${saved.bpmMax}` : saved.bpm);
-      if (saved.maxArtists) setCrawlerMaxArtists(saved.maxArtists);
-      if (saved.sources) setCrawlerSources(saved.sources);
-      else if (saved.mode === "artist") setCrawlerSources({ artist: true, radio: false, related: false });
-      else if (saved.mode === "both" || saved.allTracks) setCrawlerSources({ artist: true, radio: true, related: false });
-    } catch { /* storage unavailable */ }
-  }, []);
-  useEffect(() => {
-    try {
-      localStorage.setItem(CRAWLER_STORE_KEY, JSON.stringify({
-        artist: crawlerArtist, link: crawlerLink, bpm: crawlerBpm, maxArtists: crawlerMaxArtists, sources: crawlerSources,
-        reviewLimit: crawlerReviewLimit,
-      }));
-    } catch { /* storage unavailable */ }
-  }, [crawlerArtist, crawlerLink, crawlerBpm, crawlerMaxArtists, crawlerSources, crawlerReviewLimit]);
-
-  // Keep the log scrolled to the newest line.
-  useEffect(() => {
-    const el = crawlerLogRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [crawlerLog]);
 
   async function deleteManagedTrack(track: ManagedTrack, skipDeletedLog?: boolean) {
     setTracklistDeletingUris(prev => new Set(prev).add(track.uri));
@@ -6822,332 +6573,13 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         )}
       </div>
 
-      {/* ── Song Crawler ── always shown; the last crawl's log is kept. */}
-      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <h3 className="font-semibold text-slate-100 flex items-center gap-2">
-              <span className="text-teal-400">🕸</span> Song Crawler
-              {crawlerRunning && <span className="inline-block w-2 h-2 rounded-full bg-teal-400 animate-pulse" />}
-            </h3>
-            <p className="text-xs text-slate-500">
-              Walks Deezer artist radio from an artist — and/or every track on a Spotify album or playlist (or paste an artist link) — adding tracks at the BPM (±1) or within the range to the library. Half-time tracks count at double tempo.
-            </p>
-          </div>
+      {/* The Song Crawler has its own page now. */}
+      <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 flex items-center justify-between gap-4">
+        <div>
+          <h3 className="font-semibold text-slate-100 flex items-center gap-2"><span className="text-teal-400">🕸</span> Song Crawler</h3>
+          <p className="text-xs text-slate-500">The crawler, its review list and queue have moved to their own page.</p>
         </div>
-
-        <div className="flex flex-wrap items-end gap-2">
-          <label className="text-xs text-slate-500 space-y-1 flex-1 min-w-[12rem]">
-            <span className="block">Artist <span className="text-slate-600" title={'Separate artists with commas. Put a name that contains commas in quotes: "Earth, Wind & Fire", The Levellers'}>(comma separate several)</span></span>
-            <ArtistListInput
-              value={crawlerArtist}
-              onChange={setCrawlerArtist}
-              options={crawlerArtistOptions}
-              onEnter={() => void startSongCrawler()}
-              disabled={crawlerRunning}
-              placeholder="Type to filter artists…"
-              className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500"
-            />
-          </label>
-          <label className="text-xs text-slate-500 space-y-1 flex-1 min-w-[14rem]" title="Spotify artist link (crawls that artist), or an album / playlist link — every track on it is BPM-checked, and its artists are used as starting points for Radio / Related">
-            <span className="block">Artist / Album / Playlist link</span>
-            <input
-              value={crawlerLink}
-              onChange={e => setCrawlerLink(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
-              disabled={crawlerRunning}
-              placeholder="https://open.spotify.com/album/…"
-              className={`w-full rounded-lg bg-slate-800/60 border text-sm px-2.5 py-1.5 text-slate-100 disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500 ${
-                crawlerLink.trim() && !/open\.spotify\.com\/(?:intl-[a-z]+\/)?(album|playlist|artist)\/|spotify:(album|playlist|artist):/.test(crawlerLink) ? "border-amber-500/60" : "border-white/10"
-              }`}
-            />
-          </label>
-          <label className="text-xs text-slate-500 space-y-1 w-48" title="One BPM (±1), a range like 120-122, or exact matches like 121,145,167">
-            <span className="block">BPM</span>
-            <input
-              type="text"
-              value={crawlerBpm}
-              onChange={e => setCrawlerBpm(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
-              disabled={crawlerRunning}
-              placeholder="170 · 120-122 · 121,145,167"
-              className={`w-full rounded-lg bg-slate-800/60 border text-sm px-2.5 py-1.5 text-slate-100 font-mono disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500 ${
-                crawlerBpm.trim() && !crawlerBpmValid ? "border-amber-500/60" : "border-white/10"
-              }`}
-            />
-          </label>
-          <label className="text-xs text-slate-500 space-y-1 w-24" title="Stop queuing new artists once this many have been found (the queued ones are still finished)">
-            <span className="block">Max artists</span>
-            <input
-              type="number"
-              min={1}
-              max={2000}
-              value={crawlerMaxArtists}
-              onChange={e => setCrawlerMaxArtists(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") void startSongCrawler(); }}
-              // Only the radio crawl spreads to other artists.
-              disabled={crawlerRunning || !crawlerSpreads}
-              placeholder="50"
-              className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 font-mono disabled:opacity-50 focus:outline-none focus:ring-1 focus:ring-teal-500"
-            />
-          </label>
-          <label className="text-xs text-slate-500 space-y-1 w-24" title="Pause the crawl once this many songs are awaiting review; it carries on when you've reviewed enough. Empty = no limit. Can be changed while a crawl runs.">
-            <span className="block">Review limit</span>
-            <input
-              type="number"
-              min={1}
-              value={crawlerReviewLimit}
-              onChange={e => setCrawlerReviewLimit(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") { if (crawlerRunning) (e.target as HTMLInputElement).blur(); else void startSongCrawler(); } }}
-              // While a crawl runs, a change applies to it straight away.
-              onBlur={() => {
-                if (!crawlerRunning) return;
-                const n = parseInt(crawlerReviewLimit, 10);
-                void fetch("/api/tracks/song-crawler", {
-                  method: "PATCH",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ reviewLimit: n > 0 ? n : null }),
-                }).then(() => pollSongCrawler()).catch(() => {});
-              }}
-              placeholder="none"
-              className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1.5 text-slate-100 font-mono focus:outline-none focus:ring-1 focus:ring-teal-500"
-            />
-          </label>
-          <button
-            onClick={() => void startSongCrawler()}
-            disabled={crawlerRunning || (!crawlerArtist.trim() && !crawlerLink.trim()) || !crawlerBpmValid || (crawlerNoSource && !crawlerLink.trim())}
-            className="rounded-lg bg-teal-600 hover:bg-teal-500 disabled:bg-slate-700 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-sm px-5 py-2 shadow-sm transition-colors"
-          >
-            Crawl
-          </button>
-          <button
-            onClick={() => void stopSongCrawler()}
-            disabled={!crawlerRunning || crawlerStopping}
-            className="rounded-lg border border-red-500/40 bg-red-500/15 hover:bg-red-500/25 disabled:opacity-30 disabled:cursor-not-allowed text-red-300 font-semibold text-xs px-4 py-2 transition-colors"
-          >
-            {crawlerStopping ? "Stopping…" : "■ Stop"}
-          </button>
-          <button
-            onClick={() => { setCrawlerLog([]); setCrawlerSeed(null); setCrawlerAdded(0); setCrawlerProgress(null); setCrawlerStatusText(null); }}
-            disabled={crawlerRunning || crawlerLog.length === 0}
-            className="rounded-lg border border-white/10 hover:border-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-slate-400 hover:text-slate-200 text-xs px-3 py-2 transition-colors"
-          >
-            Clear log
-          </button>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-          <span className="text-xs text-slate-500">Crawl:</span>
-          {([
-            ["artist", "Artist", "This artist's own tracks — every album, EP and single"],
-            ["radio", "Radio", "Each artist's radio; artists in it are added to the queue (up to Max artists)"],
-            ["related", "Related", "Each artist's related artists are added to the queue, and their top tracks checked (up to Max artists)"],
-          ] as const).map(([key, label, hint]) => (
-            <label key={key} title={hint} className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={crawlerSources[key]}
-                onChange={e => setCrawlerSources(prev => ({ ...prev, [key]: e.target.checked }))}
-                disabled={crawlerRunning}
-                className="accent-teal-500"
-              />
-              {label}
-            </label>
-          ))}
-          {crawlerNoSource && <span className="text-xs text-amber-400">Tick at least one</span>}
-        </div>
-
-        {/* Run-type ranges from "Run BPM limits" (Settings > BPM) — fills
-            the BPM field (Work: the exact BPMs from the Pace BPM table); a type with no limits set is disabled. */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-slate-500 mr-1">Run type:</span>
-          {([
-            ["warmup", "Warm up"],
-            ["work", "Work"],
-            ["easy", "Easy"],
-            ["cooldown", "Cool down"],
-            ["rest", "Rest"],
-          ] as [string, string][]).map(([kind, label]) => {
-            // Work uses the Pace BPM table (its exact BPMs as a list); the
-            // other types use their min–max range.
-            const min = Number(bpmOv[kind]?.min.trim() || NaN);
-            const max = Number(bpmOv[kind]?.max.trim() || NaN);
-            const paceList = kind === "work"
-              ? Array.from(new Set(Object.values(paceBpmOv).map(v => Number(v)).filter(v => v > 0))).sort((a, b) => a - b)
-              : [];
-            const spec = kind === "work" ? paceList.join(",") : `${min}-${max}`;
-            const valid = kind === "work" ? paceList.length > 0 : min > 0 && max >= min;
-            const active = valid && crawlerBpm.trim() === spec;
-            return (
-              <button
-                key={kind}
-                onClick={() => setCrawlerBpm(spec)}
-                disabled={!valid || crawlerRunning}
-                title={valid ? `${label}: ${spec.replace("-", "–")} BPM` : `${label} has no BPM limits set (Settings → BPM)`}
-                className={`text-xs rounded-lg border px-2.5 py-1 transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
-                  active
-                    ? "border-teal-500/50 bg-teal-500/15 text-teal-300"
-                    : "border-white/10 text-slate-400 hover:text-slate-200 hover:border-white/20"
-                }`}
-              >
-                {label}{valid && kind !== "work" ? ` ${min}–${max}` : ""}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Status (left, over the log) and the Spotify playback bar (right,
-            over the "Awaiting review" list). */}
-        {/* The bar block is exactly one column of the 4-column grid below
-            (the "Awaiting review" list's width); the track name sits just
-            left of it and the status takes what's left. */}
-        <div className="flex flex-col md:flex-row md:items-center gap-3">
-          <p className="flex-1 text-xs text-slate-500 min-w-0">
-            {crawlerSeed && (
-              <>
-                {crawlerStatusText ?? (crawlerRunning ? "Running" : "Last crawl")}: {crawlerSeed.artist} · {crawlerSeed.bpmLabel} BPM · started {crawlerSeed.startedAt}{crawlerChecked != null ? ` · ${crawlerChecked.toLocaleString()} checked` : ""} · {crawlerAdded} added
-                {crawlerProgress ? ` · Artist ${crawlerProgress.crawled} of ${crawlerProgress.total}` : ""}
-              </>
-            )}
-          </p>
-          <SongProgressBar className="contents" barClassName="shrink-0 w-full md:w-[calc((100%-2.25rem)/4)]" />
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          <div
-            ref={crawlerLogRef}
-            className="md:col-span-3 h-[39.6rem] overflow-y-auto rounded-lg border border-white/10 bg-slate-950/70 p-3 font-mono text-[11px] leading-relaxed"
-          >
-            {crawlerLog.length === 0 ? (
-              <p className="text-slate-600">No crawl yet — pick an artist and BPM, then press Crawl.</p>
-            ) : crawlerLog.map((line, i) => (
-              <div
-                key={i}
-                className={
-                  line.level === "match" ? "text-teal-300 font-semibold"
-                    : line.level === "warn" ? "text-amber-400"
-                    : line.level === "error" ? "text-red-400"
-                    : "text-slate-400"
-                }
-              >
-                <span className="text-slate-600">{line.at}</span> {line.msg}
-              </div>
-            ))}
-          </div>
-
-          {/* Songs this crawl added — click to play, right-click to delete. */}
-          <div className="h-[39.6rem] flex flex-col rounded-lg border border-white/10 bg-slate-950/70 overflow-hidden">
-            <p className="px-3 py-2 text-xs font-semibold text-slate-300 border-b border-white/10 shrink-0">
-              Awaiting review <span className="text-slate-500 font-normal">({crawlerAddedTracks.length})</span>
-              {crawlerSelected.size > 0 && (
-                <span className="ml-2 text-sky-300 font-normal">
-                  {crawlerSelected.size} selected
-                  <button onClick={() => setCrawlerSelected(new Set())} className="ml-1.5 text-slate-500 hover:text-slate-300 underline">clear</button>
-                </span>
-              )}
-            </p>
-            <div className="flex-1 overflow-y-auto">
-              {crawlerAddedTracks.length === 0 ? (
-                <p className="px-3 py-2 text-xs text-slate-600">Songs crawls add stay here until you accept or delete them.</p>
-              ) : crawlerAddedTracks.map(t => (
-                <button
-                  key={t.uri}
-                  onClick={e => clickCrawlerTrack(e, t.uri)}
-                  onMouseDown={e => { if (e.shiftKey) e.preventDefault(); /* no text selection on shift-click */ }}
-                  onContextMenu={e => {
-                    e.preventDefault();
-                    if (crawlerSelected.size > 1 && crawlerSelected.has(t.uri)) {
-                      setCrawlerMenu({ x: e.clientX, y: e.clientY, uri: t.uri, uris: crawlerAddedTracks.map(x => x.uri).filter(u => crawlerSelected.has(u)) });
-                    } else {
-                      setCrawlerSelected(new Set());
-                      setCrawlerMenu({ x: e.clientX, y: e.clientY, uri: t.uri });
-                    }
-                  }}
-                  title="Click to play · ctrl-click / shift-click to select several · right-click to accept or delete"
-                  className={`w-full text-left px-3 py-1.5 border-b border-white/5 transition-colors select-none ${
-                    crawlerSelected.has(t.uri)
-                      ? "bg-sky-500/20 hover:bg-sky-500/25 shadow-[inset_3px_0_0_rgb(56,189,248)]"
-                      : crawlerPlayingUri === t.uri ? "bg-teal-500/10 hover:bg-slate-800/60" : "hover:bg-slate-800/60"
-                  }`}
-                >
-                  <span className={`block text-xs truncate ${crawlerPlayingUri === t.uri ? "text-teal-300" : "text-slate-200"}`}>{t.name}</span>
-                  <span className="block text-[10px] text-slate-500 truncate">{t.artist} · {t.bpm} BPM{t.bpm > 0 && t.bpm < 95 ? ` (×2 = ${t.bpm * 2})` : ""}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Portalled to <body>: this panel's backdrop-blur makes it the
-            containing block for position:fixed, which put the menu at the
-            mouse position measured from the panel instead of the window
-            (off-screen). */}
-        {crawlerMenu && createPortal(
-          <>
-            <div className="fixed inset-0 z-40" onClick={() => setCrawlerMenu(null)} onContextMenu={e => { e.preventDefault(); setCrawlerMenu(null); }} />
-            {crawlerMenu.uris && crawlerMenu.uris.length > 1 ? (
-            <div
-              className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl py-1 w-48"
-              style={{ left: Math.min(crawlerMenu.x, window.innerWidth - 200), top: Math.min(crawlerMenu.y, window.innerHeight - 140) }}
-            >
-              <p className="px-3 py-1 text-[11px] text-slate-500">{crawlerMenu.uris.length} songs selected</p>
-              <button
-                onClick={() => void bulkCrawlerAction(crawlerMenu.uris!, "accepted")}
-                title="Keep them in the library and remove them from this list"
-                className="w-full text-left px-3 py-1.5 text-sm text-emerald-400 hover:bg-emerald-500/15 transition-colors"
-              >
-                ✓ Accept {crawlerMenu.uris.length}
-              </button>
-              <button
-                onClick={() => void bulkCrawlerAction(crawlerMenu.uris!, "deleted")}
-                className="w-full text-left px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/15 transition-colors"
-              >
-                🗑 Delete {crawlerMenu.uris.length}
-              </button>
-              <button
-                onClick={() => void bulkCrawlerAction(crawlerMenu.uris!, "removed")}
-                title="Take them out of the library and Spotify playlist without marking them deleted — they can be added again later"
-                className="w-full text-left px-3 py-1.5 text-sm text-amber-300 hover:bg-amber-500/15 transition-colors"
-              >
-                ↩ Remove {crawlerMenu.uris.length}
-              </button>
-            </div>
-            ) : (
-            <div
-              className="fixed z-50 rounded-lg bg-slate-900 border border-white/10 shadow-xl py-1 w-40"
-              style={{ left: Math.min(crawlerMenu.x, window.innerWidth - 170), top: Math.min(crawlerMenu.y, window.innerHeight - 160) }}
-            >
-              <button
-                onClick={() => { const uri = crawlerMenu.uri; setCrawlerMenu(null); setCrawlerPlayingUri(uri); void playInSpotify(uri, session?.accessToken); ensurePlaying(); }}
-                className="w-full text-left px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800 transition-colors"
-              >
-                ▶ Play
-              </button>
-              <button
-                onClick={() => void acceptCrawlerTrack(crawlerMenu.uri)}
-                title="Keep it in the library and remove it from this list"
-                className="w-full text-left px-3 py-1.5 text-sm text-emerald-400 hover:bg-emerald-500/15 transition-colors"
-              >
-                ✓ Accept
-              </button>
-              <button
-                onClick={() => void deleteCrawlerTrack(crawlerMenu.uri)}
-                className="w-full text-left px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/15 transition-colors"
-              >
-                🗑 Delete
-              </button>
-              <button
-                onClick={() => void bulkCrawlerAction([crawlerMenu.uri], "removed")}
-                title="Take it out of the library and Spotify playlist without marking it deleted — it can be added again later"
-                className="w-full text-left px-3 py-1.5 text-sm text-amber-300 hover:bg-amber-500/15 transition-colors"
-              >
-                ↩ Remove
-              </button>
-            </div>
-            )}
-          </>,
-          document.body,
-        )}
+        <Link href="/crawler" className="shrink-0 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-sm font-semibold px-4 py-1.5 transition-colors">Open Song Crawler →</Link>
       </div>
 
       {/* ── Track Lookup ── look up an artist + title without adding it. */}
@@ -7164,6 +6596,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         <div className="flex flex-wrap items-end gap-2">
           <label className="text-xs text-slate-500 space-y-1 flex-1 min-w-[12rem]">
             <span className="block">Artist</span>
+            <datalist id="crawler-artist-options">
+              {crawlerArtistOptions.map(a => <option key={a} value={a} />)}
+            </datalist>
             <input
               list="crawler-artist-options"
               value={lookupArtist}
