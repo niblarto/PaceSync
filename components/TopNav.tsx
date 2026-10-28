@@ -3,7 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
-import { SongProgressBar } from "@/components/SongProgressBar";
+import { HeaderSongBar } from "@/components/SongProgressBar";
 
 const NAV_LINK = "text-xs text-slate-500 hover:text-slate-300 transition-colors whitespace-nowrap";
 const FALLBACK_AVATAR = "data:image/svg+xml;utf8," + encodeURIComponent(
@@ -42,7 +42,7 @@ export function TopNav({ title, extra, maxWidth = "max-w-[1800px]" }: { title: s
       <div className={`${maxWidth} mx-auto px-4 h-14 flex items-center gap-4`}>
         <Link href="/dashboard" className="text-sm text-slate-400 hover:text-slate-200 transition-colors whitespace-nowrap shrink-0">← Dashboard</Link>
         <span className="font-bold text-green-400 text-lg tracking-tight whitespace-nowrap shrink-0">{title}</span>
-        <SongProgressBar className="flex-1 min-w-0 max-w-md mx-2" />
+        <HeaderSongBar className="flex-1 min-w-0 max-w-md mx-2" />
         <nav className="ml-auto flex items-center gap-4 shrink-0">
           {session?.user && (
             <div className="flex items-center gap-2 text-sm text-slate-400">

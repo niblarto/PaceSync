@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 // Spotify playback position for whatever's playing now, with click/drag to
 // seek — shown beside the Pace Chart's song strip. Polls /api/spotify/
@@ -9,6 +9,30 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // hammering Spotify.
 
 const POLL_MS = 5000;
+
+// How many seek bars (other than the one in the page header) are on the page right now. The header's bar
+// hides itself while there is one, so a page never shows two: a popup or chart that brings its own seek bar
+// takes over from the header until it goes away.
+let otherBars = 0;
+const barListeners = new Set<() => void>();
+function setOtherBars(delta: number) {
+  otherBars += delta;
+  barListeners.forEach(l => l());
+}
+function useOtherBars(): number {
+  return useSyncExternalStore(
+    cb => { barListeners.add(cb); return () => { barListeners.delete(cb); }; },
+    () => otherBars,
+    () => 0,
+  );
+}
+
+// The seek bar for a page's title bar: shown only while no other seek bar is on the page.
+export function HeaderSongBar({ className }: { className?: string }) {
+  const others = useOtherBars();
+  if (others > 0) return null;
+  return <SongProgressBar headerBar className={className} />;
+}
 const EVENT = "pacesync:playback-changed";
 
 // Tells every SongProgressBar on the page to re-read the player now (after
@@ -52,7 +76,9 @@ function fmt(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]", barClassName }: {
+export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]", barClassName, headerBar = false }: {
+  /** The page-header instance (HeaderSongBar); doesn't count as "another seek bar on the page". */
+  headerBar?: boolean;
   /** uri -> "Name — Artist" for the mix's tracks, used as the bar's label. */
   trackNames?: Record<string, string>;
   /** Width classes for the bar's container. */
@@ -64,6 +90,11 @@ export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]", ba
       flex row. */
   barClassName?: string;
 }) {
+  useEffect(() => {
+    if (headerBar) return;
+    setOtherBars(1);
+    return () => setOtherBars(-1);
+  }, [headerBar]);
   const [state, setState] = useState<PlaybackState | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [dragMs, setDragMs] = useState<number | null>(null);

@@ -17,7 +17,7 @@ import { ZoneCard } from "./ZoneCard";
 import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArtError, MiniSpinner } from "./TrackRow";
 import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
-import { SongProgressBar, ensurePlaying } from "./SongProgressBar";
+import { SongProgressBar, HeaderSongBar, ensurePlaying } from "./SongProgressBar";
 import { AdvancedMixModal } from "./AdvancedMixModal";
 import { useRunningPlaylist, getRunningPlaylist, invalidateRunningPlaylistCache } from "./useRunningPlaylist";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
@@ -3040,7 +3040,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
         <div className="max-w-[1800px] mx-auto px-4 h-14 flex items-center justify-between">
           <span className="font-bold text-green-400 text-lg tracking-tight shrink-0">PaceSync</span>
           {/* Music seek bar, beside the title */}
-          <SongProgressBar className="flex-1 min-w-0 max-w-md mx-4" />
+          <HeaderSongBar className="flex-1 min-w-0 max-w-md mx-4" />
           <div className="flex items-center gap-4 shrink-0">
             <div className="flex items-center gap-2 text-sm text-slate-400">
               {spotifyUser.image && (

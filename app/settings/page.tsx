@@ -3,6 +3,7 @@ import { authOptions } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { SettingsClient } from "./SettingsClient";
+import { HeaderSongBar } from "@/components/SongProgressBar";
 
 export default async function SettingsPage({
   searchParams,
@@ -31,6 +32,7 @@ export default async function SettingsPage({
             ← Dashboard
           </Link>
           <span className="font-bold text-green-400 text-lg tracking-tight">Settings</span>
+          <HeaderSongBar className="flex-1 min-w-0 max-w-md mx-4" />
         </div>
       </header>
       <div className="max-w-[1800px] mx-auto px-4 py-8 w-full">

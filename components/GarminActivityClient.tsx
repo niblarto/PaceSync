@@ -1,5 +1,6 @@
 "use client";
 
+import { HeaderSongBar } from "@/components/SongProgressBar";
 import { useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { useSession } from "next-auth/react";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
@@ -716,6 +717,7 @@ export function GarminActivityClient({ id }: { id: string }) {
             ← Garmin Stats
           </Link>
           <span className="font-bold text-green-400 text-lg tracking-tight">Activity</span>
+          <HeaderSongBar className="flex-1 min-w-0 max-w-md mx-4" />
           <div />
         </div>
       </header>

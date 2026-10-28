@@ -1,5 +1,6 @@
 "use client";
 
+import { HeaderSongBar } from "@/components/SongProgressBar";
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { InlineRouteMap } from "./InlineRouteMap";
@@ -325,6 +326,7 @@ export function RaceDetailClient({ id }: { id: string }) {
             ← Races
           </Link>
           <span className="font-bold text-green-400 text-lg tracking-tight">🏁 Race</span>
+          <HeaderSongBar className="flex-1 min-w-0 max-w-md mx-4" />
           <div />
         </div>
       </header>
