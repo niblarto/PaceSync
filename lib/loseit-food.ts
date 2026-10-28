@@ -1,6 +1,6 @@
 import { getDb } from "@/lib/db";
 import {
-  copyEntry, currentBuild, deleteEntry, fetchDay, fetchMyFoods, getFoodDraft, LoseItAuthError, prepareEntry, saveEntry, searchFoods, summarizeDraft, WEIGHT_G,
+  copyEntry, currentBuild, deleteEntry, moveEntry, fetchDay, fetchMyFoods, getFoodDraft, LoseItAuthError, prepareEntry, saveEntry, searchFoods, summarizeDraft, WEIGHT_G,
   type LoseItEntry,
 } from "@/lib/loseit-gwt";
 import { downloadExport, parseFoodLogCsv, readZipEntry, singularUnit, type ExportFoodRow } from "@/lib/loseit-export";
@@ -599,4 +599,21 @@ export function topFoodLines(from: string, to: string, n = 10): string[] {
     WHERE date >= ? AND date <= ? AND kcal IS NOT NULL GROUP BY LOWER(TRIM(name)) ORDER BY total DESC LIMIT ?
   `).all(from, to, n) as { name: string; times: number; total: number }[];
   return rows.map(r => `${r.name}: ${r.times}×, ${Math.round(r.total).toLocaleString("en-GB")} kcal total (${Math.round(r.total / r.times)} each on average)`);
+}
+
+
+// ── Move / copy between meals of the same day (drag and drop) ──────────────
+
+// mode "move": the food changes meal (same entry). "copy": a second entry of
+// the same food, amount and nutrients goes into the other meal.
+export async function placeLoseItFood(date: string, item: CopyItem, toMeal: number, mode: "move" | "copy"): Promise<DiaryDay> {
+  if (!(toMeal >= 0 && toMeal <= 3)) throw new Error("meal must be 0-3");
+  await withLoseItSession(async who => {
+    const entry = findEntry(await fetchDayAndStore(who, date), item, new Set());
+    if (!entry) throw new Error(`${item.name} is no longer in that day's Lose It! diary`);
+    const build = await currentBuild(who.cookie);
+    await saveEntry(who, mode === "move" ? moveEntry(build, entry.node, toMeal) : copyEntry(build, entry.node, date, toMeal));
+  });
+  await refreshDay(date);
+  return getDiaryDay(date);
 }

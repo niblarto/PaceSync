@@ -599,6 +599,14 @@ function setDayAndMeal(build: LoseItBuild, e: GNode, isoDate: string, meal: numb
   ]);
 }
 
+// The same entry in another meal. Saved with its own key, Lose It! updates
+// it in place (checked live: same id, new meal, no duplicate).
+export function moveEntry(build: LoseItBuild, src: GNode, meal: number): GNode {
+  const e = JSON.parse(JSON.stringify(src)) as GNode;
+  e.f[6] = nodeFor(build, "com.loseit.core.client.model.interfaces.FoodLogEntryType", [meal]);
+  return e;
+}
+
 // A copy of a logged entry (same food, amount and nutrients) as a new entry
 // on another day/meal: a fresh random entry key (as the CLI does; Lose It!
 // keys are just 16 random bytes), no logged-at time, and "now" as its

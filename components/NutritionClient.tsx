@@ -972,8 +972,6 @@ export function NutritionClient() {
               )}
             />
 
-            <SummaryPanel />
-
 
             <div className="grid grid-cols-1 gap-6">
               {/* Weight + projections chart */}
@@ -1158,6 +1156,8 @@ export function NutritionClient() {
                 )}
               </Card>
             </div>
+
+            <SummaryPanel />
           </>
         )}
       </main>

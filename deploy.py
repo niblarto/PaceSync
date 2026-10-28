@@ -241,6 +241,7 @@ FILES = [
     ('app/api/loseit/food/route.ts', 'app/api/loseit/food/route.ts'),
     ('app/api/loseit/log/route.ts', 'app/api/loseit/log/route.ts'),
     ('app/api/loseit/copy/route.ts', 'app/api/loseit/copy/route.ts'),
+    ('app/api/loseit/move/route.ts', 'app/api/loseit/move/route.ts'),
     ('app/api/loseit/icon/route.ts', 'app/api/loseit/icon/route.ts'),
     ('lib/loseit-icons.ts', 'lib/loseit-icons.ts'),
     ('components/LoseItSettingsCard.tsx', 'components/LoseItSettingsCard.tsx'),

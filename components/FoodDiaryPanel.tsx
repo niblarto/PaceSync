@@ -112,6 +112,12 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [menu, setMenu] = useState<Menu | null>(null);
+  // Drag and drop between meals: what's being dragged, the meal it's over,
+  // and the dropped food waiting for "Move or copy?".
+  const [drag, setDrag] = useState<{ food: Food; meal: number } | null>(null);
+  const [overMeal, setOverMeal] = useState<number | null>(null);
+  const [drop, setDrop] = useState<{ food: Food; from: number; to: number } | null>(null);
+  const [placing, setPlacing] = useState<"move" | "copy" | null>(null);
   const [copyMsg, setCopyMsg] = useState<{ text: string; error: boolean } | null>(null);
 
   // Right-click menu closes on any click, scroll, resize or Escape.
@@ -164,6 +170,35 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
   // meal, name and calories, so they can be removed too.
   const foodKey = (f: Food, meal: number) => f.entryId ?? `${meal}|${f.name}`;
 
+  // Moves the dropped food to its new meal, or copies it there (same day).
+  async function place(mode: "move" | "copy") {
+    if (!drop) return;
+    setPlacing(mode);
+    setError(null);
+    try {
+      const res = await fetch("/api/loseit/move", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date, mode, toMeal: drop.to, item: { entryId: drop.food.entryId, name: drop.food.name, meal: drop.from, kcal: drop.food.kcal } }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `${mode === "move" ? "Move" : "Copy"} failed (${res.status})`);
+      added(body);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Move failed");
+    } finally {
+      setPlacing(null);
+      setDrop(null);
+    }
+  }
+
+  // Escape cancels the Move/Copy question.
+  useEffect(() => {
+    if (!drop || placing) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setDrop(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drop, placing]);
+
   async function remove(f: Food, meal: number) {
     setMenu(null);
     if (!confirm(`Delete ${f.name} from your Lose It! diary?`)) return;
@@ -203,8 +238,9 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
 
   const title = date === today ? "Today" : date === shift(today, -1) ? "Yesterday"
     : new Date(`${date}T12:00:00`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
-  // Today always shows all four meals (empty ones too); other days only the meals with food.
-  const meals = !diary ? [] : date === today && diary.connected
+  // Today always shows all four meals (empty ones too); other days only the meals with food,
+  // until a food is being dragged.
+  const meals = !diary ? [] : (date === today || drag) && diary.connected
     ? MEALS.map((name, meal) => diary.meals.find(m => m.meal === meal)
       ?? { meal, name, foods: [] as Food[], totals: { kcal: 0, proteinG: 0, carbsG: 0, fatG: 0 } })
     : diary.meals;
@@ -263,7 +299,16 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
             <div
               key={m.meal}
               onContextMenu={m.foods.length ? e => openMenu(e, { kind: "meal", meal: m.meal, name: m.name }) : undefined}
-              className="rounded-xl bg-slate-800/40 border border-white/5 p-3 min-w-0 flex flex-col"
+              onDragOver={drag && drag.meal !== m.meal ? e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setOverMeal(m.meal); } : undefined}
+              onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOverMeal(o => (o === m.meal ? null : o)); }}
+              onDrop={drag && drag.meal !== m.meal ? e => {
+                e.preventDefault();
+                setDrop({ food: drag.food, from: drag.meal, to: m.meal });
+                setDrag(null); setOverMeal(null);
+              } : undefined}
+              className={`rounded-xl border p-3 min-w-0 flex flex-col transition-colors ${
+                overMeal === m.meal ? "bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/40" : "bg-slate-800/40 border-white/5"
+              }`}
             >
               <div className="flex items-center justify-between gap-2 px-1 mb-1">
                 <span className={`text-xs font-medium border rounded-full px-2.5 py-0.5 ${MEAL_STYLE[m.meal] ?? MEAL_STYLE[3]}`}>{m.name}</span>
@@ -275,8 +320,18 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
                 {m.foods.map((f, i) => (
                   <li
                     key={i}
+                    draggable={placing === null && !removing}
+                    onDragStart={e => {
+                      e.dataTransfer.effectAllowed = "move";
+                      e.dataTransfer.setData("text/plain", f.name); // Firefox won't drag without data
+                      setMenu(null);
+                      setDrag({ food: f, meal: m.meal });
+                    }}
+                    onDragEnd={() => { setDrag(null); setOverMeal(null); }}
                     onContextMenu={e => openMenu(e, { kind: "food", meal: m.meal, food: f })}
-                    className="group flex items-center gap-2.5 rounded-lg px-1.5 py-1.5 hover:bg-slate-800/60 transition-colors"
+                    className={`group flex items-center gap-2.5 rounded-lg px-1.5 py-1.5 hover:bg-slate-800/60 transition-colors cursor-grab active:cursor-grabbing ${
+                      drag?.food === f ? "opacity-40" : ""
+                    }`}
                   >
                     <FoodIcon icon={f.icon} />
                     <div className="flex-1 min-w-0">
@@ -319,6 +374,48 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
       )}
 
       {diary?.lastError && <p className="mt-2 text-xs text-rose-300">Last sync failed: {diary.lastError}</p>}
+
+      {drop && createPortal(
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-[2px] p-4"
+          onClick={() => { if (!placing) setDrop(null); }}
+        >
+          <div
+            role="dialog"
+            aria-label="Move or copy food"
+            onClick={e => e.stopPropagation()}
+            className="w-full max-w-sm rounded-xl bg-slate-900 border border-white/10 shadow-2xl p-5 space-y-4"
+          >
+            <div className="flex items-center gap-3">
+              <FoodIcon icon={drop.food.icon} size={40} />
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-slate-100 truncate">{drop.food.name}</p>
+                <p className="text-xs text-slate-400">
+                  <span className={`border rounded-full px-2 py-0.5 ${MEAL_STYLE[drop.from] ?? MEAL_STYLE[3]}`}>{MEALS[drop.from]}</span>
+                  <span className="mx-2 text-slate-500">→</span>
+                  <span className={`border rounded-full px-2 py-0.5 ${MEAL_STYLE[drop.to] ?? MEAL_STYLE[3]}`}>{MEALS[drop.to]}</span>
+                </p>
+              </div>
+            </div>
+            <p className="text-xs text-slate-400">Move it to {MEALS[drop.to]}, or keep it in {MEALS[drop.from]} too and copy it?</p>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button onClick={() => setDrop(null)} disabled={placing !== null}
+                className="rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 text-sm px-3 py-1.5 text-slate-300 transition-colors">
+                Cancel
+              </button>
+              <button onClick={() => place("copy")} disabled={placing !== null}
+                className="rounded-lg border border-sky-500/40 bg-sky-500/15 hover:bg-sky-500/25 disabled:opacity-50 text-sm font-medium px-3 py-1.5 text-sky-300 transition-colors">
+                {placing === "copy" ? "Copying…" : `Copy to ${MEALS[drop.to]}`}
+              </button>
+              <button onClick={() => place("move")} disabled={placing !== null}
+                className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-sm font-medium px-3 py-1.5 text-white transition-colors">
+                {placing === "move" ? "Moving…" : `Move to ${MEALS[drop.to]}`}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y}>
