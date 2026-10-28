@@ -1,5 +1,6 @@
 "use client";
 
+import { TopNav } from "@/components/TopNav";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -510,13 +511,7 @@ export function SongCrawlerClient() {
     <div className="relative isolate min-h-screen flex flex-col text-slate-100">
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
         style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.85), rgba(2,6,23,0.85)), url('/dashboard-hero.png')" }} />
-      <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-[100rem] mx-auto px-4 h-14 flex items-center justify-between gap-3">
-          <Link href="/dashboard" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">← Dashboard</Link>
-          <span className="font-bold text-teal-400 text-lg tracking-tight">🕸 Song Crawler</span>
-          <Link href="/settings" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">Settings</Link>
-        </div>
-      </header>
+      <TopNav title="🕸 Song Crawler" maxWidth="max-w-[100rem]" />
       <main className="flex-1 max-w-[100rem] w-full mx-auto px-4 py-6 space-y-6">
       {/* ── Song Crawler ── always shown; the last crawl's log is kept. */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-3">

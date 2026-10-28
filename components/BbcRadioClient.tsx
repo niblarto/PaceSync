@@ -1,5 +1,6 @@
 "use client";
 
+import { TopNav } from "@/components/TopNav";
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { BbcPlaylistCard } from "./BbcPlaylistCard";
@@ -35,17 +36,7 @@ export function BbcRadioClient() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-[1600px] mx-auto px-4 h-14 flex items-center justify-between">
-          <Link href="/dashboard" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">
-            ← Dashboard
-          </Link>
-          <span className="font-bold text-green-400 text-lg tracking-tight">BBC Radio</span>
-          <Link href="/settings" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
-            Settings
-          </Link>
-        </div>
-      </header>
+      <TopNav title="BBC Radio" maxWidth="max-w-[1600px]" />
 
       <SpotifyRateLimitBanner />
 

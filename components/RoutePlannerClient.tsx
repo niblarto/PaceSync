@@ -1,5 +1,6 @@
 "use client";
 
+import { TopNav } from "@/components/TopNav";
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import "leaflet/dist/leaflet.css";
@@ -736,13 +737,7 @@ export function RoutePlannerClient() {
   return (
     <div className="relative isolate min-h-screen flex flex-col text-slate-100">
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 pointer-events-none" />
-      <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-[100rem] mx-auto px-4 h-14 flex items-center justify-between">
-          <Link href="/dashboard" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">← Dashboard</Link>
-          <span className="font-bold text-green-400 text-lg tracking-tight">🗺️ Route Finder</span>
-          <div />
-        </div>
-      </header>
+      <TopNav title="🗺️ Route Finder" maxWidth="max-w-[100rem]" />
 
       <div className="flex-1 max-w-[100rem] w-full mx-auto px-4 py-6 grid gap-6 lg:grid-cols-[22rem_1fr]">
         <div className="space-y-4">

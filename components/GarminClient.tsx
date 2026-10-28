@@ -1,5 +1,6 @@
 "use client";
 
+import { TopNav } from "@/components/TopNav";
 import { useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -337,17 +338,7 @@ export function GarminClient() {
           panels and pop-ups sit on top of it without moving it. */}
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
         style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.65), rgba(2,6,23,0.65)), url('/dashboard-hero.png')" }} />
-      <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 h-14 flex items-center justify-between">
-          <Link href="/dashboard" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">
-            ← Dashboard
-          </Link>
-          <span className="font-bold text-green-400 text-lg tracking-tight">Garmin Stats</span>
-          <Link href="/settings" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
-            Settings
-          </Link>
-        </div>
-      </header>
+      <TopNav title="Garmin Stats" maxWidth="max-w-7xl" />
 
       <div className="max-w-7xl mx-auto px-4 py-8 flex-1 w-full">
         {loading && (

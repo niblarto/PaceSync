@@ -3038,8 +3038,10 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
       {/* Header */}
       <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
         <div className="max-w-[1800px] mx-auto px-4 h-14 flex items-center justify-between">
-          <span className="font-bold text-green-400 text-lg tracking-tight">PaceSync</span>
-          <div className="flex items-center gap-4">
+          <span className="font-bold text-green-400 text-lg tracking-tight shrink-0">PaceSync</span>
+          {/* Music seek bar, beside the title */}
+          <SongProgressBar className="flex-1 min-w-0 max-w-md mx-4" />
+          <div className="flex items-center gap-4 shrink-0">
             <div className="flex items-center gap-2 text-sm text-slate-400">
               {spotifyUser.image && (
                 <img

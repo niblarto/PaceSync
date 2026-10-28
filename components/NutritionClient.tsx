@@ -1,5 +1,6 @@
 "use client";
 
+import { TopNav } from "@/components/TopNav";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -783,10 +784,7 @@ export function NutritionClient() {
     <div className="relative isolate min-h-screen flex flex-col text-slate-100">
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
         style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.85), rgba(2,6,23,0.85)), url('/dashboard-hero.png')" }} />
-      <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-[100rem] mx-auto px-4 h-14 flex items-center justify-between gap-3">
-          <Link href="/dashboard" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">← Dashboard</Link>
-          <span className="font-bold text-green-400 text-lg tracking-tight">🥗 Nutrition</span>
+      <TopNav title="🥗 Nutrition" maxWidth="max-w-[100rem]" extra={
           <div className="flex items-center gap-3 min-w-0">
             {data && (() => {
               const s = data.sources;
@@ -814,8 +812,7 @@ export function NutritionClient() {
             })()}
             <Link href="/settings?tab=nutrition" className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0">Goals</Link>
           </div>
-        </div>
-      </header>
+      } />
 
       <main className="flex-1 max-w-[100rem] w-full mx-auto px-4 py-6 space-y-6">
         {error && <Card><p className="text-sm text-rose-300">{error}</p></Card>}

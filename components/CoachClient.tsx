@@ -1,5 +1,6 @@
 "use client";
 
+import { TopNav } from "@/components/TopNav";
 import Link from "next/link";
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -335,15 +336,11 @@ export function CoachClient() {
     <div className="relative isolate min-h-screen flex flex-col text-slate-100">
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
         style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.8), rgba(2,6,23,0.8)), url('/dashboard-hero.png')" }} />
-      <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-[1800px] mx-auto px-4 h-14 flex items-center justify-between gap-3">
-          <Link href="/dashboard" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">← Dashboard</Link>
-          <span className="font-bold text-green-400 text-lg tracking-tight">🧠 Coach</span>
-          <Link href="/settings?tab=integrations" className="text-xs text-slate-500 hover:text-slate-300 transition-colors truncate max-w-[40%]" title="Change the Coach's AI in Settings">
-            {model || " "}
-          </Link>
-        </div>
-      </header>
+      <TopNav title="🧠 Coach" maxWidth="max-w-[1800px]" extra={
+        <Link href="/settings?tab=integrations" className="text-xs text-slate-500 hover:text-slate-300 transition-colors truncate" title="Change the Coach's AI in Settings">
+          {model || " "}
+        </Link>
+      } />
 
       <div className="flex-1 max-w-[1800px] w-full mx-auto px-4 py-6 flex flex-col gap-6">
         {/* Chat */}

@@ -343,6 +343,7 @@ FILES = [
     ('lib/system-status.ts',                       'lib/system-status.ts'),
     ('app/api/settings/status/route.ts',           'app/api/settings/status/route.ts'),
     ('app/api/settings/status/logs/route.ts',      'app/api/settings/status/logs/route.ts'),
+    ('components/TopNav.tsx',                      'components/TopNav.tsx'),
     ('components/StatusTab.tsx',                   'components/StatusTab.tsx'),
     ('lib/spotify-lookup-account.ts',              'lib/spotify-lookup-account.ts'),
     ('app/api/spotify-lookup-account/login/route.ts', 'app/api/spotify-lookup-account/login/route.ts'),

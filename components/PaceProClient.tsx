@@ -1,5 +1,6 @@
 "use client";
 
+import { TopNav } from "@/components/TopNav";
 import { queuedMessage } from "@/lib/queued-message";
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -551,15 +552,7 @@ export function PaceProClient() {
           panels and pop-ups sit on top of it without moving it. */}
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
         style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.75), rgba(2,6,23,0.75)), url('/dashboard-hero.png')" }} />
-      <header className="border-b border-white/5 bg-slate-950/70 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
-          <Link href="/dashboard" className="text-sm text-slate-500 hover:text-slate-300 transition-colors">
-            ← Dashboard
-          </Link>
-          <span className="font-bold text-green-400 text-lg tracking-tight">Pace Pro</span>
-          <div />
-        </div>
-      </header>
+      <TopNav title="Pace Pro" maxWidth="max-w-5xl" />
 
       <div className="flex-1 max-w-5xl w-full mx-auto px-4 py-6 space-y-6">
 
