@@ -27,7 +27,7 @@ const LINKS: { href: string; label: string; needsGarmin?: boolean }[] = [
 // The top menu shared by the pages the dashboard links to: a link back to the dashboard, the title of the
 // page you're on, the music seek bar, and the menu. `extra` is an optional slim row under the bar for a
 // page's own status line.
-export function TopNav({ title, extra, maxWidth = "max-w-[100rem]" }: { title: string; extra?: ReactNode; maxWidth?: string }) {
+export function TopNav({ title, extra, maxWidth = "max-w-[1800px]" }: { title: string; extra?: ReactNode; maxWidth?: string }) {
   const { data: session } = useSession();
   const [garminConfigured, setGarminConfigured] = useState(false);
   useEffect(() => {

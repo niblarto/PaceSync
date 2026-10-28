@@ -338,9 +338,9 @@ export function GarminClient() {
           panels and pop-ups sit on top of it without moving it. */}
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
         style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.65), rgba(2,6,23,0.65)), url('/dashboard-hero.png')" }} />
-      <TopNav title="Garmin Stats" maxWidth="max-w-7xl" />
+      <TopNav title="Garmin Stats" maxWidth="max-w-[1800px]" />
 
-      <div className="max-w-7xl mx-auto px-4 py-8 flex-1 w-full">
+      <div className="max-w-[1800px] mx-auto px-4 py-8 flex-1 w-full">
         {loading && (
           <div className="text-slate-500 text-sm">Loading Garmin data…</div>
         )}

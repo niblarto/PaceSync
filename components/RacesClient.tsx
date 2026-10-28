@@ -178,6 +178,29 @@ export function RacesClient() {
     } catch { /* best-effort */ }
   }
 
+  // A Runna race on the same day as a race entered by hand is the same race: link the two (the race keeps
+  // the name it was entered under) instead of listing it again. Done once per pair; the PATCH records
+  // Runna's id on the race, so it stays merged on later visits.
+  const [linkedRunna, setLinkedRunna] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (!races || !suggestions) return;
+    for (const s of suggestions) {
+      if (!s.runnaUid || linkedRunna.has(s.runnaUid)) continue;
+      if (races.some(r => r.runnaUid === s.runnaUid)) continue;
+      const same = races.find(r => !r.runnaUid && r.raceDate && r.raceDate === s.raceDate);
+      if (!same) continue;
+      setLinkedRunna(prev => new Set(prev).add(s.runnaUid!));
+      fetch(`/api/races/${same.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runnaUid: s.runnaUid, ...(same.distanceMi == null && s.distanceMi != null ? { distanceMi: s.distanceMi } : {}) }),
+      })
+        .then(r => r.json())
+        .then((d: { race?: Race }) => { if (d.race) setRaces(prev => (prev ?? []).map(r => r.id === d.race!.id ? d.race! : r)); })
+        .catch(() => {});
+    }
+  }, [races, suggestions, linkedRunna]);
+
   // Suggestions already covered by a real races row — matched by runnaUid
   // first (exact), falling back to a loose name+date match for a race
   // added manually before this suggestion strip existed (or added from a
@@ -186,7 +209,8 @@ export function RacesClient() {
     if (dismissedSuggestions.has(s.key)) return false;
     return !(races ?? []).some(r =>
       (r.runnaUid && r.runnaUid === s.runnaUid) ||
-      (r.name.trim().toLowerCase() === s.name.trim().toLowerCase() && r.raceDate === s.raceDate)
+      (r.name.trim().toLowerCase() === s.name.trim().toLowerCase() && r.raceDate === s.raceDate) ||
+      (!r.runnaUid && !!r.raceDate && r.raceDate === s.raceDate)
     );
   });
 
@@ -302,9 +326,9 @@ export function RacesClient() {
           panels and pop-ups sit on top of it without moving it. */}
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
         style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.75), rgba(2,6,23,0.75)), url('/dashboard-hero.png')" }} />
-      <TopNav title="🏁 Races" maxWidth="max-w-[100rem]" />
+      <TopNav title="🏁 Races" maxWidth="max-w-[1800px]" />
 
-      <div className="flex-1 max-w-[100rem] w-full mx-auto px-4 py-6 space-y-6">
+      <div className="flex-1 max-w-[1800px] w-full mx-auto px-4 py-6 space-y-6">
         {error && <div className="rounded-xl bg-red-950/50 border border-red-800/50 p-4 text-red-400 text-sm">{error}</div>}
 
         {visibleSuggestions.length > 0 && (

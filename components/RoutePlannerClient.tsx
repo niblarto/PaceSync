@@ -737,9 +737,9 @@ export function RoutePlannerClient() {
   return (
     <div className="relative isolate min-h-screen flex flex-col text-slate-100">
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 pointer-events-none" />
-      <TopNav title="🗺️ Route Finder" maxWidth="max-w-[100rem]" />
+      <TopNav title="🗺️ Route Finder" maxWidth="max-w-[1800px]" />
 
-      <div className="flex-1 max-w-[100rem] w-full mx-auto px-4 py-6 grid gap-6 lg:grid-cols-[22rem_1fr]">
+      <div className="flex-1 max-w-[1800px] w-full mx-auto px-4 py-6 grid gap-6 lg:grid-cols-[22rem_1fr]">
         <div className="space-y-4">
           <div className="rounded-xl bg-slate-900/70 border border-white/10 p-4 space-y-3">
             <div className="flex rounded-lg overflow-hidden border border-white/10 text-xs">

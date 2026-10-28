@@ -784,7 +784,7 @@ export function NutritionClient() {
     <div className="relative isolate min-h-screen flex flex-col text-slate-100">
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
         style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.85), rgba(2,6,23,0.85)), url('/dashboard-hero.png')" }} />
-      <TopNav title="🥗 Nutrition" maxWidth="max-w-[100rem]" extra={
+      <TopNav title="🥗 Nutrition" maxWidth="max-w-[1800px]" extra={
           <div className="flex items-center gap-3 min-w-0">
             {data && (() => {
               const s = data.sources;
@@ -814,7 +814,7 @@ export function NutritionClient() {
           </div>
       } />
 
-      <main className="flex-1 max-w-[100rem] w-full mx-auto px-4 py-6 space-y-6">
+      <main className="flex-1 max-w-[1800px] w-full mx-auto px-4 py-6 space-y-6">
         {error && <Card><p className="text-sm text-rose-300">{error}</p></Card>}
         {!data && !error && <p className="text-sm text-slate-500">Loading…</p>}
 

@@ -36,11 +36,11 @@ export function BbcRadioClient() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      <TopNav title="BBC Radio" maxWidth="max-w-[1600px]" />
+      <TopNav title="BBC Radio" maxWidth="max-w-[1800px]" />
 
       <SpotifyRateLimitBanner />
 
-      <main className="max-w-[1600px] mx-auto px-4 py-6 space-y-6">
+      <main className="max-w-[1800px] mx-auto px-4 py-6 space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 items-start">
           {programmes.map(p => (
             <BbcPlaylistCard

@@ -118,9 +118,9 @@ export function StravaClient() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      <TopNav title="Strava Stats" maxWidth="max-w-5xl" />
+      <TopNav title="Strava Stats" maxWidth="max-w-[1800px]" />
 
-      <main className="max-w-5xl mx-auto px-4 py-6 space-y-6">
+      <main className="max-w-[1800px] mx-auto px-4 py-6 space-y-6">
         {connectedParam && (
           <div className="rounded-xl bg-green-500/10 border border-green-500/30 text-green-300 text-sm px-4 py-3">
             Connected to Strava.

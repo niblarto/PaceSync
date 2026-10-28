@@ -552,9 +552,9 @@ export function PaceProClient() {
           panels and pop-ups sit on top of it without moving it. */}
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
         style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.75), rgba(2,6,23,0.75)), url('/dashboard-hero.png')" }} />
-      <TopNav title="Pace Pro" maxWidth="max-w-5xl" />
+      <TopNav title="Pace Pro" maxWidth="max-w-[1800px]" />
 
-      <div className="flex-1 max-w-5xl w-full mx-auto px-4 py-6 space-y-6">
+      <div className="flex-1 max-w-[1800px] w-full mx-auto px-4 py-6 space-y-6">
 
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
         <div>
