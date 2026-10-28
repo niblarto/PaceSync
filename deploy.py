@@ -229,6 +229,19 @@ FILES = [
     ('app/api/cron/garmin-weight/route.ts', 'app/api/cron/garmin-weight/route.ts'),
     ('app/api/nutrition/summary/route.ts', 'app/api/nutrition/summary/route.ts'),
     ('app/api/cron/nutrition-summary/route.ts', 'app/api/cron/nutrition-summary/route.ts'),
+    ('lib/loseit-gwt.ts', 'lib/loseit-gwt.ts'),
+    ('lib/loseit-session.ts', 'lib/loseit-session.ts'),
+    ('lib/loseit-export.ts', 'lib/loseit-export.ts'),
+    ('lib/loseit-food.ts', 'lib/loseit-food.ts'),
+    ('app/api/settings/loseit/route.ts', 'app/api/settings/loseit/route.ts'),
+    ('app/api/loseit/diary/route.ts', 'app/api/loseit/diary/route.ts'),
+    ('app/api/loseit/sync/route.ts', 'app/api/loseit/sync/route.ts'),
+    ('app/api/cron/loseit/route.ts', 'app/api/cron/loseit/route.ts'),
+    ('app/api/loseit/search/route.ts', 'app/api/loseit/search/route.ts'),
+    ('app/api/loseit/food/route.ts', 'app/api/loseit/food/route.ts'),
+    ('app/api/loseit/log/route.ts', 'app/api/loseit/log/route.ts'),
+    ('components/LoseItSettingsCard.tsx', 'components/LoseItSettingsCard.tsx'),
+    ('components/FoodDiaryPanel.tsx', 'components/FoodDiaryPanel.tsx'),
     ('app/races/[id]/page.tsx',                    'app/races/[id]/page.tsx'),
     ('components/RaceDetailClient.tsx',           'components/RaceDetailClient.tsx'),
     ('components/InlineRouteMap.tsx',             'components/InlineRouteMap.tsx'),
@@ -813,6 +826,15 @@ nutrition_cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/nutrition-summary' || {{ (crontab -l 2>/dev/null; echo '{nutrition_cron_line}') | crontab -; }}""")
+
+print('  Ensuring cron job (Lose It! food diary, hourly 07:23-23:23; ~4.6 KB per run)...')
+loseit_cron_log = f'/home/{PI["user"]}/cron-loseit.log'
+loseit_cron_line = (
+    f'23 7-23 * * * curl -s -m 120 -o {loseit_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/loseit '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/loseit' || {{ (crontab -l 2>/dev/null; echo '{loseit_cron_line}') | crontab -; }}""")
 
 print('  Ensuring cron job (schedule summary, every 15 min; refreshes it when the Runna plan has changed and the AI DJ service is up)...')
 brief_cron_log = f'/home/{PI["user"]}/cron-coach-brief.log'

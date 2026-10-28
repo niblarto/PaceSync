@@ -178,6 +178,10 @@ fun SettingsScreen(tokenStore: TokenStore, api: PaceSyncApi, nutritionApi: Nutri
 
         HorizontalDivider(Modifier.padding(vertical = 8.dp))
 
+        LoseItSettingsSection(nutritionApi)
+
+        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
         HealthConnectSection()
     }
     }

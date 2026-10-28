@@ -1,6 +1,7 @@
 "use client";
 
 import { TopNav } from "@/components/TopNav";
+import { FoodDiaryPanel } from "@/components/FoodDiaryPanel";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -920,6 +921,8 @@ export function NutritionClient() {
                 );
               })()}
             </div>
+
+            <FoodDiaryPanel />
 
             <SummaryPanel />
 

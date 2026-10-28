@@ -6,6 +6,7 @@ import { OrsKeyCard } from "@/components/OrsKeyCard";
 import { LookupAccountCard } from "@/components/LookupAccountCard";
 import { StatusTab } from "@/components/StatusTab";
 import { NutritionSettingsCard } from "@/components/NutritionSettingsCard";
+import { LoseItSettingsCard } from "@/components/LoseItSettingsCard";
 import { GarminPersonalApiCard } from "@/components/GarminPersonalApiCard";
 import { createPortal } from "react-dom";
 import { SongProgressBar, ensurePlaying } from "@/components/SongProgressBar";
@@ -7023,6 +7024,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     {/* ── Tab: Nutrition ── */}
     <div className={activeTab === "nutrition" ? "grid grid-cols-1 gap-6 items-start max-w-3xl" : "hidden"}>
       <NutritionSettingsCard />
+      <LoseItSettingsCard />
     </div>
 
     {/* ── Tab: Status ── accounts and restrictions, queued items, server log, service health */}

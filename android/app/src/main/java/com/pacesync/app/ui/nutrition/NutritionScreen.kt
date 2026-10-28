@@ -145,6 +145,7 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
     var weightBusy by remember { mutableStateOf(false) }
     var weightMsg by remember { mutableStateOf<String?>(null) }
     var syncMsg by remember { mutableStateOf<String?>(null) }
+    var diaryKey by remember { mutableIntStateOf(0) } // bumped by each full refresh to reload the food diary
 
     suspend fun load() {
         val resp = runCatching { nutritionApi.getDashboard(range) }.getOrNull()
@@ -168,6 +169,7 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
         weightMsg = if (w?.isSuccessful == true) w.body()?.latest?.let { "Garmin: latest ${shortDate(it.date)}" } ?: "No weigh-ins in Garmin" else "Garmin weight refresh failed"
         weightBusy = false
         load()
+        diaryKey++
         refreshing = false
     }
 
@@ -225,6 +227,7 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
                     load()
                 }
             }
+            FoodDiaryCard(nutritionApi, diaryKey)
             CaloriesCard(d, range, onExpand = { fullscreen = "calories" }) { r -> range = r; prefs.edit().putInt("range", r).apply() }
             WeightCard(d, unit, onExpand = { fullscreen = "weight" })
             ProjectionsCard(d, unit)

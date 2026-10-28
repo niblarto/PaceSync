@@ -276,6 +276,45 @@ CREATE TABLE IF NOT EXISTS nutrition_daily (
   source TEXT,
   updated_at TEXT NOT NULL
 );
+
+-- Lose It! food diary, one row per logged food (lib/loseit-food.ts). The
+-- history comes from a one-off full export (source 'export'); recent days
+-- are re-read over RPC (source 'rpc'), which also supplies brand + entry_id.
+-- meal: 0 Breakfast, 1 Lunch, 2 Dinner, 3 Snacks. seq keeps Lose It!'s order.
+CREATE TABLE IF NOT EXISTS loseit_food_log (
+  date TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  entry_id TEXT,
+  meal INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  brand TEXT,
+  icon TEXT,
+  quantity REAL,
+  units TEXT,
+  kcal REAL,
+  fat_g REAL,
+  sat_fat_g REAL,
+  cholesterol_mg REAL,
+  sodium_mg REAL,
+  carbs_g REAL,
+  fiber_g REAL,
+  sugar_g REAL,
+  protein_g REAL,
+  source TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (date, seq)
+);
+
+-- Cache of the account's Lose It! "My Foods" (everything ever logged, plus
+-- custom foods and recipes), so food search can list them first without
+-- re-downloading the ~45 KB list each time. pk: the food's key, 32 hex chars.
+CREATE TABLE IF NOT EXISTS loseit_my_foods (
+  pk TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  brand TEXT,
+  icon TEXT,
+  locale TEXT
+);
 `;
 
 let db: Database.Database | null = null;
