@@ -265,12 +265,16 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
     }
   }
 
-  const load = useCallback(async (d: string) => {
+  // refresh: ask the server to re-read the day from Lose It! first (it
+  // throttles that to once per 5 minutes). Only the page opening, the refresh
+  // button and the hourly timer do; browsing to another day just reads
+  // what's stored.
+  const load = useCallback(async (d: string, refresh = false) => {
     setLoading(true);
     setError(null);
     try {
       const recent = d >= shift(isoDate(new Date()), -1);
-      const res = await fetch(`/api/loseit/diary?date=${d}${recent ? "&refresh=1" : ""}`);
+      const res = await fetch(`/api/loseit/diary?date=${d}${refresh && recent ? "&refresh=1" : ""}`);
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
       setDiary(body);
@@ -281,27 +285,47 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
     }
   }, []);
 
-  useEffect(() => { load(date); }, [date, load]);
-
-  // Countdown to the next check of Lose It! (the server re-reads today at most
-  // every 5 minutes). While today is open and the tab visible, the panel makes
-  // that check itself when the countdown reaches zero.
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  const lastTry = useRef(0);
-  const nextCheckAt = date === today && diary?.connected && diary.lastSyncAt ? Date.parse(diary.lastSyncAt) + SYNC_EVERY_MS : null;
+  // The first load after the page opens refreshes from Lose It! (unless a
+  // refresh happened in the last 5 minutes: the server then answers from
+  // what it has, so no traffic); later date changes only read what's stored.
+  const opened = useRef(false);
   useEffect(() => {
-    if (nextCheckAt == null) return;
+    const first = !opened.current;
+    opened.current = true;
+    load(date, first);
+  }, [date, load]);
+
+  // Refresh button, and once an hour while the page stays open; the page's
+  // own numbers (Eaten today, calorie bars) are reloaded after.
+  const refreshNow = useCallback(async () => {
+    await load(date, true);
+    onChanged?.();
+  }, [date, load, onChanged]);
+  const refreshRef = useRef(refreshNow);
+  refreshRef.current = refreshNow;
+  useEffect(() => {
+    const t = setInterval(() => { refreshRef.current(); }, 60 * 60_000);
+    return () => clearInterval(t);
+  }, []);
+
+  // The server re-reads Lose It! at most every 5 minutes. After a refresh the
+  // button gives way to a countdown to when the next one is allowed; at zero
+  // the button comes back (nothing refreshes by itself).
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const lastSyncMs = diary?.connected && diary.lastSyncAt ? Date.parse(diary.lastSyncAt) : null;
+  const waitUntil = lastSyncMs != null ? lastSyncMs + SYNC_EVERY_MS : null;
+  useEffect(() => {
+    if (waitUntil == null || Date.now() >= waitUntil) return;
+    setNowMs(Date.now());
     const t = setInterval(() => {
       const n = Date.now();
       setNowMs(n);
-      if (n >= nextCheckAt && n - lastTry.current > 60_000 && document.visibilityState === "visible" && !loading) {
-        lastTry.current = n;
-        load(date);
-      }
+      if (n >= waitUntil) clearInterval(t);
     }, 1000);
     return () => clearInterval(t);
-  }, [nextCheckAt, date, load, loading]);
-  const countdown = nextCheckAt == null ? null : Math.max(0, Math.ceil((nextCheckAt - nowMs) / 1000));
+  }, [waitUntil]);
+  const countdown = waitUntil == null ? null : Math.max(0, Math.ceil((waitUntil - nowMs) / 1000));
+  const canRefresh = date >= shift(today, -1); // older days come straight from the stored history
 
   const title = date === today ? "Today" : date === shift(today, -1) ? "Yesterday"
     : new Date(`${date}T12:00:00`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
@@ -320,7 +344,25 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
           <span className="h-8 w-8 rounded-lg flex items-center justify-center shrink-0 bg-green-500/15 text-base" aria-hidden>🍽️</span>
           Food diary
           <span className="text-xs font-medium border rounded-full px-2.5 py-0.5 bg-green-500/20 text-green-300 border-green-500/30">{title}</span>
-          {loading && <span className="text-xs font-normal text-slate-500">loading…</span>}
+          {diary?.connected && canRefresh && (
+            loading ? (
+              <span className="text-xs font-normal text-slate-500">refreshing…</span>
+            ) : countdown != null && countdown > 0 ? (
+              <span className="text-xs font-mono font-normal text-slate-500" title="The earliest the next refresh from Lose It! is allowed">
+                {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, "0")}
+              </span>
+            ) : (
+              <button
+                onClick={refreshNow}
+                title="Refresh from Lose It!"
+                aria-label="Refresh from Lose It!"
+                className="rounded-md border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 text-slate-300 text-sm font-normal leading-none px-2 py-1 transition-colors"
+              >
+                ↻
+              </button>
+            )
+          )}
+          {loading && !(diary?.connected && canRefresh) && <span className="text-xs font-normal text-slate-500">loading…</span>}
         </h2>
         <div className="flex items-center gap-1.5">
           <button onClick={() => setDate(d => shift(d, -1))} className={navBtn} aria-label="Previous day">‹</button>
@@ -428,7 +470,7 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
         </div>
       )}
 
-      {diary && diary.connected && (diary.meals.length > 0 || countdown != null) && (
+      {diary && diary.connected && (diary.meals.length > 0 || diary.lastSyncAt) && (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs">
           {diary.meals.length > 0 ? (
             <span className="flex items-center gap-2 text-slate-300">
@@ -439,14 +481,6 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
           {diary.lastSyncAt && (
             <span className="text-slate-500">
               Synced from Lose It! {new Date(diary.lastSyncAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
-              {countdown != null && (
-                <>
-                  {" · "}next check{" "}
-                  <span className="font-mono text-slate-400">
-                    {countdown === 0 || loading ? "now" : `in ${Math.floor(countdown / 60)}:${String(countdown % 60).padStart(2, "0")}`}
-                  </span>
-                </>
-              )}
             </span>
           )}
         </div>

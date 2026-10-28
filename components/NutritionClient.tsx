@@ -599,10 +599,12 @@ export function NutritionClient() {
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (days: number) => {
+  // sync: also re-read today's food from Lose It! first. Only the page opening
+  // asks for it; later reloads just read what the server already has.
+  const load = useCallback(async (days: number, sync = false) => {
     setError(null);
     try {
-      const res = await fetch(`/api/nutrition/dashboard?days=${days}`);
+      const res = await fetch(`/api/nutrition/dashboard?days=${days}${sync ? "" : "&sync=0"}`);
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || `Failed (${res.status})`);
       setData(d);
@@ -613,7 +615,7 @@ export function NutritionClient() {
   }, []);
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
 
-  useEffect(() => { load(CHART_DAYS); }, [load]);
+  useEffect(() => { load(CHART_DAYS, true); }, [load]);
   // Reload every 15 minutes (today's burn is refreshed from Garmin at most
   // that often).
   useEffect(() => {

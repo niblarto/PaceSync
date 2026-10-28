@@ -2,6 +2,7 @@ package com.pacesync.app.ui.nutrition
 
 import android.app.DatePickerDialog
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -72,6 +73,7 @@ fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int) {
     var diary by remember { mutableStateOf<LoseItDiaryDto?>(null) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var collapsed by remember { mutableStateOf(setOf<String>()) } // meal names folded to just their calories
 
     LaunchedEffect(date, reloadKey) {
         loading = true
@@ -119,20 +121,28 @@ fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int) {
                 )
                 else -> {
                     d.meals.forEach { m ->
+                        val open = m.name !in collapsed
                         Column(
                             Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Color(0x22000000)).padding(10.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(m.name, style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                            // Tapping the meal's title folds it down to just its calories.
+                            Row(
+                                Modifier.fillMaxWidth().clickable { collapsed = if (open) collapsed + m.name else collapsed - m.name },
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(if (open) "▾" else "▸", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
+                                Text(m.name, style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f).padding(start = 6.dp))
                                 Text("${kcalText(m.totals.kcal)} kcal", style = MaterialTheme.typography.labelLarge)
                             }
-                            m.foods.forEach { f -> FoodRow(f) }
-                            Text(
-                                macros(m.totals.proteinG, m.totals.carbsG, m.totals.fatG),
-                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary,
-                                modifier = Modifier.align(Alignment.End),
-                            )
+                            if (open) {
+                                m.foods.forEach { f -> FoodRow(f) }
+                                Text(
+                                    macros(m.totals.proteinG, m.totals.carbsG, m.totals.fatG),
+                                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary,
+                                    modifier = Modifier.align(Alignment.End),
+                                )
+                            }
                         }
                     }
                     Text(

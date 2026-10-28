@@ -4,7 +4,7 @@ import { loadGarminConfig } from "@/lib/garmin-config";
 import { fetchRunnaSchedule, type RunnaPastRun, type RunnaWorkout } from "@/lib/runna-schedule";
 import { listRaces } from "@/lib/races";
 import { getDayRecovery, refreshTodayBurn } from "@/lib/garmin-connect";
-import { foodDiaryLines, syncLoseIt, topFoodLines } from "@/lib/loseit-food";
+import { foodDiaryLines, topFoodLines } from "@/lib/loseit-food";
 import { buildNutritionDashboard, type NutritionDashboard } from "@/lib/nutrition-dashboard";
 import { formatWeight, formatWeightDelta } from "@/lib/weight-format";
 import { listRunFeedback, effortLabel, FEEL_LABELS, type RunFeedback } from "@/lib/run-feedback";
@@ -745,10 +745,8 @@ export async function buildCoachContext(): Promise<CoachContext> {
   const pastRuns = schedule?.ok ? schedule.pastRuns : [];
   const zones = await getCurrentHrZones().catch(() => null);
   let nutrition: NutritionDashboard | null = null;
-  await Promise.all([
-    refreshTodayBurn(localDate(new Date())).catch(() => null),
-    syncLoseIt().catch(() => null), // today's food (throttled to once per 5 minutes)
-  ]);
+  // Today's food is whatever the last Lose It! sync stored (hourly, page opens, refresh button).
+  await refreshTodayBurn(localDate(new Date())).catch(() => null);
   try { nutrition = buildNutritionDashboard(14); } catch {}
   const detailStart = localDate(new Date(Date.now() - (DETAIL_DAYS - 1) * 86_400_000));
   const feedback = listRunFeedback(localDate(new Date(Date.now() - RECENT_RUN_DAYS * 86_400_000)));
