@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSession } from "next-auth/react";
-import { playInSpotify } from "@/components/TrackRow";
+import { playInSpotify, StarIcon } from "@/components/TrackRow";
+import { useFavourites } from "@/components/useFavourites";
 import { SongProgressBar } from "@/components/SongProgressBar";
 import { queueCrawlerLookup } from "@/lib/crawler-lookup-client";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
@@ -68,6 +69,7 @@ export function GenreExplorer() {
   const [moveError, setMoveError] = useState<string | null>(null);
   // Right-click on a track: Play, or Lookup (send its artist to the Song Crawler).
   const [trackMenu, setTrackMenu] = useState<{ x: number; y: number; uri: string; artist: string } | null>(null);
+  const { favourites, toggle: toggleFavourite } = useFavourites();
   const [lookupMsg, setLookupMsg] = useState<{ text: string; error: boolean } | null>(null);
 
 // Unconditional fetch — always hits the server regardless of what
@@ -430,8 +432,16 @@ export function GenreExplorer() {
                                         onContextMenu={e => { e.preventDefault(); setTrackMenu({ x: e.clientX, y: e.clientY, uri: t.uri, artist: t.artist }); }}
                                       >
                                         <button
+                                          onClick={() => toggleFavourite(t.uri)}
+                                          title={favourites.has(t.uri) ? "Favourite — click to unfavourite" : "Favourite: use first in Pace Pro / Race mixes at its BPM"}
+                                          aria-pressed={favourites.has(t.uri)}
+                                          className={`shrink-0 ${favourites.has(t.uri) ? "text-yellow-400" : "text-slate-700 hover:text-yellow-400"}`}
+                                        >
+                                          <StarIcon filled={favourites.has(t.uri)} />
+                                        </button>
+                                        <button
                                           onClick={() => playTrack(t.uri)}
-                                          title="Play on your active Spotify device · right-click for Play / Lookup"
+                                          title="Play on your active Spotify device · right-click for Play / Lookup / Favourite"
                                           className={`text-xs flex-1 min-w-0 text-left truncate ${playingUri === t.uri ? "text-orange-400" : "text-slate-300 hover:text-white"}`}
                                         >
                                           {t.name} <span className="text-slate-600">— {t.artist}</span>
@@ -521,6 +531,13 @@ export function GenreExplorer() {
               className="w-full text-left px-3 py-1.5 text-sm text-sky-300 hover:bg-sky-500/15 transition-colors"
             >
               🔎 Lookup
+            </button>
+            <button
+              onClick={() => { const uri = trackMenu.uri; setTrackMenu(null); toggleFavourite(uri); }}
+              title="Favourites are used first in Pace Pro / Race mixes at their BPM"
+              className="w-full text-left px-3 py-1.5 text-sm text-yellow-300 hover:bg-yellow-500/15 transition-colors"
+            >
+              {favourites.has(trackMenu.uri) ? "★ Unfavourite" : "☆ Favourite"}
             </button>
           </div>
         </>,

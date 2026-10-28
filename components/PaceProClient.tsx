@@ -226,7 +226,7 @@ export function PaceProClient() {
         // mixer's normal progressive BPM-tolerance widening.
         body: JSON.stringify({
           title: ppTitle.trim() || "Pace Pro Run", segments,
-          strictPaceTolerance: true, segmentCandidateUris,
+          strictPaceTolerance: true, segmentCandidateUris, useFavourites: true,
         }),
       });
       if (!res.ok || !res.body) {

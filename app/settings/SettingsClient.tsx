@@ -28,6 +28,7 @@ import { openInSpotify, playInSpotify, playOnActiveDevice, TrackRow } from "@/co
 import { useRunningPlaylist, getRunningPlaylist } from "@/components/useRunningPlaylist";
 import { MixPaceChart, timelineToChartTracks } from "@/components/MixPaceChart";
 import { GenreExplorer } from "@/components/GenreExplorer";
+import { useFavourites } from "@/components/useFavourites";
 import type { TrackWithBPM } from "@/types";
 
 const ZONE_DETAILS = [
@@ -193,6 +194,7 @@ interface SettingsClientProps {
 }
 
 export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: SettingsClientProps = {}) {
+  const { favourites, toggle: toggleFavourite } = useFavourites();
   const router = useRouter();
   const searchParams = useSearchParams();
   const { data: session } = useSession();
@@ -6130,9 +6132,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                   track={track}
                   index={i}
                   onDelete={recentDeletingUris.has(track.uri) ? undefined : () => deleteRecentTrack(track)}
-                  onSimilar={() => router.push(`/dashboard?similar=${encodeURIComponent(track.uri)}`)}
-                  onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=style`)}
-                  onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=tempo`)}
+                  favourite={favourites.has(track.uri)}
+                  onToggleFavourite={() => toggleFavourite(track.uri)}
                 />
               ))}
             </div>
@@ -6213,9 +6214,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                       track={track}
                       index={i}
                       onDelete={incompleteDeletingUris.has(track.uri) ? undefined : () => deleteIncompleteTrack(track)}
-                      onSimilar={() => router.push(`/dashboard?similar=${encodeURIComponent(track.uri)}`)}
-                      onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=style`)}
-                      onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(track.uri)}&mode=tempo`)}
+                      favourite={favourites.has(track.uri)}
+                      onToggleFavourite={() => toggleFavourite(track.uri)}
                     />
                     <div className="flex flex-wrap gap-x-4 gap-y-1 pl-3 -mt-1 pb-2">
                       {Object.entries(track.fields).map(([field, ok]) => {
@@ -6563,9 +6563,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                     track={track}
                     index={i}
                     onDelete={tracklistDeletingUris.has(t.uri) ? undefined : () => deleteManagedTrack(t)}
-                    onSimilar={() => router.push(`/dashboard?similar=${encodeURIComponent(t.uri)}`)}
-                    onSuggestStyle={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=style`)}
-                    onSuggestTempo={() => router.push(`/dashboard?suggest=${encodeURIComponent(t.uri)}&mode=tempo`)}
+                    favourite={favourites.has(t.uri)}
+                    onToggleFavourite={() => toggleFavourite(t.uri)}
                   />
                   {genres.length > 0 && (
                     <div className="flex flex-wrap gap-1 pl-[3.25rem] pr-3 pb-2 -mt-1">

@@ -12,6 +12,9 @@ interface Props {
   /** Drops the track from the currently-viewed AI DJ mix only — stays in the
       library for other mixes/remixes, unlike onDelete's permanent removal. */
   onRemoveFromMix?: () => void;
+  /** Star toggle: favourites take priority in Pace Pro / Race mixes for segments at their BPM. */
+  favourite?: boolean;
+  onToggleFavourite?: () => void;
   /** Opens the "replace by BPM" picker for this exact mix position — only
       passed while an aiDjMix is active (same gating as onRemoveFromMix). */
   onReplace?: () => void;
@@ -247,6 +250,14 @@ export function ArtistIcon() {
   );
 }
 
+export function StarIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth={1.5} className="w-3.5 h-3.5">
+      <path strokeLinejoin="round" d="M10 2.5l2.22 4.7 5.15.7-3.76 3.6.93 5.1L10 14.1l-4.54 2.5.93-5.1-3.76-3.6 5.15-.7L10 2.5z" />
+    </svg>
+  );
+}
+
 export function EjectIcon() {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
@@ -290,7 +301,7 @@ export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string)
   }
 }
 
-export function TrackRow({ track, index, onDelete, onRemoveFromMix, onReplace, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, deleted, showStats = true, isPlaying, onPlay, reorderable, onDragHandleStart }: Props) {
+export function TrackRow({ track, index, favourite, onToggleFavourite, onDelete, onRemoveFromMix, onReplace, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, deleted, showStats = true, isPlaying, onPlay, reorderable, onDragHandleStart }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(track.name)}`;
@@ -412,6 +423,16 @@ export function TrackRow({ track, index, onDelete, onRemoveFromMix, onReplace, o
           title="Replace with a track at a specific BPM"
         >
           <RecycleIcon />
+        </button>
+      )}
+      {onToggleFavourite && (
+        <button
+          onClick={onToggleFavourite}
+          className={`p-1.5 transition-all shrink-0 rounded ${favourite ? "opacity-100 text-yellow-400" : "opacity-0 group-hover:opacity-100 text-slate-600 hover:text-yellow-400"}`}
+          title={favourite ? "Favourite: used first in Pace Pro / Race mixes at its BPM. Click to unfavourite" : "Favourite: use this first in Pace Pro / Race mixes at its BPM"}
+          aria-pressed={!!favourite}
+        >
+          <StarIcon filled={!!favourite} />
         </button>
       )}
       {onRemoveFromMix && (

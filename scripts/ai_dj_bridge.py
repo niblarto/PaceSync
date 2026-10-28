@@ -226,6 +226,9 @@ def main():
     segment_candidate_uris = payload.get("segmentCandidateUris")
     if not isinstance(segment_candidate_uris, list):
         segment_candidate_uris = None
+    favourite_uris = payload.get("favouriteUris")
+    if not isinstance(favourite_uris, list):
+        favourite_uris = None
 
     # One NDJSON progress line per segment; the final line is the mix (or
     # error) JSON. lib/ai-dj-mix.ts parses stdout line-by-line for these.
@@ -239,6 +242,7 @@ def main():
             on_llm=_on_llm if payload.get("simulate") else None,
             strict_pace_tolerance=strict_pace_tolerance,
             segment_candidate_uris=segment_candidate_uris,
+            favourite_uris=favourite_uris,
         )
     except ValueError as e:
         print(json.dumps({"error": str(e)}))

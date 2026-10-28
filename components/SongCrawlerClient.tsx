@@ -8,6 +8,7 @@ import { useSession } from "next-auth/react";
 import { SongProgressBar, ensurePlaying } from "@/components/SongProgressBar";
 import { ArtistListInput } from "@/components/ArtistListInput";
 import { playOnActiveDevice } from "@/components/TrackRow";
+import { useFavourites } from "@/components/useFavourites";
 import { useRunningPlaylist } from "@/components/useRunningPlaylist";
 import { deleteTrackFromLibrary, deleteTracksFromLibrary } from "@/lib/track-delete-client";
 import { parseBpmSpec } from "@/lib/bpm-spec";
@@ -90,6 +91,7 @@ export function SongCrawlerClient() {
   const [crawlerAddedTracks, setCrawlerAddedTracks] = useState<{ uri: string; name: string; artist: string; bpm: number }[]>([]);
   const [crawlerPlayingUri, setCrawlerPlayingUri] = useState<string | null>(null);
   const [crawlerMenu, setCrawlerMenu] = useState<{ x: number; y: number; uri: string; uris?: string[] } | null>(null);
+  const { favourites, toggle: toggleFavourite } = useFavourites();
   // Awaiting-review multi-select: ctrl/cmd-click toggles, shift-click
   // selects a range from the last clicked song.
   const [crawlerSelected, setCrawlerSelected] = useState<Set<string>>(new Set());
@@ -853,7 +855,7 @@ export function SongCrawlerClient() {
                       : crawlerPlayingUri === t.uri ? "bg-teal-500/10 hover:bg-slate-800/60" : "hover:bg-slate-800/60"
                   }`}
                 >
-                  <span className={`block text-xs truncate ${crawlerPlayingUri === t.uri ? "text-teal-300" : "text-slate-200"}`}>{t.name}</span>
+                  <span className={`block text-xs truncate ${crawlerPlayingUri === t.uri ? "text-teal-300" : "text-slate-200"}`}>{favourites.has(t.uri) && <span className="text-yellow-400 mr-1" title="Favourite">★</span>}{t.name}</span>
                   <span className="block text-[10px] text-slate-500 truncate">{t.artist} · {t.bpm} BPM{t.bpm > 0 && t.bpm < 95 ? ` (×2 = ${t.bpm * 2})` : ""}</span>
                 </button>
               ))}
@@ -939,6 +941,13 @@ export function SongCrawlerClient() {
                 className="w-full text-left px-3 py-1.5 text-sm text-sky-300 hover:bg-sky-500/15 transition-colors"
               >
                 🔎 Lookup
+              </button>
+              <button
+                onClick={() => { const uri = crawlerMenu.uri; setCrawlerMenu(null); toggleFavourite(uri); }}
+                title="Favourites are used first in Pace Pro / Race mixes at their BPM"
+                className="w-full text-left px-3 py-1.5 text-sm text-yellow-300 hover:bg-yellow-500/15 transition-colors"
+              >
+                {favourites.has(crawlerMenu.uri) ? "★ Unfavourite" : "☆ Favourite"}
               </button>
             </div>
             )}

@@ -329,7 +329,7 @@ function mergePlayCounts(base: Record<string, number>, extra?: Record<string, nu
 // restricted list can't fill the segment's own time budget — see
 // ai_dj/workout.py's build_workout_playlist docstring. Used by Pace Pro to
 // hand the LLM exactly lib/pace-analysis.ts's "fits" list per split.
-export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[], extraPlayCounts?: Record<string, number>, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[], ignorePlayCounts?: boolean): Promise<AiDjMixResult> {
+export async function buildAiDjMix(title: string, segments: string[], onProgress?: AiDjProgress, avoidUris?: string[], extraPlayCounts?: Record<string, number>, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[], ignorePlayCounts?: boolean, favouriteUris?: string[]): Promise<AiDjMixResult> {
   // Rest day: two hours of unplayed songs in date-added order — built here
   // directly, no AI DJ (lib/rest-day-mix.ts).
   if (isRestDaySegments(segments)) {
@@ -372,10 +372,10 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
   // "local" mixes still need that PC (its GPU runs the model), so those go
   // over HTTP.
   if (config.provider === "claude") {
-    return buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, config.claudeModel, config.claudeEffort, strictPaceTolerance, segmentCandidateUris);
+    return buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, config.claudeModel, config.claudeEffort, strictPaceTolerance, segmentCandidateUris, favouriteUris);
   }
   if (config.provider === "gemini") {
-    return buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, config.geminiModel, undefined, strictPaceTolerance, segmentCandidateUris);
+    return buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, config.geminiModel, undefined, strictPaceTolerance, segmentCandidateUris, favouriteUris);
   }
 
   const lastEasyPaceSec = getLastEasyPaceSec();
@@ -390,6 +390,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
     model: config.ollamaModel || undefined,
     strictPaceTolerance,
     segmentCandidateUris,
+    favouriteUris: favouriteUris?.length ? favouriteUris : undefined,
   });
   try {
     if (onProgress) {
@@ -414,7 +415,7 @@ export async function buildAiDjMix(title: string, segments: string[], onProgress
     // shape, and it uses the local Garmin DB for exact pace->BPM.
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[ai-dj] remote service failed (${msg}) — trying on-Pi fallback`);
-    const local = await buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, undefined, undefined, strictPaceTolerance, segmentCandidateUris);
+    const local = await buildMixLocally(segments, easyBias, trackFeedback, playCounts, onProgress, avoidUris, undefined, undefined, strictPaceTolerance, segmentCandidateUris, favouriteUris);
     if (local.ok) return local;
     const hint = /timeout|abort/i.test(msg)
       ? "AI DJ service timed out"
@@ -722,7 +723,7 @@ export async function compareAiDjModels(
 
 function buildMixLocally(
   segments: string[], easyBias = 0, trackFeedback: object[] = [], playCounts: Record<string, number> = {}, onProgress?: AiDjProgress, avoidUris?: string[],
-  model?: string, effort?: string, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[],
+  model?: string, effort?: string, strictPaceTolerance?: boolean, segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[], favouriteUris?: string[],
 ): Promise<AiDjMixResult> {
   return runBridge({
     segments, easyBias, trackFeedback,
@@ -730,6 +731,7 @@ function buildMixLocally(
     avoidTracks: avoidUris?.length ? avoidUris : undefined,
     easyPaceSec: getLastEasyPaceSec() ?? undefined,
     model, effort, strictPaceTolerance, segmentCandidateUris,
+    favouriteUris: favouriteUris?.length ? favouriteUris : undefined,
   }, onProgress);
 }
 

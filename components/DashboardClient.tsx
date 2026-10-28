@@ -87,8 +87,10 @@ const ALL_ZONE: RunningZone = {
   textColor: "text-white",
 };
 
-function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, highlightNonce, playingUri, playedCounts, deletedUris, visibleRows }: {
+function VirtualTrackList({ tracks, favouriteUris, onToggleFavourite, onDelete, onRemoveFromMix, onReplace, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, highlightNonce, playingUri, playedCounts, deletedUris, visibleRows }: {
   tracks: TrackWithBPM[];
+  favouriteUris?: Set<string>;
+  onToggleFavourite?: (track: TrackWithBPM) => void;
   /** When set, the list is exactly this many rows tall and scrolls inside
       itself (used while the Pace Chart is showing, so the page stays put). */
   visibleRows?: number;
@@ -321,11 +323,8 @@ function VirtualTrackList({ tracks, onDelete, onRemoveFromMix, onReplace, onReor
             index={i}
             onDelete={onDelete ? () => onDelete(track) : undefined}
             onRemoveFromMix={onRemoveFromMix ? () => onRemoveFromMix(track) : undefined}
-            onReplace={onReplace ? () => onReplace(track, i) : undefined}
-            onSimilar={onSimilar ? () => onSimilar(track) : undefined}
-            onSuggestStyle={onSuggest ? () => onSuggest(track, "style") : undefined}
-            onSuggestTempo={onSuggest ? () => onSuggest(track, "tempo") : undefined}
-            onSuggestArtist={onSuggestArtist ? () => onSuggestArtist(track) : undefined}
+            favourite={favouriteUris?.has(track.uri)}
+            onToggleFavourite={onToggleFavourite ? () => onToggleFavourite(track) : undefined}
             suggestBusy={suggestBusy?.trackId === track.id ? suggestBusy.mode : null}
             playedCount={playedCounts?.[track.uri]}
             deleted={deletedUris?.has(track.uri)}
@@ -638,6 +637,26 @@ export function DashboardClient({ spotifyUser }: Props) {
   // icons do (recycle/eject/delete), resolved here from the chip's uri
   // since the chart itself only knows uri/name/artist/tempo, not the full
   // TrackWithBPM/mix-index those actions need.
+  // Starred tracks: Pace Pro / Race mixes use these first at their BPM (lib/favourite-tracks.ts)
+  const [favouriteUris, setFavouriteUris] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    fetch("/api/tracks/favourites")
+      .then(r => r.json())
+      .then((d: { uris?: string[] }) => setFavouriteUris(new Set(d.uris ?? [])))
+      .catch(() => {});
+  }, []);
+  function toggleFavourite(track: { uri: string }) {
+    const uri = track.uri;
+    const make = !favouriteUris.has(uri);
+    setFavouriteUris(prev => { const next = new Set(prev); if (make) next.add(uri); else next.delete(uri); return next; }); // optimistic
+    fetch("/api/tracks/favourites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uri, favourite: make }),
+    })
+      .then(r => { if (!r.ok) throw new Error(); })
+      .catch(() => setFavouriteUris(prev => { const next = new Set(prev); if (make) next.delete(uri); else next.add(uri); return next; })); // undo on failure
+  }
   const [chartTrackMenu, setChartTrackMenu] = useState<{ uri: string; x: number; y: number } | null>(null);
   // Ctrl-click multi-select on chart track chips — separate from the single-
   // track context menu above; right-clicking while >=2 tracks are selected
@@ -3786,6 +3805,8 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     <VirtualTrackList
                       key={singleTrackFilter ? `single-${singleTrackFilter}` : aiDjMix ? `aidj-${aiDjMix.name}` : noBpmFilter ? "nobpm" : missingFeaturesFilter ? `missing-${missingFeaturesFilter.join(",")}` : candidatesFilter ? `candidates-${candidatesFilter.segmentLabel}` : similarFilter ? `sim-${similarFilter.seed.id}` : paceFilter ? `pace-${paceFilter.paces.map(p=>p.bpm).join("-")}` : sprintBpmFilter !== null ? `sprint-${sprintBpmFilter}` : selectedZones.map(z=>z.number).sort().join("-")}
                       tracks={filteredTracks}
+                      favouriteUris={favouriteUris}
+                      onToggleFavourite={toggleFavourite}
                       deletedUris={aiDjMix ? mixDeletedUris : undefined}
                       onDelete={handleDeleteTrack}
                       onRemoveFromMix={aiDjMix ? removeTrackFromMix : undefined}
@@ -3919,6 +3940,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   🔁 Quick Swap
                 </button>
               )}
+              <button
+                className={`${item} text-yellow-300 hover:bg-yellow-500/15`}
+                onClick={() => { setChartTrackMenu(null); toggleFavourite(track); }}
+              >
+                {favouriteUris.has(track.uri) ? "★ Unfavourite" : "☆ Favourite"}
+              </button>
               <button
                 className={`${item} text-amber-300 hover:bg-amber-500/15`}
                 onClick={() => { setChartTrackMenu(null); removeTrackFromMix(track); }}

@@ -4,6 +4,7 @@ import { buildAiDjMix } from "@/lib/ai-dj-mix";
 import { scanActiveCsv } from "@/lib/csv-heal";
 import { getRecentBuildUris, recordMixBuild } from "@/lib/recent-mix-builds";
 import { setMixCandidates } from "@/lib/mix-candidates";
+import { getFavouriteUris } from "@/lib/favourite-tracks";
 
 // SSE: streams {"type":"progress","current","total","segment"} as each
 // workout segment builds, then {"type":"done",...mix} or {"type":"error"}.
@@ -13,9 +14,10 @@ import { setMixCandidates } from "@/lib/mix-candidates";
 export async function POST(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { title, segments, avoidUris, date, extraPlayCounts, strictPaceTolerance, segmentCandidateUris, ignorePlayCounts } = await req.json() as {
+  const { title, segments, avoidUris, date, extraPlayCounts, strictPaceTolerance, segmentCandidateUris, ignorePlayCounts, useFavourites } = await req.json() as {
     title: string; segments: string[]; avoidUris?: string[]; date?: string; extraPlayCounts?: Record<string, number>;
     strictPaceTolerance?: boolean; segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[]; ignorePlayCounts?: boolean;
+    useFavourites?: boolean; // Pace Pro / Race mixes only: starred tracks take priority for segments whose BPM they fit
   };
   if (!segments?.length) {
     return NextResponse.json({ error: "segments required" }, { status: 400 });
@@ -70,7 +72,8 @@ export async function POST(req: NextRequest) {
         const result = await buildAiDjMix(title, segments, (current, total, segment, detail, candidateUris) => {
           if (candidateUris?.length) candidatesBySegment.set(current, { segment, candidateUris });
           send({ type: "progress", current, total, segment, detail });
-        }, mergedAvoidUris, extraPlayCounts, strictPaceTolerance, segmentCandidateUris, ignorePlayCounts);
+        }, mergedAvoidUris, extraPlayCounts, strictPaceTolerance, segmentCandidateUris, ignorePlayCounts,
+          useFavourites ? getFavouriteUris() : undefined);
         if (!result.ok) {
           console.error(`[ai-dj] ${result.error}`);
           send({ type: "error", error: result.error });
