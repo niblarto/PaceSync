@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 // The Lose It! food diary for one day, by meal. Opening today or yesterday
 // asks the server to re-read them from Lose It! first (it throttles that to
@@ -13,6 +14,7 @@ interface Food {
   entryId: string | null;
   name: string;
   brand: string | null;
+  icon: string | null;
   quantity: number | null;
   units: string | null;
   kcal: number | null;
@@ -56,15 +58,65 @@ function amount(f: Food): string {
 const round = (n: number | null) => (n == null ? "—" : Math.round(n).toLocaleString("en-GB"));
 const grams = (n: number | null) => (n == null ? "—" : n < 10 ? n.toFixed(1) : String(Math.round(n)));
 
-function Macros({ t, className = "" }: { t: { proteinG: number | null; carbsG: number | null; fatG: number | null }; className?: string }) {
+// Styled like the dashboard: coloured pills like its workout types, mono
+// value chips like its BPM badges, track-style rows with a thumbnail.
+const MEAL_STYLE = [
+  "bg-amber-500/20 text-amber-400 border-amber-500/30",    // Breakfast
+  "bg-emerald-500/20 text-emerald-400 border-emerald-500/30", // Lunch
+  "bg-sky-500/20 text-sky-400 border-sky-500/30",          // Dinner
+  "bg-purple-500/20 text-purple-400 border-purple-500/30", // Snacks
+];
+
+// Lose It!'s own food icon, cached by /api/loseit/icon.
+function FoodIcon({ icon, size = 36 }: { icon: string | null; size?: number }) {
   return (
-    <span className={`tabular-nums ${className}`}>
-      P {grams(t.proteinG)} · C {grams(t.carbsG)} · F {grams(t.fatG)}
+    <div className="rounded-lg bg-slate-800/80 shrink-0 flex items-center justify-center" style={{ width: size, height: size }}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={`/api/loseit/icon?name=${encodeURIComponent(icon ?? "Default")}`} alt="" width={29} height={29} loading="lazy" style={{ width: size * 0.8, height: size * 0.8 }} />
+    </div>
+  );
+}
+
+function KcalChip({ kcal, big = false }: { kcal: number | null; big?: boolean }) {
+  return (
+    <span className={`font-mono font-semibold text-green-400 bg-green-500/10 rounded px-1.5 py-0.5 tabular-nums whitespace-nowrap ${big ? "text-sm" : "text-xs"}`}>
+      {round(kcal)}{big ? " kcal" : ""}
     </span>
   );
 }
 
-export function FoodDiaryPanel() {
+function Macros({ t, className = "" }: { t: { proteinG: number | null; carbsG: number | null; fatG: number | null }; className?: string }) {
+  return (
+    <span className={`tabular-nums whitespace-nowrap ${className}`}>
+      <span className="text-sky-400/80">P {grams(t.proteinG)}</span>
+      <span className="text-slate-600"> · </span>
+      <span className="text-amber-400/80">C {grams(t.carbsG)}</span>
+      <span className="text-slate-600"> · </span>
+      <span className="text-rose-400/80">F {grams(t.fatG)}</span>
+    </span>
+  );
+}
+
+// Eaten against the daily limit (Settings → Nutrition goals), like Lose It!'s Calories bar.
+function CalorieBar({ eaten, limit }: { eaten: number; limit: number }) {
+  const left = limit - eaten;
+  const pct = Math.min(100, (eaten / limit) * 100);
+  return (
+    <div className="mb-4">
+      <div className="flex items-baseline justify-between text-xs mb-1.5">
+        <span className="text-slate-400">Calories <span className="text-slate-300 tabular-nums">{round(eaten)}</span> of <span className="tabular-nums">{round(limit)}</span></span>
+        <span className={`font-semibold tabular-nums ${left >= 0 ? "text-green-400" : "text-rose-400"}`}>
+          {round(Math.abs(left))} {left >= 0 ? "under" : "over"}
+        </span>
+      </div>
+      <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
+        <div className={`h-full rounded-full transition-all ${left >= 0 ? "bg-green-500" : "bg-rose-500"}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+export function FoodDiaryPanel({ dailyLimit = null }: { dailyLimit?: number | null }) {
   const today = isoDate(new Date());
   const [date, setDate] = useState(today);
   const [diary, setDiary] = useState<Diary | null>(null);
@@ -72,6 +124,49 @@ export function FoodDiaryPanel() {
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [menu, setMenu] = useState<Menu | null>(null);
+  const [copyMsg, setCopyMsg] = useState<{ text: string; error: boolean } | null>(null);
+
+  // Right-click menu closes on any click, scroll, resize or Escape.
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
+  function openMenu(e: React.MouseEvent, target: Menu["target"]) {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu({ x: e.clientX, y: e.clientY, target });
+  }
+
+  // Copies a whole meal (into the same meal) or one food (into the chosen
+  // meal) into today's Lose It! diary.
+  async function copyToToday(body: object, label: string) {
+    setMenu(null);
+    setCopyMsg({ text: `Adding ${label} to today…`, error: false });
+    try {
+      const res = await fetch("/api/loseit/copy", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fromDate: date, ...body }),
+      });
+      const out = await res.json();
+      if (!res.ok) throw new Error(out.error || `Copy failed (${res.status})`);
+      if (date === out.toDate) applyDay(out.day);
+      setCopyMsg({ text: `Added ${label} to today.`, error: false });
+    } catch (e) {
+      setCopyMsg({ text: e instanceof Error ? e.message : "Copy failed", error: true });
+    }
+  }
 
   // Add/remove answer with the day re-read from Lose It!; keep the sync status fields.
   const applyDay = (d: Partial<Diary>) => setDiary(prev => (prev ? { ...prev, ...d } : prev));
@@ -114,14 +209,21 @@ export function FoodDiaryPanel() {
 
   const title = date === today ? "Today" : date === shift(today, -1) ? "Yesterday"
     : new Date(`${date}T12:00:00`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  // Today always shows all four meals (empty ones too); other days only the meals with food.
+  const meals = !diary ? [] : date === today && diary.connected
+    ? MEALS.map((name, meal) => diary.meals.find(m => m.meal === meal)
+      ?? { meal, name, foods: [] as Food[], totals: { kcal: 0, proteinG: 0, carbsG: 0, fatG: 0 } })
+    : diary.meals;
   const navBtn = "rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 text-xs px-2.5 py-1.5 text-slate-300 transition-colors";
 
   return (
     <section className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-        <h2 className="text-sm font-semibold text-slate-300">
-          Food diary · {title}
-          {loading && <span className="ml-2 text-xs font-normal text-slate-500">loading…</span>}
+        <h2 className="flex items-center gap-2.5 text-sm font-semibold text-slate-100">
+          <span className="h-8 w-8 rounded-lg flex items-center justify-center shrink-0 bg-green-500/15 text-base" aria-hidden>🍽️</span>
+          Food diary
+          <span className="text-xs font-medium border rounded-full px-2.5 py-0.5 bg-green-500/20 text-green-300 border-green-500/30">{title}</span>
+          {loading && <span className="text-xs font-normal text-slate-500">loading…</span>}
         </h2>
         <div className="flex items-center gap-1.5">
           <button onClick={() => setDate(d => shift(d, -1))} className={navBtn} aria-label="Previous day">‹</button>
@@ -145,6 +247,7 @@ export function FoodDiaryPanel() {
       {adding && <AddFoodPanel date={date} onAdded={applyDay} />}
 
       {error && <p className="text-sm text-rose-300">{error}</p>}
+      {copyMsg && <p className={`mb-2 text-xs ${copyMsg.error ? "text-rose-300" : "text-emerald-300"}`}>{copyMsg.text}</p>}
 
       {diary && !diary.connected && diary.meals.length === 0 && (
         <p className="text-sm text-slate-400">
@@ -154,60 +257,68 @@ export function FoodDiaryPanel() {
         </p>
       )}
 
-      {diary && diary.connected && diary.meals.length === 0 && !loading && (
-        <p className="text-sm text-slate-500">Nothing logged{date === today ? " yet" : ""}.</p>
+      {diary && diary.connected && meals.length === 0 && !loading && (
+        <p className="text-sm text-slate-500">Nothing logged.</p>
       )}
 
-      {diary && diary.meals.length > 0 && (
+      {diary && dailyLimit != null && diary.connected && (date === today || diary.meals.length > 0) && (
+        <CalorieBar eaten={diary.totals.kcal} limit={dailyLimit} />
+      )}
+
+      {meals.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-          {diary.meals.map(m => (
-            <div key={m.meal} className="rounded-lg bg-slate-800/40 border border-white/5 p-3 min-w-0">
-              <div className="flex items-baseline justify-between gap-2 mb-2">
-                <h3 className="text-sm font-medium text-slate-200">{m.name}</h3>
-                <span className="text-xs text-slate-300 tabular-nums">{round(m.totals.kcal)} kcal</span>
+          {meals.map(m => (
+            <div
+              key={m.meal}
+              onContextMenu={m.foods.length ? e => openMenu(e, { kind: "meal", meal: m.meal, name: m.name }) : undefined}
+              className="rounded-xl bg-slate-800/40 border border-white/5 p-3 min-w-0 flex flex-col"
+            >
+              <div className="flex items-center justify-between gap-2 px-1 mb-1">
+                <span className={`text-xs font-medium border rounded-full px-2.5 py-0.5 ${MEAL_STYLE[m.meal] ?? MEAL_STYLE[3]}`}>{m.name}</span>
+                <KcalChip kcal={m.totals.kcal} big />
               </div>
-              <ul className="space-y-1.5">
+              {m.foods.length > 0 && <Macros t={m.totals} className="block px-1 mb-2 text-[11px] text-right" />}
+              {m.foods.length === 0 && <p className="px-1 py-3 text-xs text-slate-500">Nothing logged yet.</p>}
+              <ul className="space-y-0.5">
                 {m.foods.map((f, i) => (
-                  <li key={i} className="flex items-start justify-between gap-3 text-xs">
-                    <div className="min-w-0">
-                      <div className="text-slate-200 truncate" title={f.name}>{f.name}</div>
-                      <div className="text-slate-500 truncate">
-                        {[f.brand, amount(f)].filter(Boolean).join(" · ")}
-                      </div>
+                  <li
+                    key={i}
+                    onContextMenu={e => openMenu(e, { kind: "food", meal: m.meal, food: f })}
+                    className="group flex items-center gap-2.5 rounded-lg px-1.5 py-1.5 hover:bg-slate-800/60 transition-colors"
+                  >
+                    <FoodIcon icon={f.icon} />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-slate-100 truncate group-hover:text-green-400 transition-colors" title={f.name}>{f.name}</p>
+                      <p className="text-xs text-slate-500 truncate">{[f.brand, amount(f)].filter(Boolean).join(" · ")}</p>
                     </div>
-                    <div className="flex items-start gap-1.5 shrink-0">
-                      <div className="text-right">
-                        <div className="text-slate-300 tabular-nums">{round(f.kcal)}</div>
-                        <Macros t={f} className="text-[10px] text-slate-500" />
-                      </div>
-                      {f.entryId && (
-                        <button
-                          onClick={() => remove(f)}
-                          disabled={removing !== null}
-                          title="Remove from Lose It!"
-                          aria-label={`Remove ${f.name}`}
-                          className="text-slate-600 hover:text-rose-300 disabled:opacity-40 leading-none px-0.5"
-                        >
-                          {removing === f.entryId ? "…" : "×"}
-                        </button>
-                      )}
+                    <div className="flex flex-col items-end gap-0.5 shrink-0">
+                      <KcalChip kcal={f.kcal} />
+                      <Macros t={f} className="text-[10px]" />
                     </div>
+                    {f.entryId && (
+                      <button
+                        onClick={() => remove(f)}
+                        disabled={removing !== null}
+                        title="Remove from Lose It!"
+                        aria-label={`Remove ${f.name}`}
+                        className={`shrink-0 p-1 rounded text-slate-600 hover:text-rose-400 transition-all disabled:opacity-40 ${removing === f.entryId ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+                      >
+                        {removing === f.entryId ? "…" : "×"}
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>
-              <div className="mt-2 pt-2 border-t border-white/5 text-[11px] text-slate-500 text-right">
-                <Macros t={m.totals} />
-              </div>
             </div>
           ))}
         </div>
       )}
 
       {diary && diary.meals.length > 0 && (
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs">
-          <span className="text-slate-300">
-            Total <span className="tabular-nums font-medium">{round(diary.totals.kcal)} kcal</span>
-            <span className="text-slate-500"> · protein {grams(diary.totals.proteinG)} g · carbs {grams(diary.totals.carbsG)} g · fat {grams(diary.totals.fatG)} g</span>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <span className="flex items-center gap-2 text-slate-300">
+            Total <KcalChip kcal={diary.totals.kcal} big />
+            <Macros t={diary.totals} className="text-xs" />
           </span>
           {diary.lastSyncAt && (
             <span className="text-slate-500">
@@ -218,14 +329,80 @@ export function FoodDiaryPanel() {
       )}
 
       {diary?.lastError && <p className="mt-2 text-xs text-rose-300">Last sync failed: {diary.lastError}</p>}
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y}>
+          {menu.target.kind === "meal" ? (() => {
+            const t = menu.target;
+            return (
+              <button role="menuitem" onClick={() => copyToToday({ meal: t.meal }, t.name)} className="block w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-700/60">
+                Add to today
+              </button>
+            );
+          })() : (() => {
+            const t = menu.target;
+            const item = { entryId: t.food.entryId, name: t.food.name, meal: t.meal, kcal: t.food.kcal };
+            return MEALS.map((name, toMeal) => (
+              <button key={name} role="menuitem" onClick={() => copyToToday({ items: [item], toMeal }, `${t.food.name} (${name})`)} className="block w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-700/60">
+                Add to {name}
+              </button>
+            ));
+          })()}
+        </ContextMenu>
+      )}
     </section>
   );
 }
 
+// A right-click menu at the pointer. Rendered on <body> through a portal:
+// inside the panel, its backdrop blur would make position: fixed relative
+// to the panel instead of the window. Measured before painting so it opens
+// up/left of the pointer when it would otherwise run off screen.
+function ContextMenu({ x, y, children }: { x: number; y: number; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: x, top: y, ready: false });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    const left = x + width > window.innerWidth - 8 ? Math.max(8, x - width) : x;
+    const top = y + height > window.innerHeight - 8 ? Math.max(8, y - height) : y;
+    setPos({ left, top, ready: true });
+  }, [x, y]);
+  return createPortal(
+    <div
+      ref={ref}
+      role="menu"
+      onClick={e => e.stopPropagation()}
+      style={{ left: pos.left, top: pos.top, visibility: pos.ready ? "visible" : "hidden" }}
+      className="fixed z-50 min-w-[180px] rounded-lg border border-white/10 bg-slate-900/95 backdrop-blur-sm shadow-xl py-1 text-xs"
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
+type Menu = {
+  x: number;
+  y: number;
+  target: { kind: "meal"; meal: number; name: string } | { kind: "food"; meal: number; food: Food };
+};
+
 // ── Add food ───────────────────────────────────────────────────────────────
 
 interface SearchFood { pk: string; name: string; brand: string | null; icon: string | null; locale: string | null; mine: boolean; timesLogged: number }
-interface FoodDetails { quantity: number; units: string | null; kcal: number | null; proteinG: number | null; carbsG: number | null; fatG: number | null }
+interface FoodDetails {
+  quantity: number;     // Lose It!'s default amount, in `units`
+  units: string | null;
+  grams: number | null; // weight of that default amount, if known
+  preferGrams: boolean; // offer grams first (the food's unit is a cup/spoon/ounce, not a count)
+  kcal: number | null; proteinG: number | null; carbsG: number | null; fatG: number | null;
+}
+
+type Unit = "food" | "gram";
+
+const trimNum = (n: number) => String(Math.round(n * 100) / 100);
 
 const MEALS = ["Breakfast", "Lunch", "Dinner", "Snacks"];
 
@@ -241,6 +418,7 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
   const [picked, setPicked] = useState<SearchFood | null>(null);
   const [details, setDetails] = useState<FoodDetails | null>(null);
   const [qty, setQty] = useState("");
+  const [unit, setUnit] = useState<Unit>("food");
   const [meal, setMeal] = useState(mealForNow);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
@@ -268,15 +446,28 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
       const res = await fetch("/api/loseit/food", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(f) });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
-      setDetails(body);
-      setQty(String(body.quantity));
+      const d = body as FoodDetails;
+      setDetails(d);
+      const grams = d.preferGrams && d.grams != null;
+      setUnit(grams ? "gram" : "food");
+      setQty(grams ? String(Math.round(d.grams!)) : trimNum(d.quantity));
     } catch (err) {
       setMessage({ text: err instanceof Error ? err.message : "Couldn't load that food", error: true });
     }
   }
 
+  // Switching unit converts the amount typed rather than reinterpreting it.
+  function changeUnit(next: Unit) {
+    if (!details || details.grams == null || next === unit) return;
+    const n = Number(qty);
+    if (n > 0) setQty(next === "gram" ? String(Math.round(n / details.quantity * details.grams)) : trimNum(n / details.grams * details.quantity));
+    setUnit(next);
+  }
+
   const amountN = Number(qty);
-  const scale = details && amountN > 0 ? amountN / details.quantity : null;
+  const base = details ? (unit === "gram" ? details.grams : details.quantity) : null;
+  const scale = base && amountN > 0 ? amountN / base : null;
+  const gramsNow = details?.grams != null && scale != null ? details.grams * scale : null;
   const scaled = (v: number | null) => (v == null || scale == null ? null : v * scale);
 
   async function add() {
@@ -285,7 +476,7 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
     try {
       const res = await fetch("/api/loseit/log", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...picked, date, meal, quantity: amountN }),
+        body: JSON.stringify({ ...picked, date, meal, quantity: amountN, unit }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Add failed (${res.status})`);
@@ -326,10 +517,13 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
                 {(i === 0 || f.mine !== results[i - 1].mine) && (
                   <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wide text-slate-500">{f.mine ? "My Foods" : "All foods"}</div>
                 )}
-                <button onClick={() => pick(f)} className="w-full text-left px-2 py-1.5 text-xs hover:bg-slate-700/40 rounded flex justify-between gap-3">
-                  <span className="min-w-0">
-                    <span className="text-slate-200">{f.name}</span>
-                    {f.brand && <span className="text-slate-500"> · {f.brand}</span>}
+                <button onClick={() => pick(f)} className="group w-full text-left px-2 py-1 text-xs hover:bg-slate-700/40 rounded-lg flex items-center justify-between gap-3">
+                  <span className="min-w-0 flex items-center gap-2.5">
+                    <FoodIcon icon={f.icon} size={28} />
+                    <span className="truncate">
+                      <span className="text-slate-200 group-hover:text-green-400 transition-colors">{f.name}</span>
+                      {f.brand && <span className="text-slate-500"> · {f.brand}</span>}
+                    </span>
                   </span>
                   {f.mine && f.timesLogged > 0 && <span className="text-slate-500 shrink-0 tabular-nums">logged {f.timesLogged}×</span>}
                 </button>
@@ -341,16 +535,33 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
 
       {picked && (
         <div className="space-y-2">
-          <div className="text-sm text-slate-200">
-            {picked.name}{picked.brand && <span className="text-slate-500"> · {picked.brand}</span>}
+          <div className="text-sm text-slate-200 flex items-center gap-2.5">
+            <FoodIcon icon={picked.icon} size={32} />
+            <span>{picked.name}{picked.brand && <span className="text-slate-500"> · {picked.brand}</span>}</span>
             <button onClick={() => { setPicked(null); setDetails(null); }} className="ml-2 text-xs text-slate-500 hover:text-slate-300">← results</button>
           </div>
           {!details ? <p className="text-xs text-slate-500">Loading…</p> : (
             <div className="flex flex-wrap items-end gap-3">
-              <label className="space-y-1">
-                <span className="block text-[11px] text-slate-400">Amount{details.units ? ` (${details.units})` : ""}</span>
-                <input inputMode="decimal" value={qty} onChange={e => setQty(e.target.value)} className={`${input} w-24`} />
-              </label>
+              <div className="space-y-1">
+                <span className="block text-[11px] text-slate-400">Amount</span>
+                <div className="flex gap-1.5">
+                  <input
+                    inputMode={unit === "gram" ? "numeric" : "decimal"}
+                    value={qty}
+                    onChange={e => setQty(unit === "gram" ? e.target.value.replace(/\D/g, "") : e.target.value)}
+                    aria-label="Amount"
+                    className={`${input} w-20`}
+                  />
+                  {details.grams != null ? (
+                    <select value={unit} onChange={e => changeUnit(e.target.value as Unit)} aria-label="Unit" className={input}>
+                      <option value="gram">grams</option>
+                      <option value="food">{details.units ?? "servings"}</option>
+                    </select>
+                  ) : (
+                    <span className="self-center text-xs text-slate-400">{details.units ?? "servings"}</span>
+                  )}
+                </div>
+              </div>
               <label className="space-y-1">
                 <span className="block text-[11px] text-slate-400">Meal</span>
                 <select value={meal} onChange={e => setMeal(Number(e.target.value))} className={input}>
@@ -358,6 +569,7 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
                 </select>
               </label>
               <div className="text-xs text-slate-300 pb-2 tabular-nums">
+                {unit === "food" && gramsNow != null && <span className="text-slate-500">{Math.round(gramsNow)} g · </span>}
                 {round(scaled(details.kcal))} kcal
                 <span className="text-slate-500"> · P {grams(scaled(details.proteinG))} · C {grams(scaled(details.carbsG))} · F {grams(scaled(details.fatG))}</span>
               </div>
@@ -365,6 +577,13 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
                 {saving ? "Adding…" : `Add to ${new Date(`${date}T12:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`}
               </button>
             </div>
+          )}
+          {/* Below the row and always shown, so the controls above never shift. */}
+          {details && (
+            <p className="text-[11px] text-slate-500">
+              Lose It!&apos;s serving: {trimNum(details.quantity)} {details.units ?? "serving"}
+              {details.grams != null ? ` = ${Math.round(details.grams)} g` : ""}
+            </p>
           )}
         </div>
       )}

@@ -1,6 +1,6 @@
 import { getDb } from "@/lib/db";
 import {
-  currentBuild, deleteEntry, fetchDay, fetchMyFoods, getFoodDraft, LoseItAuthError, prepareEntry, saveEntry, searchFoods, summarizeDraft,
+  copyEntry, currentBuild, deleteEntry, fetchDay, fetchMyFoods, getFoodDraft, LoseItAuthError, prepareEntry, saveEntry, searchFoods, summarizeDraft, WEIGHT_G,
   type LoseItEntry,
 } from "@/lib/loseit-gwt";
 import { downloadExport, parseFoodLogCsv, readZipEntry, singularUnit, type ExportFoodRow } from "@/lib/loseit-export";
@@ -18,12 +18,22 @@ import { sendNtfy } from "@/lib/ntfy";
 
 export const MEAL_NAMES = ["Breakfast", "Lunch", "Dinner", "Snacks"] as const;
 
-// FoodMeasure ids seen in the RPC, matched against the export's unit names.
-// Ids not listed here are learned from the export (see unitsFor).
+// FoodMeasure ids → unit names, from the Lose It! web app's own unit table
+// (its FoodMeasure enum). Ids not listed here are learned from the export
+// (see unitsFor).
 const MEASURE_UNITS: Record<number, string> = {
-  1: "Teaspoon", 2: "Tablespoon", 3: "Cup", 4: "Piece", 5: "Each", 8: "Gram", 11: "Milliliter",
-  26: "Slice", 27: "Serving", 39: "Imperial Pint", 42: "Pot", 46: "Package", 47: "Pouch",
+  1: "Teaspoon", 2: "Tablespoon", 3: "Cup", 4: "Piece", 5: "Each", 6: "Ounce", 7: "Pound", 8: "Gram", 9: "Kilogram",
+  10: "Fluid Ounce", 11: "Milliliter", 12: "Liter", 13: "Gallon", 14: "Pint", 15: "Quart", 16: "Milligram",
+  17: "Microgram", 18: "Intake", 19: "Bottle", 20: "Box", 21: "Can", 22: "Cube", 23: "Jar", 24: "Stick", 25: "Tablet",
+  26: "Slice", 27: "Serving", 28: "300 Can", 29: "303 Can", 30: "401 Can", 31: "404 Can", 32: "Ind Package",
+  33: "Scoop", 34: "Metric Cup", 35: "Dry Cup", 36: "Imperial Fluid Ounce", 37: "Imperial Gallon",
+  38: "Imperial Quart", 39: "Imperial Pint", 40: "Tablespoon", 41: "Dessertspoon", 42: "Pot", 43: "Punnet",
+  44: "As Entered", 45: "Container", 46: "Package", 47: "Pouch",
 };
+
+// Units that count things; a food measured in one of these is offered in
+// that unit first. Anything else (cups, spoons, ounces…) defaults to grams.
+const COUNT_UNITS = new Set([4, 5, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 42, 43, 44, 45, 46, 47]);
 
 // FoodMeasurement ordinals in an entry's nutrient map.
 const NUTRIENT = { kcal: 0, fat: 3, satFat: 4, cholesterol: 8, sodium: 9, carbs: 10, fiber: 11, sugar: 12, protein: 13 } as const;
@@ -357,6 +367,8 @@ export interface FoodSearchResult extends FoodRef {
 export interface FoodDetails {
   quantity: number;  // default amount, in `units`
   units: string | null;
+  grams: number | null; // weight of the default amount, when Lose It! knows it (allows logging in grams)
+  preferGrams: boolean; // the food's unit is a cup/spoon/ounce-type measure rather than a count
   kcal: number | null;
   proteinG: number | null;
   carbsG: number | null;
@@ -444,7 +456,12 @@ export async function getLoseItFoodDetails(food: FoodRef): Promise<FoodDetails> 
   const draft = await withLoseItSession(who => getFoodDraft(who, { pk: fromHex(food.pk), name: food.name, locale: food.locale }));
   const d = summarizeDraft(draft);
   const n = (k: keyof typeof NUTRIENT) => (typeof d.nutrients[NUTRIENT[k]] === "number" ? Math.round(d.nutrients[NUTRIENT[k]] * 10) / 10 : null);
-  return { quantity: d.quantity, units: unitName(d.measureId), kcal: n("kcal"), proteinG: n("protein"), carbsG: n("carbs"), fatG: n("fat") };
+  const grams = d.nutrients[WEIGHT_G] > 0 ? Math.round(d.nutrients[WEIGHT_G] * 10) / 10 : null;
+  return {
+    quantity: d.quantity, units: unitName(d.measureId), grams,
+    preferGrams: grams !== null && d.measureId !== 8 && !(d.measureId !== null && COUNT_UNITS.has(d.measureId)),
+    kcal: n("kcal"), proteinG: n("protein"), carbsG: n("carbs"), fatG: n("fat"),
+  };
 }
 
 // Re-reads one day from Lose It! into loseit_food_log.
@@ -456,12 +473,13 @@ async function refreshDay(date: string): Promise<void> {
 
 export async function addLoseItFood(
   food: FoodRef & { brand?: string | null; icon?: string | null }, date: string, meal: number, quantity: number,
+  unit: "food" | "gram" = "food",
 ): Promise<DiaryDay> {
   if (!(meal >= 0 && meal <= 3)) throw new Error("meal must be 0-3");
   if (!(quantity > 0 && quantity < 100_000)) throw new Error("quantity must be positive");
   await withLoseItSession(async who => {
     const draft = await getFoodDraft(who, { pk: fromHex(food.pk), name: food.name, locale: food.locale });
-    await saveEntry(who, prepareEntry(await currentBuild(who.cookie), draft, date, meal, quantity));
+    await saveEntry(who, prepareEntry(await currentBuild(who.cookie), draft, date, meal, quantity, unit));
   });
   // Lose It! now counts it as one of My Foods; mirror that without re-downloading the list.
   getDb().prepare("INSERT OR IGNORE INTO loseit_my_foods (pk, name, brand, icon, locale) VALUES (?, ?, ?, ?, ?)")
@@ -480,4 +498,45 @@ export async function removeLoseItFood(date: string, entryId: string): Promise<D
   });
   await refreshDay(date);
   return getDiaryDay(date);
+}
+
+// ── Copy to today (web Nutrition page's right-click menu) ──────────────────
+// Copies foods as they were logged — same food, amount and nutrients — into
+// today's diary. The source day is re-read from Lose It! first, since a copy
+// is made from the full stored entry. Foods from days that only came from
+// the export have no entry id, so those are matched by meal, name and calories.
+
+export interface CopyItem { entryId: string | null; name: string; meal: number; kcal: number | null }
+
+export async function copyLoseItFoods(
+  fromDate: string, what: { meal: number } | { items: CopyItem[]; toMeal: number },
+): Promise<{ copied: number; toDate: string; day: DiaryDay }> {
+  const toDate = localIsoDate();
+  let copied = 0;
+  await withLoseItSession(async who => {
+    copied = 0;
+    const entries = await fetchDay(who, fromDate);
+    const picks: { entry: LoseItEntry; meal: number }[] = [];
+    if ("meal" in what) {
+      for (const entry of entries) if (entry.meal === what.meal) picks.push({ entry, meal: what.meal });
+    } else {
+      const used = new Set<LoseItEntry>();
+      for (const it of what.items) {
+        const entry = entries.find(e => !used.has(e) && (it.entryId
+          ? e.entryId === it.entryId
+          : e.meal === it.meal && e.name === it.name.trim() && Math.abs((e.nutrients[NUTRIENT.kcal] ?? 0) - (it.kcal ?? 0)) <= 1));
+        if (!entry) throw new Error(`${it.name} is no longer in that day's Lose It! diary`);
+        used.add(entry);
+        picks.push({ entry, meal: what.toMeal });
+      }
+    }
+    if (!picks.length) throw new Error("Nothing to copy");
+    const build = await currentBuild(who.cookie);
+    for (const p of picks) {
+      await saveEntry(who, copyEntry(build, p.entry.node, toDate, p.meal));
+      copied++;
+    }
+  });
+  await refreshDay(toDate);
+  return { copied, toDate, day: getDiaryDay(toDate) };
 }

@@ -7,7 +7,8 @@ export const dynamic = "force-dynamic";
 
 // Writes to the Lose It! diary (used by the web Nutrition page).
 //
-// POST   { pk, name, locale, date, meal (0-3), quantity } → add a food; quantity is in the food's own unit
+// POST   { pk, name, locale, date, meal (0-3), quantity, unit? } → add a food; quantity is in the food's
+//        own unit, or in grams with unit "gram"
 // DELETE { date, entryId }                                → remove a food
 // Both answer with the day's diary as re-read from Lose It!.
 
@@ -23,14 +24,14 @@ export async function POST(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const b = await body(req);
   if (!b) return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  const { pk, name, locale, brand, icon, date, meal, quantity } = b;
+  const { pk, name, locale, brand, icon, date, meal, quantity, unit } = b;
   if (typeof pk !== "string" || typeof name !== "string" || !isIsoDate(date)
     || typeof meal !== "number" || typeof quantity !== "number") {
     return NextResponse.json({ error: "pk, name, date, meal and quantity are required" }, { status: 400 });
   }
   try {
     const str = (v: unknown) => (typeof v === "string" ? v : null);
-    return NextResponse.json(await addLoseItFood({ pk, name, locale: str(locale), brand: str(brand), icon: str(icon) }, date, meal, quantity));
+    return NextResponse.json(await addLoseItFood({ pk, name, locale: str(locale), brand: str(brand), icon: str(icon) }, date, meal, quantity, unit === "gram" ? "gram" : "food"));
   } catch (e) {
     return failed(e);
   }

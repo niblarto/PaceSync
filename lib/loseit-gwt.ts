@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { getDb } from "@/lib/db";
 
 // Minimal client for Lose It!'s web-app RPC (GWT-RPC, reverse-engineered —
@@ -529,6 +530,11 @@ export interface DraftSummary {
   nutrients: Record<number, number>; // for the default amount
 }
 
+// Nutrient ordinal 2 isn't a nutrient: it's the weight in grams of the
+// amount the map is for, which is what lets any food be logged in grams.
+export const WEIGHT_G = 2;
+const GRAM_MEASURE = 8;
+
 // A draft's nutrients are for FoodNutrients[0] servings; its default amount
 // is FoodServing[2] servings = FoodServing[3] units.
 export function summarizeDraft(draft: GNode): DraftSummary {
@@ -547,11 +553,14 @@ function nodeFor(build: LoseItBuild, cls: string, f: GField[]): GNode {
   return { sig, type: shortType(sig), f };
 }
 
-// Turns a draft into the entry to save: date, meal, and an amount in the
-// food's own unit (scaled from the draft's default amount). A logged entry
-// has FoodNutrients = [s, s], serving size s and tail [s, q, q, 0], with the
-// nutrients already multiplied out for s servings.
-export function prepareEntry(build: LoseItBuild, draft: GNode, isoDate: string, meal: number, quantity: number): GNode {
+// Turns a draft into the entry to save: date, meal, and an amount — in the
+// food's own unit (scaled from the draft's default amount) or, with
+// unit "gram", in grams (scaled from the food's weight, and logged with Gram
+// as its unit). A logged entry has FoodNutrients = [s, s], serving size s
+// and tail [s, q, q, 0], with the nutrients already multiplied out for s servings.
+export function prepareEntry(
+  build: LoseItBuild, draft: GNode, isoDate: string, meal: number, quantity: number, unit: "food" | "gram" = "food",
+): GNode {
   const e = JSON.parse(JSON.stringify(draft)) as GNode;
   const serving = fNode(e, 8);
   const fn = fNode(serving, 0);
@@ -559,21 +568,53 @@ export function prepareEntry(build: LoseItBuild, draft: GNode, isoDate: string, 
   const map = fNode(fn, 2);
   if (!serving || !fn || !size || !map?.map) throw new Error("unexpected draft entry shape");
   const per = fNum(fn, 0) || 1;
-  const s = (fNum(serving, 2) || 1) * (quantity / (fNum(serving, 3) || 1));
+  let s: number;
+  if (unit === "gram") {
+    const weight = map.map.find(([k]) => k && fNum(k, 0) === WEIGHT_G)?.[1];
+    const gramsPerServing = weight ? fNum(weight, 0) / per : 0;
+    if (!(gramsPerServing > 0)) throw new Error("Lose It! has no weight for this food, so it can't be logged in grams");
+    s = quantity / gramsPerServing;
+    size.f[2] = nodeFor(build, "com.loseit.core.client.model.FoodMeasure", [GRAM_MEASURE]);
+  } else {
+    s = (fNum(serving, 2) || 1) * (quantity / (fNum(serving, 3) || 1));
+  }
   for (const [, v] of map.map) if (v) v.f[0] = fNum(v, 0) * s / per;
   fn.f[0] = s; fn.f[1] = s;
   size.f[0] = s;
   serving.f[2] = s; serving.f[3] = quantity; serving.f[4] = quantity;
 
+  setDayAndMeal(build, e, isoDate, meal);
+  return e;
+}
+
+function setDayAndMeal(build: LoseItBuild, e: GNode, isoDate: string, meal: number): void {
   e.f[6] = nodeFor(build, "com.loseit.core.client.model.interfaces.FoodLogEntryType", [meal]);
   const ctx = fNode(e, 5);
-  if (!ctx) throw new Error("draft entry has no context");
+  if (!ctx) throw new Error("entry has no context");
   const [y, m, d] = isoDate.split("-").map(Number);
   ctx.f[1] = nodeFor(build, "com.loseit.core.shared.model.DayDate", [
     nodeFor(build, "java.util.Date", [encodeLong(Date.UTC(y, m - 1, d, 1, 0, 1))]),
     loseItDayNumber(isoDate),
     hoursFromGmt(),
   ]);
+}
+
+// A copy of a logged entry (same food, amount and nutrients) as a new entry
+// on another day/meal: a fresh random entry key (as the CLI does; Lose It!
+// keys are just 16 random bytes), no logged-at time, and "now" as its
+// last-changed times so Lose It!'s apps sync it.
+export function copyEntry(build: LoseItBuild, src: GNode, isoDate: string, meal: number): GNode {
+  const e = JSON.parse(JSON.stringify(src)) as GNode;
+  const serving = fNode(e, 8);
+  const keyBytes = fNode(fNode(serving, 8), 0);
+  if (!serving || !keyBytes?.bytes) throw new Error("entry has no key");
+  keyBytes.bytes = Array.from(randomBytes(16), b => (b > 127 ? b - 256 : b));
+  const now = encodeLong(Date.now());
+  e.f[3] = now;
+  serving.f[7] = now;
+  const ctx = fNode(e, 5);
+  if (ctx) ctx.f[0] = null;
+  setDayAndMeal(build, e, isoDate, meal);
   return e;
 }
 

@@ -159,27 +159,85 @@ const longDate = (date: string) => new Date(`${date}T12:00:00`).toLocaleDateStri
 const daysUntil = (from: string, to: string) => Math.round((toMs(to) - toMs(from)) / DAY_MS);
 const kcal = (n: number | null | undefined) => (n == null ? "—" : `${Math.round(n).toLocaleString("en-GB")}`);
 
-function Card({ title, children, className = "" }: { title?: string; children: React.ReactNode; className?: string }) {
+// Styled like the dashboard: icon chips and accent colours per section,
+// pill buttons, mono value chips.
+type Tone = "sky" | "emerald" | "purple" | "amber" | "rose" | "green";
+const TONE: Record<Tone, { chip: string; line: string; pill: string }> = {
+  sky:     { chip: "bg-sky-500/15 text-sky-300",         line: "from-sky-500/70",     pill: "bg-sky-500/20 text-sky-300 border-sky-500/30" },
+  emerald: { chip: "bg-emerald-500/15 text-emerald-300", line: "from-emerald-500/70", pill: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" },
+  purple:  { chip: "bg-purple-500/15 text-purple-300",   line: "from-purple-500/70",  pill: "bg-purple-500/20 text-purple-300 border-purple-500/30" },
+  amber:   { chip: "bg-amber-500/15 text-amber-300",     line: "from-amber-500/70",   pill: "bg-amber-500/20 text-amber-300 border-amber-500/30" },
+  rose:    { chip: "bg-rose-500/15 text-rose-300",       line: "from-rose-500/70",    pill: "bg-rose-500/20 text-rose-300 border-rose-500/30" },
+  green:   { chip: "bg-green-500/15 text-green-300",     line: "from-green-500/70",   pill: "bg-green-500/20 text-green-300 border-green-500/30" },
+};
+
+function IconChip({ icon, tone, size = "h-8 w-8 text-base" }: { icon: string; tone: Tone; size?: string }) {
+  return <span className={`${size} rounded-lg flex items-center justify-center shrink-0 ${TONE[tone].chip}`} aria-hidden>{icon}</span>;
+}
+
+function Pill({ tone, children }: { tone: Tone; children: React.ReactNode }) {
+  return <span className={`inline-block text-xs font-medium border rounded-full px-2.5 py-0.5 ${TONE[tone].pill}`}>{children}</span>;
+}
+
+function Card({ title, icon, tone = "sky", actions, children, className = "" }: {
+  title?: string; icon?: string; tone?: Tone; actions?: React.ReactNode; children: React.ReactNode; className?: string;
+}) {
   return (
     <section className={`rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 ${className}`}>
-      {title && <h2 className="text-sm font-semibold text-slate-300 mb-3">{title}</h2>}
+      {title && (
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <h2 className="flex items-center gap-2.5 text-sm font-semibold text-slate-100">
+            {icon && <IconChip icon={icon} tone={tone} />}
+            {title}
+          </h2>
+          {actions}
+        </div>
+      )}
       {children}
     </section>
   );
 }
 
-function Stat({ label, value, sub, action }: { label: string; value: string; sub?: React.ReactNode; action?: React.ReactNode }) {
+// Long explanations, folded away so the charts lead.
+function HowTo({ children }: { children: React.ReactNode }) {
   return (
-    <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-4 min-w-0">
+    <details className="mt-3 group">
+      <summary className="cursor-pointer select-none text-[11px] text-slate-500 hover:text-slate-300 transition-colors list-none">
+        <span className="inline-block transition-transform group-open:rotate-90 mr-1">▸</span>How to read this chart
+      </summary>
+      <div className="text-xs text-slate-500 mt-2 space-y-1 leading-relaxed">{children}</div>
+    </details>
+  );
+}
+
+function Stat({ label, value, sub, action, icon, tone = "sky", progress }: {
+  label: string; value: string; sub?: React.ReactNode; action?: React.ReactNode; icon?: string; tone?: Tone;
+  progress?: { pct: number; over: boolean }; // optional bar under the value
+}) {
+  return (
+    <div className="relative overflow-hidden rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-4 min-w-0">
+      <div className={`absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r ${TONE[tone].line} to-transparent`} />
       <div className="flex items-center justify-between gap-2">
-        <div className="text-xs text-slate-500">{label}</div>
+        <div className="flex items-center gap-2 min-w-0">
+          {icon && <IconChip icon={icon} tone={tone} size="h-7 w-7 text-sm" />}
+          <div className="text-xs text-slate-400 truncate">{label}</div>
+        </div>
         {action}
       </div>
-      <div className="text-2xl font-semibold text-slate-100 mt-1 tabular-nums truncate">{value}</div>
-      {sub && <div className="text-xs text-slate-400 mt-1">{sub}</div>}
+      <div className="text-2xl font-semibold text-slate-100 mt-2 tabular-nums truncate">{value}</div>
+      {progress && (
+        <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden mt-2">
+          <div className={`h-full rounded-full ${progress.over ? "bg-rose-500" : "bg-green-500"}`} style={{ width: `${Math.min(100, progress.pct)}%` }} />
+        </div>
+      )}
+      {sub && <div className="text-xs text-slate-400 mt-1.5">{sub}</div>}
     </div>
   );
 }
+
+const pillBtn = (on: boolean) => `text-xs px-3 py-1 rounded-full border transition-colors ${
+  on ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-300" : "border-white/10 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
+}`;
 
 function CaloriesTooltip({ active, payload, label }: { active?: boolean; payload?: { payload: DayRow }[]; label?: string }) {
   if (!active || !payload?.length || !label) return null;
@@ -342,7 +400,9 @@ function SummaryPanel() {
           className="flex items-center gap-2 text-sm font-semibold text-slate-300 hover:text-slate-100 transition-colors text-left"
           title={collapsed ? "Show the summary" : "Minimise the summary"}>
           <span className={`text-[10px] text-slate-500 transition-transform ${collapsed ? "-rotate-90" : ""}`}>▼</span>
-          🧠 AI summary · last 14 days
+          <IconChip icon="🧠" tone="purple" />
+          <span className="text-slate-100">AI summary</span>
+          <Pill tone="purple">last 14 days</Pill>
         </button>
         <div className="flex items-center gap-3">
           {s?.summary && (
@@ -385,7 +445,7 @@ function SummaryPanel() {
         <>
           <div className="space-y-3">
             {summarySections(s.summary.content).map((sec, i) => (
-              <div key={i}>
+              <div key={i} className={sec.title ? "border-l-2 border-purple-500/40 pl-3" : ""}>
                 {sec.title && (
                   <div className="flex items-center justify-between gap-3 mb-1">
                     <h3 className="text-sm font-semibold text-slate-100">{sec.title}</h3>
@@ -822,9 +882,9 @@ export function NutritionClient() {
         {data && cfg && today && (
           <>
             {(cfg.targetWeightKg == null || !cfg.goalDate || cfg.dailyCalorieLimit == null) && (
-              <Card>
+              <Card className="border-amber-500/30">
                 <p className="text-sm text-slate-300">
-                  Set your target weight, goal date and daily calorie limit in{" "}
+                  <span className="mr-2">🎯</span>Set your target weight, goal date and daily calorie limit in{" "}
                   <Link href="/settings?tab=nutrition" className="text-emerald-300 hover:text-emerald-200">Settings → Nutrition</Link>{" "}
                   to see projections.
                 </p>
@@ -834,6 +894,7 @@ export function NutritionClient() {
             {/* Headline numbers */}
             <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
               <Stat
+                icon="⚖️" tone="sky"
                 label="Current weight"
                 value={formatWeight(data.current?.kg, unit, { exact: true })}
                 sub={<>
@@ -869,6 +930,7 @@ export function NutritionClient() {
                 }
               />
               <Stat
+                icon="🎯" tone="emerald"
                 label="Target weight"
                 value={formatWeight(cfg.targetWeightKg, unit)}
                 sub={cfg.targetWeightKg != null && data.current
@@ -876,6 +938,7 @@ export function NutritionClient() {
                   : "Not set"}
               />
               <Stat
+                icon="📅" tone="purple"
                 label="Goal date"
                 value={cfg.goalDate ? longDate(cfg.goalDate) : "—"}
                 sub={cfg.goalDate
@@ -886,8 +949,12 @@ export function NutritionClient() {
                   : "Not set"}
               />
               <Stat
+                icon="🍽️" tone="amber"
                 label="Eaten today"
                 value={`${kcal(todayRow?.eaten ?? 0)} kcal`}
+                progress={cfg.dailyCalorieLimit != null
+                  ? { pct: ((todayRow?.eaten ?? 0) / cfg.dailyCalorieLimit) * 100, over: (todayRow?.eaten ?? 0) > cfg.dailyCalorieLimit }
+                  : undefined}
                 sub={<>
                   <div>{todayRow?.net != null
                     ? <>net {todayRow.net > 0 ? "+" : "−"}{kcal(Math.abs(todayRow.net))} (burnt {kcal(todayRow.burnt)}{todayRow.partial ? " so far" : ""})</>
@@ -908,6 +975,7 @@ export function NutritionClient() {
                 const signed = (n: number) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${kcal(Math.abs(n))}`;
                 return (
                   <Stat
+                    icon="🔥" tone={avg == null || avg <= 0 ? "green" : "rose"}
                     label="Avg net, eaten − burnt (7 days)"
                     value={avg == null ? "—" : `${signed(avg)} kcal`}
                     sub={avg == null
@@ -922,15 +990,13 @@ export function NutritionClient() {
               })()}
             </div>
 
-            <FoodDiaryPanel />
+            <FoodDiaryPanel dailyLimit={cfg.dailyCalorieLimit} />
 
             <SummaryPanel />
 
             {/* Calories chart */}
-            <Card>
-              <div className="flex items-center justify-between gap-3 mb-3">
-                <h2 className="text-sm font-semibold text-slate-300">Daily calories</h2>
-                <div className="flex items-center gap-1">
+            <Card title="Daily calories" icon="📊" tone="amber" actions={
+                <div className="flex items-center gap-1.5">
                   {calDomain
                     ? <button onClick={calZoom.reset}
                         className="text-xs px-2.5 py-1 mr-1 rounded-lg border border-sky-500/40 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 transition-colors">
@@ -938,15 +1004,12 @@ export function NutritionClient() {
                       </button>
                     : <span className="hidden sm:inline text-[11px] text-slate-600 mr-2">scroll to zoom · drag to pan</span>}
                   {RANGES.map(r => (
-                    <button key={r} onClick={() => setRange(r)}
-                      className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                        range === r ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-300" : "border-white/10 text-slate-400 hover:text-slate-200"
-                      }`}>
+                    <button key={r} onClick={() => setRange(r)} className={pillBtn(range === r)}>
                       {r}d
                     </button>
                   ))}
                 </div>
-              </div>
+            }>
               <div ref={calZoom.ref} className={`select-none ${calDomain ? "cursor-grab" : ""}`}>
               <ResponsiveContainer width="100%" height={320}>
                 <ComposedChart data={visibleDays} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={1} barCategoryGap="20%">
@@ -987,7 +1050,20 @@ export function NutritionClient() {
                 </ComposedChart>
               </ResponsiveContainer>
               </div>
-              <p className="text-xs text-slate-500 mt-2">
+              {/* Averages as chips, then the long explanation folded away. */}
+              <div className="flex flex-wrap items-center gap-2 mt-3 text-xs">
+                <span className="text-slate-500">Last {data.averages.windowDays} days, not today:</span>
+                <span className="font-mono font-semibold text-amber-300 bg-amber-500/10 rounded px-1.5 py-0.5">eaten {kcal(data.averages.eaten)}</span>
+                <span className="font-mono font-semibold text-sky-300 bg-sky-500/10 rounded px-1.5 py-0.5">burnt {kcal(data.averages.burnt)}</span>
+                <span className="font-mono font-semibold text-emerald-300 bg-emerald-500/10 rounded px-1.5 py-0.5">exercise {kcal(data.averages.exercise)}</span>
+                {data.averages.net != null && (
+                  <span className={`font-mono font-semibold rounded px-1.5 py-0.5 ${data.averages.net <= 0 ? "text-green-400 bg-green-500/10" : "text-rose-300 bg-rose-500/10"}`}>
+                    net {data.averages.net > 0 ? "+" : "−"}{kcal(Math.abs(data.averages.net))}
+                  </span>
+                )}
+                <span className="text-slate-500">avg/day over {data.averages.loggedDays} logged days</span>
+              </div>
+              <HowTo>
                 Last {data.averages.windowDays} days (not counting today): avg eaten {kcal(data.averages.eaten)} kcal on{" "}
                 {data.averages.loggedDays} logged days · avg burnt {kcal(data.averages.burnt)} · avg exercise {kcal(data.averages.exercise)} ·
                 avg net {data.averages.net == null ? "—" : `${data.averages.net > 0 ? "+" : "−"}${kcal(Math.abs(data.averages.net))} kcal`}.
@@ -995,12 +1071,12 @@ export function NutritionClient() {
                 Days with nothing logged in Lose It! are left out of the eaten average.
                 The white tip on each Eaten bar is as tall as that day&apos;s Exercise bar, so the amber below it is eaten − exercise (if you burnt more than you ate, the white reaches below zero).
                 A red Eaten bar (with a slightly lighter red tip) and a red net dot mean less than {kcal(cfg.minDailyCalories ?? 1400)} kcal was eaten that day, the daily minimum; today stays red until it&apos;s reached.
-              </p>
+              </HowTo>
             </Card>
 
             <div className="grid grid-cols-1 gap-6">
               {/* Weight + projections chart */}
-              <Card title="Weight and projections">
+              <Card title="Weight and projections" icon="⚖️" tone="sky">
                 {!weightChart ? (
                   <p className="text-sm text-slate-500">No weigh-ins yet.</p>
                 ) : (
@@ -1100,28 +1176,30 @@ export function NutritionClient() {
                   </div>
                 )}
                 {weightChart && (
-                  <p className="text-xs text-slate-500 mt-2">
+                  <HowTo>
                     How the projections are made: the faint purple line is the straight line fitted through your weigh-ins over the last {cfg.trendDays} days;
                     its slope is the Scale trend rate. The rose line does the same through just your last 7 weigh-ins (post-run ones aren't counted), however many days that spans: a more immediate, but noisier, read. The Scale trend continues from where that purple line is today, so it joins it without a jump. The calorie projections start from your 7-day average weight (yellow bar), not a single weigh-in,
                     so one heavy or light day doesn&apos;t swing them. A weigh-in taken within 3 hours after a run finished (from your Garmin activities) is taken as post-run: those are the green dots, left out of everything above and given their own green fitted line and "Post-run trend" projection, which starts from where that line is today; the dotted yellow line carries that average flat to the goal date, i.e. no change. Sticking to your limit uses calories instead: your {cfg.dailyCalorieLimit ?? "—"} kcal
                     limit against your average Garmin burn.
-                  </p>
+                  </HowTo>
                 )}
               </Card>
 
               {/* Projection table */}
-              <Card title="Projections">
+              <Card title="Projections" icon="🔮" tone="purple">
                 {data.projections.length === 0 ? (
                   <p className="text-sm text-slate-500">Not enough data yet. Projections need a few weigh-ins or logged days.</p>
                 ) : (
                   <div className="space-y-3">
                     <div className="flex flex-col md:flex-row gap-3">
                     {data.projections.map(p => (
-                      <div key={p.method} className="flex-1 min-w-0 rounded-lg border border-white/10 bg-slate-800/40 p-3">
+                      <div key={p.method} className="flex-1 min-w-0 rounded-lg border border-white/10 bg-slate-800/40 p-3 border-l-4" style={{ borderLeftColor: PROJ_COLORS[p.method] }}>
                         <div className="flex items-center gap-2">
-                          <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: PROJ_COLORS[p.method] }} />
-                          <span className="text-sm font-medium text-slate-200">{p.label}</span>
-                          <span className="ml-auto text-xs text-slate-400 tabular-nums">{formatWeightDelta(p.kgPerWeek, unit)}/wk</span>
+                          <span className="text-sm font-medium text-slate-100">{p.label}</span>
+                          <span className="ml-auto text-xs font-mono font-semibold rounded px-1.5 py-0.5 tabular-nums"
+                            style={{ color: PROJ_COLORS[p.method], background: `${PROJ_COLORS[p.method]}1a` }}>
+                            {formatWeightDelta(p.kgPerWeek, unit)}/wk
+                          </span>
                         </div>
                         <div className="text-xs text-slate-500 mt-0.5">{p.basis}</div>
                         {p.capped && (
@@ -1134,27 +1212,30 @@ export function NutritionClient() {
                             <div className="text-xs text-slate-500">
                               Projected weight on target date{cfg.goalDate ? ` (${shortDate(cfg.goalDate)})` : ""}
                             </div>
-                            <div className="tabular-nums text-slate-100">{formatWeight(p.weightAtGoalKg, unit)}</div>
+                            <div className="tabular-nums text-lg font-semibold text-slate-100">{formatWeight(p.weightAtGoalKg, unit)}</div>
                             {p.weightAtGoalKg != null && cfg.targetWeightKg != null && (() => {
                               const diff = p.weightAtGoalKg - cfg.targetWeightKg;
                               const amount = formatWeightDelta(Math.abs(diff), unit).replace(/^\+/, "");
                               return (
-                                <div className={`text-xs ${diff <= 0.05 ? "text-emerald-300" : "text-amber-300"}`}>
-                                  {Math.abs(diff) < 0.05 ? "On target" : `${amount} ${diff > 0 ? "above" : "below"} target`}
+                                <div className="mt-1">
+                                  <Pill tone={diff <= 0.05 ? "emerald" : "amber"}>
+                                    {Math.abs(diff) < 0.05 ? "On target" : `${amount} ${diff > 0 ? "above" : "below"} target`}
+                                  </Pill>
                                 </div>
                               );
                             })()}
                           </div>
                           <div>
                             <div className="text-xs text-slate-500">Target reached</div>
-                            <div className={`tabular-nums ${
-                              p.hitStatus === "never" ? "text-rose-300"
-                                : p.hitDate && cfg.goalDate && p.hitDate <= cfg.goalDate ? "text-emerald-300" : "text-amber-300"
-                            }`}>
-                              {cfg.targetWeightKg == null ? "—"
-                                : p.hitStatus === "reached" ? "Already there"
-                                : p.hitStatus === "never" ? "Not at this rate"
-                                : longDate(p.hitDate!)}
+                            <div className="mt-1">
+                              {cfg.targetWeightKg == null ? <span className="text-slate-500">—</span> : (
+                                <Pill tone={p.hitStatus === "never" ? "rose"
+                                  : p.hitStatus === "reached" || (p.hitDate && cfg.goalDate && p.hitDate <= cfg.goalDate) ? "emerald" : "amber"}>
+                                  {p.hitStatus === "reached" ? "Already there"
+                                    : p.hitStatus === "never" ? "Not at this rate"
+                                    : longDate(p.hitDate!)}
+                                </Pill>
+                              )}
                             </div>
                           </div>
                         </div>
