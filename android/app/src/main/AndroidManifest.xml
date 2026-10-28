@@ -6,19 +6,6 @@
     <!-- Android 13+ requires runtime-requesting this for any notification to show -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Health Connect: daily nutrition totals + weight (written by Lose It!),
-         read by NutritionSyncWorker in the background. HISTORY lifts the
-         default "only 30 days before the grant" read limit. -->
-    <uses-permission android:name="android.permission.health.READ_NUTRITION" />
-    <uses-permission android:name="android.permission.health.READ_WEIGHT" />
-    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" />
-    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_HISTORY" />
-
-    <!-- Lets getSdkStatus() see the Health Connect app on Android 13 and below -->
-    <queries>
-        <package android:name="com.google.android.apps.healthdata" />
-    </queries>
-
     <application
         android:name=".PaceSyncApplication"
         android:allowBackup="false"
@@ -38,27 +25,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Health Connect privacy policy screen. Android 13-: opened via the
-             rationale action. Android 14+: opened via the alias below. -->
-        <activity
-            android:name=".health.HealthPermissionsRationaleActivity"
-            android:exported="true"
-            android:theme="@style/Theme.PaceSync">
-            <intent-filter>
-                <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
-            </intent-filter>
-        </activity>
-
-        <activity-alias
-            android:name="ViewPermissionUsageActivity"
-            android:exported="true"
-            android:targetActivity=".health.HealthPermissionsRationaleActivity"
-            android:permission="android.permission.START_VIEW_PERMISSION_USAGE">
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
-                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
-            </intent-filter>
-        </activity-alias>
 
         <service
             android:name=".push.PaceSyncFirebaseMessagingService"

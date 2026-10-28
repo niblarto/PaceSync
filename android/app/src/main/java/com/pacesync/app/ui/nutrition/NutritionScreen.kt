@@ -77,7 +77,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pacesync.app.R
-import com.pacesync.app.health.NutritionSync
 import com.pacesync.app.network.NutritionApi
 import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.NutritionDashboardDto
@@ -98,7 +97,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 // Nutrition tab — the same data as the web /nutrition page: weight (Garmin),
-// food (Lose It! via Health Connect, synced from this phone), calories burnt
+// food (Lose It!, synced by the server), calories burnt
 // (Garmin), projections and the daily AI summary. Goals are set on the web
 // (Settings → Nutrition).
 
@@ -144,7 +143,6 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
     var refreshing by remember { mutableStateOf(false) }
     var weightBusy by remember { mutableStateOf(false) }
     var weightMsg by remember { mutableStateOf<String?>(null) }
-    var syncMsg by remember { mutableStateOf<String?>(null) }
     var diaryKey by remember { mutableIntStateOf(0) } // bumped by each full refresh to reload the food diary
 
     suspend fun load() {
@@ -155,15 +153,10 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
         } else error = "Couldn't load nutrition (${resp?.code() ?: "offline"})"
     }
 
-    // Send this phone's latest Health Connect food first, so today's numbers
-    // are current, then pull Garmin's latest weigh-in, then load.
+    // Pull Garmin's latest weigh-in, then load (the server syncs today's
+    // Lose It! food itself when the dashboard loads).
     suspend fun fullRefresh() {
         refreshing = true
-        val pushed = runCatching { NutritionSync.sync(context, api, NutritionSync.PERIODIC_DAYS) }
-        syncMsg = pushed.fold(
-            onSuccess = { "Sent ${it.daysWithData} days to PaceSync" },
-            onFailure = { "Phone sync failed: ${it.message ?: it.javaClass.simpleName}" },
-        )
         weightBusy = true
         val w = runCatching { nutritionApi.refreshWeight() }.getOrNull()
         weightMsg = if (w?.isSuccessful == true) w.body()?.latest?.let { "Garmin: latest ${shortDate(it.date)}" } ?: "No weigh-ins in Garmin" else "Garmin weight refresh failed"
@@ -187,15 +180,15 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
             Modifier.fillMaxSize().verticalScroll(scrollState).padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // Pushes Lose It! food/weight from Health Connect, pulls Garmin's
-            // latest weigh-in, then reloads — same as pull-to-refresh.
+            // Pulls Garmin's latest weigh-in and reloads (the server re-reads
+            // today's Lose It! food) — same as pull-to-refresh.
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(
                         if (refreshing) "Refreshing…" else "Refresh nutrition & weight",
                         style = MaterialTheme.typography.titleSmall,
                     )
-                    val status = listOfNotNull(syncMsg, weightMsg).joinToString(" · ")
+                    val status = listOfNotNull(weightMsg).joinToString(" · ")
                     if (status.isNotEmpty()) Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
                 }
                 if (refreshing) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)

@@ -4,6 +4,7 @@ import { loadGarminConfig } from "@/lib/garmin-config";
 import { fetchRunnaSchedule, type RunnaPastRun, type RunnaWorkout } from "@/lib/runna-schedule";
 import { listRaces } from "@/lib/races";
 import { getDayRecovery, refreshTodayBurn } from "@/lib/garmin-connect";
+import { foodDiaryLines, syncLoseIt, topFoodLines } from "@/lib/loseit-food";
 import { buildNutritionDashboard, type NutritionDashboard } from "@/lib/nutrition-dashboard";
 import { formatWeight, formatWeightDelta } from "@/lib/weight-format";
 import { listRunFeedback, effortLabel, FEEL_LABELS, type RunFeedback } from "@/lib/run-feedback";
@@ -537,8 +538,28 @@ async function dayByDaySection(
   return lines;
 }
 
-// Weight goal, trend and fuelling (Lose It! food via Health Connect,
-// Garmin burn and weigh-ins), from the Nutrition page's data.
+// What was actually eaten, from the Lose It! diary PaceSync syncs: today and
+// yesterday food by food (with macros), and the biggest calorie sources of
+// the last 14 days, so the coach can talk about specific foods and meals.
+function foodDiarySection(): string[] {
+  const today = localDate(new Date());
+  const yesterday = localDate(new Date(Date.now() - 86_400_000));
+  const fortnightAgo = localDate(new Date(Date.now() - 14 * 86_400_000));
+  let recent: string[] = [], top: string[] = [];
+  try {
+    recent = foodDiaryLines(yesterday, today, true);
+    top = topFoodLines(fortnightAgo, today, 12);
+  } catch { return []; }
+  if (!recent.length && !top.length) return [];
+  return [
+    "## Food diary (Lose It!; kcal and macros in grams per food as logged)",
+    ...(recent.length ? ["Yesterday and today, by meal (today may still be in progress):", ...recent.map(l => `- ${l}`)] : ["- Nothing logged yesterday or today."]),
+    ...(top.length ? ["Biggest calorie sources, last 14 days:", ...top.map(l => `- ${l}`)] : []),
+  ];
+}
+
+// Weight goal, trend and fuelling (Lose It! food from the diary PaceSync
+// syncs, Garmin burn and weigh-ins), from the Nutrition page's data.
 function nutritionSection(n: NutritionDashboard | null): string[] {
   if (!n) return [];
   const c = n.config;
@@ -724,7 +745,10 @@ export async function buildCoachContext(): Promise<CoachContext> {
   const pastRuns = schedule?.ok ? schedule.pastRuns : [];
   const zones = await getCurrentHrZones().catch(() => null);
   let nutrition: NutritionDashboard | null = null;
-  await refreshTodayBurn(localDate(new Date())).catch(() => null);
+  await Promise.all([
+    refreshTodayBurn(localDate(new Date())).catch(() => null),
+    syncLoseIt().catch(() => null), // today's food (throttled to once per 5 minutes)
+  ]);
   try { nutrition = buildNutritionDashboard(14); } catch {}
   const detailStart = localDate(new Date(Date.now() - (DETAIL_DAYS - 1) * 86_400_000));
   const feedback = listRunFeedback(localDate(new Date(Date.now() - RECENT_RUN_DAYS * 86_400_000)));
@@ -758,6 +782,7 @@ export async function buildCoachContext(): Promise<CoachContext> {
     earlierRunsSection(acts, pastRuns, zones, feedback),
     weeklySection(acts),
     nutritionSection(nutrition),
+    foodDiarySection(),
   ].filter(s => s.length);
 
   if (!acts.length) sections.unshift(["(No GarminDB activity data is available — say so if the athlete asks about their recent training.)"]);

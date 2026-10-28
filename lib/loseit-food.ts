@@ -490,14 +490,35 @@ export async function addLoseItFood(
 
 // Removes a food from the Lose It! diary. The entry is re-read from Lose It!
 // first, since deleting means sending the whole entry back.
-export async function removeLoseItFood(date: string, entryId: string): Promise<DiaryDay> {
+export async function removeLoseItFood(date: string, item: CopyItem): Promise<DiaryDay> {
   await withLoseItSession(async who => {
-    const entry = (await fetchDay(who, date)).find(e => e.entryId === entryId);
-    if (!entry) throw new Error("That food is no longer in the Lose It! diary");
+    const entries = await fetchDayAndStore(who, date);
+    const entry = findEntry(entries, item, new Set());
+    if (!entry) throw new Error(`${item.name} is no longer in that day's Lose It! diary`);
     await deleteEntry(who, entry.node);
   });
   await refreshDay(date);
   return getDiaryDay(date);
+}
+
+// The entry a diary row refers to: by its entry id, or — for rows from the
+// export, or stored before entry ids were read correctly — by meal, name and
+// calories. `used` stops two picks landing on the same entry.
+function findEntry(entries: LoseItEntry[], it: CopyItem, used: Set<LoseItEntry>): LoseItEntry | undefined {
+  const free = entries.filter(e => !used.has(e));
+  return (it.entryId ? free.find(e => e.entryId === it.entryId) : undefined)
+    ?? free.find(e => e.meal === it.meal && e.name === it.name.trim()
+      && Math.abs((e.nutrients[NUTRIENT.kcal] ?? 0) - (it.kcal ?? 0)) <= 1);
+}
+
+// Reads a day from Lose It! and stores it too, so the rows shown (and their
+// entry ids) match what was just read.
+async function fetchDayAndStore(who: Parameters<typeof fetchDay>[0], date: string): Promise<LoseItEntry[]> {
+  const entries = await fetchDay(who, date);
+  const state = loadState();
+  replaceDay(date, entries.map(e => rowFromEntry(e, state)), "rpc");
+  saveState(state);
+  return entries;
 }
 
 // ── Copy to today (web Nutrition page's right-click menu) ──────────────────
@@ -515,16 +536,14 @@ export async function copyLoseItFoods(
   let copied = 0;
   await withLoseItSession(async who => {
     copied = 0;
-    const entries = await fetchDay(who, fromDate);
+    const entries = await fetchDayAndStore(who, fromDate);
     const picks: { entry: LoseItEntry; meal: number }[] = [];
     if ("meal" in what) {
       for (const entry of entries) if (entry.meal === what.meal) picks.push({ entry, meal: what.meal });
     } else {
       const used = new Set<LoseItEntry>();
       for (const it of what.items) {
-        const entry = entries.find(e => !used.has(e) && (it.entryId
-          ? e.entryId === it.entryId
-          : e.meal === it.meal && e.name === it.name.trim() && Math.abs((e.nutrients[NUTRIENT.kcal] ?? 0) - (it.kcal ?? 0)) <= 1));
+        const entry = findEntry(entries, it, used);
         if (!entry) throw new Error(`${it.name} is no longer in that day's Lose It! diary`);
         used.add(entry);
         picks.push({ entry, meal: what.toMeal });
@@ -539,4 +558,45 @@ export async function copyLoseItFoods(
   });
   await refreshDay(toDate);
   return { copied, toDate, day: getDiaryDay(toDate) };
+}
+
+// ── Food diary as text, for the AI coach and the AI nutrition summary ──────
+
+function amountText(r: { quantity: number | null; units: string | null }): string {
+  if (r.quantity == null) return "";
+  const q = Math.round(r.quantity * 100) / 100;
+  return r.units ? `${q} ${r.units}${q !== 1 && r.units !== "Each" ? "s" : ""}` : String(q);
+}
+
+// One line per meal: "2026-10-28 Lunch (453 kcal): Dry Cured Ham, Marks And Spencer, 40 Grams, 52 kcal [P10 C0 F1]; …".
+// detailed adds each food's macros; otherwise just name, amount and kcal.
+export function foodDiaryLines(from: string, to: string, detailed: boolean): string[] {
+  const rows = getDb().prepare("SELECT * FROM loseit_food_log WHERE date >= ? AND date <= ? ORDER BY date, meal, seq").all(from, to) as DbRow[];
+  const out: string[] = [];
+  const groups = new Map<string, DbRow[]>();
+  for (const r of rows) {
+    const k = `${r.date}|${r.meal}`;
+    groups.set(k, [...(groups.get(k) ?? []), r]);
+  }
+  groups.forEach((list, k) => {
+    const [date, meal] = k.split("|");
+    const total = Math.round(list.reduce((a, r) => a + (r.kcal ?? 0), 0));
+    const foods = list.map(r => {
+      const bits = [r.name, r.brand, amountText(r), r.kcal != null ? `${Math.round(r.kcal)} kcal` : null].filter(Boolean).join(", ");
+      const macros = detailed && (r.protein_g != null || r.carbs_g != null || r.fat_g != null)
+        ? ` [P${Math.round(r.protein_g ?? 0)} C${Math.round(r.carbs_g ?? 0)} F${Math.round(r.fat_g ?? 0)}]` : "";
+      return bits + macros;
+    });
+    out.push(`${date} ${MEAL_NAMES[Number(meal)] ?? "Snacks"} (${total} kcal): ${foods.join("; ")}`);
+  });
+  return out;
+}
+
+// Biggest calorie sources over a period: "Coffee (125ml / 12g): 14× , 1,567 kcal total (112 each)".
+export function topFoodLines(from: string, to: string, n = 10): string[] {
+  const rows = getDb().prepare(`
+    SELECT name, COUNT(*) AS times, SUM(kcal) AS total FROM loseit_food_log
+    WHERE date >= ? AND date <= ? AND kcal IS NOT NULL GROUP BY LOWER(TRIM(name)) ORDER BY total DESC LIMIT ?
+  `).all(from, to, n) as { name: string; times: number; total: number }[];
+  return rows.map(r => `${r.name}: ${r.times}×, ${Math.round(r.total).toLocaleString("en-GB")} kcal total (${Math.round(r.total / r.times)} each on average)`);
 }

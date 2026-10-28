@@ -112,7 +112,7 @@ fun NutritionSettingsSection(nutritionApi: NutritionApi) {
 
     Text("Nutrition goals", style = MaterialTheme.typography.titleMedium)
     Text(
-        "Food comes from Lose It! (via Health Connect, below). Calories burnt and weigh-ins come from Garmin. " +
+        "Food comes from Lose It! (synced by the server, below). Calories burnt and weigh-ins come from Garmin. " +
             "These are the same goals as Settings → Nutrition goals on the web.",
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary,
     )

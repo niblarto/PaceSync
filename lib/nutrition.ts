@@ -73,11 +73,16 @@ export function replaceNutritionRange(from: string, to: string, days: NutritionD
   return days.length;
 }
 
+// Food totals come from the Lose It! diary PaceSync syncs itself
+// (loseit_food_log, lib/loseit-food.ts) once that has any data; until then,
+// and for weight, from what the phone pushed from Health Connect
+// (nutrition_daily — no longer updated now the phone doesn't poll).
 export function getNutritionDays(fromDate: string, toDate: string): NutritionDay[] {
-  const rows = getDb()
+  const db = getDb();
+  const rows = db
     .prepare("SELECT * FROM nutrition_daily WHERE date >= ? AND date <= ? ORDER BY date")
     .all(fromDate, toDate) as Row[];
-  return rows.map(r => ({
+  const days = new Map<string, NutritionDay>(rows.map(r => [r.date, {
     date: r.date,
     energyKcal: r.energy_kcal,
     proteinG: r.protein_g,
@@ -86,5 +91,28 @@ export function getNutritionDays(fromDate: string, toDate: string): NutritionDay
     weightKg: r.weight_kg,
     source: r.source,
     updatedAt: r.updated_at,
-  }));
+  }]));
+
+  const hasLoseIt = !!db.prepare("SELECT 1 FROM loseit_food_log LIMIT 1").get();
+  if (hasLoseIt) {
+    const food = db.prepare(`
+      SELECT date, SUM(kcal) AS kcal, SUM(protein_g) AS protein, SUM(carbs_g) AS carbs, SUM(fat_g) AS fat, MAX(updated_at) AS at
+      FROM loseit_food_log WHERE date >= ? AND date <= ? GROUP BY date
+    `).all(fromDate, toDate) as { date: string; kcal: number | null; protein: number | null; carbs: number | null; fat: number | null; at: string }[];
+    const byDate = new Map(food.map(f => [f.date, f]));
+    // Health Connect food is dropped even on days Lose It! has nothing (the diary is the truth).
+    days.forEach(d => { d.energyKcal = null; d.proteinG = null; d.carbsG = null; d.fatG = null; });
+    byDate.forEach((f, date) => {
+      const round1 = (v: number | null) => (v == null ? null : Math.round(v * 10) / 10);
+      const d = days.get(date) ?? { date, energyKcal: null, proteinG: null, carbsG: null, fatG: null, weightKg: null, source: null };
+      d.energyKcal = round1(f.kcal);
+      d.proteinG = round1(f.protein);
+      d.carbsG = round1(f.carbs);
+      d.fatG = round1(f.fat);
+      d.source = "loseit";
+      d.updatedAt = f.at;
+      days.set(date, d);
+    });
+  }
+  return Array.from(days.values()).sort((a, b) => a.date.localeCompare(b.date));
 }

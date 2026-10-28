@@ -857,7 +857,7 @@ export function NutritionClient() {
                 `Page updated ${loadedAt ? stamp(new Date(loadedAt).toISOString()) : "-"}; next auto-refresh in ${next ?? "-"} min`,
                 `Garmin weigh-ins fetched ${stamp(s.garminWeight)} (hourly at :37, next ${stamp(nextWeight.toISOString())}, and when this page opens)`,
                 `Today's calories burnt from Garmin ${stamp(s.todayBurn)} (at most every 15 min)`,
-                `Lose It! food from the phone ${stamp(s.food)} (phone checks every ~15 min)`,
+                `Lose It! food synced ${stamp(s.food)} (hourly, and when this page opens)`,
                 `GarminDB sync ${stamp(s.garminDb)} (daily 06:00 and after new activities)`,
               ].join("\n");
               return (
@@ -990,7 +990,7 @@ export function NutritionClient() {
               })()}
             </div>
 
-            <FoodDiaryPanel dailyLimit={cfg.dailyCalorieLimit} />
+            <FoodDiaryPanel dailyLimit={cfg.dailyCalorieLimit} onChanged={() => load(range)} />
 
             <SummaryPanel />
 

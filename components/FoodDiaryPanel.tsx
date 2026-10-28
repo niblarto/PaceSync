@@ -116,7 +116,9 @@ function CalorieBar({ eaten, limit }: { eaten: number; limit: number }) {
   );
 }
 
-export function FoodDiaryPanel({ dailyLimit = null }: { dailyLimit?: number | null }) {
+// onChanged: called after this panel adds, removes or copies food, so the
+// page can reload its own numbers (Eaten today, the calories chart).
+export function FoodDiaryPanel({ dailyLimit = null, onChanged }: { dailyLimit?: number | null; onChanged?: () => void }) {
   const today = isoDate(new Date());
   const [date, setDate] = useState(today);
   const [diary, setDiary] = useState<Diary | null>(null);
@@ -162,6 +164,7 @@ export function FoodDiaryPanel({ dailyLimit = null }: { dailyLimit?: number | nu
       const out = await res.json();
       if (!res.ok) throw new Error(out.error || `Copy failed (${res.status})`);
       if (date === out.toDate) applyDay(out.day);
+      onChanged?.();
       setCopyMsg({ text: `Added ${label} to today.`, error: false });
     } catch (e) {
       setCopyMsg({ text: e instanceof Error ? e.message : "Copy failed", error: true });
@@ -170,18 +173,24 @@ export function FoodDiaryPanel({ dailyLimit = null }: { dailyLimit?: number | nu
 
   // Add/remove answer with the day re-read from Lose It!; keep the sync status fields.
   const applyDay = (d: Partial<Diary>) => setDiary(prev => (prev ? { ...prev, ...d } : prev));
+  const added = (d: Partial<Diary>) => { applyDay(d); onChanged?.(); };
 
-  async function remove(f: Food) {
-    if (!f.entryId || !confirm(`Remove ${f.name} from your Lose It! diary?`)) return;
-    setRemoving(f.entryId);
+  // Foods from the export have no entry id; the server then matches them by
+  // meal, name and calories, so they can be removed too.
+  const foodKey = (f: Food, meal: number) => f.entryId ?? `${meal}|${f.name}`;
+
+  async function remove(f: Food, meal: number) {
+    setMenu(null);
+    if (!confirm(`Delete ${f.name} from your Lose It! diary?`)) return;
+    setRemoving(foodKey(f, meal));
     setError(null);
     try {
       const res = await fetch("/api/loseit/log", {
-        method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, entryId: f.entryId }),
+        method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, entryId: f.entryId, name: f.name, meal, kcal: f.kcal }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Remove failed (${res.status})`);
-      applyDay(body);
+      added(body);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Remove failed");
     } finally {
@@ -244,7 +253,7 @@ export function FoodDiaryPanel({ dailyLimit = null }: { dailyLimit?: number | nu
         </div>
       </div>
 
-      {adding && <AddFoodPanel date={date} onAdded={applyDay} />}
+      {adding && <AddFoodPanel date={date} onAdded={added} />}
 
       {error && <p className="text-sm text-rose-300">{error}</p>}
       {copyMsg && <p className={`mb-2 text-xs ${copyMsg.error ? "text-rose-300" : "text-emerald-300"}`}>{copyMsg.text}</p>}
@@ -295,17 +304,15 @@ export function FoodDiaryPanel({ dailyLimit = null }: { dailyLimit?: number | nu
                       <KcalChip kcal={f.kcal} />
                       <Macros t={f} className="text-[10px]" />
                     </div>
-                    {f.entryId && (
-                      <button
-                        onClick={() => remove(f)}
-                        disabled={removing !== null}
-                        title="Remove from Lose It!"
-                        aria-label={`Remove ${f.name}`}
-                        className={`shrink-0 p-1 rounded text-slate-600 hover:text-rose-400 transition-all disabled:opacity-40 ${removing === f.entryId ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
-                      >
-                        {removing === f.entryId ? "…" : "×"}
-                      </button>
-                    )}
+                    <button
+                      onClick={() => remove(f, m.meal)}
+                      disabled={removing !== null}
+                      title="Delete from Lose It!"
+                      aria-label={`Delete ${f.name}`}
+                      className={`shrink-0 p-1 rounded text-slate-600 hover:text-rose-400 transition-all disabled:opacity-40 ${removing === foodKey(f, m.meal) ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+                    >
+                      {removing === foodKey(f, m.meal) ? "…" : "×"}
+                    </button>
                   </li>
                 ))}
               </ul>
@@ -342,11 +349,19 @@ export function FoodDiaryPanel({ dailyLimit = null }: { dailyLimit?: number | nu
           })() : (() => {
             const t = menu.target;
             const item = { entryId: t.food.entryId, name: t.food.name, meal: t.meal, kcal: t.food.kcal };
-            return MEALS.map((name, toMeal) => (
-              <button key={name} role="menuitem" onClick={() => copyToToday({ items: [item], toMeal }, `${t.food.name} (${name})`)} className="block w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-700/60">
-                Add to {name}
-              </button>
-            ));
+            return (
+              <>
+                {MEALS.map((name, toMeal) => (
+                  <button key={name} role="menuitem" onClick={() => copyToToday({ items: [item], toMeal }, `${t.food.name} (${name})`)} className="block w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-700/60">
+                    Add to {name}
+                  </button>
+                ))}
+                <div className="my-1 border-t border-white/10" />
+                <button role="menuitem" onClick={() => remove(t.food, t.meal)} className="block w-full text-left px-3 py-1.5 text-rose-300 hover:bg-rose-500/15">
+                  Delete
+                </button>
+              </>
+            );
           })()}
         </ContextMenu>
       )}

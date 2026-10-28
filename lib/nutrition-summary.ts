@@ -4,6 +4,7 @@ import { coachChat } from "@/lib/coach-llm";
 import { formatCoachText } from "@/lib/coach-format";
 import { coachModelLabel, loadCoachConfig } from "@/lib/coach-config";
 import { buildNutritionDashboard } from "@/lib/nutrition-dashboard";
+import { foodDiaryLines, topFoodLines } from "@/lib/loseit-food";
 import { formatWeight, formatWeightDelta } from "@/lib/weight-format";
 
 // Daily AI summary of the last 14 days of nutrition, for the /nutrition page.
@@ -154,12 +155,19 @@ function dataText(): { text: string; start: string; end: string } {
   const proj = dash.projections.map(p =>
     `${p.label} (${p.basis}): ${formatWeightDelta(p.kgPerWeek, unit)}/week; weight on goal date ${formatWeight(p.weightAtGoalKg, unit)}; target reached ${p.hitStatus === "on-course" ? p.hitDate : p.hitStatus === "reached" ? "already" : "not at this rate"}`,
   );
-  const text = `GOALS\n${goals.join("\n")}\n\nPROJECTIONS\n${proj.join("\n") || "none yet"}\n\nDAILY DATA (food from Lose It!, burn and weight from Garmin; net = eaten − burnt, negative = deficit)\n${lines.join("\n")}`;
+  // What was eaten, food by food, from the Lose It! diary PaceSync syncs.
+  const from = days[0]?.date ?? dash.today, to = days[days.length - 1]?.date ?? dash.today;
+  let foods: string[] = [], top: string[] = [];
+  try { foods = foodDiaryLines(from, to, false); top = topFoodLines(from, to, 12); } catch {}
+  const text = `GOALS\n${goals.join("\n")}\n\nPROJECTIONS\n${proj.join("\n") || "none yet"}\n\nDAILY DATA (food from Lose It!, burn and weight from Garmin; net = eaten − burnt, negative = deficit)\n${lines.join("\n")}`
+    + (foods.length ? `\n\nFOODS EATEN (by day and meal; name, brand, amount, kcal)\n${foods.join("\n")}` : "")
+    + (top.length ? `\n\nBIGGEST CALORIE SOURCES (the 14 days)\n${top.join("\n")}` : "");
   return { text, start: days[0]?.date ?? dash.today, end: days[days.length - 1]?.date ?? dash.today };
 }
 
 const SYSTEM = `You are a sports nutritionist working with a runner who wants to lose weight while training well.
-You get their last 14 days of food logging (Lose It!), calories burnt and weight (Garmin), their goals and projections.
+You get their last 14 days of food logging (Lose It!: daily totals and every food eaten, by meal), calories burnt and weight (Garmin), their goals and projections.
+Where it helps, name the specific foods and meals behind a pattern (e.g. the biggest calorie sources, low-protein meals, snacks that push a day over the limit).
 Be specific, quote numbers, and be honest but encouraging. Use British English. Weights in the units given.
 Days marked "not logged" have no food data: don't treat them as zero calories, mention logging gaps instead.`;
 

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { buildNutritionDashboard } from "@/lib/nutrition-dashboard";
 import { refreshTodayBurn } from "@/lib/garmin-connect";
+import { syncLoseIt } from "@/lib/loseit-food";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,11 @@ export async function GET(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const days = Math.min(365, Math.max(7, Number(req.nextUrl.searchParams.get("days")) || 30));
   const d = new Date();
-  await refreshTodayBurn(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`).catch(() => null);
+  // Today's Garmin burn and today's Lose It! food (the food sync is throttled
+  // to once per 5 minutes inside syncLoseIt, a few KB when it runs).
+  await Promise.all([
+    refreshTodayBurn(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`).catch(() => null),
+    syncLoseIt().catch(() => null),
+  ]);
   return NextResponse.json(buildNutritionDashboard(days));
 }

@@ -1,14 +1,14 @@
 import fs from "fs";
 import path from "path";
-import { getDb } from "@/lib/db";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { getNutritionDays } from "@/lib/nutrition";
 import { getGarminApiWeights, getGarminWeightSamples, lastGarminWeightFetch } from "@/lib/garmin-weight";
 import { cachedTodayBurn } from "@/lib/garmin-connect";
 import { loadNutritionConfig, type NutritionConfig } from "@/lib/nutrition-config";
+import { getLoseItStatus } from "@/lib/loseit-food";
 
 // Data + projections for the /nutrition page.
-//   eaten    — Lose It! via Health Connect (nutrition_daily)
+//   eaten    — the Lose It! diary PaceSync syncs (lib/loseit-food.ts, via getNutritionDays)
 //   burnt    — Garmin daily total (resting + active)
 //   exercise — sum of that day's Garmin activity calories
 //   weight   — Health Connect reading, else GarminDB's weight table (lb)
@@ -80,7 +80,7 @@ export interface NutritionDashboard {
   sources: {
     garminWeight: string | null; // weigh-ins from Garmin Connect (hourly + page refresh)
     todayBurn: string | null; // today's calories burnt so far, Garmin Connect
-    food: string | null; // last Lose It! sync from the phone
+    food: string | null; // last Lose It! diary sync
     garminDb: string | null; // GarminDB sync (activities, past days' burn, sleep)
   };
 }
@@ -220,9 +220,7 @@ function project(
 
 function dataSources(today: string): NutritionDashboard["sources"] {
   let food: string | null = null;
-  try {
-    food = (getDb().prepare("SELECT MAX(updated_at) AS at FROM nutrition_daily").get() as { at: string | null }).at;
-  } catch {}
+  try { food = getLoseItStatus().lastDaySyncAt; } catch {}
   let garminDb: string | null = null;
   const cfg = loadGarminConfig();
   if (cfg) {
