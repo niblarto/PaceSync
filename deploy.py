@@ -342,11 +342,15 @@ FILES = [
     ('lib/favourite-tracks.ts',                    'lib/favourite-tracks.ts'),
     ('app/api/tracks/favourites/route.ts',         'app/api/tracks/favourites/route.ts'),
     ('lib/queued-message.ts',                      'lib/queued-message.ts'),
+    ('lib/wip-playlist.ts',                        'lib/wip-playlist.ts'),
+    ('app/api/spotify/wip/route.ts',               'app/api/spotify/wip/route.ts'),
+    ('app/api/cron/wip-cleanup/route.ts',          'app/api/cron/wip-cleanup/route.ts'),
     ('lib/system-status.ts',                       'lib/system-status.ts'),
     ('app/api/settings/status/route.ts',           'app/api/settings/status/route.ts'),
     ('app/api/settings/status/logs/route.ts',      'app/api/settings/status/logs/route.ts'),
     ('components/TopNav.tsx',                      'components/TopNav.tsx'),
     ('components/useFavourites.ts',                'components/useFavourites.ts'),
+    ('components/usePlaylistAdvance.ts',           'components/usePlaylistAdvance.ts'),
     ('components/StatusTab.tsx',                   'components/StatusTab.tsx'),
     ('lib/spotify-lookup-account.ts',              'lib/spotify-lookup-account.ts'),
     ('app/api/spotify-lookup-account/login/route.ts', 'app/api/spotify-lookup-account/login/route.ts'),
@@ -770,6 +774,16 @@ heal_cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/heal' || {{ (crontab -l 2>/dev/null; echo '{heal_cron_line}') | crontab -; }}""")
+
+# 04:00 daily: delete any "_WIP" playlists left behind by unclosed dashboard mixes.
+print('  Ensuring cron job (WIP playlist cleanup, daily 04:00)...')
+wip_cron_log = f'/home/{PI["user"]}/cron-wip-cleanup.log'
+wip_cron_line = (
+    f'0 4 * * * curl -s -o {wip_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/wip-cleanup '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/wip-cleanup' || {{ (crontab -l 2>/dev/null; echo '{wip_cron_line}') | crontab -; }}""")
 
 # Daily broken-tracklist check — notifies when an upcoming schedule / Pace Pro
 # tracklist still contains a deleted track.

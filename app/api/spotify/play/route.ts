@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { getFreshToken } from "@/lib/tokenStore";
 import { reviewPlaylistContains, reviewPlaylistUri } from "@/lib/review-playlist";
+import { isKnownWipContext } from "@/lib/wip-playlist";
 
 const BASE = "https://api.spotify.com/v1";
 
@@ -15,6 +16,7 @@ const BASE = "https://api.spotify.com/v1";
 // at that track, so Spotify carries on down the list by itself. Only when the playlist
 // really holds the track yet (it is synced in batches); otherwise it plays on its own.
 function reviewStart(contextUri: string, uri: string): boolean {
+  if (isKnownWipContext(contextUri)) return true; // the open mix's _WIP playlist: start it at this track
   return contextUri === reviewPlaylistUri() && reviewPlaylistContains(uri);
 }
 

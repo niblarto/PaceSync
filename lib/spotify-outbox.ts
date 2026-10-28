@@ -68,7 +68,7 @@ export async function call(token: string, path: string, init: RequestInit = {}):
   return governedCall(`${API}${path}`, init, token);
 }
 
-async function ownUserId(token: string): Promise<string> {
+export async function ownUserId(token: string): Promise<string> {
   const cached = readKv<string | null>(USER_KEY, null);
   if (cached) return cached;
   const res = await call(token, "/me");
@@ -127,6 +127,17 @@ async function upsertGoverned(token: string, req: SaveRequest): Promise<UpsertRe
     return { playlistId: id, url: `https://open.spotify.com/playlist/${id}`, tracksAdded: true, replaced: !created };
   }
   throw new Error("Couldn't save the playlist to Spotify");
+}
+
+// Forgets everything remembered about a playlist (queued save, cached id, state) - used after it is deleted on Spotify.
+export function forgetPlaylistSave(name: string): { id: string | null } {
+  const q = loadQueue();
+  if (q[name]) { delete q[name]; writeKv(QUEUE_KEY, q); }
+  const states = loadState();
+  const id = states[name]?.id ?? getCachedPlaylistId(name) ?? null;
+  if (states[name]) { delete states[name]; writeKv(STATE_KEY, states); }
+  clearCachedPlaylistId(name);
+  return { id };
 }
 
 function enqueue(req: SaveRequest): void {

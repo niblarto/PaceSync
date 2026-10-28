@@ -122,7 +122,7 @@ const REST_SUFFIX_RE = / \+ ((\d+)\s*(s|sec|secs|min|mins?)\b[^,]*)$/i;
 // built from a mix's own planned data (no actual pace, since it hasn't been
 // run yet) so it can be shown the moment a mix is built or reloaded from a
 // saved/pinned snapshot. `tracks` should be the full ordered mix track list.
-export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMenu, selectedUris, onToggleSelect, onSelectionContextMenu, deletedUris, zoomKey, height = 220 }: {
+export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMenu, selectedUris, onToggleSelect, onSelectionContextMenu, deletedUris, removedUris, addedUris, zoomKey, height = 220 }: {
   tracks: MixChartTrack[];
   /** Plot height in px (the strips below it are extra). */
   height?: number;
@@ -134,6 +134,10 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
   /** Tracks deleted from the library but still in this mix — their chips
       are highlighted red until swapped (same set the tracklist highlights). */
   deletedUris?: Set<string>;
+  /** Tracks removed from this mix (still shown, orange, until Fill the gap replaces them). */
+  removedUris?: Set<string>;
+  /** Tracks swapped in by Fill the gap (shown green). */
+  addedUris?: Set<string>;
   /** Fired when a track chip in the bottom strip is clicked (in addition to
       playing it in Spotify, which the chart does itself) — lets a caller
       scroll to and highlight the same track wherever else it's shown (e.g.
@@ -587,6 +591,8 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
               const widthPct = span > 0 ? ((t.clipEnd - t.clipStart) / span) * 100 : 0;
               const isLastPlayed = t.uri != null && lastPlayedUri === t.uri;
               const isDeleted = t.uri != null && !!deletedUris?.has(t.uri);
+              const isRemoved = !isDeleted && t.uri != null && !!removedUris?.has(t.uri);
+              const isAdded = !isDeleted && !isRemoved && t.uri != null && !!addedUris?.has(t.uri);
               const canDrag = !!(onReorder && t.uri);
               return (
                 <button
@@ -619,7 +625,7 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
                     }
                     onTrackContextMenu?.(t.uri, e.clientX, e.clientY);
                   }}
-                  title={isDeleted ? `Deleted from the library — right-click → Quick Swap to repair · ${t.name} — ${t.artist}` : t.tempo != null && t.tempo < DOUBLETIME_THRESHOLD
+                  title={isDeleted ? `Deleted from the library — right-click → Quick Swap to repair · ${t.name} — ${t.artist}` : isRemoved ? `Removed from this mix — use Fill the gap to replace · ${t.name} — ${t.artist}` : isAdded ? `Added by Fill the gap · ${t.name} — ${t.artist}` : t.tempo != null && t.tempo < DOUBLETIME_THRESHOLD
                     ? `${t.name} — ${t.artist} (${Math.round(t.tempo)} BPM, felt as ${Math.round(effectiveTempo(t.tempo))} double-time)`
                     : `${t.name} — ${t.artist}`}
                   className={`absolute top-0 h-full flex items-center justify-center overflow-hidden border-r border-slate-950/60 transition-colors ${
@@ -631,6 +637,10 @@ export function MixPaceChart({ tracks, onTrackClick, onReorder, onTrackContextMe
                   } ${
                     isDeleted
                       ? "bg-rose-600/60 hover:bg-rose-500/70 ring-1 ring-inset ring-rose-400"
+                      : isRemoved
+                      ? "bg-orange-500/60 hover:bg-orange-400/70 ring-1 ring-inset ring-orange-400"
+                      : isAdded
+                      ? "bg-green-600/60 hover:bg-green-500/70 ring-1 ring-inset ring-green-400"
                       : isLastPlayed
                       ? "bg-purple-500/50 hover:bg-purple-500/60"
                       : i % 2 === 0

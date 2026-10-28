@@ -29,6 +29,8 @@ interface Props {
   /** Deleted from the library but still in the loaded mix — highlighted
       until it's Quick Swapped. */
   deleted?: boolean;
+  /** "Remove from this mix": still listed (orange) until Fill the gap / a swap replaces it. */
+  removed?: boolean;
   /** Whether to show the BPM badge and track-length column. Defaults to true
       (desktop); the mobile dashboard passes false to save row width for the
       title on a narrow screen. */
@@ -143,7 +145,13 @@ let activeDeviceQueue: Promise<void> = Promise.resolve();
 // contextUri: a playlist (the crawler's review playlist) to play the track from, so
 // Spotify carries on to the next song in it. The server only uses it if that playlist
 // really holds the track, and otherwise plays the track alone.
+// The open dashboard mix's "_WIP" Spotify playlist: a track that is in it is played as part of the playlist,
+// so Spotify itself carries on to the next one (set by the dashboard; null when there is no such playlist).
+let playContext: { contextUri: string; uris: Set<string> } | null = null;
+export function setPlayContext(c: { contextUri: string; uris: Set<string> } | null): void { playContext = c; }
+
 export async function playOnActiveDevice(uri: string, token?: string | null, contextUri?: string | null): Promise<void> {
+  if (!contextUri && playContext?.uris.has(uri)) contextUri = playContext.contextUri;
   const ticket = ++activeDeviceTicket;
   const isCurrent = () => ticket === activeDeviceTicket;
   const run = async () => {
@@ -301,13 +309,13 @@ export function handleArtError(e: SyntheticEvent<HTMLImageElement>, key: string)
   }
 }
 
-export function TrackRow({ track, index, favourite, onToggleFavourite, onDelete, onRemoveFromMix, onReplace, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, deleted, showStats = true, isPlaying, onPlay, reorderable, onDragHandleStart }: Props) {
+export function TrackRow({ track, index, favourite, onToggleFavourite, onDelete, onRemoveFromMix, onReplace, onSimilar, onSuggestStyle, onSuggestTempo, onSuggestArtist, suggestBusy, playedCount, deleted, removed, showStats = true, isPlaying, onPlay, reorderable, onDragHandleStart }: Props) {
   const { data: session } = useSession();
   const artist = track.artists[0]?.name ?? "";
   const artSrc = `/api/itunes-art?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(track.name)}`;
 
   return (
-    <div className={`flex items-center group ${deleted ? "rounded-lg bg-rose-500/10 ring-1 ring-rose-500/60" : ""}`}>
+    <div className={`flex items-center group ${deleted ? "rounded-lg bg-rose-500/10 ring-1 ring-rose-500/60" : removed ? "rounded-lg bg-orange-500/10 ring-1 ring-orange-500/60" : ""}`}>
       {reorderable && (
         <span
           draggable
@@ -339,6 +347,11 @@ export function TrackRow({ track, index, favourite, onToggleFavourite, onDelete,
             {deleted && (
               <span className="text-rose-400 font-semibold" title="Deleted from the library — Quick Swap it to repair this tracklist">
                 Deleted — swap it{" · "}
+              </span>
+            )}
+            {removed && !deleted && (
+              <span className="text-orange-400 font-semibold" title="Removed from this mix: use Fill the gap to replace it">
+                Removed, needs replacing{" · "}
               </span>
             )}
             {track.artists.map((a) => a.name).join(", ")}

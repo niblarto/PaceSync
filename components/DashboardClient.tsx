@@ -15,6 +15,8 @@ import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
 import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArtError, MiniSpinner } from "./TrackRow";
+import { usePlaylistAdvance } from "@/components/usePlaylistAdvance";
+import { setPlayContext } from "@/components/TrackRow";
 import { RunnaSummaryCard, RunnaScheduleCard, MixProgressBar, shortSegmentLabel, type AiDjTimeline, type MixProgress, type RunnaScheduleHandle } from "./RunnaCard";
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
 import { SongProgressBar, HeaderSongBar, ensurePlaying } from "./SongProgressBar";
@@ -87,7 +89,7 @@ const ALL_ZONE: RunningZone = {
   textColor: "text-white",
 };
 
-function VirtualTrackList({ tracks, favouriteUris, onToggleFavourite, onDelete, onRemoveFromMix, onReplace, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, highlightNonce, playingUri, playedCounts, deletedUris, visibleRows }: {
+function VirtualTrackList({ tracks, favouriteUris, onToggleFavourite, onDelete, onRemoveFromMix, onReplace, onReorder, onSimilar, onSuggest, onSuggestArtist, suggestBusy, inlineCard, highlightUri, highlightNonce, playingUri, playedCounts, deletedUris, removedUris, visibleRows }: {
   tracks: TrackWithBPM[];
   favouriteUris?: Set<string>;
   onToggleFavourite?: (track: TrackWithBPM) => void;
@@ -103,6 +105,7 @@ function VirtualTrackList({ tracks, favouriteUris, onToggleFavourite, onDelete, 
   /** Tracks in the loaded mix that have been deleted from the library —
       kept in place and highlighted until Quick Swapped. */
   deletedUris?: Set<string>;
+  removedUris?: Set<string>;
   onDelete?: (track: TrackWithBPM) => void;
   /** Drops a track from the currently-viewed AI DJ mix only (keeps it in the library) — only passed while an aiDjMix is active. */
   onRemoveFromMix?: (track: TrackWithBPM) => void;
@@ -328,6 +331,7 @@ function VirtualTrackList({ tracks, favouriteUris, onToggleFavourite, onDelete, 
             suggestBusy={suggestBusy?.trackId === track.id ? suggestBusy.mode : null}
             playedCount={playedCounts?.[track.uri]}
             deleted={deletedUris?.has(track.uri)}
+            removed={removedUris?.has(track.uri)}
             isPlaying={lastPlayedUri === track.uri}
             onPlay={() => setLastPlayedUri(track.uri)}
             reorderable={!!onReorder}
@@ -609,6 +613,64 @@ export function DashboardClient({ spotifyUser }: Props) {
     for (const t of aiDjMix?.tracks ?? []) if (sessionDeletedUris.has(t.uri) || brokenMissingUris.has(t.uri)) out.add(t.uri);
     return out;
   }, [aiDjMix, sessionDeletedUris, brokenMissingUris]);
+  // Tracks ejected with "Remove from this mix": they stay listed (orange) until Fill the gap replaces them.
+  const [removedMixUris, setRemovedMixUris] = useState<Set<string>>(new Set());
+  // Tracks swapped in by Fill the gap: green on the pace chart until the mix is rebuilt/reloaded.
+  const [filledMixUris, setFilledMixUris] = useState<Set<string>>(new Set());
+  const mixRemovedUris = useMemo(() => {
+    const out = new Set<string>();
+    for (const t of aiDjMix?.tracks ?? []) if (removedMixUris.has(t.uri)) out.add(t.uri);
+    return out;
+  }, [aiDjMix, removedMixUris]);
+  // The list on screen is a playlist: when the playing track ends, the next one down it plays.
+  // The open mix is mirrored to a Spotify playlist "<mix name>_WIP" that is played through and kept in step
+  // with every edit; closing the mix or saving it to Spotify deletes it (and a 04:00 job sweeps up leftovers).
+  const wipNameRef = useRef<string | null>(null);
+  const wipSuppressedRef = useRef<string | null>(null); // mix name that has been saved for real: no more WIP for it
+  const wipSyncedRef = useRef("");
+  async function deleteWip(suppress = false) {
+    const name = wipNameRef.current;
+    if (suppress && aiDjMixRef.current) wipSuppressedRef.current = aiDjMixRef.current.name;
+    setPlayContext(null);
+    wipNameRef.current = null;
+    wipSyncedRef.current = "";
+    if (!name) return;
+    try {
+      await fetch("/api/spotify/wip", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    } catch { /* the 04:00 sweep clears it */ }
+  }
+  const wipUris = useMemo(
+    () => (aiDjMix?.tracks ?? []).filter(t => !mixDeletedUris.has(t.uri) && !mixRemovedUris.has(t.uri)).map(t => t.uri),
+    [aiDjMix, mixDeletedUris, mixRemovedUris],
+  );
+  const wipKey = wipUris.join(",");
+  const mixName = aiDjMix?.name ?? null;
+  useEffect(() => {
+    if (!mixName) { void deleteWip(); return; }
+    if (wipSuppressedRef.current === mixName) return;
+    if (wipNameRef.current && wipNameRef.current !== mixName) void deleteWip(); // a different mix replaced it
+    if (wipUris.length === 0) return;
+    const key = `${mixName}|${wipKey}`;
+    if (wipSyncedRef.current === key) return;
+    const t = setTimeout(() => {
+      wipNameRef.current = mixName;
+      fetch("/api/spotify/wip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: mixName, trackUris: wipUris }),
+      })
+        .then(r => (r.ok ? r.json() : null))
+        .then((d: { playlistId?: string | null } | null) => {
+          if (wipNameRef.current !== mixName) return; // closed / saved / replaced meanwhile
+          wipSyncedRef.current = key;
+          setPlayContext(d?.playlistId ? { contextUri: `spotify:playlist:${d.playlistId}`, uris: new Set(wipUris) } : null);
+        })
+        .catch(() => {});
+    }, 2500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mixName, wipKey]);
+  usePlaylistAdvance(() => filteredTracks.filter(t => !mixDeletedUris.has(t.uri) && !mixRemovedUris.has(t.uri)).map(t => t.uri));
   // Mirrors aiDjMix for reading inside callbacks with an empty dependency
   // array (e.g. loadLibrary) without them going stale — those can't just
   // list aiDjMix as a dependency without changing identity/re-running on
@@ -1213,6 +1275,9 @@ export function DashboardClient({ spotifyUser }: Props) {
     setMissingFeaturesFilter(null);
     setSingleTrackFilter(null);
     const unique = tracks.filter((t, i, a) => a.findIndex(x => x.uri === t.uri) === i);
+    setRemovedMixUris(new Set());
+    setFilledMixUris(new Set());
+    wipSuppressedRef.current = null;
     setAiDjMix({ workoutTitle, name, tracks: unique, totalSec, segments, date, timeline, stale: false, avoidUris, originalCount: unique.length, origin });
     setChartDismissed(false);
     setChartSelectedUris(new Set());
@@ -1559,139 +1624,106 @@ export function DashboardClient({ spotifyUser }: Props) {
   // splice.
   async function topUpAiDjMix() {
     if (!aiDjMix) return;
-    if (aiDjMix.origin !== "pace-pro" && !runnaScheduleRef.current) return;
-    const gap = aiDjMix.originalCount - aiDjMix.tracks.length;
-    if (gap <= 0) return;
+    // Every missing track: ones removed with "Remove from this mix" (orange) and ones deleted from the library (red).
+    const missingUris = new Set(aiDjMix.tracks.filter(t => removedMixUris.has(t.uri) || mixDeletedUris.has(t.uri)).map(t => t.uri));
+    if (missingUris.size === 0) return;
     setToppingUp(true);
     setSaveError(null);
-    const keptUris = aiDjMix.tracks.map(t => t.uri);
-    const keptArtists = new Set(aiDjMix.tracks.flatMap(t => t.artists.map(a => a.name.toLowerCase())));
-    const avoidUris = Array.from(new Set([...(aiDjMix.avoidUris ?? []), ...keptUris]));
-    // Additions are appended after the mix's last segment, so they should
-    // match ITS target BPM — otherwise the fresh rebuild's tracks (spanning
-    // every segment's wildly different targets, e.g. warmup through
-    // cooldown) get picked in whatever order they happen to come back,
-    // producing a BPM line that jumps around instead of holding near the
-    // pace this stretch of the run is actually targeting.
-    const targetBpm = aiDjMix.timeline[aiDjMix.timeline.length - 1]?.targetBpm ?? null;
-    const bpmDistance = (tempo: number) => targetBpm == null ? 0
-      : Math.min(Math.abs(tempo - targetBpm), Math.abs(tempo * 2 - targetBpm), Math.abs(tempo / 2 - targetBpm));
-    // Tracks explicitly removed from this mix session get heavily demoted
-    // (not hard-excluded) so the gap-fill doesn't just pick them straight
-    // back in.
-    const extraPlayCounts = Object.fromEntries(Object.keys(removedFromMix).map(uri => [uri, 1]));
     try {
-      const onTopUpResult = (freshTracks: TrackWithBPM[], _totalSec: number, _timeline: AiDjTimeline, startedAtMs: number) => {
-        // freshTracks is a flattened rebuild of the WHOLE mix — the same
-        // track can legitimately appear in more than one of its segments
-        // (avoidUris is only a soft demotion in the mixer, not a hard
-        // exclusion), so dedupe by uri here too, not just against keptUris —
-        // otherwise a track already kept, or several duplicate entries of
-        // the same fresh candidate, can slip into additions and end up
-        // rendered twice at two different timeline positions.
-        const seenUris = new Set(keptUris);
-        const candidates = [...freshTracks]
-          .filter(t => {
-            if (seenUris.has(t.uri)) return false;
-            // extraPlayCounts only demotes a removed track in the mixer's
-            // own ranking (a soft penalty) — it can still come back if the
-            // rest of the pool runs dry, so it must also be hard-excluded
-            // here or a gap-fill can silently re-add exactly what was just
-            // ejected.
-            if (removedFromMix[t.uri]) return false;
-            if (t.artists.some(a => keptArtists.has(a.name.toLowerCase()))) return false;
-            seenUris.add(t.uri);
-            return true;
-          })
-          .sort((a, b) => bpmDistance(a.bpm) - bpmDistance(b.bpm));
-        const additions = candidates.slice(0, gap);
-        setAiDjMix(prev => {
-          if (!prev) return prev;
-          const merged = [...prev.tracks, ...additions];
-          // timeline must stay in sync with tracks — Pin/Save send timeline,
-          // not tracks, to the pin/history APIs, and the Pace/BPM chart
-          // (MixPaceChart, via timelineToChartTracks) plots each track by
-          // its own startsAt in listed order, assuming strictly increasing
-          // values — every addition sharing the same startsAt collapses them
-          // onto the same point and makes the chart render backward/
-          // overlapping steps. Appending a synthetic "gap fill" segment
-          // (rather than trying to splice additions back into their
-          // original segment slots, which isn't tracked) keeps every
-          // consumer of aiDjMix.timeline showing what's actually in the mix,
-          // but each addition's startsAt must be a real cumulative time
-          // continuing from the end of the mix so far, not a placeholder.
-          //
-          // Must derive the starting cursor from prev.timeline (what the
-          // chart actually renders from), not prev.tracks — handleAiDjMix
-          // deduplicates prev.tracks by uri but leaves prev.timeline
-          // untouched, so if the original build ever placed the same uri in
-          // two segments, prev.tracks is shorter than prev.timeline's
-          // flattened track list and summing its durations undercounts the
-          // real elapsed time, landing the new segment's tracks inside the
-          // time range still occupied by the real last segment instead of
-          // strictly after it.
-          const toSec = (mmss: string) => {
-            const p = mmss.split(":").map(Number);
-            return p.some(isNaN) ? 0 : p.reduce((acc, x) => acc * 60 + x, 0);
-          };
-          const toMmss = (sec: number) => {
-            const m = Math.floor(sec / 60), s = Math.round(sec % 60);
-            return `${m}:${String(s).padStart(2, "0")}`;
-          };
-          const timelineTracks = prev.timeline.flatMap(s => s.tracks);
-          const lastTimelineTrack = timelineTracks[timelineTracks.length - 1];
-          let cursorSec = lastTimelineTrack
-            ? toSec(lastTimelineTrack.startsAt) + (lastTimelineTrack.durationSec ?? 0)
-            : prev.tracks.reduce((sum, t) => sum + t.duration_ms / 1000, 0);
-          // Inherit the target BPM/pace from the mix's last real segment
-          // rather than leaving them null — additions are appended after
-          // everything else, so they're continuing that segment in time,
-          // and the Pace/BPM chart needs a real target to plot a matching
-          // line against instead of the target line dropping to nothing.
-          const lastSeg = prev.timeline[prev.timeline.length - 1];
-          const additionsSegment = additions.length > 0 ? [{
-            segment: lastSeg?.segment ?? "Gap fill",
-            targetBpm: lastSeg?.targetBpm ?? null,
-            targetPaceSec: lastSeg?.targetPaceSec ?? null,
-            tracks: additions.map(t => {
-              const durationSec = Math.round(t.duration_ms / 1000);
-              const startsAt = toMmss(cursorSec);
-              cursorSec += durationSec;
-              return {
-                uri: t.uri,
-                name: t.name,
-                artist: t.artists.map(a => a.name).join(", "),
-                startsAt,
-                durationSec,
-                tempo: t.bpm,
-                camelot: null,
-                energy: t.energy,
-              };
+      const trackByUri = new Map(aiDjMix.tracks.map(t => [t.uri, t] as const));
+      const excludeUris = new Set(aiDjMix.tracks.map(t => t.uri));
+      // Per segment: the tracks still in place stay together, in order, and the time the missing ones
+      // freed up (one contiguous stretch after them) is refilled at that segment's own target BPM.
+      const segTracks: TrackWithBPM[][] = [];
+      const failures: string[] = [];
+      const warnings: string[] = [];
+      let filledAll = true;
+      for (const seg of aiDjMix.timeline) {
+        const inSeg = seg.tracks.map(t => trackByUri.get(t.uri)).filter((t): t is TrackWithBPM => !!t);
+        const missing = inSeg.filter(t => missingUris.has(t.uri));
+        if (missing.length === 0) { segTracks.push(inSeg); continue; }
+        const kept = inSeg.filter(t => !missingUris.has(t.uri));
+        const budgetMs = missing.reduce((n, t) => n + t.duration_ms, 0);
+        if (!seg.targetBpm || budgetMs <= 0) { segTracks.push(inSeg); failures.push(...missing.map(t => t.name)); filledAll = false; continue; }
+        try {
+          const res = await fetch("/api/tracks/replace-candidates-budget", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              targetBpm: seg.targetBpm,
+              artistNames: Array.from(new Set(missing.map(t => t.artists[0]?.name).filter((a): a is string => !!a))),
+              seedUris: missing.map(t => t.uri),
+              excludeUris: Array.from(excludeUris),
+              budgetMs,
             }),
-          }] : [];
-          const newTimeline = [...prev.timeline, ...additionsSegment];
-          const newTotalSec = merged.reduce((sum, t) => sum + t.duration_ms / 1000, 0);
-          const stale = merged.length < prev.originalCount;
-          const next = { ...prev, tracks: merged, timeline: newTimeline, totalSec: newTotalSec, stale };
-          // A gap-fill that fully restores the mix back to its original
-          // length re-pins automatically, same as a fresh build/remix — a
-          // partial fill (still short) leaves the existing pin/stale state
-          // alone so the Pin button stays available for the next fill. The
-          // pin call is derived from the exact same `next` object being
-          // written to aiDjMix state (not a second, independently-built
-          // literal) so the two can never structurally drift apart.
-          if (!stale) pinMix({ date: next.date, workoutTitle: next.workoutTitle, totalSec: next.totalSec, timeline: next.timeline, startedAtMs, allowedUris: new Set(merged.map(t => t.uri)) }, true);
-          return next;
-        });
-      };
-      if (aiDjMix.origin === "pace-pro") {
-        const result = await buildMixDirect(aiDjMix.workoutTitle, aiDjMix.segments, aiDjMix.date, avoidUris, extraPlayCounts);
-        onTopUpResult(result.tracks, result.totalSec, result.timeline, result.startedAtMs);
-      } else {
-        await runnaScheduleRef.current!.topUp(aiDjMix.date, avoidUris, onTopUpResult, extraPlayCounts);
+          });
+          if (!res.ok || !res.body) throw new Error(`Search failed (${res.status})`);
+          let picked: ReplaceCandidate[] | null = null;
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let sep;
+            while ((sep = buf.indexOf("\n\n")) !== -1) {
+              const chunk = buf.slice(0, sep);
+              buf = buf.slice(sep + 2);
+              const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+              if (!dataLine) continue;
+              const msg = JSON.parse(dataLine.slice(6)) as { type: string; tracks?: ReplaceCandidate[]; warning?: string; error?: string };
+              if (msg.type === "error") throw new Error(msg.error ?? "Search failed");
+              if (msg.type === "done") { picked = msg.tracks ?? []; if (msg.warning) warnings.push(msg.warning); }
+            }
+          }
+          if (!picked || picked.length === 0) throw new Error("no match");
+          const resolved: TrackWithBPM[] = [];
+          for (const c of picked) {
+            const t = await resolveCandidateForUse(c);
+            resolved.push(t);
+            excludeUris.add(t.uri);
+          }
+          segTracks.push([...kept, ...resolved]);
+          setFilledMixUris(prev => { const n = new Set(prev); for (const t of resolved) n.add(t.uri); return n; });
+        } catch {
+          segTracks.push(inSeg);
+          failures.push(...missing.map(t => t.name));
+          filledAll = false;
+        }
       }
+
+      // Rebuild the flat list and timeline (startsAt recomputed cumulatively) from the per-segment lists.
+      const nextTracks = segTracks.flat();
+      let cursorSec = 0;
+      const newTimeline: AiDjTimeline = aiDjMix.timeline.map((seg, i) => ({
+        ...seg,
+        tracks: segTracks[i].map(t => {
+          const durationSec = Math.round(t.duration_ms / 1000);
+          const m = Math.floor(cursorSec / 60), sec = Math.round(cursorSec % 60);
+          const startsAt = `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+          cursorSec += durationSec;
+          return { uri: t.uri, name: t.name, artist: t.artists.map(a => a.name).join(", "), startsAt, durationSec, tempo: t.bpm, camelot: null, energy: t.energy };
+        }),
+      }));
+      const newTotalSec = nextTracks.reduce((sum, t) => sum + t.duration_ms / 1000, 0);
+      setRemovedMixUris(prev => {
+        const next = new Set(prev);
+        for (const u of Array.from(prev)) if (!nextTracks.some(t => t.uri === u)) next.delete(u);
+        return next;
+      });
+      setAiDjMix(prev => {
+        if (!prev) return prev;
+        const next = { ...prev, tracks: nextTracks, timeline: newTimeline, totalSec: newTotalSec, originalCount: nextTracks.length, stale: false };
+        if (filledAll) pinMix({ date: next.date, workoutTitle: next.workoutTitle, totalSec: next.totalSec, timeline: next.timeline, allowedUris: new Set(nextTracks.map(t => t.uri)) }, true);
+        return next;
+      });
+      const messages: string[] = [];
+      if (failures.length > 0) messages.push(`No replacement found for ${failures.length} track${failures.length === 1 ? "" : "s"}: ${failures.slice(0, 3).join(", ")}${failures.length > 3 ? "…" : ""}`);
+      messages.push(...warnings);
+      if (messages.length > 0) setSaveError(messages.join(" "));
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : "Failed to top up mix");
+      setSaveError(e instanceof Error ? e.message : "Failed to fill the gap");
     } finally {
       setToppingUp(false);
     }
@@ -2095,6 +2127,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       });
       const data = await res.json() as { error?: string; url?: string; tracksAdded?: boolean; trackUris?: string[]; queued?: boolean; message?: string };
       if (data.error) throw new Error(data.error);
+      void deleteWip(true);
       if (data.queued) {
         // Spotify is rate-limiting: the run is saved here, and the playlist is created automatically later.
         setTodaysRunSaved(true);
@@ -2429,17 +2462,9 @@ export function DashboardClient({ spotifyUser }: Props) {
     // legitimately lag one render behind a just-completed build/fill-the-gap
     // that already changed aiDjMix.tracks. Gating on a match there caused
     // ejects to silently no-op whenever they landed in that window.
-    setAiDjMix(prev => prev
-      ? {
-          ...prev,
-          tracks: prev.tracks.filter(t => t.uri !== track.uri),
-          // timeline must drop the ejected track too — it renders the
-          // Pace/BPM chart directly, so leaving a stale entry there kept an
-          // already-removed track showing on the chart/song-strip.
-          timeline: removeUriFromTimeline(prev.timeline, track.uri),
-          stale: true,
-        }
-      : prev);
+    // The track stays listed (orange on the chart and track list) so the mix
+    // stays open and the gap is visible; Fill the gap replaces it.
+    setRemovedMixUris(prev => new Set(prev).add(track.uri));
     // The pinned mix (if any) is exactly this now-changed tracklist — it no
     // longer matches reality, so unpin THIS workout specifically (not every
     // pin containing the track library-wide, unlike a real delete, since the
@@ -3003,6 +3028,7 @@ export function DashboardClient({ spotifyUser }: Props) {
         until?: string;
       };
       if (data.error) throw new Error(data.error);
+      void deleteWip(true);
       if (data.queued) {
         setSavedQueuedNote(queuedMessage(`"${playlistName}"`, data.until));
         setStep("saved");
@@ -3142,6 +3168,8 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 zoomKey={`${aiDjMix.date}|${aiDjMix.workoutTitle}`}
                 height={165}
                 deletedUris={mixDeletedUris}
+                removedUris={mixRemovedUris}
+                addedUris={filledMixUris}
                 onTrackClick={uri => { setChartHighlightUri(uri); setChartHighlightNonce(n => n + 1); }}
                 onReorder={!aiDjMix.stale ? reorderMixTrackByUri : undefined}
                 onTrackContextMenu={(uri, x, y) => setChartTrackMenu({ uri, x, y })}
@@ -3641,7 +3669,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                     </div>
                   )}
 
-                  {!noBpmFilter && step !== "partial" && aiDjMix?.stale && (
+                  {!noBpmFilter && step !== "partial" && aiDjMix && (aiDjMix.stale || mixRemovedUris.size > 0 || mixDeletedUris.size > 0) && (
                     <div className="flex flex-col items-end gap-1.5 shrink-0">
                       <div className="flex items-center gap-2">
                         <button
@@ -3671,12 +3699,12 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                         </button>
                       </div>
                       <p className="text-xs text-slate-500 max-w-[260px] text-right">
-                        Tracks were deleted — fill the gap to keep the rest and add replacements, or remix to rebuild from scratch.
+                        Tracks were deleted or removed — fill the gap to keep the rest and add replacements, or remix to rebuild from scratch.
                       </p>
                     </div>
                   )}
 
-                  {!noBpmFilter && filteredTracks.length > 0 && step !== "partial" && !aiDjMix?.stale && aiDjMix && (
+                  {!noBpmFilter && filteredTracks.length > 0 && step !== "partial" && !aiDjMix?.stale && mixRemovedUris.size === 0 && mixDeletedUris.size === 0 && aiDjMix && (
                     <div className="flex items-start gap-2 shrink-0">
                       <label className="text-xs text-slate-500 whitespace-nowrap pt-1.5">Spotify playlist name</label>
                       <div className="flex flex-col gap-1.5">
@@ -3843,6 +3871,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                       favouriteUris={favouriteUris}
                       onToggleFavourite={toggleFavourite}
                       deletedUris={aiDjMix ? mixDeletedUris : undefined}
+                      removedUris={aiDjMix ? mixRemovedUris : undefined}
                       onDelete={handleDeleteTrack}
                       onRemoveFromMix={aiDjMix ? removeTrackFromMix : undefined}
                       onReorder={aiDjMix && !aiDjMix.stale ? reorderMixTrack : undefined}
