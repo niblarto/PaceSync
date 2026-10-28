@@ -204,6 +204,8 @@ FILES = [
     ('lib/coach-garmin-extra.ts',                 'lib/coach-garmin-extra.ts'),
     ('scripts/fit_laps.py',                       'scripts/fit_laps.py'),
     ('scripts/garmin_after_sync.sh',              'scripts/garmin_after_sync.sh'),
+    ('scripts/pacesync_backup.py',                'scripts/pacesync_backup.py'),
+    ('scripts/pacesync_restore.sh',               'scripts/pacesync_restore.sh'),
     ('app/api/coach/refresh-data/route.ts',       'app/api/coach/refresh-data/route.ts'),
     ('lib/coach-weekly.ts',                       'lib/coach-weekly.ts'),
     ('lib/coach-format.ts', 'lib/coach-format.ts'),
@@ -864,6 +866,17 @@ run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/garmin-weight' || {{ (c
 # the existing garmin cron line if the hook isn't there yet. The garmin cron
 # itself is user-installed (garmin_run.py pre-dates this app), so there's no
 # install-if-missing step for it here.
+print('  Ensuring nightly PaceSync backup (03:15, to the FILESERVER Backups share)...')
+backup_py = f'{PI_REMOTE}/scripts/pacesync_backup.py'
+backup_sh = f'{PI_REMOTE}/scripts/pacesync_restore.sh'
+run(ssh, f"sed -i 's/\\r$//' {backup_py} {backup_sh} && chmod +x {backup_py} {backup_sh}")
+# The share's login lives only on the Pi, in ~/.pacesync-backup.cred (username=/password= lines).
+run(ssh, f"test -f /home/{PI['user']}/.pacesync-backup.cred || echo 'WARNING: ~/.pacesync-backup.cred is missing on the Pi: the nightly backup will fail until it is created'")
+backup_cron_line = (
+    f'15 3 * * * /usr/bin/python3 {backup_py} >> /home/{PI["user"]}/cron-backup.log 2>&1'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q 'pacesync_backup.py' || {{ (crontab -l 2>/dev/null; echo '{backup_cron_line}') | crontab -; }}""")
+
 print('  Ensuring Garmin sync ntfy hook...')
 notify_sh = f'{PI_REMOTE}/scripts/garmin_notify.sh'
 after_sh = f'{PI_REMOTE}/scripts/garmin_after_sync.sh'
