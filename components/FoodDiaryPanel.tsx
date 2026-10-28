@@ -119,6 +119,51 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
   const [drop, setDrop] = useState<{ food: Food; from: number; to: number } | null>(null);
   const [placing, setPlacing] = useState<"move" | "copy" | null>(null);
   const [copyMsg, setCopyMsg] = useState<{ text: string; error: boolean } | null>(null);
+  // Clicking a food opens "change the amount".
+  const [editing, setEditing] = useState<{ food: Food; meal: number } | null>(null);
+  const [editQty, setEditQty] = useState("");
+  const [editUnit, setEditUnit] = useState<"food" | "gram">("food");
+  const [saving, setSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  function startEdit(food: Food, meal: number) {
+    setMenu(null);
+    setEditing({ food, meal });
+    setEditQty(food.quantity == null ? "" : String(Math.round(food.quantity * 100) / 100));
+    setEditUnit("food");
+    setEditError(null);
+  }
+
+  async function saveEdit() {
+    if (!editing) return;
+    const quantity = Number(editQty);
+    if (!(quantity > 0)) return;
+    setSaving(true);
+    setEditError(null);
+    try {
+      const f = editing.food;
+      const res = await fetch("/api/loseit/edit", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date, quantity, unit: editUnit, item: { entryId: f.entryId, name: f.name, meal: editing.meal, kcal: f.kcal } }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Edit failed (${res.status})`);
+      added(body);
+      setEditing(null);
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : "Edit failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Escape closes the edit dialog.
+  useEffect(() => {
+    if (!editing || saving) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setEditing(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editing, saving]);
 
   // Right-click menu closes on any click, scroll, resize or Escape.
   useEffect(() => {
@@ -329,7 +374,9 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
                     }}
                     onDragEnd={() => { setDrag(null); setOverMeal(null); }}
                     onContextMenu={e => openMenu(e, { kind: "food", meal: m.meal, food: f })}
-                    className={`group flex items-center gap-2.5 rounded-lg px-1.5 py-1.5 hover:bg-slate-800/60 transition-colors cursor-grab active:cursor-grabbing ${
+                    onClick={() => startEdit(f, m.meal)}
+                    title="Click to change the amount"
+                    className={`group flex items-center gap-2.5 rounded-lg px-1.5 py-1.5 hover:bg-slate-800/60 transition-colors cursor-pointer active:cursor-grabbing ${
                       drag?.food === f ? "opacity-40" : ""
                     }`}
                   >
@@ -343,7 +390,7 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
                       <Macros t={f} className="text-[10px]" />
                     </div>
                     <button
-                      onClick={() => remove(f, m.meal)}
+                      onClick={e => { e.stopPropagation(); remove(f, m.meal); }}
                       disabled={removing !== null}
                       title="Delete from Lose It!"
                       aria-label={`Delete ${f.name}`}
@@ -417,6 +464,81 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
         document.body,
       )}
 
+      {editing && createPortal(
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-[2px] p-4"
+          onClick={() => { if (!saving) setEditing(null); }}
+        >
+          <form
+            role="dialog"
+            aria-label="Change amount"
+            onClick={e => e.stopPropagation()}
+            onSubmit={e => { e.preventDefault(); saveEdit(); }}
+            className="w-full max-w-sm rounded-xl bg-slate-900 border border-white/10 shadow-2xl p-5 space-y-4"
+          >
+            {(() => {
+              const f = editing.food;
+              const qty = Number(editQty);
+              const ownLabel = f.units ? (UNIT_ABBR[f.units] ?? f.units.toLowerCase()) : "amount";
+              // Calories scale with the amount when the unit stays the same.
+              const preview = editUnit === "food" && f.kcal != null && f.quantity && qty > 0 ? (f.kcal * qty) / f.quantity : null;
+              return (
+                <>
+                  <div className="flex items-center gap-3">
+                    <FoodIcon icon={f.icon} size={40} />
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-100 truncate">{f.name}</p>
+                      <p className="text-xs text-slate-400">
+                        <span className={`border rounded-full px-2 py-0.5 ${MEAL_STYLE[editing.meal] ?? MEAL_STYLE[3]}`}>{MEALS[editing.meal]}</span>
+                        <span className="ml-2">now {amount(f) || "—"}</span>
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number" inputMode="decimal" min="0" step="any" autoFocus value={editQty}
+                      onChange={e => setEditQty(e.target.value)}
+                      onFocus={e => e.target.select()}
+                      className="w-28 rounded-lg bg-slate-800 border border-slate-700 text-sm px-3 py-2 text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    />
+                    {f.units === "Gram" ? (
+                      <span className="text-sm text-slate-400">g</span>
+                    ) : (
+                      <select
+                        value={editUnit}
+                        onChange={e => setEditUnit(e.target.value as "food" | "gram")}
+                        className="rounded-lg bg-slate-800 border border-slate-700 text-sm px-2 py-2 text-slate-100"
+                      >
+                        <option value="food">{ownLabel}</option>
+                        <option value="gram">g (grams)</option>
+                      </select>
+                    )}
+                    {preview != null && (
+                      <span className="ml-auto text-xs text-slate-400">≈ <span className="font-mono text-slate-200">{Math.round(preview)}</span> kcal</span>
+                    )}
+                  </div>
+                  {editUnit === "gram" && f.units !== "Gram" && (
+                    <p className="text-[11px] text-slate-500">The amount is switched to grams, scaled from the food&apos;s logged weight.</p>
+                  )}
+                  {editError && <p className="text-xs text-rose-300">{editError}</p>}
+                  <div className="flex justify-end gap-2">
+                    <button type="button" onClick={() => setEditing(null)} disabled={saving}
+                      className="rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 text-sm px-3 py-1.5 text-slate-300 transition-colors">
+                      Cancel
+                    </button>
+                    <button type="submit" disabled={saving || !(qty > 0)}
+                      className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-sm font-medium px-3 py-1.5 text-white transition-colors">
+                      {saving ? "Saving…" : "Save"}
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
+          </form>
+        </div>,
+        document.body,
+      )}
+
       {menu && (
         <ContextMenu x={menu.x} y={menu.y}>
           {menu.target.kind === "meal" ? (() => {
@@ -431,6 +553,10 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
             const item = { entryId: t.food.entryId, name: t.food.name, meal: t.meal, kcal: t.food.kcal };
             return (
               <>
+                <button role="menuitem" onClick={() => startEdit(t.food, t.meal)} className="block w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-700/60">
+                  Edit amount
+                </button>
+                <div className="my-1 border-t border-white/10" />
                 {MEALS.map((name, toMeal) => (
                   <button key={name} role="menuitem" onClick={() => copyToToday({ items: [item], toMeal }, `${t.food.name} (${name})`)} className="block w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-700/60">
                     Add to {name}

@@ -607,6 +607,41 @@ export function moveEntry(build: LoseItBuild, src: GNode, meal: number): GNode {
   return e;
 }
 
+// The same entry with a different amount, scaled from what is logged now: in
+// the entry's own unit, or in grams (scaled from the logged weight, and
+// switching the entry's unit to Gram). Saved with its own key, Lose It!
+// updates it in place; the last-changed times are set to "now" so the apps sync it.
+export function rescaleEntry(build: LoseItBuild, src: GNode, quantity: number, unit: "food" | "gram" = "food"): GNode {
+  const e = JSON.parse(JSON.stringify(src)) as GNode;
+  const serving = fNode(e, 8);
+  const fn = fNode(serving, 0);
+  const size = fNode(serving, 1);
+  const map = fNode(fn, 2);
+  if (!serving || !fn || !size || !map?.map) throw new Error("unexpected entry shape");
+  let ratio: number;
+  if (unit === "gram") {
+    const weight = map.map.find(([k]) => k && fNum(k, 0) === WEIGHT_G)?.[1];
+    const now = weight ? fNum(weight, 0) : 0;
+    if (!(now > 0)) throw new Error("Lose It! has no weight for this food, so it can't be edited in grams");
+    ratio = quantity / now;
+  } else {
+    const now = fNum(serving, 3);
+    if (!(now > 0)) throw new Error("this entry has no amount to scale from");
+    ratio = quantity / now;
+  }
+  for (const [, v] of map.map) if (v) v.f[0] = fNum(v, 0) * ratio;
+  fn.f[0] = fNum(fn, 0) * ratio;
+  fn.f[1] = fNum(fn, 1) * ratio;
+  size.f[0] = fNum(size, 0) * ratio;
+  serving.f[2] = fNum(serving, 2) * ratio;
+  serving.f[3] = quantity; serving.f[4] = quantity;
+  if (unit === "gram") size.f[2] = nodeFor(build, "com.loseit.core.client.model.FoodMeasure", [GRAM_MEASURE]);
+  const now = encodeLong(Date.now());
+  e.f[3] = now;
+  serving.f[7] = now;
+  return e;
+}
+
 // A copy of a logged entry (same food, amount and nutrients) as a new entry
 // on another day/meal: a fresh random entry key (as the CLI does; Lose It!
 // keys are just 16 random bytes), no logged-at time, and "now" as its

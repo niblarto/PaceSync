@@ -46,12 +46,24 @@ STATUS = HOME / ".pacesync-backup-status.json"
 LOCK = WORK / "lock"
 
 MOUNT = Path("/mnt/pacesync-backup")
-HOSTS = ["192.168.0.31", "fileserver.local"]  # IP first; the mDNS name if it ever moves
-SHARE = "Backups"
-DEST_DIR = "PaceSync"
+CONFIG = HOME / ".pacesync-backup.json"  # written by Settings → Backup; optional
+
+
+def _config() -> dict:
+    try:
+        return json.loads(CONFIG.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+_cfg = _config()
+_host = str(_cfg.get("host") or "192.168.0.31")
+HOSTS = [_host] + (["fileserver.local"] if _host == "192.168.0.31" else [])  # the mDNS name if the IP ever moves
+SHARE = str(_cfg.get("share") or "Backups")
+DEST_DIR = str(_cfg.get("folder") or "PaceSync")
 SMB_VERSIONS = ["3.1.1", "3.0", "2.1"]
 
-KEEP_DAILY = 30
+KEEP_DAILY = min(365, max(3, int(_cfg.get("keepDays") or 30)))
 MIN_FREE_GB = 20
 MAX_MIRROR_DELETES = 2000  # rsync refuses to delete more than this in one run
 

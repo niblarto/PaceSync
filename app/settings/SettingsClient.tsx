@@ -7,6 +7,7 @@ import { LookupAccountCard } from "@/components/LookupAccountCard";
 import { StatusTab } from "@/components/StatusTab";
 import { NutritionSettingsCard } from "@/components/NutritionSettingsCard";
 import { LoseItSettingsCard } from "@/components/LoseItSettingsCard";
+import { BackupSettingsCard } from "@/components/BackupSettingsCard";
 import { GarminPersonalApiCard } from "@/components/GarminPersonalApiCard";
 import { createPortal } from "react-dom";
 import { SongProgressBar, ensurePlaying } from "@/components/SongProgressBar";
@@ -5771,6 +5772,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     {/* ── Tab: Scheduled Jobs ── */}
     <div className={activeTab === "scheduled-jobs" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
+
+      <BackupSettingsCard />
 
       {/* Scheduled jobs */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">

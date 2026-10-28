@@ -13,6 +13,7 @@ import { loadRunningPlaylistConfig } from "@/lib/running-playlist-config";
 import { getCachedPlaylistId } from "@/lib/playlist-id-cache";
 import { buildNutritionDashboard } from "@/lib/nutrition-dashboard";
 import { readAllTracks } from "@/lib/tracks-store";
+import { getBackupState } from "@/lib/backup-settings";
 
 // The Settings > Status tab: the state of each account and any restriction in effect, what is queued,
 // the health of the server and of the external services. Everything here is read from local state or,
@@ -255,6 +256,36 @@ function cronSection(): StatusSection {
   return { title: "Scheduled jobs (last run)", items };
 }
 
+// ── nightly backup (lib/backup-settings.ts) ──
+function backupSection(): StatusSection {
+  const b = getBackupState();
+  if (!b.supported) return { title: "Backup", items: [item("Backup", "info", "Only runs on the Raspberry Pi server.")] };
+  const items: StatusItem[] = [];
+  const next = b.nextRunAt ? new Date(b.nextRunAt) : null;
+  items.push(item("Schedule", b.enabled ? "ok" : "warn",
+    b.enabled ? `Every night at ${b.time}${next ? `; next run ${next.toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : ""}` : "Off: no backups are being made"));
+  items.push(item("Destination", b.username && b.hasPassword ? "ok" : "error",
+    `//${b.host}/${b.share}/${b.folder}, keeping ${b.keepDays} days${b.username && b.hasPassword ? "" : " (share login not set)"}`));
+  const last = b.last;
+  if (b.running) items.push(item("Running now", "info", "A backup is in progress."));
+  if (!last) {
+    items.push(item("Last backup", b.enabled ? "warn" : "info", "No backup has run yet."));
+  } else {
+    const done = last.finishedAt ?? last.startedAt;
+    const age = done ? Date.now() - new Date(done).getTime() : Infinity;
+    if (last.ok) {
+      const mb = last.archiveBytes ? ` · archive ${(last.archiveBytes / 1048576).toFixed(1)} MB` : "";
+      const stale = b.enabled && age > 36 * 3600_000;
+      items.push(item("Last backup", stale ? "warn" : "ok",
+        `${stamp(done)}: OK in ${last.seconds ?? "?"}s${mb}${stale ? " (overdue: expected nightly)" : ""}`));
+      if (last.daily != null) items.push(item("Archives kept", "info", `${last.daily} daily${last.shareFreeGB != null ? ` · ${last.shareFreeGB} GB free on the share` : ""}`));
+    } else {
+      items.push(item("Last backup", "error", `${stamp(done)}: FAILED: ${last.error ?? "unknown error"}`));
+    }
+  }
+  return { title: "Backup", items };
+}
+
 export async function buildStatusReport(live: boolean): Promise<StatusReport> {
   const sections: StatusSection[] = [];
   const add = async (fn: () => StatusSection | Promise<StatusSection>, title: string) => {
@@ -265,6 +296,7 @@ export async function buildStatusReport(live: boolean): Promise<StatusReport> {
   if (live) await add(servicesSection, "External services (live check)");
   await add(feedsSection, "Data feeds");
   await add(systemSection, "Server");
+  await add(backupSection, "Backup");
   await add(cronSection, "Scheduled jobs (last run)");
   return { generatedAt: new Date().toISOString(), live, sections };
 }

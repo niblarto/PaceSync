@@ -1,6 +1,6 @@
 import { getDb } from "@/lib/db";
 import {
-  copyEntry, currentBuild, deleteEntry, moveEntry, fetchDay, fetchMyFoods, getFoodDraft, LoseItAuthError, prepareEntry, saveEntry, searchFoods, summarizeDraft, WEIGHT_G,
+  copyEntry, currentBuild, deleteEntry, moveEntry, fetchDay, fetchMyFoods, getFoodDraft, LoseItAuthError, prepareEntry, rescaleEntry, saveEntry, searchFoods, summarizeDraft, WEIGHT_G,
   type LoseItEntry,
 } from "@/lib/loseit-gwt";
 import { downloadExport, parseFoodLogCsv, readZipEntry, singularUnit, type ExportFoodRow } from "@/lib/loseit-export";
@@ -601,6 +601,21 @@ export function topFoodLines(from: string, to: string, n = 10): string[] {
   return rows.map(r => `${r.name}: ${r.times}×, ${Math.round(r.total).toLocaleString("en-GB")} kcal total (${Math.round(r.total / r.times)} each on average)`);
 }
 
+
+// ── Edit the amount of a logged food ───────────────────────────────────────
+
+// Changes how much of a food was eaten; the calories and nutrients are scaled
+// to match. quantity is in the entry's own unit, or in grams with unit "gram".
+export async function editLoseItFood(date: string, item: CopyItem, quantity: number, unit: "food" | "gram" = "food"): Promise<DiaryDay> {
+  if (!(quantity > 0 && quantity < 100_000)) throw new Error("quantity must be positive");
+  await withLoseItSession(async who => {
+    const entry = findEntry(await fetchDayAndStore(who, date), item, new Set());
+    if (!entry) throw new Error(`${item.name} is no longer in that day's Lose It! diary`);
+    await saveEntry(who, rescaleEntry(await currentBuild(who.cookie), entry.node, quantity, unit));
+  });
+  await refreshDay(date);
+  return getDiaryDay(date);
+}
 
 // ── Move / copy between meals of the same day (drag and drop) ──────────────
 
