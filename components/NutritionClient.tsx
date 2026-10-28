@@ -649,6 +649,10 @@ export function NutritionClient() {
     }
   }, [load]);
 
+  // The projection card the pointer is over: its line (and fitted trend line
+  // and end label) is highlighted on the weight chart, the rest fade back.
+  const [hoverProj, setHoverProj] = useState<Projection["method"] | null>(null);
+
   // Get Garmin's latest weigh-in once when the page opens.
   useEffect(() => { refreshWeight(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1021,33 +1025,35 @@ export function NutritionClient() {
                         dot={{ r: 4, fill: PROJ_COLORS.postrun, stroke: "#052e16", strokeWidth: 1 }} activeDot={{ r: 5, fill: PROJ_COLORS.postrun, stroke: "none" }}
                         isAnimationActive={false} />
                       {data.postRunFit && (
-                        <Line dataKey="postFit" name={`Post-run fit (last ${cfg.trendDays} days)`} stroke={PROJ_COLORS.postrun} strokeOpacity={0.55}
-                          strokeWidth={2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
+                        <Line dataKey="postFit" name={`Post-run fit (last ${cfg.trendDays} days)`} stroke={PROJ_COLORS.postrun} strokeOpacity={hoverProj == null ? 0.55 : hoverProj === "postrun" ? 1 : 0.08}
+                          strokeWidth={hoverProj === "postrun" ? 3 : 2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
                       )}
                       {/* Fitted trend over the window's weigh-ins: the basis of "Scale trend" */}
                       {data.trendFit7 && (
-                        <Line dataKey="fit7" name="Trend fit (last 7 weigh-ins)" stroke={PROJ_COLORS.trend7} strokeOpacity={0.55}
-                          strokeWidth={2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
+                        <Line dataKey="fit7" name="Trend fit (last 7 weigh-ins)" stroke={PROJ_COLORS.trend7} strokeOpacity={hoverProj == null ? 0.55 : hoverProj === "trend7" ? 1 : 0.08}
+                          strokeWidth={hoverProj === "trend7" ? 3 : 2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
                       )}
                       {data.trendFit && (
-                        <Line dataKey="fit" name={`Trend fit (last ${cfg.trendDays} days)`} stroke={PROJ_COLORS.trend} strokeOpacity={0.55}
-                          strokeWidth={2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
+                        <Line dataKey="fit" name={`Trend fit (last ${cfg.trendDays} days)`} stroke={PROJ_COLORS.trend} strokeOpacity={hoverProj == null ? 0.55 : hoverProj === "trend" ? 1 : 0.08}
+                          strokeWidth={hoverProj === "trend" ? 3 : 2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
                       )}
                       {/* The 7-day average, held flat to the goal date (no change) */}
-                      <Line dataKey="avg" name="7-day avg (if unchanged)" stroke="#fbbf24" strokeOpacity={0.8} strokeWidth={2}
+                      <Line dataKey="avg" name="7-day avg (if unchanged)" stroke="#fbbf24" strokeOpacity={hoverProj == null ? 0.8 : 0.15} strokeWidth={2}
                         strokeDasharray="2 5" connectNulls dot={false} activeDot={false} isAnimationActive={false} />
                       {/* The 7-day average every projection starts from */}
                       <ReferenceLine segment={[{ x: weightChart.avgFrom, y: weightChart.anchor }, { x: weightChart.todayMs, y: weightChart.anchor }]}
-                        stroke="#fbbf24" strokeWidth={4} ifOverflow={wDomain ? "hidden" : "extendDomain"}
-                        label={{ value: "7-day avg", fill: "#fbbf24", fontSize: 10, position: "insideBottomLeft" }} />
+                        stroke="#fbbf24" strokeWidth={4} strokeOpacity={hoverProj == null ? 1 : 0.2} ifOverflow={wDomain ? "hidden" : "extendDomain"}
+                        label={{ value: "7-day avg", fill: "#fbbf24", fontSize: 10, position: "insideBottomLeft", opacity: hoverProj == null ? 1 : 0.2 }} />
                       {data.projections.map(p => (
                         <Line key={p.method} dataKey={p.method} name={p.label} stroke={PROJ_COLORS[p.method]} connectNulls
-                          strokeWidth={2} strokeDasharray="5 4" dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
+                          strokeOpacity={hoverProj == null || hoverProj === p.method ? 1 : 0.12}
+                          strokeWidth={hoverProj === p.method ? 4 : 2} strokeDasharray="5 4" dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
                       ))}
                       {/* Each projection's weight where it meets the goal date, and the 7-day average's weight at its end */}
                       {weightChart.endMarks.filter(m => !wDomain || (m.ms >= wDomain[0] && m.ms <= wDomain[1])).map(m => (
-                        <ReferenceDot key={`end-${m.key}`} x={m.ms} y={m.kg} r={4}
-                          fill={m.color} stroke="#f8fafc" strokeWidth={1.5} ifOverflow={wDomain ? "hidden" : "extendDomain"}
+                        <ReferenceDot key={`end-${m.key}`} x={m.ms} y={m.kg} r={hoverProj === m.key ? 6 : 4}
+                          fill={m.color} stroke="#f8fafc" strokeWidth={1.5}
+                          fillOpacity={hoverProj == null || hoverProj === m.key ? 1 : 0.15} strokeOpacity={hoverProj == null || hoverProj === m.key ? 1 : 0.15} ifOverflow={wDomain ? "hidden" : "extendDomain"}
                           label={{
                             content: props => {
                               const vb = (props as { viewBox?: { x: number; y: number; width: number; height: number } }).viewBox;
@@ -1059,7 +1065,7 @@ export function NutritionClient() {
                               const cy = vb.y + vb.height / 2 + m.dy;
                               const right = vb.x - 8;
                               return (
-                                <g>
+                                <g opacity={hoverProj == null || hoverProj === m.key ? 1 : 0.15}>
                                   <rect x={right - w} y={cy - 9} width={w} height={18} rx={4}
                                     fill="#0f172a" fillOpacity={0.94} stroke={m.color} strokeWidth={1.5} />
                                   <text x={right - w / 2} y={cy + 4.5} textAnchor="middle" fill="#f8fafc" fontSize={12} fontWeight={700}>
@@ -1092,7 +1098,11 @@ export function NutritionClient() {
                   <div className="space-y-3">
                     <div className="flex flex-col md:flex-row gap-3">
                     {data.projections.map(p => (
-                      <div key={p.method} className="flex-1 min-w-0 rounded-lg border border-white/10 bg-slate-800/40 p-3 border-l-4" style={{ borderLeftColor: PROJ_COLORS[p.method] }}>
+                      <div key={p.method}
+                        onMouseEnter={() => setHoverProj(p.method)} onMouseLeave={() => setHoverProj(null)}
+                        className={`flex-1 min-w-0 rounded-lg border p-3 border-l-4 transition-colors cursor-default ${
+                          hoverProj === p.method ? "border-white/25 bg-slate-800/80" : "border-white/10 bg-slate-800/40"
+                        }`} style={{ borderLeftColor: PROJ_COLORS[p.method] }}>
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-medium text-slate-100">{p.label}</span>
                           <span className="ml-auto text-xs font-mono font-semibold rounded px-1.5 py-0.5 tabular-nums"
