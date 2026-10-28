@@ -15,7 +15,7 @@ import Link from "next/link";
 import type { RunningZone, TrackWithBPM } from "@/types";
 import { ZoneCard } from "./ZoneCard";
 import { TrackRow, playInSpotify, openSpotifyAppFirst, openSpotifyUrl, handleArtError, MiniSpinner } from "./TrackRow";
-import { RunnaSummaryCard, RunnaScheduleCard, type AiDjTimeline, type RunnaScheduleHandle } from "./RunnaCard";
+import { RunnaSummaryCard, RunnaScheduleCard, MixProgressBar, shortSegmentLabel, type AiDjTimeline, type MixProgress, type RunnaScheduleHandle } from "./RunnaCard";
 import { MixPaceChart, timelineToChartTracks } from "./MixPaceChart";
 import { SongProgressBar, HeaderSongBar, ensurePlaying } from "./SongProgressBar";
 import { AdvancedMixModal } from "./AdvancedMixModal";
@@ -685,6 +685,8 @@ export function DashboardClient({ spotifyUser }: Props) {
   // library search itself is instant, no status needed for that part).
   const [chartRemixStatus, setChartRemixStatus] = useState<string | null>(null);
   const [remixing, setRemixing] = useState(false);
+  // Live AI DJ progress for the "Rebuilding mix…" panel (fed by buildMixDirect / RunnaScheduleCard.onBuildProgress)
+  const [remixProgress, setRemixProgress] = useState<{ startedAt: number; progress?: MixProgress; title?: string } | null>(null);
   const [toppingUp, setToppingUp] = useState(false);
   // Right-click on the "🎧 Remix" button — "Remix by genre…" restricts the
   // rebuild's candidate pool to only the checked genres (see
@@ -1259,15 +1261,19 @@ export function DashboardClient({ spotifyUser }: Props) {
   // per-workout progress-bar bookkeeping. Used only for a "pace-pro" origin
   // mix, which has no real Runna workout for RunnaScheduleCard's ref-based
   // remix/topUp to look up by date.
-  async function buildMixDirect(
+  function buildMixDirect(...args: Parameters<typeof buildMixDirectInner>) {
+    return buildMixDirectInner(...args).finally(() => setRemixProgress(null));
+  }
+  async function buildMixDirectInner(
     title: string, segments: string[], date: string, avoidUris?: string[], extraPlayCounts?: Record<string, number>,
     segmentCandidateUris?: (string[] | null | { line: string; uris: string[] })[], ignorePlayCounts?: boolean,
   ): Promise<{ tracks: TrackWithBPM[]; totalSec: number; timeline: AiDjTimeline; startedAtMs: number }> {
     const startedAtMs = Date.now();
+    setRemixProgress({ startedAt: startedAtMs, title });
     const res = await fetch("/api/ai-dj/mix", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, segments, avoidUris, date, extraPlayCounts, startedAtMs, segmentCandidateUris, ignorePlayCounts }),
+      body: JSON.stringify({ title, segments, avoidUris, date, extraPlayCounts, startedAtMs, segmentCandidateUris, ignorePlayCounts, useFavourites: true }),
     });
     if (!res.ok || !res.body) {
       const err = await res.json().catch(() => ({})) as { error?: string };
@@ -1288,7 +1294,8 @@ export function DashboardClient({ spotifyUser }: Props) {
         const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
         if (!dataLine) continue;
         const msg = JSON.parse(dataLine.slice(6)) as
-          & { type: string; trackUris?: string[]; totalSec?: number; timeline?: AiDjTimeline; error?: string };
+          & { type: string; trackUris?: string[]; totalSec?: number; timeline?: AiDjTimeline; error?: string; current?: number; total?: number; segment?: string; detail?: string };
+        if (msg.type === "progress") setRemixProgress({ startedAt: startedAtMs, progress: { current: msg.current ?? 0, total: msg.total ?? 1, segment: msg.segment ?? "", detail: msg.detail }, title });
         if (msg.type === "error") throw new Error(msg.error ?? "Mix failed");
         if (msg.type === "done") mix = { trackUris: msg.trackUris ?? [], totalSec: msg.totalSec ?? 0, timeline: msg.timeline ?? [] };
       }
@@ -1335,6 +1342,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     if (!aiDjMix) return;
     if (aiDjMix.origin !== "pace-pro" && !runnaScheduleRef.current) return;
     setRemixing(true);
+    setRemixProgress({ startedAt: Date.now() });
     setSaveError(null);
     const priorUris = aiDjMix.tracks.map(t => t.uri);
     const avoidUris = Array.from(new Set([...(aiDjMix.avoidUris ?? []), ...priorUris]));
@@ -1358,6 +1366,7 @@ export function DashboardClient({ spotifyUser }: Props) {
       setSaveError(e instanceof Error ? e.message : "Failed to remix");
     } finally {
       setRemixing(false);
+      setRemixProgress(null);
     }
   }
 
@@ -3404,6 +3413,22 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                 edge (see resultsMaxHeight above) so a long track list
                 scrolls inside the card instead of pushing the page past the
                 Runna rail. No cap until the first measurement lands. */}
+            {remixProgress && !remixing && (
+              <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
+                <div className="p-5 border-b border-white/10">
+                  <h3 className="font-semibold">Building AI DJ mix{remixProgress.title ? ` for "${remixProgress.title}"` : ""}</h3>
+                </div>
+                <div className="p-8 flex flex-col items-center gap-1.5 text-sm text-slate-500">
+                  <p>Building mix…</p>
+                  <MixProgressBar startedAt={remixProgress.startedAt} progress={remixProgress.progress} />
+                  {remixProgress.progress?.detail && (
+                    <p className="text-[11px] text-slate-500 max-w-md truncate">
+                      {remixProgress.progress.segment ? `${shortSegmentLabel(remixProgress.progress.segment)}: ${remixProgress.progress.detail}` : remixProgress.progress.detail}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
             {step !== "idle" && csvName && (searchText.trim() || selectedZones.length > 0 || (paceFilter && paceFilter.paces.length > 0) || sprintBpmFilter !== null || similarFilter || noBpmFilter || missingFeaturesFilter || candidatesFilter || aiDjMix || singleTrackFilter) && (
               <div
                 ref={setResultsCardEl}
@@ -3792,6 +3817,16 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                           : aiDjMix ? (remixing ? "Rebuilding mix…" : "No tracks in this mix.")
                           : "No tracks in this BPM range. Try a different zone."}
                       </p>
+                      {aiDjMix && remixing && remixProgress && !searchText.trim() && (
+                        <div className="flex flex-col items-center gap-1.5">
+                          <MixProgressBar startedAt={remixProgress.startedAt} progress={remixProgress.progress} />
+                          {remixProgress.progress?.detail && (
+                            <p className="text-[11px] text-slate-500 max-w-md truncate">
+                              {remixProgress.progress.segment ? `${shortSegmentLabel(remixProgress.progress.segment)}: ${remixProgress.progress.detail}` : remixProgress.progress.detail}
+                            </p>
+                          )}
+                        </div>
+                      )}
                       {searchText.trim() && (
                         <button
                           onClick={() => searchArtistTopTracks(searchText.trim(), "list")}
@@ -3854,6 +3889,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             <RunnaSummaryCard onTrackClick={jumpToTrack} />
             <RunnaScheduleCard
               ref={runnaScheduleRef}
+              onBuildProgress={setRemixProgress}
               aiDjEnabled={aiDjEnabled}
               garminConfigured={garminConfigured}
               mixSavedNonce={mixSavedNonce}

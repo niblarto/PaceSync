@@ -696,6 +696,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   const [tracklistBpmMin, setTracklistBpmMin] = useState("");
   const [tracklistBpmMax, setTracklistBpmMax] = useState("");
   const [tracklistGenre, setTracklistGenre] = useState("");
+  const [tracklistOnlyFavourites, setTracklistOnlyFavourites] = useState(false);
   // Separate from tracklistGenre (a substring match against a genre VALUE)
   // — this filters to rows with NO genre at all, for the missing-data
   // summary's "N missing genres" stat. Genre-only gaps are deliberately
@@ -1325,6 +1326,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       if (max != null && (effBpm === 0 || effBpm > max)) return false;
       if (tracklistGenre && !t.genre.toLowerCase().includes(tracklistGenre.toLowerCase())) return false;
       if (tracklistOnlyMissingGenre && t.genre.trim() !== "") return false;
+      if (tracklistOnlyFavourites && !favourites.has(t.uri)) return false;
       // The bulk-delete artist field previews live as you type, same as
       // every other filter here — matches by substring while typing, so
       // the table shows exactly what "Delete artist" would remove.
@@ -1419,7 +1421,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // from a much longer previous list.
   useEffect(() => {
     setTracklistVisibleCount(100);
-  }, [tracklistFilter, tracklistBpmMin, tracklistBpmMax, tracklistGenre, tracklistSort]);
+  }, [tracklistFilter, tracklistBpmMin, tracklistBpmMax, tracklistGenre, tracklistSort, tracklistOnlyFavourites]);
 
   useEffect(() => {
     const container = tracklistContainerRef.current;
@@ -6361,7 +6363,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           <div>
             <h3 className="font-semibold text-slate-200">Tracklist</h3>
             <p className="text-sm text-slate-400 mt-1">
-              Every track in the active library — the same play/delete/similar/suggest options as the dashboard, plus filtering and sorting.
+              Every track in the active library — play and delete options, favourites, plus filtering and sorting.
             </p>
           </div>
           {!!tracklist?.length && (
@@ -6416,6 +6418,14 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
                 </datalist>
               </>
             )}
+            <button
+              onClick={() => setTracklistOnlyFavourites(v => !v)}
+              aria-pressed={tracklistOnlyFavourites}
+              title="Show only favourite tracks (used first in Pace Pro / Race mixes)"
+              className={`text-sm rounded-lg border px-3 py-1.5 transition-colors ${tracklistOnlyFavourites ? "bg-yellow-500/20 border-yellow-500/50 text-yellow-300" : "bg-slate-800 border-slate-700 text-slate-400 hover:text-yellow-300"}`}
+            >
+              {tracklistOnlyFavourites ? "★" : "☆"} Favourites{favourites.size ? ` (${favourites.size})` : ""}
+            </button>
             {tracklistOnlyMissingGenre && (
               <span className="text-xs text-amber-300">Showing only tracks missing a genre</span>
             )}
@@ -6443,9 +6453,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             {tracklistOnlyMissingGenre && missingGenreMsg && (
               <span className={`text-xs ${missingGenreMsg.error ? "text-red-400" : "text-amber-300"}`}>{missingGenreMsg.text}</span>
             )}
-            {(tracklistFilter || tracklistBpmMin || tracklistBpmMax || tracklistGenre || tracklistOnlyMissingGenre) && (
+            {(tracklistFilter || tracklistBpmMin || tracklistBpmMax || tracklistGenre || tracklistOnlyMissingGenre || tracklistOnlyFavourites) && (
               <button
-                onClick={() => { setTracklistFilter(""); setTracklistBpmMin(""); setTracklistBpmMax(""); setTracklistGenre(""); setTracklistOnlyMissingGenre(false); }}
+                onClick={() => { setTracklistFilter(""); setTracklistBpmMin(""); setTracklistBpmMax(""); setTracklistGenre(""); setTracklistOnlyMissingGenre(false); setTracklistOnlyFavourites(false); }}
                 className="text-xs text-slate-400 hover:text-slate-200 underline"
               >
                 Clear

@@ -812,6 +812,8 @@ interface RunnaScheduleProps {
       startedAtMs is the wall-clock time this build STARTED (captured client-side before the request went out) —
       the parent passes it straight through to the pin write so a stale, still-in-flight build can never clobber
       a result from a build that started later, regardless of which network response actually lands last. */
+  /** Live progress of a build/remix started through this card (undefined progress = no event yet); null when it ends. */
+  onBuildProgress?: (p: { startedAt: number; progress?: MixProgress; title?: string } | null) => void;
   onAiDjMix?: (workoutTitle: string, playlistName: string, tracks: TrackWithBPM[], totalSec: number, segments: string[], date: string, timeline: AiDjTimelineSegment[], avoidUris?: string[], startedAtMs?: number) => void;
   /** Bumped by the parent after a mix is saved — invalidates the saved-mix tracklist cache */
   mixSavedNonce?: number;
@@ -901,7 +903,7 @@ function mixSegmentsFor(w: RunnaWorkout, raceSplits?: RaceSplitsEntry | null): s
 // e.g. "1.25mi warm up at a conversational pace (no faster than 9:10/mi)"
 // -> "1.25mi warm up", but "3mi at 7:55/mi (7:40-8:10/mi), 150s walking
 // rest" -> "3mi at 7:55/mi" (numeric pace clauses are kept).
-function shortSegmentLabel(label: string): string {
+export function shortSegmentLabel(label: string): string {
   return label
     .replace(/\([^)]*\)/g, "")
     .split(",")[0]
@@ -909,14 +911,14 @@ function shortSegmentLabel(label: string): string {
     .trim();
 }
 
-type MixProgress = { current: number; total: number; segment: string; detail?: string };
+export type MixProgress = { current: number; total: number; segment: string; detail?: string };
 type MixStatus = { status: "building" | "done" | "error"; error?: string; warning?: string; warningUris?: string[]; startedAt?: number; progress?: MixProgress; uris?: string[] };
 
 // Real per-segment progress streamed over SSE from /api/ai-dj/mix. Between
 // segment events the bar eases partway toward the next step (a segment's LLM
 // pick can take ~30s), so it never looks stalled. Falls back to a pure
 // time-based curve if no progress events arrive (older AI DJ service).
-function MixProgressBar({ startedAt, progress }: { startedAt: number; progress?: MixProgress }) {
+export function MixProgressBar({ startedAt, progress }: { startedAt: number; progress?: MixProgress }) {
   const [, forceTick] = useState(0);
   const stepStartRef = useRef(startedAt);
   const lastStepRef = useRef(-1);
@@ -1033,7 +1035,7 @@ function courseMatchesDate(name: string, date: string): boolean {
 }
 
 export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaScheduleProps>(function RunnaScheduleCard(
-  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, mixSavedNonce = 0, onTrackClick, onMissingTracks, showRouteMaps = true, onShowCandidates, onUnpinned }: RunnaScheduleProps = {},
+  { garminConfigured = false, onPaceFilter, activePaces = [], aiDjEnabled = false, onAiDjMix, onBuildProgress, mixSavedNonce = 0, onTrackClick, onMissingTracks, showRouteMaps = true, onShowCandidates, onUnpinned }: RunnaScheduleProps = {},
   ref,
 ) {
   const { workouts: allWorkouts, pastRuns, loading, error } = useRunnaData();
@@ -1540,11 +1542,12 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     // an absolute reference to compare against.
     const startedAtMs = Date.now();
     setMixState(s => ({ ...s, [w.uid]: { status: "building", startedAt: Date.now(), uris: avoidUris } }));
+    onBuildProgress?.({ startedAt: startedAtMs, title: w.title });
     try {
       const mixRes = await fetch("/api/ai-dj/mix", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w, raceSplits[w.date]), avoidUris, date: w.date, extraPlayCounts, startedAtMs, segmentCandidateUris, ignorePlayCounts }),
+        body: JSON.stringify({ title: w.title, segments: mixSegmentsFor(w, raceSplits[w.date]), avoidUris, date: w.date, extraPlayCounts, startedAtMs, segmentCandidateUris, ignorePlayCounts, useFavourites: w.type === "race" }),
       });
       if (!mixRes.ok || !mixRes.body) {
         const err = await mixRes.json().catch(() => ({})) as { error?: string };
@@ -1597,6 +1600,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
           } else if (msg.type === "progress") {
             const progress = { current: msg.current ?? 0, total: msg.total ?? 1, segment: msg.segment ?? "", detail: msg.detail };
             setMixState(s => ({ ...s, [w.uid]: { ...s[w.uid], status: "building", progress } }));
+            onBuildProgress?.({ startedAt: startedAtMs, progress, title: w.title });
           } else if (msg.type === "error") {
             throw new Error(msg.error ?? "Mix failed");
           } else if (msg.type === "done") {
@@ -1628,12 +1632,14 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       } else {
         onAiDjMix?.(w.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w, raceSplits[w.date]), w.date, mix.timeline, accumulatedUris, startedAtMs);
       }
+      onBuildProgress?.(null);
       setMixState(s => ({
         ...s,
         [w.uid]: { status: "done", warning: s[w.uid]?.warning, warningUris: s[w.uid]?.warningUris, uris: accumulatedUris },
       }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to build mix";
+      onBuildProgress?.(null);
       setMixState(s => ({ ...s, [w.uid]: { status: "error", error: msg, warning: s[w.uid]?.warning } }));
       if (onResult) throw e; // top-up caller needs to see the failure directly
     }
@@ -1882,7 +1888,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                                 ⚙️ Advanced AI DJ Mix
                               </button>
                             )}
-                            {st?.status === "building" && (
+                            {st?.status === "building" && !onBuildProgress && (
                               <MixProgressBar startedAt={st.startedAt ?? Date.now()} progress={st.progress} />
                             )}
                             {st?.status === "done" && (
@@ -1892,7 +1898,7 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                               <span className="text-xs text-red-400">{st.error}</span>
                             )}
                           </div>
-                          {st?.status === "building" && st.progress?.detail && (
+                          {st?.status === "building" && !onBuildProgress && st.progress?.detail && (
                             <p className="text-[11px] text-slate-500 pl-0.5 -mt-1 truncate">
                               {st.progress.segment ? `${shortSegmentLabel(st.progress.segment)}: ${st.progress.detail}` : st.progress.detail}
                             </p>
