@@ -43,6 +43,8 @@ function shift(date: string, days: number): string {
   return isoDate(d);
 }
 
+const SYNC_EVERY_MS = 5 * 60_000; // lib/loseit-food.ts's MIN_SYNC_INTERVAL_MS
+
 const UNIT_ABBR: Record<string, string> = { Gram: "g", Milliliter: "ml", Milligram: "mg", Liter: "l", Ounce: "oz" };
 
 // "7 g", "1 Serving", "2 Servings", "6 Pieces", "1.5 Imperial Pints".
@@ -281,6 +283,26 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
 
   useEffect(() => { load(date); }, [date, load]);
 
+  // Countdown to the next check of Lose It! (the server re-reads today at most
+  // every 5 minutes). While today is open and the tab visible, the panel makes
+  // that check itself when the countdown reaches zero.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const lastTry = useRef(0);
+  const nextCheckAt = date === today && diary?.connected && diary.lastSyncAt ? Date.parse(diary.lastSyncAt) + SYNC_EVERY_MS : null;
+  useEffect(() => {
+    if (nextCheckAt == null) return;
+    const t = setInterval(() => {
+      const n = Date.now();
+      setNowMs(n);
+      if (n >= nextCheckAt && n - lastTry.current > 60_000 && document.visibilityState === "visible" && !loading) {
+        lastTry.current = n;
+        load(date);
+      }
+    }, 1000);
+    return () => clearInterval(t);
+  }, [nextCheckAt, date, load, loading]);
+  const countdown = nextCheckAt == null ? null : Math.max(0, Math.ceil((nextCheckAt - nowMs) / 1000));
+
   const title = date === today ? "Today" : date === shift(today, -1) ? "Yesterday"
     : new Date(`${date}T12:00:00`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
   // Today always shows all four meals (empty ones too); other days only the meals with food,
@@ -406,15 +428,25 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
         </div>
       )}
 
-      {diary && diary.meals.length > 0 && (
+      {diary && diary.connected && (diary.meals.length > 0 || countdown != null) && (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs">
-          <span className="flex items-center gap-2 text-slate-300">
-            Total <KcalChip kcal={diary.totals.kcal} big />
-            <Macros t={diary.totals} className="text-xs" />
-          </span>
+          {diary.meals.length > 0 ? (
+            <span className="flex items-center gap-2 text-slate-300">
+              Total <KcalChip kcal={diary.totals.kcal} big />
+              <Macros t={diary.totals} className="text-xs" />
+            </span>
+          ) : <span />}
           {diary.lastSyncAt && (
             <span className="text-slate-500">
               Synced from Lose It! {new Date(diary.lastSyncAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+              {countdown != null && (
+                <>
+                  {" · "}next check{" "}
+                  <span className="font-mono text-slate-400">
+                    {countdown === 0 || loading ? "now" : `in ${Math.floor(countdown / 60)}:${String(countdown % 60).padStart(2, "0")}`}
+                  </span>
+                </>
+              )}
             </span>
           )}
         </div>

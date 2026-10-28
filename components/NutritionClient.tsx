@@ -75,15 +75,6 @@ interface Dashboard {
 
 const AUTO_REFRESH_MS = 15 * 60_000;
 
-// "18:42" today, "Thu 06:04" otherwise.
-function stamp(iso: string | null | undefined): string {
-  if (!iso) return "never";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "?";
-  const time = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString("en-GB", { weekday: "short" })} ${time}`;
-}
-
 const CHART_DAYS = 30; // days of burn/eaten rows loaded (the food diary's day bars use them)
 const DAY_MS = 86_400_000;
 // Rectangle with rounded top corners, as the bars have.
@@ -621,14 +612,12 @@ export function NutritionClient() {
     }
   }, []);
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
-  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => { load(CHART_DAYS); }, [load]);
   // Reload every 15 minutes (today's burn is refreshed from Garmin at most
-  // that often), and tick the countdown every 30s.
+  // that often).
   useEffect(() => {
     const t = setInterval(() => {
-      setNow(Date.now());
       if (loadedAt != null && Date.now() - loadedAt >= AUTO_REFRESH_MS) load(CHART_DAYS);
     }, 30_000);
     return () => clearInterval(t);
@@ -825,30 +814,6 @@ export function NutritionClient() {
         style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.85), rgba(2,6,23,0.85)), url('/dashboard-hero.png')" }} />
       <TopNav title="🥗 Nutrition" maxWidth="max-w-[1800px]" extra={
           <div className="flex items-center gap-3 min-w-0">
-            {data && (() => {
-              const s = data.sources;
-              const next = loadedAt != null ? Math.max(0, Math.ceil((loadedAt + AUTO_REFRESH_MS - now) / 60_000)) : null;
-              const nextWeight = new Date(now); // hourly Garmin weigh-in job runs at :37
-              nextWeight.setMinutes(37, 0, 0);
-              if (nextWeight.getTime() <= now) nextWeight.setHours(nextWeight.getHours() + 1);
-              const detail = [
-                `Page updated ${loadedAt ? stamp(new Date(loadedAt).toISOString()) : "-"}; next auto-refresh in ${next ?? "-"} min`,
-                `Garmin weigh-ins fetched ${stamp(s.garminWeight)} (hourly at :37, next ${stamp(nextWeight.toISOString())}, and when this page opens)`,
-                `Today's calories burnt from Garmin ${stamp(s.todayBurn)} (at most every 15 min)`,
-                `Lose It! food synced ${stamp(s.food)} (hourly, and when this page opens)`,
-                `GarminDB sync ${stamp(s.garminDb)} (daily 06:00 and after new activities)`,
-              ].join("\n");
-              return (
-                <span className="hidden md:inline text-[11px] text-slate-500 truncate" title={detail}>
-                  Updated {loadedAt ? stamp(new Date(loadedAt).toISOString()) : "-"}
-                  {" · "}weight {stamp(s.garminWeight)}
-                  {" · "}burn {stamp(s.todayBurn)}
-                  {" · "}food {stamp(s.food)}
-                  {" · "}GarminDB {stamp(s.garminDb)}
-                  {" · "}next refresh {next ?? "-"}m
-                </span>
-              );
-            })()}
             <Link href="/settings?tab=nutrition" className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0">Goals</Link>
           </div>
       } />
