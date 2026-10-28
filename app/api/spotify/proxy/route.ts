@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { queueSpotifyAdds, queueSpotifyRemovals } from "@/lib/spotify-removals";
 import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest, getBurstCooldownRemainingMs } from "@/lib/spotify-rate-limit";
 
 // Relays a single Spotify Web API request server-side and hands the response
@@ -19,6 +20,29 @@ import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, record
 // forwards that straight through to Spotify rather than re-deriving a
 // session server-side, since it's a generic relay for any spotify.com path.
 
+// A playlist track add / remove (POST / DELETE /v1/playlists/{id}/items) that can be queued instead of lost
+// when Spotify is rate-limiting: the change goes into the server's queue (lib/spotify-removals.ts) and is
+// sent, in batches, once the limit has cleared. Anything with a position, or a non-track item, isn't
+// queueable and gets the 429 as before.
+function queueableTrackWrite(method: string | undefined, path: string, body: unknown): { playlistId: string; uris: string[]; kind: "add" | "remove" } | null {
+  const m = /^\/v1\/playlists\/([A-Za-z0-9]+)\/items$/.exec(path.split("?")[0]);
+  if (!m || !body || typeof body !== "object") return null;
+  const b = body as { uris?: unknown; items?: unknown; position?: unknown; snapshot_id?: unknown };
+  if (method === "POST" && Array.isArray(b.uris) && b.position === undefined && b.uris.every(u => typeof u === "string" && u.startsWith("spotify:track:"))) {
+    return { playlistId: m[1], uris: b.uris as string[], kind: "add" };
+  }
+  if (method === "DELETE" && Array.isArray(b.items)) {
+    const uris = (b.items as { uri?: unknown }[]).map(i => i?.uri);
+    if (uris.every(u => typeof u === "string" && (u as string).startsWith("spotify:track:"))) return { playlistId: m[1], uris: uris as string[], kind: "remove" };
+  }
+  return null;
+}
+
+function queueWrite(q: NonNullable<ReturnType<typeof queueableTrackWrite>>): void {
+  if (q.kind === "add") queueSpotifyAdds(q.uris, q.playlistId);
+  else queueSpotifyRemovals(q.uris, q.playlistId);
+}
+
 export async function POST(req: NextRequest) {
   const auth = req.headers.get("Authorization");
   if (!auth) return NextResponse.json({ error: "Missing Authorization" }, { status: 401 });
@@ -28,9 +52,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "path required, must start with /" }, { status: 400 });
   }
 
+  const queueable = queueableTrackWrite(method, path, body);
   const blockedUntil = await getSpotifyBlockedUntil("main");
   if (blockedUntil) {
     const retryAfterSec = Math.max(0, Math.ceil((new Date(blockedUntil).getTime() - Date.now()) / 1000));
+    if (queueable) {
+      queueWrite(queueable); // accepted: it will be sent when the limit clears
+      return NextResponse.json({ status: 202, ok: true, queued: true, retryAfterSec, data: { queued: true } });
+    }
     return NextResponse.json({ status: 429, ok: false, retryAfterSec, data: null });
   }
 
@@ -60,6 +89,10 @@ export async function POST(req: NextRequest) {
       retryAfterSec = parseRetryAfter(res.headers.get("Retry-After") ?? "30");
       console.warn(`[spotify/proxy] 429 on ${method ?? "GET"} ${path} — retry-after ${retryAfterSec}s`);
       await setSpotifyBlockedUntil(new Date(Date.now() + retryAfterSec * 1000).toISOString(), "main");
+      if (queueable) {
+        queueWrite(queueable); // this request drew the 429: queue it rather than lose it
+        return NextResponse.json({ status: 202, ok: true, queued: true, retryAfterSec, data: { queued: true } });
+      }
     }
 
     // Spotify's responses are JSON except for a 204 (empty body) on some

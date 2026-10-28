@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSession } from "next-auth/react";
 import { playInSpotify } from "@/components/TrackRow";
@@ -50,6 +50,9 @@ export function GenreExplorer() {
   const [open, setOpen] = useState(false);
   const [hierarchy, setHierarchy] = useState<GenreHierarchyNode[] | null>(null);
   const [filterText, setFilterText] = useState("");
+  // BPM range filter for the track lists under each genre (blank = no limit)
+  const [bpmMin, setBpmMin] = useState("");
+  const [bpmMax, setBpmMax] = useState("");
   const [expandedBranches, setExpandedBranches] = useState<Set<string>>(new Set());
   // Which single genre leaf's own track list is expanded (accordion — at
   // most one at a time), and that genre's fetched tracks, cached per genre.
@@ -130,6 +133,29 @@ export function GenreExplorer() {
       })
       .catch(() => setTagTracks(prev => ({ ...prev, [genre]: "error" })));
   }
+
+  // Opening a category (e.g. Techno) loads the tracks, and so the BPMs, of every genre under it in one request,
+  // so the BPM filter can work out which of its sub-categories have a match.
+  useEffect(() => {
+    if (!hierarchy) return;
+    const need = hierarchy
+      .filter(mg => expandedBranches.has(mg.mainGenre))
+      .flatMap(mg => mg.subgenres.flatMap(sg => sg.tags.map(t => t.genre)))
+      .filter(g => tagTracks[g] === undefined);
+    if (need.length === 0) return;
+    setTagTracks(prev => { const next = { ...prev }; for (const g of need) next[g] ??= "loading"; return next; });
+    fetch(`/api/tracks/genre-uris?genres=${encodeURIComponent(need.join("|"))}`)
+      .then(r => r.json())
+      .then((d: { byGenre?: Record<string, GenreTagTrack[]>; error?: string }) => {
+        setTagTracks(prev => {
+          const next = { ...prev };
+          for (const g of need) next[g] = d.byGenre?.[g] ?? "error";
+          return next;
+        });
+      })
+      .catch(() => setTagTracks(prev => { const next = { ...prev }; for (const g of need) next[g] = "error"; return next; }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expandedBranches, hierarchy]);
 
   async function lookupArtist(artist: string) {
     setTrackMenu(null);
@@ -220,11 +246,30 @@ export function GenreExplorer() {
   }
 
   const q = filterText.trim().toLowerCase();
+  const loBpm = bpmMin.trim() === "" ? null : Number(bpmMin);
+  const hiBpm = bpmMax.trim() === "" ? null : Number(bpmMax);
+  const bpmFilterOn = (loBpm != null && !isNaN(loBpm)) || (hiBpm != null && !isNaN(hiBpm));
+  // Tracks with no BPM data can't match a BPM range, so they're hidden while one is set.
+  const matchesBpm = (t: GenreTagTrack) =>
+    !bpmFilterOn || (t.tempo != null
+      && (loBpm == null || isNaN(loBpm) || Math.round(t.tempo) >= loBpm)
+      && (hiBpm == null || isNaN(hiBpm) || Math.round(t.tempo) <= hiBpm));
   const filteredTree = (hierarchy ?? [])
     .map(mg => ({
       mainGenre: mg.mainGenre,
       subgenres: mg.subgenres
-        .map(sg => ({ subgenre: sg.subgenre, tags: sg.tags.filter(t => !q || t.genre.includes(q)) }))
+        .map(sg => ({
+          subgenre: sg.subgenre,
+          tags: sg.tags
+            .filter(t => !q || t.genre.includes(q))
+            // With a BPM range set, a genre whose tracks are loaded shows how many fall in the range, and is
+            // hidden when none do. Genres not loaded yet (category never opened) keep their full count.
+            .map(t => {
+              const loaded = tagTracks[t.genre];
+              return bpmFilterOn && Array.isArray(loaded) ? { ...t, count: loaded.filter(matchesBpm).length } : t;
+            })
+            .filter(t => !(bpmFilterOn && Array.isArray(tagTracks[t.genre]) && t.count === 0)),
+        }))
         .filter(sg => sg.tags.length > 0),
     }))
     .filter(mg => mg.subgenres.length > 0);
@@ -256,6 +301,22 @@ export function GenreExplorer() {
             placeholder="Filter genres…"
             className="w-full rounded-lg bg-slate-800/60 border border-white/10 text-sm px-3 py-1.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500"
           />
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <span className="shrink-0">BPM</span>
+            <input
+              type="number" inputMode="numeric" min={0} value={bpmMin} onChange={e => setBpmMin(e.target.value)} placeholder="min"
+              className="w-20 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500"
+            />
+            <span>to</span>
+            <input
+              type="number" inputMode="numeric" min={0} value={bpmMax} onChange={e => setBpmMax(e.target.value)} placeholder="max"
+              className="w-20 rounded-lg bg-slate-800/60 border border-white/10 text-sm px-2.5 py-1 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-sky-500"
+            />
+            {bpmFilterOn && (
+              <button onClick={() => { setBpmMin(""); setBpmMax(""); }} className="text-slate-500 hover:text-slate-300 underline">Clear</button>
+            )}
+            <span className="text-slate-600">filters the tracks shown when a genre is opened</span>
+          </div>
           {lookupMsg && (
             <p className={`text-xs ${lookupMsg.error ? "text-red-400" : "text-sky-300"}`}>
               {lookupMsg.text} <button onClick={() => setLookupMsg(null)} className="text-slate-500 hover:text-slate-300 underline">Dismiss</button>
@@ -357,7 +418,12 @@ export function GenreExplorer() {
                                   {tracks === "loading" && <p className="text-xs text-slate-500 py-1">Loading tracks…</p>}
                                   {tracks === "error" && <p className="text-xs text-red-400 py-1">Failed to load tracks.</p>}
                                   {Array.isArray(tracks) && tracks.length === 0 && <p className="text-xs text-slate-600 py-1">No tracks.</p>}
-                                  {Array.isArray(tracks) && tracks.map(t => (
+                                  {Array.isArray(tracks) && bpmFilterOn && tracks.length > 0 && (
+                                    <p className="text-xs text-slate-600 py-1">
+                                      {tracks.filter(matchesBpm).length} of {tracks.length} in the BPM range
+                                    </p>
+                                  )}
+                                  {Array.isArray(tracks) && tracks.filter(matchesBpm).map(t => (
                                     <div key={t.uri}>
                                       <div
                                         className="flex items-center gap-2 py-0.5"
@@ -370,7 +436,12 @@ export function GenreExplorer() {
                                         >
                                           {t.name} <span className="text-slate-600">— {t.artist}</span>
                                         </button>
-                                        {t.tempo != null && <span className="text-[11px] text-slate-600 shrink-0">{Math.round(t.tempo)} BPM</span>}
+                                        <span
+                                          title={t.tempo != null ? "Tempo (BPM)" : "No BPM data for this track yet"}
+                                          className={`text-[11px] shrink-0 tabular-nums rounded px-1.5 py-0.5 ${t.tempo != null ? "bg-slate-800 text-emerald-300" : "text-slate-600"}`}
+                                        >
+                                          {t.tempo != null ? `${Math.round(t.tempo)} BPM` : "— BPM"}
+                                        </span>
                                         <button
                                           onClick={() => startMove(genre, t.uri, t.name)}
                                           className="text-[11px] text-sky-300/80 hover:text-sky-200 underline shrink-0"

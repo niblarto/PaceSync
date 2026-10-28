@@ -1,5 +1,6 @@
 "use client";
 
+import { queuedMessage } from "@/lib/queued-message";
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
@@ -258,8 +259,9 @@ export function MobileDashboardClient({ spotifyUser }: Props) {
           trackUris: aiDjMix.tracks.map(t => t.uri),
         }),
       });
-      const data = await res.json() as { error?: string; url?: string; tracksAdded?: boolean; trackUris?: string[] };
+      const data = await res.json() as { error?: string; url?: string; tracksAdded?: boolean; trackUris?: string[]; queued?: boolean; until?: string };
       if (data.error) throw new Error(data.error);
+      if (data.queued) setSaveError(queuedMessage("the playlist", data.until));
       if (data.tracksAdded === false && data.url) {
         const playlistId = data.url.split("/").pop()!;
         await addTracksBrowser(playlistId, data.trackUris ?? aiDjMix.tracks.map(t => t.uri));

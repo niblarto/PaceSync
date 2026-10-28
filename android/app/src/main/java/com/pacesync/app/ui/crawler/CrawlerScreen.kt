@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -51,6 +52,7 @@ import androidx.compose.ui.unit.sp
 import com.pacesync.app.R
 import com.pacesync.app.network.PaceSyncApi
 import com.pacesync.app.network.dto.CrawlAddedTrack
+import com.pacesync.app.network.dto.CrawledArtistDto
 import com.pacesync.app.network.dto.CrawlClearQueueRequest
 import com.pacesync.app.network.dto.CrawlControlRequest
 import com.pacesync.app.network.dto.CrawlRemoveQueuedRequest
@@ -164,6 +166,11 @@ fun CrawlerScreen(api: PaceSyncApi) {
     var playingUri by remember { mutableStateOf<String?>(null) }
     var reviewPlaylist by remember { mutableStateOf<String?>(null) }
     var queue by remember { mutableStateOf<List<String>>(emptyList()) } // artists waiting for their own crawl
+    // The log of artists the crawler has been through (newest first): can be minimized, and a long
+    // press on an artist offers to send it to the queue.
+    var crawled by remember { mutableStateOf<List<CrawledArtistDto>>(emptyList()) }
+    var crawledOpen by remember { mutableStateOf(true) }
+    var crawledMenuFor by remember { mutableStateOf<Long?>(null) }
     var pollNonce by remember { mutableStateOf(0) }
     var playNonce by remember { mutableStateOf(0) } // re-reads the playback bar after a tap
 
@@ -232,10 +239,9 @@ fun CrawlerScreen(api: PaceSyncApi) {
     // Lookup: crawl this song's artist - now if nothing is running, otherwise queued behind the
     // crawl in progress (the server runs the queue one artist after another). Uses the BPM /
     // sources / limits currently entered above.
-    fun lookup(t: CrawlAddedTrack) {
-        menuFor = null
+    fun lookupName(credit: String) {
         if (!bpmSpecValid(bpm)) { message = "Enter a BPM (170, 120-122 or 121,145,167) first"; return }
-        val name = t.artist.substringBefore(';').trim()
+        val name = credit.substringBefore(';').trim()
         if (name.isEmpty()) return
         artist = if (name.contains(',')) "\"$name\"" else name // show who was looked up in the Artist field
         saveInputs()
@@ -259,6 +265,19 @@ fun CrawlerScreen(api: PaceSyncApi) {
             val body = resp.body()
             message = if (body?.started == true) "Crawling $name now" else "$name queued (${body?.queued ?: 0} waiting)"
             pollNonce++
+        }
+    }
+
+    fun lookup(t: CrawlAddedTrack) {
+        menuFor = null
+        lookupName(t.artist)
+    }
+
+    val runningNow by rememberUpdatedState(running)
+    LaunchedEffect(Unit) {
+        while (true) {
+            runCatching { api.getCrawledArtists() }.getOrNull()?.takeIf { it.isSuccessful }?.body()?.let { crawled = it.artists }
+            delay(if (runningNow) 5_000L else 20_000L)
         }
     }
 
@@ -454,6 +473,57 @@ fun CrawlerScreen(api: PaceSyncApi) {
                                     queue = queue.filter { it != name }
                                     scope.launch { runCatching { api.crawlRemoveQueued(CrawlRemoveQueuedRequest(name)) }; pollNonce++ }
                                 }) { Text("✕") }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Crawled artists: the log of artists the crawler has been through ──
+            Card(colors = cardColors, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { crawledOpen = !crawledOpen }, modifier = Modifier.weight(1f)) {
+                            Text(
+                                "${if (crawledOpen) "▾" else "▸"} Crawled artists (${crawled.size})",
+                                style = MaterialTheme.typography.titleSmall, modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        if (crawledOpen && crawled.isNotEmpty()) {
+                            TextButton(onClick = {
+                                crawled = emptyList()
+                                scope.launch { runCatching { api.clearCrawledArtists() } }
+                            }) { Text("Clear") }
+                        }
+                    }
+                    if (crawledOpen) {
+                        if (crawled.isEmpty()) {
+                            Text(
+                                "No artists crawled yet. Long-press an artist here to send it to the queue.",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Column(Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState())) {
+                            crawled.forEach { a ->
+                                Box {
+                                    Row(
+                                        Modifier.fillMaxWidth()
+                                            .combinedClickable(onClick = {}, onLongClick = { crawledMenuFor = a.id })
+                                            .padding(vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(a.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                                        Text(
+                                            if (a.added > 0) "+${a.added}" else "0",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (a.added > 0) TEAL else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    DropdownMenu(expanded = crawledMenuFor == a.id, onDismissRequest = { crawledMenuFor = null }) {
+                                        DropdownMenuItem(text = { Text("➕ Send to crawler queue") }, onClick = { crawledMenuFor = null; lookupName(a.name) })
+                                    }
+                                }
+                                HorizontalDivider()
                             }
                         }
                     }

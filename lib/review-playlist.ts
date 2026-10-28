@@ -1,7 +1,8 @@
+import { getDb } from "@/lib/db";
 import { getFreshToken } from "@/lib/tokenStore";
-import { getSpotifyUser } from "@/lib/spotify";
-import { findExistingPlaylist } from "@/lib/spotify-playlist";
-import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest } from "@/lib/spotify-rate-limit";
+import { getSpotifyBlockedUntil } from "@/lib/spotify-rate-limit";
+import { governedCall, SpotifyBlocked, blockedRetryMs } from "@/lib/spotify-governor";
+import { findPlaylistIdByName } from "@/lib/spotify-outbox";
 
 // A private "PaceSync review" Spotify playlist kept in step with the Song Crawler's
 // "awaiting review" list, so those songs can be played as a playlist: Spotify itself
@@ -73,18 +74,23 @@ export function ensureReviewSyncStarted(provider: () => string[]): void {
   scheduleReviewSync(provider);
 }
 
+// Every request goes through the governor (one at a time, spaced out, never while Spotify is rate-limiting).
 async function spotifyCall(token: string, url: string, init: RequestInit = {}): Promise<Response> {
-  await sleep(CALL_GAP_MS);
-  recordSpotifyRequest();
-  const res = await fetch(url, {
-    ...init,
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(init.headers ?? {}) },
-  });
-  if (res.status === 429) {
-    const wait = Math.min(parseRetryAfter(res.headers.get("Retry-After") ?? "30"), 3600);
-    await setSpotifyBlockedUntil(new Date(Date.now() + wait * 1000).toISOString(), "main");
-  }
-  return res;
+  return governedCall(url, init, token);
+}
+
+const ID_KEY = "review_playlist_id";
+function storedPlaylistId(): string | null {
+  try {
+    const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(ID_KEY) as { value_json: string } | undefined;
+    return row ? (JSON.parse(row.value_json) as string) : null;
+  } catch { return null; }
+}
+function storePlaylistId(id: string | null): void {
+  try {
+    if (id) getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json").run(ID_KEY, JSON.stringify(id));
+    else getDb().prepare("DELETE FROM kv_config WHERE key = ?").run(ID_KEY);
+  } catch { /* best-effort */ }
 }
 
 async function runSync(): Promise<void> {
@@ -92,24 +98,19 @@ async function runSync(): Promise<void> {
   st.running = true;
   let retryInMs: number | null = null;
   try {
-    // Never sync into an active rate limit - wait for it to clear.
+    // Never sync into an active rate limit: wait for it to clear.
     const blocked = await getSpotifyBlockedUntil("main");
-    if (blocked) {
-      retryInMs = Math.min(Math.max(new Date(blocked).getTime() - Date.now(), 5_000) + 2_000, MAX_WAIT_MS);
-      return;
-    }
+    if (blocked) { retryInMs = blockedRetryMs(blocked); return; }
     st.dirty = false;
     const desired = st.provider?.();
     if (!desired) return;
-
     const token = await getFreshToken();
     if (!token.ok) { st.lastError = `No Spotify token (${token.reason})`; return; }
     const auth = token.token;
 
-    // Find or create the playlist (the id is cached on disk by findExistingPlaylist).
+    // Find or create the playlist (its id is remembered, so this is only searched for once).
     if (!st.playlistId) {
-      const user = await getSpotifyUser(auth) as { id: string };
-      let id = await findExistingPlaylist(auth, user.id, NAME);
+      let id = storedPlaylistId() ?? await findPlaylistIdByName(auth, NAME);
       if (!id) {
         const res = await spotifyCall(auth, `${API}/me/playlists`, {
           method: "POST", body: JSON.stringify({ name: NAME, description: DESCRIPTION, public: false }),
@@ -118,6 +119,7 @@ async function runSync(): Promise<void> {
         id = ((await res.json()) as { id: string }).id;
       }
       st.playlistId = id;
+      storePlaylistId(id);
     }
     const playlistId = st.playlistId;
 
@@ -125,8 +127,8 @@ async function runSync(): Promise<void> {
     const actual: string[] = [];
     let url: string | null = `${API}/playlists/${playlistId}/items?limit=100`;
     while (url) {
-      const res = await spotifyCall(auth, url);
-      if (res.status === 404) { st.playlistId = null; st.dirty = true; retryInMs = DEBOUNCE_MS; return; } // deleted on Spotify: start over
+      const res = await spotifyCall(auth, url, {});
+      if (res.status === 404) { st.playlistId = null; storePlaylistId(null); st.dirty = true; retryInMs = DEBOUNCE_MS; return; } // deleted on Spotify: start over
       if (!res.ok) throw new Error(`Read playlist ${res.status}`);
       const page = await res.json() as { next: string | null; items?: { item?: { uri?: string }; track?: { uri?: string } }[] };
       for (const it of page.items ?? []) {
@@ -160,10 +162,14 @@ async function runSync(): Promise<void> {
     st.lastError = null;
     if (toRemove.length || toAdd.length) console.log(`[review-playlist] synced: +${toAdd.length} -${toRemove.length} (${st.synced.size} in playlist)`);
   } catch (e) {
-    st.lastError = e instanceof Error ? e.message : String(e);
-    console.warn(`[review-playlist] sync failed: ${st.lastError}`);
     st.dirty = true;
-    retryInMs = 60_000; // back off a minute, then try again
+    if (e instanceof SpotifyBlocked) {
+      retryInMs = blockedRetryMs(e.until); // Spotify is rate-limiting: leave the list as it is until that clears
+    } else {
+      st.lastError = e instanceof Error ? e.message : String(e);
+      console.warn(`[review-playlist] sync failed: ${st.lastError}`);
+      retryInMs = 5 * 60_000; // back off, then try again
+    }
   } finally {
     st.running = false;
     // Anything that changed during the run, or a retry, goes out in the next batch.

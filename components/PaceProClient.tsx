@@ -1,5 +1,6 @@
 "use client";
 
+import { queuedMessage } from "@/lib/queued-message";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { RouteMapLightbox } from "@/components/RouteMapLightbox";
@@ -443,8 +444,9 @@ export function PaceProClient() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: mix.id }),
       });
-      const data = await res.json() as { url?: string; spotifyPlaylistId?: string; error?: string };
+      const data = await res.json() as { url?: string; spotifyPlaylistId?: string; error?: string; queued?: boolean; until?: string };
       if (!res.ok || data.error) throw new Error(data.error ?? `Save failed (${res.status})`);
+      if (data.queued) { setPpLibraryMsg(queuedMessage(`"${mix.title}"`, data.until)); return; }
       setPpSavedMixes(prev => prev.map(m => m.id === mix.id ? { ...m, spotifyPlaylistId: data.spotifyPlaylistId ?? m.spotifyPlaylistId } : m));
       setPpLibraryMsg(`Saved "${mix.title}" to Spotify`);
     } catch (e) {
@@ -532,8 +534,9 @@ export function PaceProClient() {
           trackUris: ppTrackUris,
         }),
       });
-      const data = await res.json() as { error?: string };
+      const data = await res.json() as { error?: string; queued?: boolean; until?: string };
       if (!res.ok || data.error) throw new Error(data.error ?? `Save failed (${res.status})`);
+      if (data.queued) { setPpSaveMsg(queuedMessage(`"Today's Run"`, data.until)); return; }
       setPpSaveMsg(`Saved ${ppTrackUris.length} track${ppTrackUris.length !== 1 ? "s" : ""} to "Today's Run" on Spotify`);
     } catch (e) {
       setPpSaveMsg(e instanceof Error ? e.message : "Failed to save");

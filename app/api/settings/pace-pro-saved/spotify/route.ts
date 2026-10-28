@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { getSpotifyUser } from "@/lib/spotify";
-import { upsertPlaylist } from "@/lib/spotify-playlist";
+import { requestPlaylistSave } from "@/lib/spotify-outbox";
 import { getSavedPaceProMix, setSavedPaceProMixPlaylist } from "@/lib/pace-pro-saved";
 
 // Saves a saved Pace Pro mix's tracks to ITS OWN Spotify playlist — named
@@ -23,14 +22,21 @@ export async function POST(req: NextRequest) {
   if (!trackUris.length) return NextResponse.json({ error: "This mix has no tracks" }, { status: 400 });
 
   try {
-    const user = await getSpotifyUser(session.accessToken);
-    const result = await upsertPlaylist(
-      session.accessToken,
-      user.id,
-      mix.title,
-      `Pace Pro mix (${mix.title}) from Settings → Pace Pro`,
-      trackUris,
-    );
+    // The mix itself is already saved (the Pace Pro library). The Spotify playlist is sent now, or
+    // queued if Spotify is rate-limiting and created when that clears (the queue then records its id).
+    const out = await requestPlaylistSave(session.accessToken, {
+      name: mix.title,
+      description: `Pace Pro mix (${mix.title}) from Settings → Pace Pro`,
+      uris: trackUris,
+      after: { kind: "paceProMix", id },
+    });
+    if (out.status === "queued") {
+      return NextResponse.json({
+        queued: true, until: out.until,
+        message: `The mix is saved in PaceSync. Spotify is rate-limiting, so its playlist will be created automatically${out.until ? ` after about ${new Date(out.until).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}` : " when Spotify allows"}.`,
+      });
+    }
+    const result = out.result;
     if (result.playlistId !== mix.spotifyPlaylistId) {
       setSavedPaceProMixPlaylist(id, result.playlistId);
     }

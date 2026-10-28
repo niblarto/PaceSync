@@ -1,7 +1,10 @@
 "use client";
 
+import { queuedMessage } from "@/lib/queued-message";
 import { CoachSettingsCard } from "@/components/CoachSettingsCard";
 import { OrsKeyCard } from "@/components/OrsKeyCard";
+import { LookupAccountCard } from "@/components/LookupAccountCard";
+import { StatusTab } from "@/components/StatusTab";
 import { NutritionSettingsCard } from "@/components/NutritionSettingsCard";
 import { GarminPersonalApiCard } from "@/components/GarminPersonalApiCard";
 import { createPortal } from "react-dom";
@@ -698,6 +701,10 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
   // decision), so that stat can't reuse that list the way the other
   // missing-data stats do — it points at the Tracklist table instead.
   const [tracklistOnlyMissingGenre, setTracklistOnlyMissingGenre] = useState(false);
+  const [savingMissingGenre, setSavingMissingGenre] = useState(false);
+  const [settingUnknownGenre, setSettingUnknownGenre] = useState(false);
+  const [confirmUnknownGenre, setConfirmUnknownGenre] = useState(false);
+  const [missingGenreMsg, setMissingGenreMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [tracklistSort, setTracklistSort] = useState<{ key: "name" | "artist" | "bpm" | "genre" | "added"; dir: "asc" | "desc" }>({ key: "name", dir: "asc" });
   const [tracklistDeletingUris, setTracklistDeletingUris] = useState<Set<string>>(new Set());
   const [tracklistVisibleCount, setTracklistVisibleCount] = useState(100);
@@ -971,8 +978,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           trackUris: withUri.map(t => t.uri),
         }),
       });
-      const data = await res.json() as { error?: string };
+      const data = await res.json() as { error?: string; queued?: boolean; until?: string };
       if (!res.ok || data.error) throw new Error(data.error ?? `Save failed (${res.status})`);
+      if (data.queued) { setSaveErrorsToSpotifyMsg(queuedMessage('the "No BPM" playlist', data.until)); return; }
       setSaveErrorsToSpotifyMsg(`Saved ${withUri.length} track${withUri.length !== 1 ? "s" : ""} to "No BPM" on Spotify`);
     } catch (e) {
       setSaveErrorsToSpotifyMsg(e instanceof Error ? e.message : "Failed to save");
@@ -1245,6 +1253,60 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
       })
       .sort((a, b) => a.tracks[0].name.localeCompare(b.tracks[0].name));
   })();
+
+  // Gives every track the "missing genres" filter lists the genre "Unknown".
+  async function setListedGenresUnknown() {
+    const uris = (filteredTracklist ?? []).filter(t => t.genre.trim() === "").map(t => t.uri).filter(Boolean);
+    if (uris.length === 0) return;
+    setSettingUnknownGenre(true);
+    setConfirmUnknownGenre(false);
+    setMissingGenreMsg(null);
+    try {
+      const res = await fetch("/api/tracks/set-unknown-genre", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uris }),
+      });
+      const data = await res.json() as { error?: string; updated?: number };
+      if (!res.ok || data.error) throw new Error(data.error ?? `Failed (${res.status})`);
+      const done = new Set(uris);
+      setTracklist(prev => prev?.map(t => done.has(t.uri) ? { ...t, genre: "Unknown" } : t) ?? prev);
+      setHealStatus(prev => prev ? { ...prev, missingGenres: Math.max(0, prev.missingGenres - (data.updated ?? 0)) } : prev);
+      setMissingGenreMsg({ text: `Set ${data.updated ?? 0} track${data.updated === 1 ? "" : "s"} to genre "Unknown"` });
+    } catch (e) {
+      setMissingGenreMsg({ text: e instanceof Error ? e.message : "Failed to update", error: true });
+    } finally {
+      setSettingUnknownGenre(false);
+    }
+  }
+
+  // Saves what the "missing genres" filter currently shows as the "Missing Genre" playlist (replacing its tracks).
+  async function saveMissingGenrePlaylist() {
+    const uris = (filteredTracklist ?? []).map(t => t.uri).filter(Boolean);
+    if (uris.length === 0) return;
+    setSavingMissingGenre(true);
+    setMissingGenreMsg(null);
+    try {
+      const res = await fetch("/api/spotify/create-playlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Missing Genre",
+          description: "Tracks in the Running library that have no genre yet.",
+          trackUris: uris,
+        }),
+      });
+      const data = await res.json() as { error?: string; queued?: boolean; until?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `Save failed (${res.status})`);
+      setMissingGenreMsg(data.queued
+        ? { text: queuedMessage('the "Missing Genre" playlist', data.until) }
+        : { text: `Saved ${uris.length} track${uris.length !== 1 ? "s" : ""} to "Missing Genre" on Spotify` });
+    } catch (e) {
+      setMissingGenreMsg({ text: e instanceof Error ? e.message : "Failed to save", error: true });
+    } finally {
+      setSavingMissingGenre(false);
+    }
+  }
 
   const filteredTracklist = (() => {
     if (!tracklist) return null;
@@ -1771,8 +1833,9 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
           trackUris: simTrackUris,
         }),
       });
-      const data = await res.json() as { error?: string };
+      const data = await res.json() as { error?: string; queued?: boolean; until?: string };
       if (!res.ok || data.error) throw new Error(data.error ?? `Save failed (${res.status})`);
+      if (data.queued) { setSimSaveMsg(queuedMessage(`"Today's Run"`, data.until)); return; }
       setSimSaveMsg(`Saved ${simTrackUris.length} track${simTrackUris.length !== 1 ? "s" : ""} to "Today's Run" on Spotify`);
     } catch (e) {
       setSimSaveMsg(e instanceof Error ? e.message : "Failed to save");
@@ -3320,6 +3383,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     { key: "tracklist", label: "Tracklist" },
     { key: "llm-testing", label: "LLM Testing" },
     { key: "pace-analysis", label: "Pace Analysis" },
+    { key: "status", label: "Status" },
   ] as const;
   type TabKey = typeof TABS[number]["key"];
   const [activeTab, setActiveTab] = useState<TabKey>("heart-rate");
@@ -5373,6 +5437,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
 
       <OrsKeyCard />
 
+      <LookupAccountCard />
+
       {/* Garmin DB */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">
         <div>
@@ -6353,6 +6419,30 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
             {tracklistOnlyMissingGenre && (
               <span className="text-xs text-amber-300">Showing only tracks missing a genre</span>
             )}
+            {tracklistOnlyMissingGenre && (
+              <button
+                onClick={saveMissingGenrePlaylist}
+                disabled={savingMissingGenre || !filteredTracklist?.length}
+                title='Save the tracks listed below as the "Missing Genre" playlist on Spotify (replaces its contents)'
+                className="text-xs rounded-lg bg-green-500/15 border border-green-500/40 hover:bg-green-500/25 disabled:opacity-40 text-green-300 px-2.5 py-1 transition-colors"
+              >
+                {savingMissingGenre ? "Saving…" : `Save ${filteredTracklist?.length ?? 0} to Spotify as "Missing Genre"`}
+              </button>
+            )}
+            {tracklistOnlyMissingGenre && (
+              <button
+                onClick={() => confirmUnknownGenre ? void setListedGenresUnknown() : setConfirmUnknownGenre(true)}
+                onBlur={() => setConfirmUnknownGenre(false)}
+                disabled={settingUnknownGenre || !filteredTracklist?.length}
+                title='Give every track listed below (they have no genre) the genre "Unknown"'
+                className="text-xs rounded-lg bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 disabled:opacity-40 text-amber-300 px-2.5 py-1 transition-colors"
+              >
+                {settingUnknownGenre ? "Updating…" : confirmUnknownGenre ? `Confirm: set ${filteredTracklist?.length ?? 0} to Unknown?` : 'Set genre to "Unknown"'}
+              </button>
+            )}
+            {tracklistOnlyMissingGenre && missingGenreMsg && (
+              <span className={`text-xs ${missingGenreMsg.error ? "text-red-400" : "text-amber-300"}`}>{missingGenreMsg.text}</span>
+            )}
             {(tracklistFilter || tracklistBpmMin || tracklistBpmMax || tracklistGenre || tracklistOnlyMissingGenre) && (
               <button
                 onClick={() => { setTracklistFilter(""); setTracklistBpmMin(""); setTracklistBpmMax(""); setTracklistGenre(""); setTracklistOnlyMissingGenre(false); }}
@@ -6924,6 +7014,11 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     {/* ── Tab: Nutrition ── */}
     <div className={activeTab === "nutrition" ? "grid grid-cols-1 gap-6 items-start max-w-3xl" : "hidden"}>
       <NutritionSettingsCard />
+    </div>
+
+    {/* ── Tab: Status ── accounts and restrictions, queued items, server log, service health */}
+    <div className={activeTab === "status" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
+      <StatusTab active={activeTab === "status"} />
     </div>
 
     {/* ── Tab: Pace Analysis ── */}

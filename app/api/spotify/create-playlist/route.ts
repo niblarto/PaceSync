@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { getSpotifyUser } from "@/lib/spotify";
-import { upsertPlaylist } from "@/lib/spotify-playlist";
+import { requestPlaylistSave } from "@/lib/spotify-outbox";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { getFreshToken } from "@/lib/tokenStore";
 
@@ -31,10 +30,17 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const user = await getSpotifyUser(token);
-    console.log(`[create-playlist] userId=${user.id} name="${name}" tracks=${trackUris.length}`);
+    console.log(`[create-playlist] name="${name}" tracks=${trackUris.length}`);
 
-    const result = await upsertPlaylist(token, user.id, name, description ?? "", trackUris);
+    const out = await requestPlaylistSave(token, { name, description: description ?? "", uris: trackUris });
+    if (out.status === "queued") {
+      // Spotify is rate-limiting: the caller has already saved locally; the playlist is sent when the limit clears.
+      return NextResponse.json({
+        queued: true, until: out.until, playlistId: null, url: null, tracksAdded: false,
+        message: `Saved in PaceSync. Spotify is rate-limiting, so the "${name}" playlist will be created automatically${out.until ? ` after about ${new Date(out.until).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}` : " when Spotify allows"}.`,
+      });
+    }
+    const result = out.result;
     if (result.replaced) {
       console.log(`[create-playlist] found existing playlist ${result.playlistId} — replaced tracks`);
     } else {

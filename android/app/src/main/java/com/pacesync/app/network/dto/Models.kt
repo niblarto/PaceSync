@@ -427,6 +427,13 @@ data class CrawlReviewLimitRequest(val reviewLimit: Int?)
 @Serializable
 data class CrawlControlRequest(val crawlControl: String) // "pause" | "resume"
 
+// The log of artists the crawler has been through (api/tracks/song-crawler/artists), newest first.
+@Serializable
+data class CrawledArtistDto(val id: Long, val name: String, val at: String = "", val added: Int = 0, val crawls: Int = 1)
+
+@Serializable
+data class CrawledArtistsResponse(val artists: List<CrawledArtistDto> = emptyList())
+
 @Serializable
 data class CrawlRemoveQueuedRequest(val removeQueued: String)
 

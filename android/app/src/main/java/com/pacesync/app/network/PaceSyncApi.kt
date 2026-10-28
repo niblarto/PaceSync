@@ -130,6 +130,13 @@ interface PaceSyncApi {
     @POST("api/nutrition")
     suspend fun syncNutrition(@Body body: com.pacesync.app.network.dto.NutritionSyncRequest): Response<com.pacesync.app.network.dto.NutritionSyncResponse>
 
+    // The log of artists the crawler has been through.
+    @GET("api/tracks/song-crawler/artists")
+    suspend fun getCrawledArtists(): Response<com.pacesync.app.network.dto.CrawledArtistsResponse>
+
+    @DELETE("api/tracks/song-crawler/artists")
+    suspend fun clearCrawledArtists(): Response<Unit>
+
     // The crawler form's saved settings, shared with the web page.
     @GET("api/tracks/song-crawler/inputs")
     suspend fun getCrawlInputs(): Response<com.pacesync.app.network.dto.CrawlInputsResponse>

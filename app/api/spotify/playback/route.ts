@@ -4,6 +4,13 @@ import { getFreshToken } from "@/lib/tokenStore";
 
 const BASE = "https://api.spotify.com/v1";
 
+// A network failure (timeout / reset) is a clean 502 for the player to retry, not an unhandled server error.
+// Playback calls are deliberately NOT held back by the rate-limit marker: they kept working during a block.
+async function spotifyFetch(url: string, init: RequestInit): Promise<Response | null> {
+  const res = await fetch(url, { ...init, signal: AbortSignal.timeout(10_000) }).catch(() => null);
+  return res;
+}
+
 // Pause/resume on whatever Spotify device is currently active, plus a GET
 // for the current is-playing state (so a UI can show the right play/pause
 // icon). Resume here (action=resume) just un-pauses whatever was already
@@ -33,10 +40,8 @@ export async function POST(req: NextRequest) {
   const url = action === "seek"
     ? `${BASE}/me/player/seek?position_ms=${Math.round(body!.positionMs!)}`
     : `${BASE}/me/player/${action === "pause" ? "pause" : "play"}`;
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: { Authorization: `Bearer ${token.token}` },
-  });
+  const res = await spotifyFetch(url, { method: "PUT", headers: { Authorization: `Bearer ${token.token}` } });
+  if (!res) return NextResponse.json({ error: "Couldn't reach Spotify" }, { status: 502 });
 
   if (res.status === 204) {
     return NextResponse.json({ ok: true });
@@ -57,9 +62,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: `No Spotify token available (${token.reason})` }, { status: 502 });
   }
 
-  const res = await fetch(`${BASE}/me/player`, {
-    headers: { Authorization: `Bearer ${token.token}` },
-  });
+  const res = await spotifyFetch(`${BASE}/me/player`, { headers: { Authorization: `Bearer ${token.token}` } });
+  if (!res) return NextResponse.json({ error: "Couldn't reach Spotify" }, { status: 502 });
 
   // 204 means no active device/session at all.
   if (res.status === 204) {

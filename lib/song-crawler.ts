@@ -11,7 +11,8 @@ import { parseBpmSpec, type BpmSpecResult } from "@/lib/bpm-spec";
 import { splitArtistList } from "@/lib/artist-list";
 import { recordCrawledArtist } from "@/lib/crawled-artists";
 import { ensureReviewSyncStarted, reviewPlaylistUri, scheduleReviewSync } from "@/lib/review-playlist";
-import { getFreshToken } from "@/lib/tokenStore";
+import { getLookupToken } from "@/lib/spotify-lookup-account";
+import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter, recordSpotifyRequest } from "@/lib/spotify-rate-limit";
 
 // Song Crawler as a server-side background job (Settings > Tracklist).
 // Starting from an artist it walks Deezer "artist radio" breadth-first —
@@ -135,11 +136,20 @@ async function fetchLinkTracks(kind: "album" | "playlist", id: string): Promise<
 }
 
 async function fetchLinkTracksApi(kind: "album" | "playlist", id: string): Promise<{ name: string; tracks: LinkTrack[] } | { error: string }> {
-  const token = await getFreshToken();
-  if (!token.ok) return { error: `no Spotify login on the server (${token.reason})` };
+  // A lookup: uses the secondary lookup account (never the main account / app) and its own rate-limit marker.
+  const blocked = await getSpotifyBlockedUntil("search");
+  if (blocked) return { error: `Spotify lookups are rate-limited until ${blocked}` };
+  const token = await getLookupToken();
+  if (!token.ok) return { error: token.reason };
   const get = async (url: string) => {
     await sleep(300);
+    recordSpotifyRequest();
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token.token}` }, signal: AbortSignal.timeout(20000) });
+    if (res.status === 429) {
+      const wait = Math.min(parseRetryAfter(res.headers.get("Retry-After") ?? "30"), 24 * 3600);
+      await setSpotifyBlockedUntil(new Date(Date.now() + wait * 1000 + 30_000).toISOString(), "search");
+      throw new Error("Spotify 429");
+    }
     if (!res.ok) throw new Error(`Spotify ${res.status}`);
     return res.json();
   };

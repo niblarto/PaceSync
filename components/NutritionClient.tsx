@@ -629,9 +629,11 @@ export function NutritionClient() {
 
     // One row per date shared by every series, so the tooltip shows the
     // values for that date: weigh-ins in the past, projections from today
-    // on (a point each week, plus the goal date and the end).
+    // on (a point each day, plus the goal date and the end).
     type Row = { t: number; kg?: number; post?: number; fit?: number; fit7?: number; postFit?: number; avg?: number } & Partial<Record<Projection["method"], number>>;
     const rows = new Map<number, Row>();
+    // A row for every day, so the hover snaps to one day at a time (the axis labels stay weekly).
+    for (let ms = startMs; ms <= endMs; ms += DAY_MS) rows.set(ms, { t: ms });
     for (const h of history) rows.set(h.t, { t: h.t, kg: h.kg });
     // Post-run weigh-ins (taken soon after a run), drawn in green.
     for (const w of data.postRunWeights ?? []) {
@@ -671,7 +673,7 @@ export function NutritionClient() {
       });
     }
     const projTimes = new Set<number>([todayMs, endMs]);
-    for (let ms = todayMs; ms < endMs; ms += 7 * DAY_MS) projTimes.add(ms);
+    for (let ms = todayMs; ms < endMs; ms += DAY_MS) projTimes.add(ms);
     if (cfg?.goalDate && toMs(cfg.goalDate) > todayMs && toMs(cfg.goalDate) <= endMs) projTimes.add(toMs(cfg.goalDate));
     projTimes.forEach(ms => {
       const row = rows.get(ms) ?? { t: ms };

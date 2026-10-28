@@ -1,5 +1,6 @@
 ﻿"use client";
 
+import { queuedMessage } from "@/lib/queued-message";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { FloatingCard } from "./FloatingCard";
@@ -569,6 +570,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [csvName, setCsvName]           = useState<string | null>(null);
   const [step, setStep]                 = useState<Step>("idle");
   const [savedUrl, setSavedUrl]         = useState<string | null>(null);
+  const [savedQueuedNote, setSavedQueuedNote] = useState<string | null>(null);
   const [pendingUris, setPendingUris]   = useState<string[]>([]);
   const [copied, setCopied]             = useState(false);
   const [playlistName, setPlaylistName] = useState("");
@@ -745,6 +747,8 @@ export function DashboardClient({ spotifyUser }: Props) {
   const [todaysRunSaving, setTodaysRunSaving] = useState(false);
   const [todaysRunSaved, setTodaysRunSaved] = useState(false);
   const [todaysRunError, setTodaysRunError] = useState<string | null>(null);
+  // Saved in PaceSync, but the Spotify playlist is waiting for a rate limit to clear (it is sent automatically).
+  const [todaysRunNote, setTodaysRunNote] = useState<string | null>(null);
   const [todaysRunUrl, setTodaysRunUrl] = useState<string | null>(null);
   const [mixSavedNonce, setMixSavedNonce] = useState(0);
   const [pinSaving, setPinSaving] = useState(false);
@@ -949,8 +953,7 @@ export function DashboardClient({ spotifyUser }: Props) {
   // no-BPM list can't burst Spotify's rate limit. Returns how many were
   // removed.
   async function pruneDeadSpotifyTracks(tracks: TrackWithBPM[]): Promise<number> {
-    const token = await freshSpotifyToken();
-    if (!token || tracks.length === 0) return 0;
+    if (tracks.length === 0) return 0;
     const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
     let removed = 0;
     for (let i = 0; i < tracks.length; i += 50) {
@@ -959,8 +962,11 @@ export function DashboardClient({ spotifyUser }: Props) {
       const ids = batch.map(t => t.id).join(",");
       let res: Response;
       try {
-        res = await spotifyFetch(`https://api.spotify.com/v1/tracks?ids=${ids}`, {
-          headers: { Authorization: `Bearer ${token}` },
+        // Through the server, on the secondary lookup account (not this browser's main login).
+        res = await fetch("/api/spotify/lookup-tracks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: batch.map(t => t.id) }),
         });
       } catch {
         continue; // network hiccup — leave these tracks alone
@@ -995,8 +1001,9 @@ export function DashboardClient({ spotifyUser }: Props) {
           trackUris: missing.map(t => t.uri),
         }),
       });
-      const data = await res.json() as { error?: string };
+      const data = await res.json() as { error?: string; queued?: boolean; until?: string };
       if (!res.ok || data.error) throw new Error(data.error ?? `Save failed (${res.status})`);
+      if (data.queued) { setNoBpmSaveMsg(queuedMessage('the "No BPM" playlist', data.until)); return; }
       setNoBpmSaveMsg(`Saved ${missing.length} track${missing.length !== 1 ? "s" : ""} to "No BPM" on Spotify`);
     } catch (e) {
       setNoBpmSaveMsg(e instanceof Error ? e.message : "Failed to save");
@@ -2015,31 +2022,7 @@ export function DashboardClient({ spotifyUser }: Props) {
     setTodaysRunSaving(true);
     setTodaysRunError(null);
     try {
-      const res = await fetch("/api/spotify/create-playlist", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: TODAYS_RUN_PLAYLIST,
-          description: aiDjMix
-            ? `${aiDjMix.workoutTitle} - ${aiDjMix.date.split("-").reverse().join("-")}`
-            : "PaceSync running playlist for today",
-          trackUris: filteredTracks.map((t) => t.uri),
-        }),
-      });
-      const data = await res.json() as { error?: string; url?: string; tracksAdded?: boolean; trackUris?: string[] };
-      if (data.error) throw new Error(data.error);
-      setTodaysRunUrl(data.url ?? null);
-      if (data.tracksAdded === false && data.url) {
-        const playlistId = data.url.split("/").pop()!;
-        try {
-          await addTracksBrowser(playlistId, data.trackUris ?? filteredTracks.map((t) => t.uri));
-          setTodaysRunSaved(true);
-        } catch (e) {
-          setTodaysRunError(e instanceof Error ? e.message : "Playlist created but adding tracks failed");
-        }
-      } else {
-        setTodaysRunSaved(true);
-      }
+      // Saved in PaceSync FIRST (below), then Spotify, so a rate limit never loses the run.
       // Snapshot which mix "Today's Run" now holds, so the past run can be
       // reviewed song-by-song against the pace actually run. This must run
       // for every save, not just AI-DJ-built ones — otherwise a save made
@@ -2071,6 +2054,38 @@ export function DashboardClient({ spotifyUser }: Props) {
       })
         .then(() => setMixSavedNonce(n => n + 1)) // refresh the Runna card's saved-mix tracklist
         .catch(() => {});
+      const res = await fetch("/api/spotify/create-playlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: TODAYS_RUN_PLAYLIST,
+          description: aiDjMix
+            ? `${aiDjMix.workoutTitle} - ${aiDjMix.date.split("-").reverse().join("-")}`
+            : "PaceSync running playlist for today",
+          trackUris: filteredTracks.map((t) => t.uri),
+        }),
+      });
+      const data = await res.json() as { error?: string; url?: string; tracksAdded?: boolean; trackUris?: string[]; queued?: boolean; message?: string };
+      if (data.error) throw new Error(data.error);
+      if (data.queued) {
+        // Spotify is rate-limiting: the run is saved here, and the playlist is created automatically later.
+        setTodaysRunSaved(true);
+        setTodaysRunNote(queuedMessage("the playlist", (data as { until?: string }).until));
+        return;
+      }
+      setTodaysRunNote(null);
+      setTodaysRunUrl(data.url ?? null);
+      if (data.tracksAdded === false && data.url) {
+        const playlistId = data.url.split("/").pop()!;
+        try {
+          await addTracksBrowser(playlistId, data.trackUris ?? filteredTracks.map((t) => t.uri));
+          setTodaysRunSaved(true);
+        } catch (e) {
+          setTodaysRunError(e instanceof Error ? e.message : "Playlist created but adding tracks failed");
+        }
+      } else {
+        setTodaysRunSaved(true);
+      }
     } catch (e) {
       setTodaysRunError(e instanceof Error ? e.message : "Failed to save playlist");
     } finally {
@@ -2956,8 +2971,16 @@ export function DashboardClient({ spotifyUser }: Props) {
         url?: string;
         tracksAdded?: boolean;
         trackUris?: string[];
+        queued?: boolean;
+        until?: string;
       };
       if (data.error) throw new Error(data.error);
+      if (data.queued) {
+        setSavedQueuedNote(queuedMessage(`"${playlistName}"`, data.until));
+        setStep("saved");
+        return;
+      }
+      setSavedQueuedNote(null);
       setSavedUrl(data.url ?? null);
       if (data.tracksAdded === false && data.url) {
         // Server-side add blocked by Spotify — try directly from the browser
@@ -3672,6 +3695,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                         <p className="text-xs text-slate-400">{paceProSaving ? "Saving to the Pace Pro library…" : paceProSaveMsg}</p>
                       )}
                       {todaysRunError && <p className="text-xs text-red-400">{todaysRunError}</p>}
+                      {todaysRunNote && <p className="text-xs text-amber-300">{todaysRunNote}</p>}
                       {todaysRunSaved && todaysRunUrl && (
                         <button
                           onClick={() => openSpotifyUrl(todaysRunUrl)}
@@ -3689,6 +3713,10 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
                   <div className="px-5 py-3 text-sm text-red-400 border-b border-slate-800">
                     {saveError}
                   </div>
+                )}
+
+                {step === "saved" && savedQueuedNote && (
+                  <div className="px-5 py-3 border-b border-slate-800 text-xs text-amber-300">{savedQueuedNote}</div>
                 )}
 
                 {step === "partial" && savedUrl && (

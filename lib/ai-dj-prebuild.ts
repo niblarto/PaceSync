@@ -1,7 +1,7 @@
 import { getFreshToken } from "@/lib/tokenStore";
 import { restDaySegments } from "@/lib/rest-day-mix-shared";
 import { getSpotifyUser } from "@/lib/spotify";
-import { upsertPlaylist } from "@/lib/spotify-playlist";
+import { requestPlaylistSave } from "@/lib/spotify-outbox";
 import { buildAiDjMix } from "@/lib/ai-dj-mix";
 import { loadAiDjConfig } from "@/lib/ai-dj-config";
 import { fetchRunnaSchedule, TODAYS_RUN_PLAYLIST, type RunnaWorkout } from "@/lib/runna-schedule";
@@ -115,7 +115,6 @@ export async function buildAndSaveMixesFor(targetDate: string, label: "pre-build
     return { ok: false, error: tokenResult.reason };
   }
   const token = tokenResult.token;
-  const user = await getSpotifyUser(token);
 
   const results: { title: string; ok: boolean; tracks?: number; url?: string; error?: string }[] = [];
 
@@ -151,13 +150,26 @@ export async function buildAndSaveMixesFor(targetDate: string, label: "pre-build
     const [yy, mm, dd] = w.date.split("-");
     const description = `${w.title} - ${dd}-${mm}-${yy}`;
     try {
-      const saved = await upsertPlaylist(token, user.id, TODAYS_RUN_PLAYLIST, description, trackUris);
+      // Saved locally FIRST, so the run's mix is recorded whether or not Spotify is available.
       saveTodaysRunEntry({
         date: w.date,
         workoutTitle: w.title,
         savedAt: new Date().toISOString(),
         tracks: timelineToHistoryTracks(mix.timeline),
       });
+      const out = await requestPlaylistSave(token, { name: TODAYS_RUN_PLAYLIST, description, uris: trackUris });
+      if (out.status === "queued") {
+        // Spotify is rate-limiting: the playlist is created automatically when that clears (lib/spotify-outbox.ts).
+        const when = out.until ? ` after about ${new Date(out.until).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}` : " when Spotify allows";
+        results.push({ title: w.title, ok: true, tracks: trackUris.length });
+        await notify(
+          `"${w.title}" ready for ${targetDate} and saved in PaceSync (${trackUris.length} tracks). Spotify is rate-limiting, so the "${TODAYS_RUN_PLAYLIST}" playlist will be created automatically${when}.`,
+          { title: "⏳ AI DJ Mix saved - Spotify queued", tags: "musical_note,hourglass", priority: "low" },
+        );
+        appendCronLog("AI DJ", `✓ (${label}) "${w.title}" (${targetDate}) saved locally; Spotify playlist queued${when}`);
+        continue;
+      }
+      const saved = out.result;
       results.push({ title: w.title, ok: true, tracks: trackUris.length, url: saved.url });
       const trackList = trackLinkLines(
         mix.timeline.flatMap(seg => seg.tracks.map(t => ({ uri: t.uri, name: t.name, artist: t.artist })))

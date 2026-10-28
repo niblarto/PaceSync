@@ -273,6 +273,16 @@ function fmtPaceSec(s: number | null): string {
 export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string) => void } = {}) {
   const { pastRuns, loading, error } = useRunnaData();
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Click the title to minimize / maximize the card (remembered in this browser).
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    try { setCollapsed(window.localStorage.getItem("pacesync.runnaSummaryCollapsed") === "1"); } catch { /* storage unavailable */ }
+  }, []);
+  const toggleCollapsed = () => setCollapsed(c => {
+    const next = !c;
+    try { window.localStorage.setItem("pacesync.runnaSummaryCollapsed", next ? "1" : "0"); } catch { /* storage unavailable */ }
+    return next;
+  });
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pacing, setPacing] = useState<Record<string, PacingState>>({});
   const [activityLinks, setActivityLinks] = useState<Record<string, { garminId: string | number | null; stravaId: number | null } | null>>({});
@@ -450,13 +460,22 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
 
   return (
     <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 overflow-hidden">
-      <div className="px-5 py-4 border-b border-white/10">
-        <h2 className="font-semibold flex items-center gap-2">
-          <span className="text-base">✅</span> Runna Summary
-        </h2>
-        <p className="text-xs text-slate-500 mt-0.5">Last 8 days</p>
-      </div>
+      <button
+        onClick={toggleCollapsed}
+        aria-expanded={!collapsed}
+        title={collapsed ? "Show the Runna Summary" : "Minimize the Runna Summary"}
+        className={`w-full text-left px-5 py-4 flex items-start justify-between gap-3 hover:bg-slate-800/30 transition-colors ${collapsed ? "" : "border-b border-white/10"}`}
+      >
+        <div>
+          <h2 className="font-semibold flex items-center gap-2">
+            <span className="text-base">✅</span> Runna Summary
+          </h2>
+          <p className="text-xs text-slate-500 mt-0.5">Last 8 days</p>
+        </div>
+        <span className={`text-slate-500 text-sm mt-1 transition-transform ${collapsed ? "-rotate-90" : ""}`}>▾</span>
+      </button>
 
+      {!collapsed && (<>
       <FortnightFacts />
 
       {loading && (
@@ -772,6 +791,7 @@ export function RunnaSummaryCard({ onTrackClick }: { onTrackClick?: (uri: string
           })}
         </div>
       )}
+      </>)}
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { getFreshToken } from "@/lib/tokenStore";
 import { addTracksToLibrary } from "@/lib/library-add";
 import { findPreviouslyDeleted } from "@/lib/deleted-tracks";
 import { healActiveCsv } from "@/lib/csv-heal";
+import { governedCall, SpotifyBlocked } from "@/lib/spotify-governor";
 import { flushSpotifyRemovals, pendingSpotifyRemovals, queueSpotifyRemovals } from "@/lib/spotify-removals";
 
 // Daily two-way sync between the local library and its Spotify playlist
@@ -18,7 +19,6 @@ import { flushSpotifyRemovals, pendingSpotifyRemovals, queueSpotifyRemovals } fr
 
 const API = "https://api.spotify.com/v1";
 const TRACK_URI_RE = /^spotify:track:[A-Za-z0-9]{22}$/;
-const CALL_GAP_MS = 400;
 const MAX_REMOVALS_PER_RUN = 1000;
 // More Spotify-only tracks than this is far more likely tracks removed from the library whose
 // Spotify removal never went through (e.g. during a rate limit) than that many added on Spotify
@@ -40,22 +40,24 @@ export interface LibrarySyncResult {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// One Spotify call with 429 handling: waits Retry-After (capped) and retries.
+// One Spotify call, through the governor: one at a time, spaced out, never while Spotify is
+// rate-limiting. A 429 stops the sync (SpotifyBlocked) instead of being waited out and retried.
 async function spotifyCall(token: string, url: string, init: RequestInit = {}): Promise<Response> {
-  for (let attempt = 0; ; attempt++) {
-    await sleep(CALL_GAP_MS);
-    const res = await fetch(url, {
-      ...init,
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(init.headers ?? {}) },
-    });
-    if (res.status !== 429 || attempt >= 3) return res;
-    const wait = Math.min(Number(res.headers.get("Retry-After") ?? "5") || 5, 120);
-    console.log(`[library-sync] 429 — waiting ${wait}s (attempt ${attempt + 1})`);
-    await sleep(wait * 1000);
-  }
+  return governedCall(url, init, token);
 }
 
 export async function syncLibraryWithSpotify(): Promise<LibrarySyncResult> {
+  try {
+    return await syncLibraryWithSpotifyInner();
+  } catch (e) {
+    if (e instanceof SpotifyBlocked) {
+      return { libraryCount: 0, spotifyCount: 0, addedToSpotify: 0, importedToLibrary: 0, removedFromSpotify: 0, ok: false, error: `Spotify is rate-limiting until ${e.until ?? "later"} - the sync was skipped and will run again tomorrow` };
+    }
+    throw e;
+  }
+}
+
+async function syncLibraryWithSpotifyInner(): Promise<LibrarySyncResult> {
   const base = { libraryCount: 0, spotifyCount: 0, addedToSpotify: 0, importedToLibrary: 0, removedFromSpotify: 0 };
   const config = loadRunningPlaylistConfig();
   if (!config.id) return { ...base, ok: false, error: "No Spotify playlist configured for the library" };

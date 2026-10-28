@@ -254,6 +254,8 @@ function ChartTooltip({ active, payload, label }: {
         <p key={p.name} style={{ color: p.color }}>
           {p.name === "Cadence"
             ? `${p.value} SPM`
+            : p.name === "Song BPM"
+            ? `${p.value} BPM (song)`
             : `${fmtPaceSecs(p.value)} /mi${p.name === "Target" ? " target" : p.name === "Pace Pro plan" ? " planned" : ""}`}
         </p>
       ))}
@@ -527,12 +529,27 @@ export function GarminActivityClient({ id }: { id: string }) {
 
   const a = data?.activity;
 
+  // Lines switched off by clicking their legend key
+  const [hiddenLines, setHiddenLines] = useState<Set<string>>(new Set());
+  const toggleLine = (key: string) => setHiddenLines(prev => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+
   // Expected pace over time from the mix (song playing at each moment) —
   // drawn on the pace chart in blue.
   const targetAt = (t: number): number | null => {
     if (!mix) return null;
     const track = mix.tracks.find(x => t >= x.startsAtSec && t < x.startsAtSec + x.durationSec);
     return track?.targetPaceSec ?? null;
+  };
+  // BPM of the song playing at each moment, from the tracklisting — drawn on the cadence axis (same scale,
+  // steps per minute), so the music's tempo can be read against the runner's cadence.
+  const songBpmAt = (t: number): number | null => {
+    if (!mix) return null;
+    const track = mix.tracks.find(x => t >= x.startsAtSec && t < x.startsAtSec + x.durationSec);
+    return track?.tempo != null ? Math.round(track.tempo) : null;
   };
   // Expected pace over DISTANCE from a selected Pace Pro plan — drawn in
   // purple, distinct from the (time-based) blue "Target" line above. Splits
@@ -554,7 +571,7 @@ export function GarminActivityClient({ id }: { id: string }) {
   const chartRecords = (mix || paceProSplits)
     ? (data?.records ?? []).map(r => ({
         ...r,
-        ...(mix ? { target: targetAt(r.t) } : {}),
+        ...(mix ? { target: targetAt(r.t), songBpm: songBpmAt(r.t) } : {}),
         ...(paceProSplits ? { paceProTarget: paceProTargetAt(r.distanceMi) } : {}),
       }))
     : data?.records ?? [];
@@ -894,6 +911,7 @@ export function GarminActivityClient({ id }: { id: string }) {
                       yAxisId="pace"
                       type="monotone"
                       dataKey="pace"
+                        hide={hiddenLines.has("pace")}
                       name="Pace"
                       stroke="#34d399"
                       strokeWidth={1.5}
@@ -906,6 +924,7 @@ export function GarminActivityClient({ id }: { id: string }) {
                       yAxisId="cadence"
                       type="monotone"
                       dataKey="cadence"
+                        hide={hiddenLines.has("cadence")}
                       name="Cadence"
                       stroke="#fb923c"
                       strokeWidth={1.5}
@@ -916,9 +935,26 @@ export function GarminActivityClient({ id }: { id: string }) {
                     {mix && (
                       <Line
                         xAxisId="time"
+                        yAxisId="cadence"
+                        type="stepAfter"
+                        dataKey="songBpm"
+                        hide={hiddenLines.has("songBpm")}
+                        name="Song BPM"
+                        stroke="#f472b6"
+                        strokeWidth={1.5}
+                        strokeDasharray="2 3"
+                        dot={false}
+                        connectNulls={false}
+                        isAnimationActive={false}
+                      />
+                    )}
+                    {mix && (
+                      <Line
+                        xAxisId="time"
                         yAxisId="pace"
                         type="stepAfter"
                         dataKey="target"
+                        hide={hiddenLines.has("target")}
                         name="Target"
                         stroke="#3b82f6"
                         strokeWidth={1.5}
@@ -934,6 +970,7 @@ export function GarminActivityClient({ id }: { id: string }) {
                         yAxisId="pace"
                         type="stepAfter"
                         dataKey="paceProTarget"
+                        hide={hiddenLines.has("paceProTarget")}
                         name="Pace Pro plan"
                         stroke="#c084fc"
                         strokeWidth={1.5}
@@ -1036,21 +1073,28 @@ export function GarminActivityClient({ id }: { id: string }) {
                   </div>
                 )}
 
-                <div className="flex gap-6 mt-3 text-xs text-slate-500">
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-4 h-0.5 bg-emerald-400 inline-block rounded" />
-                    Pace /mi
-                  </span>
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-4 h-0.5 bg-orange-400 inline-block rounded" />
-                    Cadence (SPM)
-                  </span>
-                  {mix && (
-                    <span className="flex items-center gap-1.5">
-                      <span className="w-4 h-0.5 bg-blue-500 inline-block rounded" />
-                      Target pace /mi
-                    </span>
-                  )}
+                {/* Legend: click a key to show / hide that line */}
+                <div className="flex flex-wrap gap-x-6 gap-y-1 mt-3 text-xs">
+                  {([
+                    { key: "pace", label: "Pace /mi", color: "bg-emerald-400", show: true },
+                    { key: "cadence", label: "Cadence (SPM)", color: "bg-orange-400", show: true },
+                    { key: "songBpm", label: "Song BPM", color: "bg-pink-400", show: !!mix },
+                    { key: "target", label: "Target pace /mi", color: "bg-blue-500", show: !!mix },
+                    { key: "paceProTarget", label: "Pace Pro plan", color: "bg-purple-400", show: !!paceProSplits },
+                  ]).filter(l => l.show).map(l => {
+                    const off = hiddenLines.has(l.key);
+                    return (
+                      <button
+                        key={l.key}
+                        onClick={() => toggleLine(l.key)}
+                        title={off ? "Click to show this line" : "Click to hide this line"}
+                        className={`flex items-center gap-1.5 transition-opacity hover:text-slate-300 ${off ? "opacity-40 line-through text-slate-600" : "text-slate-500"}`}
+                      >
+                        <span className={`w-4 h-0.5 inline-block rounded ${l.color}`} />
+                        {l.label}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             )}

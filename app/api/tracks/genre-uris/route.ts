@@ -18,6 +18,29 @@ export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  // ?genres=a|b|c -> { byGenre: { a: tracks[], ... } } from ONE read of the library (the Genre Explorer loads
+  // every tag under an opened category at once).
+  const genresParam = req.nextUrl.searchParams.get("genres");
+  if (genresParam !== null) {
+    const wanted = Array.from(new Set(genresParam.split("|").map(g => g.trim().toLowerCase()).filter(Boolean))).slice(0, 300);
+    if (wanted.length === 0) return NextResponse.json({ error: "genres required" }, { status: 400 });
+    try {
+      const rows = readAllTracks(loadRunningPlaylistConfig().csvFile);
+      const byGenre: Record<string, unknown[]> = Object.fromEntries(wanted.map(g => [g, []]));
+      for (const t of rows) {
+        if (!t.uri) continue;
+        const have = parseGenres(t.genres);
+        for (const g of wanted) {
+          if (have.includes(g)) byGenre[g].push({ uri: t.uri, name: t.trackName ?? "", artist: t.artistNames ?? "", durationMs: t.durationMs, tempo: t.tempo, energy: t.energy });
+        }
+      }
+      for (const g of wanted) (byGenre[g] as { name: string }[]).sort((x, y) => x.name.localeCompare(y.name));
+      return NextResponse.json({ byGenre });
+    } catch (err) {
+      return NextResponse.json({ error: err instanceof Error ? err.message : "Failed to look up genre tracks" }, { status: 500 });
+    }
+  }
+
   const genre = (req.nextUrl.searchParams.get("genre") ?? "").trim().toLowerCase();
   if (!genre) return NextResponse.json({ error: "genre required" }, { status: 400 });
 

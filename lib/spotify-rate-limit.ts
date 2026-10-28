@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "fs/promises";
+import { lookupCredentials } from "@/lib/spotify-lookup-account";
 import path from "path";
 
 // "Spotify is rate limited until X" sentinel, persisted to disk (not just an
@@ -32,6 +33,15 @@ export async function getSpotifyBlockedUntil(lane: SpotifyRateLane = "main"): Pr
     if (raw.until && new Date(raw.until).getTime() > Date.now()) return raw.until;
   } catch { /* no file yet, or expired */ }
   return null;
+}
+
+// When the last block ended (or ends), even if that is already in the past - for the cool-off after one.
+export async function getLastBlockEnd(lane: SpotifyRateLane = "main"): Promise<number | null> {
+  try {
+    const raw = JSON.parse(await readFile(rateLimitPath(lane), "utf8")) as { until?: string };
+    const t = raw.until ? new Date(raw.until).getTime() : NaN;
+    return Number.isFinite(t) ? t : null;
+  } catch { return null; }
 }
 
 export async function setSpotifyBlockedUntil(until: string, lane: SpotifyRateLane = "main"): Promise<void> {
@@ -125,10 +135,10 @@ export async function spotifyAppToken(): Promise<string | null> {
 
 // Second app's token, or null if not configured.
 export async function spotifyAppToken2(): Promise<string | null> {
-  const id = process.env.SPOTIFY_CLIENT_ID_2;
-  const secret = process.env.SPOTIFY_CLIENT_SECRET_2;
-  if (!id || !secret) return null;
-  return fetchAppToken(id, secret);
+  // Entered in Settings (stored on the server), else the SPOTIFY_CLIENT_ID_2 / _SECRET_2 pair.
+  const c = lookupCredentials();
+  if (!c) return null;
+  return fetchAppToken(c.id, c.secret);
 }
 
 // Query-only lookups (never a playlist write, which stays on the user's
@@ -136,20 +146,28 @@ export async function spotifyAppToken2(): Promise<string | null> {
 // the SECOND app first when one is configured, so search volume never
 // touches the main app's own 30s rolling budget at all — playlist adds/
 // plays/deletes (a completely different, user-scoped token) are the only
-// thing that should ever draw on that budget. Only falls back to the
-// primary app if the second one isn't configured, or itself gets rate-
-// limited. Shared by lib/csv-heal.ts's duration/URI-search passes and the
+// thing that should ever draw on that budget. The primary app is used
+// ONLY if no second app is configured at all; if the second one gets
+// rate-limited, lookups wait (they never fall back to the primary app).
+// Shared by lib/csv-heal.ts's duration/URI-search passes and the
 // "search more by this artist" ISRC-miss Spotify-search fallback.
 export class SearchTokenSource {
   private primary: string | null | undefined;
   private secondary: string | null | undefined;
+  private secondaryBlocked = false;
   usingPrimary = false;
 
   constructor(private readonly alreadyBlocked: boolean) {}
 
   // Returns the token to use right now, or null if nothing usable is
-  // available at all (neither app configured, or both rate-limited).
+  // available at all (no app configured, or the lookup app is rate-limited).
+  //
+  // When the second (read-only lookup) app is configured it is the ONLY app lookups use: if it is
+  // rate-limited, lookups wait, they do NOT fall back to the main app - that app's allowance is
+  // reserved for saving playlists, which is the whole point of having a separate lookup app. Only
+  // when no second app is configured at all do lookups use the main app's credentials.
   async current(): Promise<string | null> {
+    if (this.secondaryBlocked) return null;
     if (this.usingPrimary) {
       if (this.alreadyBlocked) return null;
       if (this.primary === undefined) this.primary = await spotifyAppToken();
@@ -157,7 +175,7 @@ export class SearchTokenSource {
     }
     if (this.secondary === undefined) this.secondary = await spotifyAppToken2();
     if (this.secondary) return this.secondary;
-    // No second app configured at all — fall back to the primary immediately.
+    // No second app configured at all - the main app's credentials are the only option.
     this.usingPrimary = true;
     if (this.alreadyBlocked) return null;
     if (this.primary === undefined) this.primary = await spotifyAppToken();
@@ -166,15 +184,14 @@ export class SearchTokenSource {
 
   // Called after a 429 on whichever token `current()` just returned.
   // Returns true if there's another app left to retry with (caller should
-  // retry the same request), false if Spotify is exhausted entirely.
+  // retry the same request), false if lookups should stop and wait.
   async onRateLimited(): Promise<boolean> {
     if (!this.usingPrimary) {
-      this.usingPrimary = true;
-      if (this.alreadyBlocked) return false;
-      if (this.primary === undefined) this.primary = await spotifyAppToken();
-      return !!this.primary;
+      // The lookup app itself is rate-limited: stop, rather than move to the main app.
+      this.secondaryBlocked = true;
+      return false;
     }
-    this.primary = null; // primary also rate-limited — nothing left to try
+    this.primary = null; // the main app (no second app configured) is rate-limited - nothing left to try
     return false;
   }
 }
