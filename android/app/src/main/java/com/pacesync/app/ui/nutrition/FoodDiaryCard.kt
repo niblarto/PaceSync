@@ -1,6 +1,7 @@
 package com.pacesync.app.ui.nutrition
 
 import android.app.DatePickerDialog
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -73,7 +74,14 @@ fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int) {
     var diary by remember { mutableStateOf<LoseItDiaryDto?>(null) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var collapsed by remember { mutableStateOf(setOf<String>()) } // meal names folded to just their calories
+    // Meal names folded to just their calories; kept in preferences so it
+    // survives switching tabs (which leaves this screen) and restarting the app.
+    val prefs = remember { context.getSharedPreferences("food_diary", Context.MODE_PRIVATE) }
+    var collapsed by remember { mutableStateOf(prefs.getStringSet("collapsed", emptySet())?.toSet() ?: emptySet()) }
+    fun setCollapsed(next: Set<String>) {
+        collapsed = next
+        prefs.edit().putStringSet("collapsed", next).apply()
+    }
 
     LaunchedEffect(date, reloadKey) {
         loading = true
@@ -128,7 +136,7 @@ fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int) {
                         ) {
                             // Tapping the meal's title folds it down to just its calories.
                             Row(
-                                Modifier.fillMaxWidth().clickable { collapsed = if (open) collapsed + m.name else collapsed - m.name },
+                                Modifier.fillMaxWidth().clickable { setCollapsed(if (open) collapsed + m.name else collapsed - m.name) },
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(if (open) "▾" else "▸", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)

@@ -169,8 +169,20 @@ function rowFromEntry(e: LoseItEntry, state: SyncState): FoodRowInput {
 
 // ── Sync ───────────────────────────────────────────────────────────────────
 
-async function syncDay(date: string, state: SyncState): Promise<number> {
-  const entries = await withLoseItSession(who => fetchDay(who, date));
+async function syncDay(date: string, state: SyncState, expectFewer = false): Promise<number> {
+  const stored = (getDb().prepare("SELECT COUNT(*) AS n FROM loseit_food_log WHERE date = ? AND source = 'rpc'").get(date) as { n: number }).n;
+  let entries = await withLoseItSession(who => fetchDay(who, date));
+  // Twice, Lose It! answered with only part of a day (the meals before dinner)
+  // that it returned in full seconds later. A read that shows fewer foods than
+  // we hold is therefore read again (up to twice more) before a deletion is
+  // believed; any read with at least as many wins.
+  for (let attempt = 1; attempt <= 2 && stored > 0 && entries.length < stored && !expectFewer; attempt++) {
+    console.warn(`[loseit] ${date}: read ${entries.length} foods, ${stored} stored; re-reading (${attempt}/2)`);
+    await new Promise(r => setTimeout(r, 3000));
+    const again = await withLoseItSession(who => fetchDay(who, date));
+    if (again.length >= entries.length) entries = again;
+  }
+  if (stored !== entries.length) console.warn(`[loseit] ${date}: ${stored} → ${entries.length} foods`);
   replaceDay(date, entries.map(e => rowFromEntry(e, state)), "rpc");
   return entries.length;
 }
@@ -465,9 +477,9 @@ export async function getLoseItFoodDetails(food: FoodRef): Promise<FoodDetails> 
 }
 
 // Re-reads one day from Lose It! into loseit_food_log.
-async function refreshDay(date: string): Promise<void> {
+async function refreshDay(date: string, expectFewer = false): Promise<void> {
   const state = loadState();
-  await syncDay(date, state);
+  await syncDay(date, state, expectFewer);
   saveState(state);
 }
 
@@ -497,7 +509,7 @@ export async function removeLoseItFood(date: string, item: CopyItem): Promise<Di
     if (!entry) throw new Error(`${item.name} is no longer in that day's Lose It! diary`);
     await deleteEntry(who, entry.node);
   });
-  await refreshDay(date);
+  await refreshDay(date, true); // one food fewer is expected
   return getDiaryDay(date);
 }
 
