@@ -84,8 +84,7 @@ function stamp(iso: string | null | undefined): string {
   return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString("en-GB", { weekday: "short" })} ${time}`;
 }
 
-const RANGES = [14, 30, 90] as const;
-const RANGE_KEY = "nutrition.chartRange";
+const CHART_DAYS = 30; // days of burn/eaten rows loaded (the food diary's day bars use them)
 const DAY_MS = 86_400_000;
 // Rectangle with rounded top corners, as the bars have.
 function topRounded(x: number, y: number, w: number, h: number, r: number): string {
@@ -235,31 +234,42 @@ function Stat({ label, value, sub, action, icon, tone = "sky", progress }: {
   );
 }
 
-const pillBtn = (on: boolean) => `text-xs px-3 py-1 rounded-full border transition-colors ${
-  on ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-300" : "border-white/10 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
-}`;
-
-function CaloriesTooltip({ active, payload, label }: { active?: boolean; payload?: { payload: DayRow }[]; label?: string }) {
-  if (!active || !payload?.length || !label) return null;
-  const d = payload[0].payload;
+// One day's calories at the top of the food diary, as long thin bars on one
+// shared scale: Eaten (white tip = that day's exercise, as on the old Daily
+// calories chart), Exercise and Burnt. No net line, limit marker or header. Eaten comes from the diary itself so adds and deletes
+// show at once.
+function DayCaloriesBars({ row, eaten, limit, minKcal }: { row: DayRow | undefined; eaten: number; limit: number | null; minKcal: number }) {
+  const e = Math.round(eaten);
+  const ex = row?.exercise ?? null;
+  const burnt = row?.burnt ?? null;
+  const scale = Math.max(e, ex ?? 0, burnt ?? 0, limit ?? 0, 1) * 1.04;
+  const pct = (v: number) => `${Math.max(0, Math.min(100, (v / scale) * 100))}%`;
+  const low = e > 0 && e < minKcal;
+  const tip = Math.min(Math.max(ex ?? 0, 0), e); // white end of the Eaten bar
+  const Track = ({ label, value, color, width, children }: { label: string; value: number | null; color: string; width: number | null; children?: React.ReactNode }) => (
+    <div className="flex items-center gap-3 text-xs">
+      <span className="w-20 shrink-0 text-slate-400">{label}</span>
+      <div className="relative flex-1 h-2 rounded-full bg-slate-800">
+        {width != null && width > 0 && (
+          <div className="absolute inset-y-0 left-0 rounded-full overflow-hidden" style={{ width: pct(width), background: color }}>{children}</div>
+        )}
+      </div>
+      <span className="w-20 shrink-0 text-right font-mono font-semibold tabular-nums text-slate-200">{kcal(value)}</span>
+    </div>
+  );
   return (
-    <div className="rounded-lg bg-slate-950/95 border border-white/10 px-3 py-2 text-xs space-y-0.5 shadow-lg">
-      <div className="font-medium text-slate-200 mb-1">{longDate(label)}</div>
-      <div style={{ color: C.eaten }}>Eaten: {kcal(d.eaten)} kcal</div>
-      <div style={{ color: C.burnt }}>Burnt{d.partial ? " so far" : ""}: {kcal(d.burnt)} kcal{d.resting != null ? ` (${kcal(d.resting)} resting)` : ""}</div>
-      <div style={{ color: C.exercise }}>Exercise: {kcal(d.exercise)} kcal</div>
-
-      {d.net != null && (
-        <div className={d.net <= 0 ? "text-emerald-300" : "text-rose-300"}>
-          Net (eaten − burnt){d.partial ? " so far" : ""}: {d.net > 0 ? "+" : d.net < 0 ? "−" : ""}{kcal(Math.abs(d.net))} kcal ({d.net <= 0 ? "deficit" : "gain"})
-        </div>
-      )}
-      {d.proteinG != null && (
-        <div className="text-slate-400 pt-1">P {Math.round(d.proteinG)} g · C {Math.round(d.carbsG ?? 0)} g · F {Math.round(d.fatG ?? 0)} g</div>
-      )}
+    <div className="mb-4">
+      <div className="relative space-y-1.5">
+        <Track label="Eaten" value={e} color={low ? "#ff0012" : C.eaten} width={e}>
+          {tip > 0 && <div className="absolute inset-y-0 right-0" style={{ width: `${(tip / e) * 100}%`, background: low ? "#ef4444" : "#ffffff" }} />}
+        </Track>
+        <Track label="Exercise" value={ex} color={C.exercise} width={ex} />
+        <Track label={row?.partial ? "Burnt so far" : "Burnt"} value={burnt} color={C.burnt} width={burnt} />
+      </div>
     </div>
   );
 }
+
 
 // Minimal Markdown for the AI summary: **bold**, headings, bullet lists.
 function inlineMd(text: string): React.ReactNode[] {
@@ -595,19 +605,6 @@ function useChartZoom(dataMin: number, dataMax: number, minSpan: number) {
 }
 
 export function NutritionClient() {
-  // Chart range is remembered in this browser across refreshes.
-  const [range, setRangeState] = useState<(typeof RANGES)[number]>(() => {
-    try {
-      const v = Number(window.localStorage.getItem(RANGE_KEY));
-      return (RANGES as readonly number[]).includes(v) ? (v as (typeof RANGES)[number]) : 30;
-    } catch {
-      return 30;
-    }
-  });
-  const setRange = (r: (typeof RANGES)[number]) => {
-    setRangeState(r);
-    try { window.localStorage.setItem(RANGE_KEY, String(r)); } catch {}
-  };
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -626,16 +623,16 @@ export function NutritionClient() {
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
-  useEffect(() => { load(range); }, [range, load]);
+  useEffect(() => { load(CHART_DAYS); }, [load]);
   // Reload every 15 minutes (today's burn is refreshed from Garmin at most
   // that often), and tick the countdown every 30s.
   useEffect(() => {
     const t = setInterval(() => {
       setNow(Date.now());
-      if (loadedAt != null && Date.now() - loadedAt >= AUTO_REFRESH_MS) load(range);
+      if (loadedAt != null && Date.now() - loadedAt >= AUTO_REFRESH_MS) load(CHART_DAYS);
     }, 30_000);
     return () => clearInterval(t);
-  }, [loadedAt, load, range]);
+  }, [loadedAt, load]);
 
   // Pull the latest weigh-ins from Garmin Connect, then reload the page data.
   const [weightRefresh, setWeightRefresh] = useState<{ busy: boolean; msg: string | null }>({ busy: false, msg: null });
@@ -645,30 +642,16 @@ export function NutritionClient() {
       const res = await fetch("/api/nutrition/weight-refresh", { method: "POST" });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || `Failed (${res.status})`);
-      await load(range);
+      await load(CHART_DAYS);
       setWeightRefresh({ busy: false, msg: d.latest ? `Garmin: latest ${shortDate(d.latest.date)}` : "No weigh-ins in Garmin" });
     } catch (e) {
       setWeightRefresh({ busy: false, msg: e instanceof Error ? e.message : "Refresh failed" });
     }
-  }, [load, range]);
+  }, [load]);
 
   // Get Garmin's latest weigh-in once when the page opens.
   useEffect(() => { refreshWeight(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Click a legend entry to hide/show that series.
-  const [hidden, setHidden] = useState<Set<string>>(new Set());
-  const toggleSeries = (key: string) => setHidden(h => {
-    const next = new Set(h);
-    if (next.has(key)) next.delete(key); else next.add(key);
-    return next;
-  });
-
-  // Chart zoom (wheel / drag / pinch). The calories chart is categorical, so
-  // its zoom window is a span of day indices, at least a week wide.
-  const nDays = data?.days.length ?? 0;
-  const calZoom = useChartZoom(0, Math.max(0, nDays - 1), 6);
-  const resetCalZoom = calZoom.reset;
-  useEffect(() => { resetCalZoom(); }, [range, resetCalZoom]);
 
   const unit = data?.config.weightUnit ?? "st";
   const cfg = data?.config;
@@ -793,15 +776,6 @@ export function NutritionClient() {
     };
   }, [data, cfg, today]);
 
-  // The days shown in the calories chart (all, or the zoomed span).
-  const calDomain = calZoom.domain;
-  const visibleDays = useMemo(() => {
-    if (!data) return [];
-    if (!calDomain) return data.days;
-    const lo = Math.max(0, Math.round(calDomain[0]));
-    const hi = Math.min(data.days.length - 1, Math.round(calDomain[1]));
-    return data.days.slice(lo, hi + 1);
-  }, [data, calDomain]);
 
   const wZoom = useChartZoom(weightChart?.startMs ?? 0, weightChart?.endMs ?? 0, 3 * DAY_MS);
   const wDomain = wZoom.domain;
@@ -990,89 +964,16 @@ export function NutritionClient() {
               })()}
             </div>
 
-            <FoodDiaryPanel dailyLimit={cfg.dailyCalorieLimit} onChanged={() => load(range)} />
+            <FoodDiaryPanel
+              onChanged={() => load(CHART_DAYS)}
+              dayChart={(date, eaten) => (
+                <DayCaloriesBars row={data.days.find(d => d.date === date)} eaten={eaten}
+                  limit={cfg.dailyCalorieLimit} minKcal={cfg.minDailyCalories ?? 1400} />
+              )}
+            />
 
             <SummaryPanel />
 
-            {/* Calories chart */}
-            <Card title="Daily calories" icon="📊" tone="amber" actions={
-                <div className="flex items-center gap-1.5">
-                  {calDomain
-                    ? <button onClick={calZoom.reset}
-                        className="text-xs px-2.5 py-1 mr-1 rounded-lg border border-sky-500/40 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 transition-colors">
-                        Reset zoom
-                      </button>
-                    : <span className="hidden sm:inline text-[11px] text-slate-600 mr-2">scroll to zoom · drag to pan</span>}
-                  {RANGES.map(r => (
-                    <button key={r} onClick={() => setRange(r)} className={pillBtn(range === r)}>
-                      {r}d
-                    </button>
-                  ))}
-                </div>
-            }>
-              <div ref={calZoom.ref} className={`select-none ${calDomain ? "cursor-grab" : ""}`}>
-              <ResponsiveContainer width="100%" height={320}>
-                <ComposedChart data={visibleDays} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={1} barCategoryGap="20%">
-                  <CartesianGrid strokeDasharray="3 3" stroke={C.grid} vertical={false} />
-                  <XAxis dataKey="date" tickFormatter={shortDate} tick={{ fill: C.axis, fontSize: 10 }} axisLine={{ stroke: C.grid }} tickLine={false} minTickGap={16} />
-                  <YAxis tick={{ fill: C.axis, fontSize: 10 }} axisLine={false} tickLine={false} width={44}
-                    domain={[(min: number) => Math.min(min, ...visibleDays.map(d => (d.eaten ?? 0) - (d.exercise ?? 0))), "auto"]} />
-                  <Tooltip content={<CaloriesTooltip />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
-                  <Legend
-                    wrapperStyle={{ fontSize: 11, color: C.axis, cursor: "pointer" }}
-                    onClick={e => toggleSeries(String((e as { dataKey?: unknown }).dataKey ?? ""))}
-                    formatter={(value, entry) => (
-                      <span style={{ opacity: hidden.has(String((entry as { dataKey?: unknown }).dataKey)) ? 0.35 : 1 }}>{value}</span>
-                    )}
-                  />
-                  <Bar dataKey="eaten" name="Eaten" fill={C.eaten} radius={[2, 2, 0, 0]} hide={hidden.has("eaten")}
-                    shape={(p: unknown) => <EatenBar {...(p as { x?: number; y?: number; width?: number; height?: number; payload?: DayRow })}
-                      showTip={!hidden.has("exercise")} minKcal={cfg.minDailyCalories ?? 1400} />} />
-                  <Bar dataKey="exercise" name="Exercise" fill={C.exercise} radius={[2, 2, 0, 0]} hide={hidden.has("exercise")} />
-                  <Bar dataKey="burnt" name="Burnt" fill={C.burnt} radius={[2, 2, 0, 0]} hide={hidden.has("burnt")} />
-                  <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" />
-                  {/* Net (eaten − burnt) as a line: dots green on a deficit, red on a gain. */}
-                  <Line dataKey="net" name="Net (eaten − burnt)" stroke={C.netLine} strokeWidth={2} connectNulls={false}
-                    isAnimationActive={false} hide={hidden.has("net")}
-                    dot={(p: { cx?: number; cy?: number; payload?: DayRow; index?: number }) => {
-                      const v = p.payload?.net;
-                      if (v == null || p.cx == null || p.cy == null) return <g key={p.index} />;
-                      // Red on a gain, and on a day under the minimum eaten.
-                      const red = v > 0 || underMinimum(p.payload, cfg.minDailyCalories ?? 1400);
-                      return <circle key={p.index} cx={p.cx} cy={p.cy} r={p.payload?.partial ? 4 : 3.5}
-                        fill={p.payload?.partial ? "transparent" : red ? C.netOver : C.netOk}
-                        stroke={red ? C.netOver : C.netOk} strokeWidth={2} />;
-                    }} />
-                  {cfg.dailyCalorieLimit != null && (
-                    <ReferenceLine y={cfg.dailyCalorieLimit} stroke={C.limit} strokeDasharray="6 4"
-                      label={{ value: `Limit ${kcal(cfg.dailyCalorieLimit)}`, fill: C.limit, fontSize: 10, position: "insideTopRight" }} />
-                  )}
-                </ComposedChart>
-              </ResponsiveContainer>
-              </div>
-              {/* Averages as chips, then the long explanation folded away. */}
-              <div className="flex flex-wrap items-center gap-2 mt-3 text-xs">
-                <span className="text-slate-500">Last {data.averages.windowDays} days, not today:</span>
-                <span className="font-mono font-semibold text-amber-300 bg-amber-500/10 rounded px-1.5 py-0.5">eaten {kcal(data.averages.eaten)}</span>
-                <span className="font-mono font-semibold text-sky-300 bg-sky-500/10 rounded px-1.5 py-0.5">burnt {kcal(data.averages.burnt)}</span>
-                <span className="font-mono font-semibold text-emerald-300 bg-emerald-500/10 rounded px-1.5 py-0.5">exercise {kcal(data.averages.exercise)}</span>
-                {data.averages.net != null && (
-                  <span className={`font-mono font-semibold rounded px-1.5 py-0.5 ${data.averages.net <= 0 ? "text-green-400 bg-green-500/10" : "text-rose-300 bg-rose-500/10"}`}>
-                    net {data.averages.net > 0 ? "+" : "−"}{kcal(Math.abs(data.averages.net))}
-                  </span>
-                )}
-                <span className="text-slate-500">avg/day over {data.averages.loggedDays} logged days</span>
-              </div>
-              <HowTo>
-                Last {data.averages.windowDays} days (not counting today): avg eaten {kcal(data.averages.eaten)} kcal on{" "}
-                {data.averages.loggedDays} logged days · avg burnt {kcal(data.averages.burnt)} · avg exercise {kcal(data.averages.exercise)} ·
-                avg net {data.averages.net == null ? "—" : `${data.averages.net > 0 ? "+" : "−"}${kcal(Math.abs(data.averages.net))} kcal`}.
-                The net line (eaten − burnt) dips below zero on a deficit (green dots) and rises above on a gain (red); today's hollow dot is "so far" and updates through the day. Click a legend entry to hide it.
-                Days with nothing logged in Lose It! are left out of the eaten average.
-                The white tip on each Eaten bar is as tall as that day&apos;s Exercise bar, so the amber below it is eaten − exercise (if you burnt more than you ate, the white reaches below zero).
-                A red Eaten bar (with a slightly lighter red tip) and a red net dot mean less than {kcal(cfg.minDailyCalories ?? 1400)} kcal was eaten that day, the daily minimum; today stays red until it&apos;s reached.
-              </HowTo>
-            </Card>
 
             <div className="grid grid-cols-1 gap-6">
               {/* Weight + projections chart */}

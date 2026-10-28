@@ -97,28 +97,13 @@ function Macros({ t, className = "" }: { t: { proteinG: number | null; carbsG: n
   );
 }
 
-// Eaten against the daily limit (Settings → Nutrition goals), like Lose It!'s Calories bar.
-function CalorieBar({ eaten, limit }: { eaten: number; limit: number }) {
-  const left = limit - eaten;
-  const pct = Math.min(100, (eaten / limit) * 100);
-  return (
-    <div className="mb-4">
-      <div className="flex items-baseline justify-between text-xs mb-1.5">
-        <span className="text-slate-400">Calories <span className="text-slate-300 tabular-nums">{round(eaten)}</span> of <span className="tabular-nums">{round(limit)}</span></span>
-        <span className={`font-semibold tabular-nums ${left >= 0 ? "text-green-400" : "text-rose-400"}`}>
-          {round(Math.abs(left))} {left >= 0 ? "under" : "over"}
-        </span>
-      </div>
-      <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
-        <div className={`h-full rounded-full transition-all ${left >= 0 ? "bg-green-500" : "bg-rose-500"}`} style={{ width: `${pct}%` }} />
-      </div>
-    </div>
-  );
-}
-
 // onChanged: called after this panel adds, removes or copies food, so the
-// page can reload its own numbers (Eaten today, the calories chart).
-export function FoodDiaryPanel({ dailyLimit = null, onChanged }: { dailyLimit?: number | null; onChanged?: () => void }) {
+// page can reload its own numbers (Eaten today, the day's calorie bars).
+// dayChart: drawn above the meals for the day shown (the page's calorie bars),
+// given that day's eaten total from the diary.
+export function FoodDiaryPanel({ onChanged, dayChart }: {
+  onChanged?: () => void; dayChart?: (date: string, eaten: number) => React.ReactNode;
+}) {
   const today = isoDate(new Date());
   const [date, setDate] = useState(today);
   const [diary, setDiary] = useState<Diary | null>(null);
@@ -270,9 +255,7 @@ export function FoodDiaryPanel({ dailyLimit = null, onChanged }: { dailyLimit?: 
         <p className="text-sm text-slate-500">Nothing logged.</p>
       )}
 
-      {diary && dailyLimit != null && diary.connected && (date === today || diary.meals.length > 0) && (
-        <CalorieBar eaten={diary.totals.kcal} limit={dailyLimit} />
-      )}
+      {diary && dayChart && diary.connected && (date === today || diary.meals.length > 0) && dayChart(date, diary.totals.kcal)}
 
       {meals.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
