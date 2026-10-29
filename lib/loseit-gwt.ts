@@ -471,10 +471,10 @@ export async function searchFoods(who: GwtIdentity, query: string, max = 25): Pr
 // The account's own foods: "My Foods" (every food it has logged plus its
 // custom foods, ~1,000, ~45 KB gzipped) and its recipes, which Lose It!
 // keeps in a separate, much smaller list. Both log the same way.
-export async function fetchMyFoods(who: GwtIdentity): Promise<LoseItSearchFood[]> {
+export async function fetchMyFoods(who: GwtIdentity): Promise<(LoseItSearchFood & { recipe: boolean })[]> {
   const foods = parseSearchFoods(await rpcWithBuildRetry(who, "getMyFoodsSearchResults", [], () => []));
   const recipes = parseSearchFoods(await rpcWithBuildRetry(who, "getRecipesSearchResults", [], () => []));
-  return [...foods, ...recipes];
+  return [...foods.map(f => ({ ...f, recipe: false })), ...recipes.map(f => ({ ...f, recipe: true }))];
 }
 
 // Search results are a list mixing headers, previous meals and foods; only

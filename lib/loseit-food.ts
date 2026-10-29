@@ -400,7 +400,8 @@ export interface FoodRef { pk: string; name: string; locale: string | null } // 
 export interface FoodSearchResult extends FoodRef {
   brand: string | null;
   icon: string | null;
-  mine: boolean;       // in the account's My Foods
+  mine: boolean;       // in the account's My Foods (or its recipes)
+  recipe: boolean;     // one of the account's recipes
   timesLogged: number; // how often it appears in the stored diary (My Foods only)
 }
 
@@ -436,10 +437,10 @@ async function ensureMyFoods(): Promise<void> {
   if (fresh && count > 0) return;
   const foods = await withLoseItSession(fetchMyFoods);
   const db = getDb();
-  const ins = db.prepare("INSERT OR REPLACE INTO loseit_my_foods (pk, name, brand, icon, locale) VALUES (?, ?, ?, ?, ?)");
+  const ins = db.prepare("INSERT OR REPLACE INTO loseit_my_foods (pk, name, brand, icon, locale, recipe) VALUES (?, ?, ?, ?, ?, ?)");
   db.transaction(() => {
     db.prepare("DELETE FROM loseit_my_foods").run();
-    for (const f of foods) ins.run(toHex(f.pk), f.name, f.brand, f.icon, f.locale);
+    for (const f of foods) ins.run(toHex(f.pk), f.name, f.brand, f.icon, f.locale, f.recipe ? 1 : 0);
   })();
   const latest = loadState();
   latest.myFoodsAt = new Date().toISOString();
@@ -453,8 +454,8 @@ async function ensureMyFoods(): Promise<void> {
 // last — newest — version is shown.
 function searchMyFoods(query: string): FoodSearchResult[] {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const rows = getDb().prepare("SELECT pk, name, brand, icon, locale FROM loseit_my_foods ORDER BY rowid").all() as
-    { pk: string; name: string; brand: string | null; icon: string | null; locale: string | null }[];
+  const rows = getDb().prepare("SELECT pk, name, brand, icon, locale, recipe FROM loseit_my_foods ORDER BY rowid").all() as
+    { pk: string; name: string; brand: string | null; icon: string | null; locale: string | null; recipe: number }[];
   const newest = new Map<string, (typeof rows)[number]>();
   for (const r of rows) {
     const text = `${r.name} ${r.brand ?? ""}`.toLowerCase();
@@ -467,7 +468,7 @@ function searchMyFoods(query: string): FoodSearchResult[] {
     counts.set(c.name, c.n);
   }
   return matches
-    .map(r => ({ ...r, mine: true, timesLogged: counts.get(r.name.trim().toLowerCase()) ?? 0 }))
+    .map(({ recipe, ...r }) => ({ ...r, mine: true, recipe: recipe === 1, timesLogged: counts.get(r.name.trim().toLowerCase()) ?? 0 }))
     .sort((a, b) => b.timesLogged - a.timesLogged || a.name.localeCompare(b.name));
 }
 
@@ -482,7 +483,7 @@ export async function searchLoseItFoods(query: string): Promise<FoodSearchResult
   if (error && !mineResult.length) throw error;
   const seen = new Set(mineResult.map(f => f.pk));
   const others = foods
-    .map(f => ({ pk: toHex(f.pk), name: f.name, brand: f.brand, icon: f.icon, locale: f.locale, mine: false, timesLogged: 0 }))
+    .map(f => ({ pk: toHex(f.pk), name: f.name, brand: f.brand, icon: f.icon, locale: f.locale, mine: false, recipe: false, timesLogged: 0 }))
     .filter(f => !seen.has(f.pk));
   return [...mineResult, ...others];
 }

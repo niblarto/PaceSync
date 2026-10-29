@@ -313,7 +313,8 @@ CREATE TABLE IF NOT EXISTS loseit_my_foods (
   name TEXT NOT NULL,
   brand TEXT,
   icon TEXT,
-  locale TEXT
+  locale TEXT,
+  recipe INTEGER NOT NULL DEFAULT 0
 );
 `;
 
@@ -340,6 +341,11 @@ function runColumnMigrations(conn: Database.Database): void {
   const pinnedRouteCols = conn.prepare("PRAGMA table_info(pinned_routes)").all() as { name: string }[];
   if (pinnedRouteCols.length > 0 && !pinnedRouteCols.some(c => c.name === "pace_pro_mix_id")) {
     conn.exec("ALTER TABLE pinned_routes ADD COLUMN pace_pro_mix_id TEXT");
+  }
+  const myFoodCols = conn.prepare("PRAGMA table_info(loseit_my_foods)").all() as { name: string }[];
+  if (myFoodCols.length > 0 && !myFoodCols.some(c => c.name === "recipe")) {
+    conn.exec("ALTER TABLE loseit_my_foods ADD COLUMN recipe INTEGER NOT NULL DEFAULT 0");
+    conn.exec("DELETE FROM loseit_my_foods"); // empty cache → the next search re-downloads it with recipes flagged
   }
   const raceCols = conn.prepare("PRAGMA table_info(races)").all() as { name: string }[];
   if (raceCols.length > 0 && !raceCols.some(c => c.name === "garmin_course_id")) {

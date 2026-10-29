@@ -681,7 +681,14 @@ type Menu = {
 
 // ── Add food ───────────────────────────────────────────────────────────────
 
-interface SearchFood { pk: string; name: string; brand: string | null; icon: string | null; locale: string | null; mine: boolean; timesLogged: number }
+interface SearchFood { pk: string; name: string; brand: string | null; icon: string | null; locale: string | null; mine: boolean; recipe: boolean; timesLogged: number }
+
+type ResultTab = "mine" | "all" | "recipes";
+const RESULT_TABS: { key: ResultTab; label: string; match: (f: SearchFood) => boolean }[] = [
+  { key: "mine", label: "My Foods", match: f => f.mine && !f.recipe },
+  { key: "all", label: "All Foods", match: f => !f.mine },
+  { key: "recipes", label: "Recipes", match: f => f.recipe },
+];
 interface FoodDetails {
   quantity: number;     // Lose It!'s default amount, in `units`
   units: string | null;
@@ -705,7 +712,8 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchFood[] | null>(null);
   const [searching, setSearching] = useState(false);
-  const [picked, setPicked] = useState<SearchFood | null>(null);
+  const [tab, setTab] = useState<ResultTab | null>(null);
+  const [picked,setPicked] = useState<SearchFood | null>(null);
   const [details, setDetails] = useState<FoodDetails | null>(null);
   const [qty, setQty] = useState("");
   const [unit, setUnit] = useState<Unit>("food");
@@ -716,7 +724,7 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
   async function search(e?: React.FormEvent) {
     e?.preventDefault();
     if (query.trim().length < 2) return;
-    setSearching(true); setMessage(null); setPicked(null); setDetails(null);
+    setSearching(true); setMessage(null); setPicked(null); setDetails(null); setTab(null);
     try {
       const res = await fetch(`/api/loseit/search?q=${encodeURIComponent(query.trim())}`);
       const body = await res.json();
@@ -754,8 +762,12 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
     setUnit(next);
   }
 
+  // The tab shown: the one picked, else the first with results (My Foods when it has any).
+  const shownTab = tab ?? (RESULT_TABS.find(t => results?.some(t.match))?.key ?? "mine");
+  const shown = (results ?? []).filter((RESULT_TABS.find(t => t.key === shownTab) ?? RESULT_TABS[0]).match);
+
   const amountN = Number(qty);
-  const base = details ? (unit === "gram" ? details.grams : details.quantity) : null;
+  const base =details ? (unit === "gram" ? details.grams : details.quantity) : null;
   const scale = base && amountN > 0 ? amountN / base : null;
   const gramsNow = details?.grams != null && scale != null ? details.grams * scale : null;
   const scaled = (v: number | null) => (v == null || scale == null ? null : v * scale);
@@ -800,13 +812,25 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
 
       {results && !picked && (
         results.length === 0 ? <p className="text-xs text-slate-500">No foods found.</p> : (
+          <>
+          <div role="tablist" className="flex gap-1 border-b border-white/10">
+            {RESULT_TABS.map(t => {
+              const n = results.filter(t.match).length;
+              const on = shownTab === t.key;
+              return (
+                <button key={t.key} role="tab" aria-selected={on} onClick={() => setTab(t.key)}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-t-lg border-b-2 -mb-px transition-colors ${
+                    on ? "border-emerald-400 text-emerald-300 bg-white/5" : "border-transparent text-slate-400 hover:text-slate-200"
+                  }`}>
+                  {t.label} <span className="text-slate-500">{n}</span>
+                </button>
+              );
+            })}
+          </div>
+          {shown.length === 0 && <p className="text-xs text-slate-500 py-2">Nothing in this tab.</p>}
           <ul className="max-h-80 overflow-y-auto">
-            {results.map((f, i) => (
+            {shown.map(f => (
               <li key={f.pk}>
-                {/* Section headings: My Foods matches come first, then Lose It!'s database. */}
-                {(i === 0 || f.mine !== results[i - 1].mine) && (
-                  <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wide text-slate-500">{f.mine ? "My Foods" : "All foods"}</div>
-                )}
                 <button onClick={() => pick(f)} className="group w-full text-left px-2 py-1 text-xs hover:bg-slate-700/40 rounded-lg flex items-center justify-between gap-3">
                   <span className="min-w-0 flex items-center gap-2.5">
                     <FoodIcon icon={f.icon} size={28} />
@@ -820,6 +844,7 @@ function AddFoodPanel({ date, onAdded }: { date: string; onAdded: (d: Partial<Di
               </li>
             ))}
           </ul>
+          </>
         )
       )}
 
