@@ -435,7 +435,16 @@ private fun SummaryDetails(summary: Any?) {
     // e.g. "5.00 mi @ 8:47 /mi") underneath — per explicit user request.
     if (summary is RunnaWorkout && summary.segments.isNotEmpty()) {
         Column(Modifier.padding(top = 8.dp)) {
-            summary.segments.forEach { seg -> Text("• $seg", style = MaterialTheme.typography.bodySmall) }
+            // Only the exercises inside a set (marked as nested in the source) get a bullet, indented.
+            summary.segments.forEach { seg ->
+                val nested = seg.trimStart().firstOrNull() in setOf('•', '-', '*', '–')
+                val text = seg.trimStart('•', '-', '*', '–', ' ')
+                Text(
+                    if (nested) "• $text" else text,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(start = if (nested) 16.dp else 0.dp),
+                )
+            }
         }
     }
     if (summary is RunnaPastRun && summary.planSteps.isNotEmpty()) {
