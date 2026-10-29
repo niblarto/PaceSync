@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import android.widget.Toast
+import androidx.compose.material3.Button
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -92,8 +95,11 @@ private fun MacroRow(label: String, eaten: Double, target: Double, minimum: Bool
 }
 
 @Composable
-fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int, plan: MacroPlanDto?, days: List<NutritionDayRow>) {
+fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int, plan: MacroPlanDto?, days: List<NutritionDayRow>, onChanged: () -> Unit = {}) {
     val context = LocalContext.current
+    // "Snack Me!" at the bottom of the card (today only): the sheet is open, with the calories left when it opened.
+    var snackLeft by remember { mutableStateOf<Double?>(null) }
+    var snackReload by remember { mutableIntStateOf(0) } // bumped when snacks were added, to reload this diary
     val today = remember { LocalDate.now() }
     var date by remember { mutableStateOf(LocalDate.now()) }
     var diary by remember { mutableStateOf<LoseItDiaryDto?>(null) }
@@ -108,7 +114,7 @@ fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int, plan: MacroPlanDto
         prefs.edit().putStringSet("collapsed", next).apply()
     }
 
-    LaunchedEffect(date, reloadKey) {
+    LaunchedEffect(date, reloadKey, snackReload) {
         loading = true
         val recent = !date.isBefore(LocalDate.now().minusDays(1))
         val resp = runCatching { nutritionApi.getDiary(date.toString(), if (recent) 1 else 0) }.getOrNull()
@@ -198,6 +204,29 @@ fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int, plan: MacroPlanDto
                 if (t != null && d.connected) Text("Synced from Lose It! $t", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
             }
             d?.lastError?.let { Text("Last sync failed: $it", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF87171)) }
+
+            // Snacks from your own history that fit under today's calories left (the daily limit minus what's eaten).
+            if (d != null && d.connected && date == today) {
+                Button(
+                    onClick = {
+                        val limit = plan?.limitKcal
+                        val left = if (limit == null) null else limit - d.totals.kcal
+                        when {
+                            limit == null -> Toast.makeText(context, "Set a daily calorie limit first (Settings → Nutrition on the web).", Toast.LENGTH_LONG).show()
+                            left != null && left < 40 -> Toast.makeText(context, "Only ${kcalText(maxOf(0.0, left))} kcal left of ${kcalText(limit)}: not enough for a snack.", Toast.LENGTH_LONG).show()
+                            left != null -> snackLeft = left.roundToInt().toDouble()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("🍫 Snack Me!") }
+            }
+        }
+    }
+
+    snackLeft?.let { left ->
+        SnackMeSheet(nutritionApi, today.toString(), left, plan?.limitKcal) { added ->
+            snackLeft = null
+            if (added) { snackReload++; onChanged() } // this diary and the day's totals now include what was added
         }
     }
 }

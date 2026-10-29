@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CreateMealModal, type Macros } from "@/components/CreateMealModal";
+import { SnackMeModal } from "@/components/SnackMeModal";
 
 // The Lose It! food diary for one day, by meal. Opening today or yesterday
 // asks the server to re-read them from Lose It! first (it throttles that to
@@ -29,6 +30,8 @@ interface Diary {
   meals: { meal: number; name: string; foods: Food[]; totals: Totals }[];
   totals: Totals;
   connected: boolean;
+  // Meals Lose It! has stopped showing for three checks in a row: asks whether they were deleted.
+  pendingDeletion?: { meals: { meal: number; name: string; foods: number }[] } | null;
   lastSyncAt: string | null;
   lastError: string | null;
   sync: { status: string; error?: string } | null;
@@ -113,6 +116,9 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
   // "Create meal" pop-up; the budget is fixed when it opens so it doesn't shift as items are accepted.
   const [creating, setCreating] = useState<Macros | null>(null);
   const [creatingTest, setCreatingTest] = useState(false); // the pop-up is using the test budget from Settings
+  // "Snack Me!" pop-up on the Snacks card: calories left (fixed when it opens), the day's limit, and whether it's the test budget.
+  const [snacking, setSnacking] = useState<{ kcalLeft: number; limit: number | null; testing: boolean } | null>(null);
+  const [snackMsg, setSnackMsg] = useState<string | null>(null);
   const [createMsg, setCreateMsg] = useState<string | null>(null);
   const [date, setDate] = useState(today);
   const [diary, setDiary] = useState<Diary | null>(null);
@@ -213,6 +219,26 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
       setCopyMsg({ text: `Added ${label} to today.`, error: false });
     } catch (e) {
       setCopyMsg({ text: e instanceof Error ? e.message : "Copy failed", error: true });
+    }
+  }
+
+  // "Lose It! no longer shows Lunch. Was it deleted?": yes removes it, no keeps it.
+  const [answering, setAnswering] = useState(false);
+  async function answerDeletion(deleted: boolean) {
+    setAnswering(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/loseit/confirm-deletion", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, deleted }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
+      applyDay(body);
+      onChanged?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't save the answer");
+    } finally {
+      setAnswering(false);
     }
   }
 
@@ -401,6 +427,25 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
       {adding && <AddFoodPanel date={date} onAdded={added} />}
 
       {error && <p className="text-sm text-rose-300">{error}</p>}
+      {diary?.pendingDeletion && (
+        <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-xs space-y-2">
+          <p className="text-amber-200">
+            Lose It! has stopped showing{" "}
+            {diary.pendingDeletion.meals.map(x => `${x.name} (${x.foods} food${x.foods === 1 ? "" : "s"})`).join(" and ")} for this day, three checks in a row.
+            Was {diary.pendingDeletion.meals.length === 1 ? "it" : "they"} deleted? Until you answer, the foods stay here.
+          </p>
+          <div className="flex gap-2">
+            <button onClick={() => answerDeletion(true)} disabled={answering}
+              className="rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 font-medium px-3 py-1.5 text-white transition-colors">
+              Yes, remove {diary.pendingDeletion.meals.length === 1 ? "it" : "them"}
+            </button>
+            <button onClick={() => answerDeletion(false)} disabled={answering}
+              className="rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-50 px-3 py-1.5 text-slate-200 transition-colors">
+              No, keep {diary.pendingDeletion.meals.length === 1 ? "it" : "them"}
+            </button>
+          </div>
+        </div>
+      )}
       {copyMsg && <p className={`mb-2 text-xs ${copyMsg.error ? "text-rose-300" : "text-emerald-300"}`}>{copyMsg.text}</p>}
 
       {diary && !diary.connected && diary.meals.length === 0 && (
@@ -437,6 +482,7 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
               {/* Dinner today: Create meal and Copy yesterday's dinner sit in the title bar, beside the meal name. */}
               {(() => {
                 const dinnerToday = m.meal === 2 && date === today && !!diary?.connected && !drag;
+                const snackToday = m.meal === 3 && date === today && !!diary?.connected && !drag;
                 // Copy yesterday's <meal> shows in each meal's title bar until something is logged to that meal.
                 const copyHere = date === today && !drag && m.foods.length === 0;
                 return (
@@ -467,6 +513,24 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
                           ✨ Create meal
                         </button>
                       )}
+                      {snackToday && (
+                        <button
+                          onClick={async () => {
+                            // Snacks that fit under what's left of the day's calorie limit (no exercise added), or the test budget's calories.
+                            const test = await fetch("/api/settings/meal-test-budget").then(r => r.json()).catch(() => null);
+                            const t = targetsFor?.(date);
+                            const limit = t ? Math.round(t.kcal) : null;
+                            const left = test?.enabled ? test.kcal : t && diary ? Math.round(t.kcal - diary.totals.kcal) : null;
+                            if (left == null) { setSnackMsg("Set a daily calorie limit first (Settings → Nutrition)."); return; }
+                            if (left < 40) { setSnackMsg(`Only ${Math.max(0, left)} kcal left of ${limit ?? "your limit"}: not enough for a snack.`); return; }
+                            setSnackMsg(null);
+                            setSnacking({ kcalLeft: left, limit, testing: !!test?.enabled });
+                          }}
+                          className="text-[11px] rounded-md border border-purple-500/40 bg-purple-500/15 hover:bg-purple-500/25 text-purple-200 font-semibold px-2 py-0.5 transition-colors"
+                        >
+                          🍫 Snack Me!
+                        </button>
+                      )}
                       {copyHere && (
                         <button
                           onClick={() => copyToToday({ fromDate: shift(today, -1), meal: m.meal }, `yesterday's ${m.name.toLowerCase()}`)}
@@ -480,6 +544,7 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
                     </div>
                     {m.foods.length > 0 && <Macros t={m.totals} className="block px-1 mb-2 text-[11px] text-right" />}
                     {dinnerToday && createMsg && <p className="px-1 mb-2 text-[11px] text-amber-300">{createMsg}</p>}
+                    {snackToday && snackMsg && <p className="px-1 mb-2 text-[11px] text-amber-300">{snackMsg}</p>}
                     {m.foods.length === 0 && <p className="px-1 py-3 text-xs text-slate-500">Nothing logged yet.</p>}
                   </>
                 );
@@ -542,6 +607,11 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
 
       {creating && (
         <CreateMealModal date={date} meal={2} remaining={creating} testing={creatingTest} onLogged={d => added(d as Partial<Diary>)} onClose={() => setCreating(null)} />
+      )}
+
+      {snacking && (
+        <SnackMeModal date={date} meal={3} kcalLeft={snacking.kcalLeft} limit={snacking.limit} testing={snacking.testing}
+          onLogged={d => added(d as Partial<Diary>)} onClose={() => setSnacking(null)} />
       )}
 
       {drop && createPortal(

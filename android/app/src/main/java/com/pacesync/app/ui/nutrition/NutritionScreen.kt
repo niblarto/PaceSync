@@ -20,6 +20,8 @@ import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Button
+import android.widget.Toast
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -220,7 +222,8 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
                     load()
                 }
             }
-            FoodDiaryCard(nutritionApi, diaryKey, d.macroPlan, d.days)
+            // onChanged: Snack Me! added food, so the day's totals above need reloading too.
+            FoodDiaryCard(nutritionApi, diaryKey, d.macroPlan, d.days, onChanged = { scope.launch { load() } })
             CaloriesCard(d, range, onExpand = { fullscreen = "calories" }) { r -> range = r; prefs.edit().putInt("range", r).apply() }
             WeightCard(d, unit, onExpand = { fullscreen = "weight" })
             ProjectionsCard(d, unit)

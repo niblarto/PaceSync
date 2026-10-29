@@ -52,11 +52,14 @@ interface SyncState {
   errorNotifiedAt: string | null;
   learnedUnits: Record<string, string>;
   myFoodsAt: string | null; // when the My Foods cache was last downloaded
+  // Whole meals that a day's read no longer shows, by date: how many separate syncs have seen them missing, and
+  // whether it has been asked if they were deleted (see syncDay).
+  missingMeals: Record<string, { meals: number[]; checks: number; lastAt: string; alerted: boolean }>;
 }
 
 const EMPTY_STATE: SyncState = {
   importedAt: null, importedRows: 0, lastDaySyncAt: null, yesterdayCheckedFor: null,
-  lastError: null, lastErrorAt: null, errorNotifiedAt: null, learnedUnits: {}, myFoodsAt: null,
+  lastError: null, lastErrorAt: null, errorNotifiedAt: null, learnedUnits: {}, myFoodsAt: null, missingMeals: {},
 };
 
 function loadState(): SyncState {
@@ -182,9 +185,74 @@ async function syncDay(date: string, state: SyncState, expectFewer = false): Pro
     const again = await withLoseItSession(who => fetchDay(who, date));
     if (again.length >= entries.length) entries = again;
   }
+  // Lose It! has answered with only part of a day (breakfast alone, or the meals before dinner) several times in a
+  // row, even right after the server restarted, and the whole stored day was then replaced by it. Deleting a whole
+  // meal is rare, so a read that no longer shows a meal we hold is not believed: that meal's stored foods are kept
+  // (the other meals still update). If separate syncs, at least MISSING_CHECK_GAP_MS apart, see it missing three
+  // times, nothing is deleted yet: a notification and a banner on the diary ask for confirmation
+  // (resolveMissingMeals). A meal that comes back clears the check. A deletion made through PaceSync (expectFewer) is
+  // believed straight away.
+  const missing = state.missingMeals ?? (state.missingMeals = {});
+  const readMeals = new Set(entries.map(e => e.meal));
+  const heldMeals = (getDb().prepare("SELECT DISTINCT meal FROM loseit_food_log WHERE date = ? AND source = 'rpc' ORDER BY meal").all(date) as { meal: number }[])
+    .map(r => r.meal).filter(m => !readMeals.has(m));
+  if (!expectFewer && stored > 0 && heldMeals.length > 0) {
+    const m = missing[date];
+    const same = !!m && m.meals.length === heldMeals.length && m.meals.every((x, i) => x === heldMeals[i]);
+    const now = Date.now();
+    if (!same) missing[date] = { meals: heldMeals, checks: 1, lastAt: new Date(now).toISOString(), alerted: false };
+    else if (now - Date.parse(m.lastAt) >= MISSING_CHECK_GAP_MS) { m.checks++; m.lastAt = new Date(now).toISOString(); }
+    const c = missing[date];
+    console.warn(`[loseit] ${date}: ${heldMeals.map(x => MEAL_NAMES[x]).join(", ")} missing from this read (check ${c.checks}/${MISSING_CHECKS}); keeping the stored foods`);
+    if (c.checks >= MISSING_CHECKS && !c.alerted) {
+      c.alerted = true;
+      const names = heldMeals.map(x => MEAL_NAMES[x]).join(" and ");
+      await sendNtfy(`Lose It! no longer shows ${names} for ${date}, ${MISSING_CHECKS} checks in a row. Open the Nutrition page and confirm whether it was deleted.`,
+        { title: "Lose It! meal missing", tags: "warning" }).catch(() => false);
+    }
+    // Rows of the missing meals stay as they were; everything else follows this read.
+    const kept = (getDb().prepare("SELECT * FROM loseit_food_log WHERE date = ? AND source = 'rpc' AND meal IN (" + heldMeals.join(",") + ") ORDER BY meal, seq").all(date) as DbRow[])
+      .map((r): FoodRowInput => ({
+        entryId: r.entry_id, meal: r.meal, name: r.name, brand: r.brand, icon: r.icon, quantity: r.quantity, units: r.units, kcal: r.kcal,
+        fatG: r.fat_g, satFatG: r.sat_fat_g, cholesterolMg: r.cholesterol_mg, sodiumMg: r.sodium_mg, carbsG: r.carbs_g, fiberG: r.fiber_g,
+        sugarG: r.sugar_g, proteinG: r.protein_g,
+      }));
+    const merged = [...entries.map(e => rowFromEntry(e, state)), ...kept].map((r, i) => ({ r, i })).sort((a, b) => a.r.meal - b.r.meal || a.i - b.i).map(x => x.r);
+    replaceDay(date, merged, "rpc");
+    return merged.length;
+  }
+  delete missing[date];
   if (stored !== entries.length) console.warn(`[loseit] ${date}: ${stored} → ${entries.length} foods`);
   replaceDay(date, entries.map(e => rowFromEntry(e, state)), "rpc");
   return entries.length;
+}
+
+const MISSING_CHECKS = 3;
+const MISSING_CHECK_GAP_MS = 4 * 60_000;
+
+// The meals of a day that Lose It! no longer shows, once checked often enough to ask: { meals: [{ meal, name, foods }] }.
+export function pendingMealDeletion(date: string): { meals: { meal: number; name: string; foods: number }[] } | null {
+  const m = loadState().missingMeals?.[date];
+  if (!m?.alerted) return null;
+  const counts = getDb().prepare("SELECT meal, COUNT(*) AS n FROM loseit_food_log WHERE date = ? AND source = 'rpc' GROUP BY meal").all(date) as { meal: number; n: number }[];
+  const meals = m.meals.map(meal => ({ meal, name: MEAL_NAMES[meal] ?? "Snacks", foods: counts.find(c => c.meal === meal)?.n ?? 0 })).filter(x => x.foods > 0);
+  return meals.length ? { meals } : null;
+}
+
+// The answer to "was it deleted?": yes applies what Lose It! shows now (the meals go); no keeps them and starts the checks again.
+export async function resolveMissingMeals(date: string, deleted: boolean): Promise<DiaryDay> {
+  if (deleted) {
+    const state = loadState();
+    delete state.missingMeals[date];
+    saveState(state);
+    await refreshDay(date, true); // expectFewer: believed straight away
+  } else {
+    const state = loadState();
+    const m = state.missingMeals[date];
+    if (m) { m.checks = 0; m.alerted = false; m.lastAt = new Date().toISOString(); }
+    saveState(state);
+  }
+  return getDiaryDay(date);
 }
 
 async function importHistory(state: SyncState): Promise<number> {

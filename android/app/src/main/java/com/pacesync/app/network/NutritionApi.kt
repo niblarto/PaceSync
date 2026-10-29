@@ -11,6 +11,10 @@ import com.pacesync.app.network.dto.NutritionSettingsDto
 import com.pacesync.app.network.dto.NutritionSettingsRequest
 import com.pacesync.app.network.dto.NutritionSummaryStateDto
 import com.pacesync.app.network.dto.WeightRefreshDto
+import com.pacesync.app.network.dto.AcceptItemDto
+import com.pacesync.app.network.dto.AcceptItemRequest
+import com.pacesync.app.network.dto.SnackMeDto
+import com.pacesync.app.network.dto.SnackMeRequest
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import retrofit2.Response
@@ -54,6 +58,14 @@ interface NutritionApi {
 
     @POST("api/loseit/sync")
     suspend fun syncLoseIt(@Body body: LoseItSyncRequest): Response<LoseItStatusDto>
+
+    // "Snack Me!": snacks from the Lose It! history that fit under the calories left.
+    @POST("api/nutrition/snack-me")
+    suspend fun snackMe(@Body body: SnackMeRequest): Response<SnackMeDto>
+
+    // Logs one suggested item to a meal of the Lose It! diary (3 = Snacks).
+    @POST("api/nutrition/create-meal/accept")
+    suspend fun acceptItem(@Body body: AcceptItemRequest): Response<AcceptItemDto>
 
     // Settings -> Lose It! account the server logs in with.
     @GET("api/settings/loseit")

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { isIsoDate } from "@/lib/nutrition";
-import { getDiaryDay, getLoseItStatus, localIsoDate, syncLoseIt } from "@/lib/loseit-food";
+import { getDiaryDay, getLoseItStatus, localIsoDate, pendingMealDeletion, syncLoseIt } from "@/lib/loseit-food";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +19,8 @@ export async function GET(req: NextRequest) {
   const status = getLoseItStatus();
   return NextResponse.json({
     ...getDiaryDay(date),
+    // Meals Lose It! stopped showing, checked three times: the app asks whether they were deleted (see resolveMissingMeals).
+    pendingDeletion: pendingMealDeletion(date),
     sync,
     connected: status.connected,
     lastSyncAt: status.lastDaySyncAt,
