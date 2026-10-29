@@ -12,16 +12,14 @@ const val LB_PER_KG = 2.20462
 
 fun formatWeight(kg: Double?, unit: String, exact: Boolean = false): String {
     if (kg == null || kg.isNaN()) return "—"
-    val dp = if (exact) 2 else 1
+    val dp = 1
     return when (unit) {
         "kg" -> "%.${dp}f kg".format(kg)
         "lb" -> "%.${dp}f lb".format(kg * LB_PER_KG)
         else -> {
-            val totalLb = kg * LB_PER_KG
-            var st = floor(totalLb / 14).toInt()
-            var lb = totalLb - st * 14
-            if ("%.${dp}f".format(lb).toDouble() >= 14.0) { st += 1; lb -= 14 }
-            "$st st ${"%.${dp}f".format(lb)} lb"
+            val totalLb = Math.round(kg * LB_PER_KG * 10) / 10.0 // round first, so 12 st 13.99 lb reads 13 st 0.0 lb
+            val st = floor(totalLb / 14).toInt()
+            "$st st ${"%.1f".format(totalLb - st * 14)} lb"
         }
     }
 }

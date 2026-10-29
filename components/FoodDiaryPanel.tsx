@@ -347,6 +347,11 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
           Food diary
           <span className="text-xs font-medium border rounded-full px-2.5 py-0.5 bg-green-500/20 text-green-300 border-green-500/30">{title}</span>
           <Link href="/settings?tab=nutrition" className="text-xs font-normal text-slate-500 hover:text-slate-300 transition-colors">Goals</Link>
+          {diary?.lastSyncAt && (
+            <span className="text-xs font-normal text-slate-500">
+              Synced from Lose It! {new Date(diary.lastSyncAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+            </span>
+          )}
           {diary?.connected && canRefresh && (
             loading ? (
               <span className="text-xs font-normal text-slate-500">refreshing…</span>
@@ -482,19 +487,12 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
         </div>
       )}
 
-      {diary && diary.connected && (diary.meals.length > 0 || diary.lastSyncAt) && (
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs">
-          {diary.meals.length > 0 ? (
-            <span className="flex items-center gap-2 text-slate-300">
-              Total <KcalChip kcal={diary.totals.kcal} big />
-              <Macros t={diary.totals} className="text-xs" />
-            </span>
-          ) : <span />}
-          {diary.lastSyncAt && (
-            <span className="text-slate-500">
-              Synced from Lose It! {new Date(diary.lastSyncAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
-            </span>
-          )}
+      {diary && diary.connected && diary.meals.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center gap-3 text-xs">
+          <span className="flex items-center gap-2 text-slate-300">
+            Total <KcalChip kcal={diary.totals.kcal} big />
+            <Macros t={diary.totals} className="text-xs" />
+          </span>
         </div>
       )}
 

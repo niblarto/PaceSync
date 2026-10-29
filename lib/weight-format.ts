@@ -19,11 +19,12 @@ export function stLbToKg(st: number, lb: number): number {
 export function formatWeight(kg: number | null | undefined, unit: WeightUnit, opts: { decimals?: boolean; exact?: boolean } = {}): string {
   if (kg == null || !Number.isFinite(kg)) return "—";
   if (opts.exact) {
-    if (unit === "kg") return `${kg.toFixed(2)} kg`;
-    const totalLb = kg * LB_PER_KG;
-    if (unit === "lb") return `${totalLb.toFixed(2)} lb`;
+    // One decimal place, rounded before splitting into stone so 12 st 13.99 lb reads 13 st 0.0 lb.
+    if (unit === "kg") return `${kg.toFixed(1)} kg`;
+    const totalLb = Math.round(kg * LB_PER_KG * 10) / 10;
+    if (unit === "lb") return `${totalLb.toFixed(1)} lb`;
     const st = Math.floor(totalLb / 14);
-    return `${st} st ${(totalLb - st * 14).toFixed(2)} lb`;
+    return `${st} st ${(totalLb - st * 14).toFixed(1)} lb`;
   }
   const dec = opts.decimals ?? true;
   if (unit === "kg") return `${kg.toFixed(dec ? 1 : 0)} kg`;
