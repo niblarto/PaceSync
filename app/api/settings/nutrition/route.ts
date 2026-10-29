@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
   const config = sanitizeNutritionConfig(body);
 
   // A goal date that would need more than 2 lb/week can't be saved.
-  if (config.goalDate && config.targetWeightKg != null) {
+  if (!config.goalDateAuto && config.goalDate && config.targetWeightKg != null) {
     const dash = buildNutritionDashboard(7);
     if (dash.current) {
       const earliest = earliestGoalDate(dash.current.avg7Kg, config.targetWeightKg, dash.today);
@@ -31,6 +31,6 @@ export async function POST(req: NextRequest) {
   }
 
   saveNutritionConfig(config);
-  const dash = buildNutritionDashboard(7);
-  return NextResponse.json({ ok: true, ...config, currentKg: dash.current?.avg7Kg ?? null, today: dash.today, maxLossLbPerWeek: MAX_LOSS_LB_PER_WEEK });
+  const dash = buildNutritionDashboard(7); // with the automatic goal date on, this refreshes it
+  return NextResponse.json({ ok: true, ...loadNutritionConfig(), currentKg: dash.current?.avg7Kg ?? null, today: dash.today, maxLossLbPerWeek: MAX_LOSS_LB_PER_WEEK });
 }

@@ -10,6 +10,10 @@ export type { WeightUnit };
 export interface NutritionConfig {
   targetWeightKg: number | null;
   goalDate: string | null; // YYYY-MM-DD
+  // true: the goal date is kept at the earliest date reachable at the maximum
+  // loss rate, recalculated whenever the nutrition numbers are built (so it
+  // follows each weigh-in); false: the date typed in Settings is used.
+  goalDateAuto: boolean;
   dailyCalorieLimit: number | null; // kcal eaten per day
   minDailyCalories: number; // eating less than this in a day shows red on the calories chart
   weightUnit: WeightUnit;
@@ -20,6 +24,7 @@ export interface NutritionConfig {
 export const DEFAULT_NUTRITION_CONFIG: NutritionConfig = {
   targetWeightKg: null,
   goalDate: null,
+  goalDateAuto: true,
   dailyCalorieLimit: null,
   minDailyCalories: 1400,
   weightUnit: "st",
@@ -38,6 +43,7 @@ export function sanitizeNutritionConfig(raw: unknown): NutritionConfig {
   return {
     targetWeightKg: numOrNull(r.targetWeightKg, 30, 300),
     goalDate: typeof r.goalDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(r.goalDate) ? r.goalDate : null,
+    goalDateAuto: r.goalDateAuto !== false,
     dailyCalorieLimit: numOrNull(r.dailyCalorieLimit, 500, 10000),
     minDailyCalories: numOrNull(r.minDailyCalories, 0, 5000) ?? d.minDailyCalories,
     weightUnit: r.weightUnit === "kg" || r.weightUnit === "lb" ? r.weightUnit : "st",

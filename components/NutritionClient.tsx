@@ -657,14 +657,17 @@ export function NutritionClient() {
   // current 7-day average out to the later of the goal date / hit date.
   const weightChart = useMemo(() => {
     if (!data || !data.current || !today) return null;
-    const startMs = toMs(today) - 56 * DAY_MS;
-    const history = data.weights.filter(w => toMs(w.date) >= startMs).map(w => ({ t: toMs(w.date), kg: w.kg }));
     const anchor = data.current.avg7Kg;
     const candidates = [toMs(today) + 60 * DAY_MS];
     if (cfg?.goalDate) candidates.push(toMs(cfg.goalDate));
     for (const p of data.projections) if (p.hitDate) candidates.push(toMs(p.hitDate));
     const endMs = Math.min(Math.max(...candidates), toMs(today) + 730 * DAY_MS);
     const todayMs = toMs(today);
+    // Only the last 28 days to the left of today; the projection to the right
+    // sets the width, and both sides share one time scale. Older weigh-ins and
+    // the left end of the fitted lines run off the edge.
+    const startMs = todayMs - 28 * DAY_MS;
+    const history = data.weights.filter(w => toMs(w.date) >= startMs).map(w => ({ t: toMs(w.date), kg: w.kg }));
     const target = cfg?.targetWeightKg ?? null;
 
     // One row per date shared by every series, so the tooltip shows the
@@ -734,7 +737,7 @@ export function NutritionClient() {
     rows.forEach(r => { if (r.t >= todayMs && r.t <= avgEnd) r.avg = anchor; });
     const points = Array.from(rows.values()).sort((a, b) => a.t - b.t);
 
-    const ys = points.flatMap(r => [r.kg, r.post, r.fit, r.fit7, r.postFit, ...data.projections.map(p => r[p.method])]).filter((v): v is number => v != null);
+    const ys = points.filter(r => r.t >= startMs).flatMap(r => [r.kg, r.post, r.fit, r.fit7, r.postFit, ...data.projections.map(p => r[p.method])]).filter((v): v is number => v != null);
     if (target != null) ys.push(target);
     const lo = Math.min(...ys), hi = Math.max(...ys);
     const pad = Math.max(0.5, (hi - lo) * 0.08);
@@ -765,7 +768,7 @@ export function NutritionClient() {
     });
     const stoneTicks = unit === "st" ? halfStoneTicks(domain[0], domain[1]) : [];
     return {
-      points, startMs: history[0]?.t ?? startMs, endMs, domain,
+      points, startMs, endMs, domain,
       anchor, avgFrom: todayMs - 6 * DAY_MS, todayMs, endMarks,
       ticks: stoneTicks.length > 0 ? stoneTicks : undefined,
     };
@@ -791,8 +794,8 @@ export function NutritionClient() {
     return { domain, ticks: ticks.length >= 2 ? ticks : undefined };
   }, [weightChart, wDomain, data, unit]);
 
-  // "12st 9.5", "185.3 lb" or "84.1 kg": the weight written beside a goal-date dot.
-  const weightShort = (kg: number) => {
+  // "12st 9.5", "185.3 lb" or "84.1 kg": the weight written in a goal-date pill.
+  const weightShort = useCallback((kg: number) => {
     if (unit === "kg") return `${kg.toFixed(1)} kg`;
     const lb = kg * LB_PER_KG;
     if (unit === "lb") return `${lb.toFixed(1)} lb`;
@@ -800,7 +803,62 @@ export function NutritionClient() {
     let rest = lb - st * 14;
     if (Number(rest.toFixed(1)) >= 14) { st += 1; rest -= 14; }
     return `${st}st ${rest.toFixed(1)}`;
-  };
+  }, [unit]);
+
+  // Where each end-of-line weight pill sits. The dot is where the line first
+  // reaches its goal date, your target weight (a losing line stops there), the
+  // right edge, or the bottom/top edge of the view. The pill still reads the
+  // weight at the goal date.
+  const placedMarks = useMemo(() => {
+    if (!weightChart || !data) return [];
+    const [l, r] = wDomain ?? [weightChart.startMs, weightChart.endMs];
+    const [yl, yh] = weightZoomY?.domain ?? weightChart.domain;
+    const target = cfg?.targetWeightKg ?? null;
+    const marks = weightChart.endMarks.map(m => {
+      const p = data.projections.find(pr => pr.method === m.key);
+      let x = Math.min(m.ms, r);
+      let edge: "bottom" | "top" | null = null;
+      const yAt = (ms: number) => {
+        if (!p) return m.kg; // the flat 7-day average
+        const from = p.anchorKg ?? weightChart.anchor;
+        const kg = from + (p.kgPerWeek / 7) * ((ms - weightChart.todayMs) / DAY_MS);
+        return target != null && p.kgPerWeek < 0 && from > target ? Math.max(kg, target) : kg;
+      };
+      if (p && p.kgPerWeek !== 0) {
+        const from = p.anchorKg ?? weightChart.anchor;
+        const perMs = p.kgPerWeek / (7 * DAY_MS);
+        const bound = perMs < 0 ? yl : yh;
+        const reachable = !(perMs < 0 && target != null && from > target && target > bound); // a floor at the target stops it first
+        const at = weightChart.todayMs + (bound - from) / perMs;
+        if (reachable && at >= weightChart.todayMs && at < x) { x = at; edge = perMs < 0 ? "bottom" : "top"; }
+        // A losing line stops at your target weight: the pill belongs where it gets there.
+        if (target != null && perMs < 0 && from > target) {
+          const hit = weightChart.todayMs + (target - from) / perMs;
+          if (hit < x) { x = hit; edge = null; }
+        }
+      }
+      const atGoal = x === Math.min(m.ms, r) && edge === null; // nothing stopped it before its goal date
+      x = Math.max(l, x);
+      const y = Math.min(yh, Math.max(yl, yAt(x)));
+      return { ...m, x, y, edge, atGoal };
+    });
+    // Only lines that reach their goal date before the target (or the view's
+    // edge) get a weight pill: the others all end at the target weight. Pills
+    // are right-aligned beside their dots and stacked vertically (22px
+    // minimum) so none overprints another.
+    const pxPerKg = 250 / (yh - yl); // the plot is about 250px tall
+    let lastPx = -Infinity;
+    return marks
+      .map(m => ({ ...m, cy: (yh - m.y) * pxPerKg }))
+      .sort((a, b) => a.cy - b.cy)
+      .map(m => {
+        if (!m.atGoal) return { ...m, pill: false, ox: 0, oy: 0, w: 0 };
+        const w = weightShort(m.kg).length * 7 + 14;
+        const at = Math.max(m.cy, lastPx + 22);
+        lastPx = at;
+        return { ...m, pill: true, ox: -8 - w, oy: at - m.cy, w };
+      });
+  }, [weightChart, wDomain, weightZoomY, data, cfg, weightShort]);
 
   const weightTick = (kg: number) => {
     if (unit === "kg") return `${kg.toFixed(0)}`;
@@ -962,7 +1020,7 @@ export function NutritionClient() {
                   <ResponsiveContainer width="100%" height={320}>
                     <ComposedChart data={weightChart.points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={C.grid} />
-                      <XAxis dataKey="t" type="number" scale="time" domain={wDomain ?? [weightChart.startMs, weightChart.endMs]} allowDataOverflow={!!wDomain}
+                      <XAxis dataKey="t" type="number" scale="time" domain={wDomain ?? [weightChart.startMs, weightChart.endMs]} allowDataOverflow
                         tickFormatter={t => shortDate(msToYmd(t))} tick={{ fill: C.axis, fontSize: 10 }}
                         axisLine={{ stroke: C.grid }} tickLine={false} minTickGap={24} />
                       <YAxis type="number" orientation="right" domain={weightZoomY?.domain ?? weightChart.domain}
@@ -1017,25 +1075,25 @@ export function NutritionClient() {
                           strokeWidth={hoverProj === p.method ? 4 : 2} strokeDasharray="5 4" dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
                       ))}
                       {/* Each projection's weight where it meets the goal date, and the 7-day average's weight at its end */}
-                      {weightChart.endMarks.filter(m => !wDomain || (m.ms >= wDomain[0] && m.ms <= wDomain[1])).map(m => (
-                        <ReferenceDot key={`end-${m.key}`} x={m.ms} y={m.kg} r={hoverProj === m.key ? 6 : 4}
+                      {placedMarks.map(m => (
+                        <ReferenceDot key={`end-${m.key}`} x={m.x} y={m.y} r={hoverProj === m.key ? 6 : 4}
                           fill={m.color} stroke="#f8fafc" strokeWidth={1.5}
                           fillOpacity={hoverProj == null || hoverProj === m.key ? 1 : 0.15} strokeOpacity={hoverProj == null || hoverProj === m.key ? 1 : 0.15} ifOverflow={wDomain ? "hidden" : "extendDomain"}
                           label={{
                             content: props => {
                               const vb = (props as { viewBox?: { x: number; y: number; width: number; height: number } }).viewBox;
-                              if (!vb) return null;
+                              if (!vb || !m.pill) return null;
                               // White text on a dark pill edged in the line's colour, so it
                               // reads over the dashed line and gridlines behind it.
                               const text = weightShort(m.kg);
-                              const w = text.length * 7 + 14;
-                              const cy = vb.y + vb.height / 2 + m.dy;
-                              const right = vb.x - 8;
+                              const w = m.w;
+                              const cy = vb.y + vb.height / 2 + m.oy;
+                              const left = vb.x + vb.width / 2 + m.ox; // m.ox/oy: placed relative to the dot
                               return (
                                 <g opacity={hoverProj == null || hoverProj === m.key ? 1 : 0.15}>
-                                  <rect x={right - w} y={cy - 9} width={w} height={18} rx={4}
+                                  <rect x={left} y={cy - 9} width={w} height={18} rx={4}
                                     fill="#0f172a" fillOpacity={0.94} stroke={m.color} strokeWidth={1.5} />
-                                  <text x={right - w / 2} y={cy + 4.5} textAnchor="middle" fill="#f8fafc" fontSize={12} fontWeight={700}>
+                                  <text x={left + w / 2} y={cy + 4.5} textAnchor="middle" fill="#f8fafc" fontSize={12} fontWeight={700}>
                                     {text}
                                   </text>
                                 </g>

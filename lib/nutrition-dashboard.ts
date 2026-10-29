@@ -4,7 +4,7 @@ import { loadGarminConfig } from "@/lib/garmin-config";
 import { getNutritionDays } from "@/lib/nutrition";
 import { getGarminApiWeights, getGarminWeightSamples, lastGarminWeightFetch } from "@/lib/garmin-weight";
 import { cachedTodayBurn } from "@/lib/garmin-connect";
-import { loadNutritionConfig, type NutritionConfig } from "@/lib/nutrition-config";
+import { loadNutritionConfig, saveNutritionConfig, type NutritionConfig } from "@/lib/nutrition-config";
 import { getLoseItStatus } from "@/lib/loseit-food";
 
 // Data + projections for the /nutrition page.
@@ -195,9 +195,10 @@ function project(
   method: Projection["method"], label: string, basis: string, kgPerDay: number,
   anchorKg: number, today: string, config: NutritionConfig,
 ): Projection {
+  // Projections run at the measured rate, however steep: the loss-rate cap only
+  // stops a too-aggressive goal date being saved, it doesn't bend the real forecast.
   const rawKgPerDay = kgPerDay;
-  const capped = kgPerDay < -MAX_LOSS_KG_PER_DAY;
-  if (capped) kgPerDay = -MAX_LOSS_KG_PER_DAY;
+  const capped = false;
   const target = config.targetWeightKg;
   const weightAtGoalKg = config.goalDate ? anchorKg + kgPerDay * Math.max(0, daysBetween(today, config.goalDate)) : null;
   let hitDate: string | null = null;
@@ -349,6 +350,16 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
         regularDate: (last ?? lastPost).date,
       }
     : null;
+
+  // The goal date follows each weigh-in: the earliest date the target can be
+  // reached at the maximum loss rate (Settings → Nutrition can switch this off).
+  if (config.goalDateAuto && config.targetWeightKg != null && current) {
+    const earliest = earliestGoalDate(current.avg7Kg, config.targetWeightKg, today);
+    if (earliest !== config.goalDate) {
+      config.goalDate = earliest;
+      try { saveNutritionConfig({ ...loadNutritionConfig(), goalDate: earliest }); } catch { /* shown correctly anyway */ }
+    }
+  }
 
   // Averages over the trend window, excluding today (still in progress).
   const windowStart = addDays(today, -config.trendDays);

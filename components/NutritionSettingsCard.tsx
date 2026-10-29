@@ -7,6 +7,7 @@ import { kgToStLb, LB_PER_KG, stLbToKg, type WeightUnit } from "@/lib/weight-for
 interface NutritionConfig {
   targetWeightKg: number | null;
   goalDate: string | null;
+  goalDateAuto?: boolean;
   dailyCalorieLimit: number | null;
   weightUnit: WeightUnit;
   trendDays: number;
@@ -25,6 +26,7 @@ interface Form {
   lb: string;
   single: string; // kg or lb, depending on unit
   goalDate: string;
+  goalAuto: boolean;
   limit: string;
   trendDays: string;
   kcalPerKg: string;
@@ -39,6 +41,7 @@ function toForm(c: NutritionConfig): Form {
     lb: stlb ? String(stlb.lb) : "",
     single: kg == null ? "" : c.weightUnit === "lb" ? (kg * LB_PER_KG).toFixed(1) : kg.toFixed(1),
     goalDate: c.goalDate ?? "",
+    goalAuto: c.goalDateAuto !== false,
     limit: c.dailyCalorieLimit != null ? String(c.dailyCalorieLimit) : "",
     trendDays: String(c.trendDays),
     kcalPerKg: String(c.kcalPerKg),
@@ -91,7 +94,7 @@ export function NutritionSettingsCard() {
     if (!form) return;
     const kg = targetKg(form);
     const next = toForm({
-      targetWeightKg: kg, weightUnit: unit, goalDate: form.goalDate || null,
+      targetWeightKg: kg, weightUnit: unit, goalDate: form.goalDate || null, goalDateAuto: form.goalAuto,
       dailyCalorieLimit: form.limit ? Number(form.limit) : null,
       trendDays: Number(form.trendDays) || 28, kcalPerKg: Number(form.kcalPerKg) || 7700,
     });
@@ -101,7 +104,7 @@ export function NutritionSettingsCard() {
   const target = form ? targetKg(form) : null;
   const earliest = limits?.currentKg != null && target != null && limits.today
     ? earliestDate(limits.currentKg, target, limits.today, limits.maxLb) : null;
-  const tooSoon = !!(form?.goalDate && earliest && form.goalDate < earliest);
+  const tooSoon = !!(form && !form.goalAuto && form.goalDate && earliest && form.goalDate < earliest);
 
   async function save() {
     if (!form || tooSoon) return;
@@ -110,7 +113,8 @@ export function NutritionSettingsCard() {
     try {
       const body = {
         targetWeightKg: targetKg(form),
-        goalDate: form.goalDate || null,
+        goalDate: form.goalAuto ? (earliest ?? form.goalDate) || null : form.goalDate || null,
+        goalDateAuto: form.goalAuto,
         dailyCalorieLimit: form.limit ? Number(form.limit) : null,
         weightUnit: form.unit,
         trendDays: Number(form.trendDays),
@@ -135,7 +139,7 @@ export function NutritionSettingsCard() {
         <Link href="/nutrition" className="text-xs text-emerald-300 hover:text-emerald-200">Open Nutrition →</Link>
       </div>
       <p className="text-xs text-slate-500">
-        Food comes from Lose It! (synced by the PaceSync phone app through Health Connect). Calories burnt and
+        Food comes from your Lose It! diary (read by the PaceSync server). Calories burnt and
         weigh-ins come from Garmin.
       </p>
       {!form ? (
@@ -181,7 +185,12 @@ export function NutritionSettingsCard() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <label className="text-xs text-slate-400">Goal date</label>
-              <input type="date" value={form.goalDate} min={earliest ?? undefined} onChange={e => set("goalDate", e.target.value)} className={INPUT} />
+              <input type="date" value={form.goalAuto ? (earliest ?? form.goalDate) : form.goalDate} min={earliest ?? undefined} disabled={form.goalAuto}
+                onChange={e => set("goalDate", e.target.value)} className={`${INPUT} disabled:opacity-60`} />
+              <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                <input type="checkbox" checked={form.goalAuto} onChange={e => set("goalAuto", e.target.checked)} />
+                Set automatically: the earliest date at the maximum loss rate, updated with each weigh-in
+              </label>
               {tooSoon ? (
                 <p className="text-[11px] text-rose-300">
                   Needs more than {limits?.maxLb ?? 2} lb a week. Earliest: {prettyDate(earliest!)}.{" "}

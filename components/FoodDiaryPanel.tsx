@@ -374,7 +374,7 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
             className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-2 py-1.5 text-slate-200"
           />
           <button onClick={() => setDate(d => shift(d, 1))} disabled={date >= today} className={navBtn} aria-label="Next day">›</button>
-          {date !== today && <button onClick={() => setDate(today)} className={navBtn}>Today</button>}
+          <button onClick={() => setDate(today)} disabled={date === today} className={navBtn}>Today</button>
           {diary?.connected && (
             <button onClick={() => setAdding(a => !a)} className={`${navBtn} ${adding ? "text-emerald-300 border-emerald-500/40" : ""}`}>
               {adding ? "Close" : "+ Add food"}
