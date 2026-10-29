@@ -428,6 +428,15 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
               </div>
               {m.foods.length > 0 && <Macros t={m.totals} className="block px-1 mb-2 text-[11px] text-right" />}
               {m.foods.length === 0 && <p className="px-1 py-3 text-xs text-slate-500">Nothing logged yet.</p>}
+              {m.foods.length === 0 && date === today && !drag && (
+                <button
+                  onClick={() => copyToToday({ fromDate: shift(today, -1), meal: m.meal }, `yesterday's ${m.name.toLowerCase()}`)}
+                  disabled={!!copyMsg?.text.startsWith("Adding")}
+                  className="mx-1 mb-2 self-start text-xs rounded-lg border border-sky-500/30 bg-sky-500/10 hover:bg-sky-500/20 text-sky-200 px-2.5 py-1 disabled:opacity-50 transition-colors"
+                >
+                  Copy yesterday&apos;s {m.name.toLowerCase()}
+                </button>
+              )}
               <ul className="space-y-0.5">
                 {m.foods.map((f, i) => (
                   <li
