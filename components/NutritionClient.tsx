@@ -872,11 +872,7 @@ export function NutritionClient() {
     <div className="relative isolate min-h-screen flex flex-col text-slate-100">
       <div aria-hidden className="fixed inset-0 -z-10 bg-slate-950 bg-cover bg-center bg-no-repeat pointer-events-none"
         style={{ backgroundImage: "linear-gradient(rgba(2,6,23,0.85), rgba(2,6,23,0.85)), url('/dashboard-hero.png')" }} />
-      <TopNav title="🥗 Nutrition" maxWidth="max-w-[1800px]" extra={
-          <div className="flex items-center gap-3 min-w-0">
-            <Link href="/settings?tab=nutrition" className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0">Goals</Link>
-          </div>
-      } />
+      <TopNav title="🥗 Nutrition" maxWidth="max-w-[1800px]" />
 
       <main className="flex-1 max-w-[1800px] w-full mx-auto px-4 py-6 space-y-6">
         {error && <Card><p className="text-sm text-rose-300">{error}</p></Card>}
@@ -1109,8 +1105,8 @@ export function NutritionClient() {
                   <HowTo>
                     How the projections are made: the faint purple line is the straight line fitted through your weigh-ins over the last {cfg.trendDays} days;
                     its slope is the Scale trend rate. The rose line does the same through just your last 7 weigh-ins (post-run ones aren't counted), however many days that spans: a more immediate, but noisier, read. The Scale trend continues from where that purple line is today, so it joins it without a jump. The calorie projections start from your 7-day average weight (yellow bar), not a single weigh-in,
-                    so one heavy or light day doesn&apos;t swing them. A weigh-in taken within 3 hours after a run finished (from your Garmin activities) is taken as post-run: those are the green dots, left out of everything above and given their own green fitted line and "Post-run trend" projection, which starts from where that line is today; the dotted yellow line carries that average flat to the goal date, i.e. no change. Sticking to your limit uses calories instead: your {cfg.dailyCalorieLimit ?? "—"} kcal
-                    limit against your average Garmin burn.
+                    so one heavy or light day doesn&apos;t swing them. A weigh-in taken within 3 hours after a run finished (from your Garmin activities) is taken as post-run: those are the green dots, left out of everything above and given their own green fitted line and "Post-run trend" projection, which starts from where that line is today; the dotted yellow line carries that average flat to the goal date, i.e. no change. Sticking to your limit assumes you lose at the maximum rate Lose It! allows (2 lb a week), starting from your 7-day average; the calories that needs
+                    are your average Garmin burn minus that deficit.
                   </HowTo>
                 )}
               </Card>

@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
   const config = sanitizeNutritionConfig(body);
 
   // A goal date that would need more than 2 lb/week can't be saved.
-  if (!config.goalDateAuto && config.goalDate && config.targetWeightKg != null) {
+  if (!config.goalFromLoseIt && !config.goalDateAuto && config.goalDate && config.targetWeightKg != null) {
     const dash = buildNutritionDashboard(7);
     if (dash.current) {
       const earliest = earliestGoalDate(dash.current.avg7Kg, config.targetWeightKg, dash.today);

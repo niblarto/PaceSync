@@ -677,6 +677,66 @@ export async function deleteEntry(who: GwtIdentity, entry: GNode): Promise<void>
   await sendEntry(who, "deleteFoodLogEntry", entry);
 }
 
+export async function rawGoals(who: GwtIdentity): Promise<GwtResponse> {
+  return rpcWithBuildRetry(who, "getGoalsData", [], () => []);
+}
+
+// ── Goals ──────────────────────────────────────────────────────────────────
+
+export interface LoseItGoals {
+  goalWeightLb: number;      // the goal weight set in Lose It!
+  currentWeightLb: number;   // Lose It!'s current weight
+  startWeightLb: number | null;
+  startDate: string | null;  // when the plan started
+  goalDate: string;          // Lose It!'s own projected date for reaching the goal
+  planLbPerWeek: number | null; // weekly loss implied by that date (to the nearest 0.5)
+}
+
+const isoOfDayNumber = (n: number) => new Date(Date.UTC(2000, 11, 31) + n * 86_400_000).toISOString().slice(0, 10);
+
+// getGoalsData (~1 KB) carries a GoalsSummary: current weight, a budget
+// identifier whose day is the projected goal date, the goal weight, the plan
+// and the starting weight. Layout read from live responses (positions are
+// relative to type names, so rebuilds don't matter); anything unexpected throws
+// rather than guessing.
+export function parseGoals(res: GwtResponse, today: string): LoseItGoals {
+  const rev = [...res.tokens].reverse();
+  const at = (prefix: string) => typeIndex(res.strings, prefix);
+  const iSum = at("com.loseit.core.client.model.GoalsSummary/"), iBud = at("com.loseit.core.client.model.budget.DailyBudgetIdentifier/");
+  const iDay = at("com.loseit.core.shared.model.DayDate/"), iDate = at("java.util.Date/");
+  const iGender = at("com.loseit.core.client.model.GoalsProfileGender/");
+  const iRec = at("com.loseit.core.client.model.RecordedWeight/");
+  const a = iSum ? rev.indexOf(iSum) : -1;
+  const b = a >= 0 && iBud ? rev.indexOf(iBud, a) : -1;
+  if (b < 1 || rev[b + 2] !== iDay || rev[b + 3] !== iDate || rev[b + 7] !== iGender) throw new Error("unexpected goals layout");
+  const num = (i: number) => { const v = rev[i]; if (typeof v !== "number") throw new Error("unexpected goals layout"); return v; };
+  const goalWeightLb = num(b + 9), currentWeightLb = num(b - 1);
+  // The budget identifier's day is one day before the date Lose It! shows for
+  // reaching the goal (it showed 15 Jan 2027 for day 9510 = 14 Jan).
+  const goalDate = isoOfDayNumber(num(b + 5) + 1);
+  if (!(goalWeightLb > 20 && goalWeightLb < 700 && currentWeightLb > 20 && currentWeightLb < 700)) throw new Error("implausible goals");
+
+  let startWeightLb: number | null = null, startDate: string | null = null;
+  const r = iRec ? rev.indexOf(iRec, b) : -1;
+  if (r > 0 && rev[r + 1] === iDay && rev[r + 2] === iDate && typeof rev[r + 8] === "number") {
+    startWeightLb = rev[r + 8] as number;
+    startDate = isoOfDayNumber(num(r + 4));
+  }
+  const days = loseItDayNumber(goalDate) - loseItDayNumber(today);
+  const raw = days > 0 ? (currentWeightLb - goalWeightLb) / (days / 7) : null;
+  return {
+    goalWeightLb: Math.round(goalWeightLb * 100) / 100,
+    currentWeightLb: Math.round(currentWeightLb * 100) / 100,
+    startWeightLb: startWeightLb == null ? null : Math.round(startWeightLb * 100) / 100,
+    startDate, goalDate,
+    planLbPerWeek: raw != null && raw > 0 ? Math.round(raw * 2) / 2 : null,
+  };
+}
+
+export async function fetchGoals(who: GwtIdentity, today: string): Promise<LoseItGoals> {
+  return parseGoals(await rawGoals(who), today);
+}
+
 export async function currentBuild(cookie: string): Promise<LoseItBuild> {
   return getBuild(cookie);
 }

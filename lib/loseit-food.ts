@@ -1,7 +1,7 @@
 import { getDb } from "@/lib/db";
 import {
-  copyEntry, currentBuild, deleteEntry, moveEntry, fetchDay, fetchMyFoods, getFoodDraft, LoseItAuthError, prepareEntry, rescaleEntry, saveEntry, searchFoods, summarizeDraft, WEIGHT_G,
-  type LoseItEntry,
+  copyEntry, currentBuild, deleteEntry, moveEntry, fetchDay, fetchGoals, fetchMyFoods, getFoodDraft, LoseItAuthError, prepareEntry, rescaleEntry, saveEntry, searchFoods, summarizeDraft, WEIGHT_G,
+  type LoseItEntry, type LoseItGoals,
 } from "@/lib/loseit-gwt";
 import { downloadExport, parseFoodLogCsv, readZipEntry, singularUnit, type ExportFoodRow } from "@/lib/loseit-export";
 import { loadLoseItAccount, loadLoseItSession, withLoseItSession } from "@/lib/loseit-session";
@@ -240,6 +240,8 @@ async function runSync({ force = false, full = false }: { force?: boolean; full?
     state.lastError = null;
     state.lastErrorAt = null;
     saveState(state);
+    // The goal set in Lose It! (kept for an hour, so this is a request only about hourly).
+    await getLoseItGoals().catch(() => null);
     return result;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -354,6 +356,32 @@ export function getLoseItStatus(): LoseItStatus {
     firstDate: agg.first,
     lastDate: agg.last,
   };
+}
+
+// ── The goal set in Lose It! ───────────────────────────────────────────────
+// Read on request (~1 KB) and kept for an hour: it only changes when the goal is
+// edited in Lose It! or a new weigh-in moves its projected date.
+const GOALS_KEY = "loseit_goals";
+const GOALS_MAX_AGE_MS = 60 * 60_000;
+
+// The last goals read, without a network call (null before the first read).
+export function cachedLoseItGoals(): LoseItGoals | null {
+  try {
+    const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(GOALS_KEY) as { value_json: string } | undefined;
+    return row ? (JSON.parse(row.value_json) as { goals: LoseItGoals }).goals : null;
+  } catch { return null; }
+}
+
+export async function getLoseItGoals(force = false): Promise<{ goals: LoseItGoals; fetchedAt: string }> {
+  const row = getDb().prepare("SELECT value_json FROM kv_config WHERE key = ?").get(GOALS_KEY) as { value_json: string } | undefined;
+  const cached = row ? (JSON.parse(row.value_json) as { goals: LoseItGoals; fetchedAt: string }) : null;
+  if (cached && !force && Date.now() - Date.parse(cached.fetchedAt) < GOALS_MAX_AGE_MS) return cached;
+  const today = localIsoDate();
+  const goals = await withLoseItSession(who => fetchGoals(who, today));
+  const fresh = { goals, fetchedAt: new Date().toISOString() };
+  getDb().prepare("INSERT INTO kv_config (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
+    .run(GOALS_KEY, JSON.stringify(fresh));
+  return fresh;
 }
 
 // Forgetting the account also forgets sync progress, so reconnecting

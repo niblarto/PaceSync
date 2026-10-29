@@ -249,6 +249,7 @@ FILES = [
     ('components/LoseItSettingsCard.tsx', 'components/LoseItSettingsCard.tsx'),
     ('components/BackupSettingsCard.tsx', 'components/BackupSettingsCard.tsx'),
     ('app/api/loseit/edit/route.ts', 'app/api/loseit/edit/route.ts'),
+    ('app/api/loseit/goals/route.ts', 'app/api/loseit/goals/route.ts'),
     ('lib/backup-settings.ts', 'lib/backup-settings.ts'),
     ('app/api/settings/backup/route.ts', 'app/api/settings/backup/route.ts'),
     ('components/FoodDiaryPanel.tsx', 'components/FoodDiaryPanel.tsx'),

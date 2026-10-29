@@ -3096,6 +3096,18 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           {/* Music seek bar, beside the title */}
           <HeaderSongBar className="flex-1 min-w-0 max-w-md mx-4" />
           <div className="flex items-center gap-4 shrink-0">
+            <Link href="/coach" className={NAV_LINK}>Coach</Link>
+            <Link href="/nutrition" className={NAV_LINK}>Nutrition</Link>
+            {garminConfigured && (
+              <Link href="/garmin" className={NAV_LINK}>Garmin</Link>
+            )}
+            <Link href="/races" className={NAV_LINK}>Races</Link>
+            <Link href="/pace-pro" className={NAV_LINK}>Pace Pro</Link>
+            <Link href="/routes" className={NAV_LINK}>Routes</Link>
+            <Link href="/strava" className={NAV_LINK}>Strava</Link>
+            <Link href="/crawler" className={NAV_LINK}>Crawler</Link>
+            <Link href="/bbc" className={NAV_LINK}>BBC Radio</Link>
+            <Link href="/settings" className={NAV_LINK}>Settings</Link>
             <div className="flex items-center gap-2 text-sm text-slate-400">
               {spotifyUser.image && (
                 <img
@@ -3107,18 +3119,6 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
               )}
               <span>{spotifyUser.name}</span>
             </div>
-            {garminConfigured && (
-              <Link href="/garmin" className={NAV_LINK}>Garmin</Link>
-            )}
-            <Link href="/coach" className={NAV_LINK}>Coach</Link>
-            <Link href="/nutrition" className={NAV_LINK}>Nutrition</Link>
-            <Link href="/crawler" className={NAV_LINK}>Crawler</Link>
-            <Link href="/pace-pro" className={NAV_LINK}>Pace Pro</Link>
-            <Link href="/races" className={NAV_LINK}>Races</Link>
-            <Link href="/routes" className={NAV_LINK}>Routes</Link>
-            <Link href="/strava" className={NAV_LINK}>Strava</Link>
-            <Link href="/bbc" className={NAV_LINK}>BBC Radio</Link>
-            <Link href="/settings" className={NAV_LINK}>Settings</Link>
             <button
               onClick={async () => {
                 // Clear the local-auth gate first so signing back in requires

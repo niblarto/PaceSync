@@ -335,7 +335,9 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
     ? MEALS.map((name, meal) => diary.meals.find(m => m.meal === meal)
       ?? { meal, name, foods: [] as Food[], totals: { kcal: 0, proteinG: 0, carbsG: 0, fatG: 0 } })
     : diary.meals;
-  const navBtn = "rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40 text-xs px-2.5 py-1.5 text-slate-300 transition-colors";
+  // The dashboard's tinted buttons: sky for navigation, green for the main action.
+  const navBtn = "rounded-lg border border-sky-500/40 bg-sky-500/15 hover:bg-sky-500/25 disabled:opacity-40 disabled:hover:bg-sky-500/15 text-xs font-semibold px-2.5 py-1.5 text-sky-300 transition-colors";
+  const addBtn = "rounded-lg border border-green-500/40 bg-green-500/15 hover:bg-green-500/25 text-xs font-semibold px-3 py-1.5 text-green-300 transition-colors";
 
   return (
     <section className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5">
@@ -344,6 +346,7 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
           <span className="h-8 w-8 rounded-lg flex items-center justify-center shrink-0 bg-green-500/15 text-base" aria-hidden>🍽️</span>
           Food diary
           <span className="text-xs font-medium border rounded-full px-2.5 py-0.5 bg-green-500/20 text-green-300 border-green-500/30">{title}</span>
+          <Link href="/settings?tab=nutrition" className="text-xs font-normal text-slate-500 hover:text-slate-300 transition-colors">Goals</Link>
           {diary?.connected && canRefresh && (
             loading ? (
               <span className="text-xs font-normal text-slate-500">refreshing…</span>
@@ -371,12 +374,12 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
             value={date}
             max={today}
             onChange={e => e.target.value && setDate(e.target.value)}
-            className="rounded-lg bg-slate-800 border border-slate-700 text-xs px-2 py-1.5 text-slate-200"
+            className="rounded-lg bg-sky-500/10 border border-sky-500/40 hover:bg-sky-500/20 focus:outline-none focus:ring-1 focus:ring-sky-400 text-xs font-semibold px-2 py-1.5 text-sky-200 transition-colors [color-scheme:dark]"
           />
           <button onClick={() => setDate(d => shift(d, 1))} disabled={date >= today} className={navBtn} aria-label="Next day">›</button>
           <button onClick={() => setDate(today)} disabled={date === today} className={navBtn}>Today</button>
           {diary?.connected && (
-            <button onClick={() => setAdding(a => !a)} className={`${navBtn} ${adding ? "text-emerald-300 border-emerald-500/40" : ""}`}>
+            <button onClick={() => setAdding(a => !a)} className={`${addBtn} ${adding ? "bg-green-500/30 border-green-400/60 text-green-200" : ""}`}>
               {adding ? "Close" : "+ Add food"}
             </button>
           )}

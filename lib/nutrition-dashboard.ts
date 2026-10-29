@@ -5,7 +5,7 @@ import { getNutritionDays } from "@/lib/nutrition";
 import { getGarminApiWeights, getGarminWeightSamples, lastGarminWeightFetch } from "@/lib/garmin-weight";
 import { cachedTodayBurn } from "@/lib/garmin-connect";
 import { loadNutritionConfig, saveNutritionConfig, type NutritionConfig } from "@/lib/nutrition-config";
-import { getLoseItStatus } from "@/lib/loseit-food";
+import { cachedLoseItGoals, getLoseItStatus } from "@/lib/loseit-food";
 
 // Data + projections for the /nutrition page.
 //   eaten    — the Lose It! diary PaceSync syncs (lib/loseit-food.ts, via getNutritionDays)
@@ -240,6 +240,17 @@ const POST_RUN_WINDOW_MS = 3 * 3_600_000;
 
 export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
   const config = { ...loadNutritionConfig() };
+  // The goal weight and date set in Lose It! (last read, see lib/loseit-food.ts)
+  // override the typed ones, and are stored so everything else sees them too.
+  const loseItGoals = config.goalFromLoseIt ? cachedLoseItGoals() : null;
+  if (loseItGoals) {
+    const kg = Math.round((loseItGoals.goalWeightLb / LB_PER_KG) * 1000) / 1000;
+    if (kg !== config.targetWeightKg || loseItGoals.goalDate !== config.goalDate) {
+      config.targetWeightKg = kg;
+      config.goalDate = loseItGoals.goalDate;
+      try { saveNutritionConfig({ ...loadNutritionConfig(), targetWeightKg: kg, goalDate: loseItGoals.goalDate }); } catch { /* shown correctly anyway */ }
+    }
+  }
   const today = ymd(new Date());
   const span = Math.max(chartDays, config.trendDays);
   const since = addDays(today, -(span - 1));
@@ -353,7 +364,7 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
 
   // The goal date follows each weigh-in: the earliest date the target can be
   // reached at the maximum loss rate (Settings → Nutrition can switch this off).
-  if (config.goalDateAuto && config.targetWeightKg != null && current) {
+  if (config.goalDateAuto && !loseItGoals && config.targetWeightKg != null && current) {
     const earliest = earliestGoalDate(current.avg7Kg, config.targetWeightKg, today);
     if (earliest !== config.goalDate) {
       config.goalDate = earliest;
@@ -436,13 +447,16 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
         balance / config.kcalPerKg, anchor, today, config,
       ));
     }
-    // The limit is on calories eaten: balance = limit − average burnt.
-    if (config.dailyCalorieLimit != null && averages.burnt != null) {
-      const balance = config.dailyCalorieLimit - averages.burnt;
+    // Sticking to the plan: losing at the maximum rate Lose It! allows
+    // (MAX_LOSS_LB_PER_WEEK), from the 7-day average. The calories that takes are
+    // shown alongside when the average burn is known.
+    {
+      const maxKgPerDay = MAX_LOSS_KG_PER_DAY;
+      const intake = averages.burnt != null ? Math.round(averages.burnt - maxKgPerDay * config.kcalPerKg) : null;
       projections.push(project(
         "plan", "Sticking to your limit",
-        `${config.dailyCalorieLimit} kcal/day eaten vs avg ${Math.round(averages.burnt)} burnt`,
-        balance / config.kcalPerKg, anchor, today, config,
+        `the maximum ${MAX_LOSS_LB_PER_WEEK} lb a week${intake != null ? ` (about ${intake} kcal/day eaten at avg ${Math.round(averages.burnt!)} burnt)` : ""}`,
+        -maxKgPerDay, anchor, today, config,
       ));
     }
     if (config.targetWeightKg != null && config.goalDate && daysBetween(today, config.goalDate) > 0) {

@@ -14,6 +14,9 @@ export interface NutritionConfig {
   // loss rate, recalculated whenever the nutrition numbers are built (so it
   // follows each weigh-in); false: the date typed in Settings is used.
   goalDateAuto: boolean;
+  // true: the target weight and goal date are the ones set in Lose It! (read
+  // hourly); they override the two fields above. false: the typed values.
+  goalFromLoseIt: boolean;
   dailyCalorieLimit: number | null; // kcal eaten per day
   minDailyCalories: number; // eating less than this in a day shows red on the calories chart
   weightUnit: WeightUnit;
@@ -25,6 +28,7 @@ export const DEFAULT_NUTRITION_CONFIG: NutritionConfig = {
   targetWeightKg: null,
   goalDate: null,
   goalDateAuto: true,
+  goalFromLoseIt: true,
   dailyCalorieLimit: null,
   minDailyCalories: 1400,
   weightUnit: "st",
@@ -44,6 +48,7 @@ export function sanitizeNutritionConfig(raw: unknown): NutritionConfig {
     targetWeightKg: numOrNull(r.targetWeightKg, 30, 300),
     goalDate: typeof r.goalDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(r.goalDate) ? r.goalDate : null,
     goalDateAuto: r.goalDateAuto !== false,
+    goalFromLoseIt: r.goalFromLoseIt !== false,
     dailyCalorieLimit: numOrNull(r.dailyCalorieLimit, 500, 10000),
     minDailyCalories: numOrNull(r.minDailyCalories, 0, 5000) ?? d.minDailyCalories,
     weightUnit: r.weightUnit === "kg" || r.weightUnit === "lb" ? r.weightUnit : "st",

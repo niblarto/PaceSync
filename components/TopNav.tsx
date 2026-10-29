@@ -12,14 +12,14 @@ const FALLBACK_AVATAR = "data:image/svg+xml;utf8," + encodeURIComponent(
 
 // The links of the top menu (Settings is last; the Settings page itself doesn't use this bar).
 const LINKS: { href: string; label: string; needsGarmin?: boolean }[] = [
-  { href: "/garmin", label: "Garmin", needsGarmin: true },
   { href: "/coach", label: "Coach" },
   { href: "/nutrition", label: "Nutrition" },
-  { href: "/crawler", label: "Crawler" },
-  { href: "/pace-pro", label: "Pace Pro" },
+  { href: "/garmin", label: "Garmin", needsGarmin: true },
   { href: "/races", label: "Races" },
+  { href: "/pace-pro", label: "Pace Pro" },
   { href: "/routes", label: "Routes" },
   { href: "/strava", label: "Strava" },
+  { href: "/crawler", label: "Crawler" },
   { href: "/bbc", label: "BBC Radio" },
   { href: "/settings", label: "Settings" },
 ];
@@ -44,6 +44,9 @@ export function TopNav({ title, extra, maxWidth = "max-w-[1800px]" }: { title: s
         <span className="font-bold text-green-400 text-lg tracking-tight whitespace-nowrap shrink-0">{title}</span>
         <HeaderSongBar className="flex-1 min-w-0 max-w-md mx-2" />
         <nav className="ml-auto flex items-center gap-4 shrink-0">
+          {LINKS.filter(l => !l.needsGarmin || garminConfigured).map(l => (
+            <Link key={l.href} href={l.href} className={NAV_LINK}>{l.label}</Link>
+          ))}
           {session?.user && (
             <div className="flex items-center gap-2 text-sm text-slate-400">
               {session.user.image && (
@@ -54,9 +57,6 @@ export function TopNav({ title, extra, maxWidth = "max-w-[1800px]" }: { title: s
               <span>{session.user.name}</span>
             </div>
           )}
-          {LINKS.filter(l => !l.needsGarmin || garminConfigured).map(l => (
-            <Link key={l.href} href={l.href} className={NAV_LINK}>{l.label}</Link>
-          ))}
           <button
             onClick={async () => {
               await fetch("/api/local-auth/logout", { method: "POST" }).catch(() => {});
