@@ -3104,7 +3104,6 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             <Link href="/races" className={NAV_LINK}>Races</Link>
             <Link href="/pace-pro" className={NAV_LINK}>Pace Pro</Link>
             <Link href="/routes" className={NAV_LINK}>Routes</Link>
-            <Link href="/strava" className={NAV_LINK}>Strava</Link>
             <Link href="/crawler" className={NAV_LINK}>Crawler</Link>
             <Link href="/bbc" className={NAV_LINK}>BBC Radio</Link>
             <Link href="/settings" className={NAV_LINK}>Settings</Link>

@@ -5253,8 +5253,7 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
         <div>
           <h2 className="font-semibold text-lg">Strava</h2>
           <p className="text-sm text-slate-400 mt-1">
-            Connect Strava for activity stats and heart-rate zones on the{" "}
-            <Link href="/strava" className="text-orange-400 hover:text-orange-300 underline">Strava Stats</Link> page.
+            Connect Strava to sync Runna workout titles and steps onto your activities and to read your heart-rate zones.
           </p>
         </div>
         <div className="rounded-lg bg-slate-800/50 border border-white/5 p-4 space-y-2 text-xs text-slate-400">

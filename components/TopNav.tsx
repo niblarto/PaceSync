@@ -18,7 +18,6 @@ const LINKS: { href: string; label: string; needsGarmin?: boolean }[] = [
   { href: "/races", label: "Races" },
   { href: "/pace-pro", label: "Pace Pro" },
   { href: "/routes", label: "Routes" },
-  { href: "/strava", label: "Strava" },
   { href: "/crawler", label: "Crawler" },
   { href: "/bbc", label: "BBC Radio" },
   { href: "/settings", label: "Settings" },

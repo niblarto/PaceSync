@@ -5,14 +5,14 @@ import { saveStravaTokens } from "@/lib/strava-tokens";
 // Strava redirects here with ?code=... after the user approves access.
 // Not gated by getServerSession — Strava's redirect is a plain browser GET
 // with no way to carry our session cookie's auth header, but middleware.ts
-// already requires local-auth login to reach /strava in the first place,
+// already requires local-auth login to reach /settings in the first place,
 // and this route only ever writes tokens, never reads app data.
 export async function GET(req: NextRequest) {
   const code = req.nextUrl.searchParams.get("code");
   const error = req.nextUrl.searchParams.get("error");
   // NEXTAUTH_URL, not request origin — the proxy rewrites Host to localhost
   const base = process.env.NEXTAUTH_URL?.replace(/\/+$/, "") || req.nextUrl.origin;
-  const redirectBase = `${base}/strava`;
+  const redirectBase = `${base}/settings?tab=integrations`;
 
   if (error) {
     return NextResponse.redirect(`${redirectBase}?error=${encodeURIComponent(error)}`);
