@@ -567,7 +567,7 @@ function nutritionSection(n: NutritionDashboard | null): string[] {
   const lines = ["## Weight & nutrition (food from Lose It!, burn and weigh-ins from Garmin)"];
   if (n.current) {
     const c0 = n.current;
-    lines.push(`- Latest weight: ${formatWeight(c0.kg, u)} (${c0.kg.toFixed(1)} kg) on ${c0.date}${c0.postRun ? " — a post-run weigh-in, which reads light from sweat" : ""}; 7-day average ${formatWeight(c0.avg7Kg, u)}${c0.postRun ? `; latest regular (pre-breakfast) weight ${formatWeight(c0.regularKg, u)} on ${c0.regularDate}` : ""}`);
+    lines.push(`- Latest weight: ${formatWeight(c0.kg, u)} (${c0.kg.toFixed(1)} kg) on ${c0.date}${c0.postRun ? " — a post-activity weigh-in, which reads light from sweat" : ""}; 7-day average ${formatWeight(c0.avg7Kg, u)}${c0.postRun ? `; latest regular (pre-breakfast) weight ${formatWeight(c0.regularKg, u)} on ${c0.regularDate}` : ""}`);
   }
   const goal = [
     c.targetWeightKg != null ? `target ${formatWeight(c.targetWeightKg, u)}` : "",

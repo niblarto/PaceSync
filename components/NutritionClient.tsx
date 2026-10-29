@@ -678,7 +678,7 @@ export function NutritionClient() {
     // A row for every day, so the hover snaps to one day at a time (the axis labels stay weekly).
     for (let ms = startMs; ms <= endMs; ms += DAY_MS) rows.set(ms, { t: ms });
     for (const h of history) rows.set(h.t, { t: h.t, kg: h.kg });
-    // Post-run weigh-ins (taken soon after a run), drawn in green.
+    // Post-activity weigh-ins (taken soon after a run or strength session), drawn in green.
     for (const w of data.postRunWeights ?? []) {
       const t = toMs(w.date);
       if (t < startMs) continue;
@@ -706,7 +706,7 @@ export function NutritionClient() {
         if (r.t >= f0 && r.t <= f1) r.fit7 = fit7.startKg + (fit7.endKg - fit7.startKg) * ((r.t - f0) / (f1 - f0 || 1));
       });
     }
-    // The same for the line fitted through the post-run weigh-ins.
+    // The same for the line fitted through the post-activity weigh-ins.
     const pfit = data.postRunFit;
     if (pfit) {
       const f0 = toMs(pfit.startDate), f1 = toMs(pfit.endDate);
@@ -903,7 +903,7 @@ export function NutritionClient() {
                           {data.current.kg.toFixed(2)} kg · {data.current.measuredAt
                             ? new Date(data.current.measuredAt).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
                             : longDate(data.current.date)} · {data.current.source}
-                          {data.current.postRun && <span className="text-emerald-400"> · post-run</span>}
+                          {data.current.postRun && <span className="text-emerald-400"> · post-activity</span>}
                         </div>
                         <div className="text-slate-500">7-day avg {formatWeight(data.current.avg7Kg, unit)}</div>
                         {data.current.postRun && data.current.regularKg != null && (
@@ -1041,12 +1041,12 @@ export function NutritionClient() {
                       <Line dataKey="kg" name="Weigh-ins" stroke={C.weight} strokeOpacity={0} legendType="circle" connectNulls={false}
                         dot={{ r: 3, fill: C.weight, stroke: "none" }} activeDot={{ r: 5, fill: C.weight, stroke: "none" }}
                         isAnimationActive={false} />
-                      {/* Post-run weigh-ins (taken soon after a run), in green */}
-                      <Line dataKey="post" name="Post-run weigh-ins" stroke={PROJ_COLORS.postrun} strokeOpacity={0} legendType="circle" connectNulls={false}
+                      {/* Post-activity weigh-ins (taken soon after a run or strength session), in green */}
+                      <Line dataKey="post" name="Post-activity weigh-ins" stroke={PROJ_COLORS.postrun} strokeOpacity={0} legendType="circle" connectNulls={false}
                         dot={{ r: 4, fill: PROJ_COLORS.postrun, stroke: "#052e16", strokeWidth: 1 }} activeDot={{ r: 5, fill: PROJ_COLORS.postrun, stroke: "none" }}
                         isAnimationActive={false} />
                       {data.postRunFit && (
-                        <Line dataKey="postFit" name={`Post-run fit (last ${cfg.trendDays} days)`} stroke={PROJ_COLORS.postrun} strokeOpacity={hoverProj == null ? 0.55 : hoverProj === "postrun" ? 1 : 0.08}
+                        <Line dataKey="postFit" name={`Post-activity fit (last ${cfg.trendDays} days)`} stroke={PROJ_COLORS.postrun} strokeOpacity={hoverProj == null ? 0.55 : hoverProj === "postrun" ? 1 : 0.08}
                           strokeWidth={hoverProj === "postrun" ? 3 : 2} connectNulls dot={false} activeDot={false} isAnimationActive={false} />
                       )}
                       {/* Fitted trend over the window's weigh-ins: the basis of "Scale trend" */}
@@ -1104,8 +1104,8 @@ export function NutritionClient() {
                 {weightChart && (
                   <HowTo>
                     How the projections are made: the faint purple line is the straight line fitted through your weigh-ins over the last {cfg.trendDays} days;
-                    its slope is the Scale trend rate. The rose line does the same through just your last 7 weigh-ins (post-run ones aren't counted), however many days that spans: a more immediate, but noisier, read. The Scale trend continues from where that purple line is today, so it joins it without a jump. The calorie projections start from your 7-day average weight (yellow bar), not a single weigh-in,
-                    so one heavy or light day doesn&apos;t swing them. A weigh-in taken within 3 hours after a run finished (from your Garmin activities) is taken as post-run: those are the green dots, left out of everything above and given their own green fitted line and "Post-run trend" projection, which starts from where that line is today; the dotted yellow line carries that average flat to the goal date, i.e. no change. Sticking to your limit assumes you lose at the maximum rate Lose It! allows (2 lb a week), starting from your 7-day average; the calories that needs
+                    its slope is the Scale trend rate. The rose line does the same through just your last 7 weigh-ins (post-activity ones aren't counted), however many days that spans: a more immediate, but noisier, read. The Scale trend continues from where that purple line is today, so it joins it without a jump. The calorie projections start from your 7-day average weight (yellow bar), not a single weigh-in,
+                    so one heavy or light day doesn&apos;t swing them. A weigh-in taken within 3 hours after a run or strength session finished (from your Garmin activities) is taken as post-activity: those are the green dots, left out of everything above and given their own green fitted line and "Post-run trend" projection, which starts from where that line is today; the dotted yellow line carries that average flat to the goal date, i.e. no change. Sticking to your limit assumes you lose at the maximum rate Lose It! allows (2 lb a week), starting from your 7-day average; the calories that needs
                     are your average Garmin burn minus that deficit.
                   </HowTo>
                 )}

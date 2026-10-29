@@ -288,7 +288,7 @@ private fun StatTiles(d: NutritionDashboardDto, unit: String, weightBusy: Boolea
                 },
             ) {
                 d.current?.let { c ->
-                    Small("${"%.2f".format(c.kg)} kg · ${c.measuredAt?.let { whenLabel(it) } ?: shortDate(c.date)}${c.source?.let { " · $it" } ?: ""}${if (c.postRun) " · post-run" else ""}")
+                    Small("${"%.2f".format(c.kg)} kg · ${c.measuredAt?.let { whenLabel(it) } ?: shortDate(c.date)}${c.source?.let { " · $it" } ?: ""}${if (c.postRun) " · post-activity" else ""}")
                     Small("7-day avg ${formatWeight(c.avg7Kg, unit)}")
                     if (c.postRun && c.regularKg != null) Small("Morning ${formatWeight(c.regularKg, unit)}")
                 } ?: Small("No weigh-ins yet")
@@ -409,7 +409,7 @@ private fun WeightLegend(d: NutritionDashboardDto) {
     // ones to nothing and broke their text letter by letter into a very tall column).
     FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         LegendDot(NC.weight, "Weigh-ins")
-        LegendDot(NC.postRun, "Post-run")
+        LegendDot(NC.postRun, "Post-activity")
         LegendDot(NC.avg, "7-day avg")
         d.projections.forEach { LegendDot(NC.projection(it.method), it.label) }
     }
@@ -442,7 +442,7 @@ private fun WeightDetail(d: NutritionDashboardDto, chart: WeightChartData, unit:
             if (!s.isAfter(today)) {
                 near?.let { Small("Weigh-in ${it.first.format(DateTimeFormatter.ofPattern("d MMM"))}: ${formatWeight(it.second, unit)}") } ?: Small("No weigh-in near this date")
                 chart.postWeights.minByOrNull { abs(ChronoUnit.DAYS.between(it.first, s)) }?.takeIf { abs(ChronoUnit.DAYS.between(it.first, s)) <= 2 }?.let {
-                    Small("Post-run ${it.first.format(DateTimeFormatter.ofPattern("d MMM"))}: ${formatWeight(it.second, unit)}", NC.postRun)
+                    Small("Post-activity ${it.first.format(DateTimeFormatter.ofPattern("d MMM"))}: ${formatWeight(it.second, unit)}", NC.postRun)
                 }
             } else {
                 chart.lines.forEach { l ->

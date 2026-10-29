@@ -74,7 +74,7 @@ export interface NutritionDashboard {
   trendFit: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
   // The same over just the last 7 days: a more immediate read than the (configurable) trend window.
   trendFit7: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
-  // The same for the post-run weigh-ins (basis of the "Post-run trend" projection).
+  // The same for the post-run weigh-ins (basis of the "Post-activity trend" projection).
   postRunFit: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
   // When each data source was last refreshed (ISO timestamps).
   sources: {
@@ -143,14 +143,14 @@ function garminWeights(since: string): Map<string, number> {
   return out;
 }
 
-// When each run started and finished (local wall-clock times, as GarminDB stores them).
+// When each run or strength session started and finished (local wall-clock times, as GarminDB stores them).
 function garminRuns(since: string): { startMs: number; endMs: number }[] {
   const out: { startMs: number; endMs: number }[] = [];
   const db = openGarmin("garmin_activities.db");
   if (!db) return out;
   try {
     const rows = db.prepare(
-      "SELECT start_time AS s, elapsed_time AS e FROM activities WHERE LOWER(sport) LIKE '%run%' AND DATE(start_time) >= ?",
+      "SELECT start_time AS s, elapsed_time AS e FROM activities WHERE (LOWER(sport) LIKE '%run%' OR LOWER(sport) = 'fitness_equipment') AND DATE(start_time) >= ?",
     ).all(since) as { s: string; e: string | null }[];
     for (const r of rows) {
       const startMs = new Date(r.s.slice(0, 19).replace(" ", "T")).getTime();
@@ -235,7 +235,7 @@ function dataSources(today: string): NutritionDashboard["sources"] {
 
 // Weigh-ins closer together than this are the same weigh-in (a re-weigh).
 const REWEIGH_MS = 20 * 60_000;
-// A weigh-in this soon after a run finishes is a post-run weigh-in.
+// A weigh-in this soon after a run or strength session finishes is a post-activity weigh-in.
 const POST_RUN_WINDOW_MS = 3 * 3_600_000;
 
 export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
@@ -422,7 +422,7 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
     const fit7 = linearFit(pts7, 3, 4);
     if (fit7) {
       const end7Kg = fit7.intercept + fit7.slope * daysBetween(start7, today);
-      projections.push(project("trend7", "7-weigh-in trend", `the last ${pts7.length} weigh-ins (not counting post-run ones), ${start7} to ${last7[last7.length - 1].date}`, fit7.slope, end7Kg, today, config));
+      projections.push(project("trend7", "7-weigh-in trend", `the last ${pts7.length} weigh-ins (not counting post-activity ones), ${start7} to ${last7[last7.length - 1].date}`, fit7.slope, end7Kg, today, config));
       const r2b = (n: number) => Math.round(n * 1000) / 1000;
       trendFit7 = { startDate: start7, startKg: r2b(fit7.intercept), endDate: today, endKg: r2b(end7Kg) };
     }
@@ -437,7 +437,7 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
       const startKg = postFit.intercept;
       const endKg = postFit.intercept + postFit.slope * daysBetween(windowStart, today);
       postRunFit = { startDate: windowStart, startKg: r3(startKg), endDate: today, endKg: r3(endKg) };
-      projections.push(project("postrun", "Post-run trend", `${postPts.length} post-run weigh-ins over the last ${config.trendDays} days`, postFit.slope, endKg, today, config));
+      projections.push(project("postrun", "Post-activity trend", `${postPts.length} post-activity weigh-ins over the last ${config.trendDays} days`, postFit.slope, endKg, today, config));
     }
     if (logged.length >= 3) {
       const balance = mean(logged.map(d => d.eaten! - d.burnt!))!;
