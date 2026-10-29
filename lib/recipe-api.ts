@@ -2,15 +2,42 @@ import { getDb } from "@/lib/db";
 
 // Recipe ideas for "Create meal", from API Ninjas' recipe API
 // (https://api.api-ninjas.com/v3/recipe). The key is saved in Settings →
-// Integrations → Coach and never sent back to the browser. Recipes carry no
-// nutrition here, so they are inspiration only; the meal's numbers come from
-// the Lose It! food history (lib/meal-builder.ts).
+// Integrations → Coach and never sent back to the browser. A recipe's
+// ingredients keep their amounts (parsed where possible) so they can be added
+// to the Lose It! diary one by one (lib/meal-builder.ts).
 
 const KEY = "api_ninjas_key";
-const URL = "https://api.api-ninjas.com/v3/recipe";
+const ENDPOINT = "https://api.api-ninjas.com/v3/recipe";
 
-// nutrition: API Ninjas' own figures for the dish, e.g. "calories 450, protein 32, carbohydrates 40, fat 18" (whatever it sends).
-export interface Recipe { title: string; ingredients: string[]; servings: string | null; instructions: string; nutrition: string | null; kcal: number | null }
+// One recipe ingredient. quantity/unit are for the whole recipe; null when the source gave no usable amount.
+export interface RecipeIngredient { text: string; name: string; quantity: number | null; unit: string | null }
+
+// nutrition: the source's own figures for the dish, e.g. "calories 450, protein 32 g…" (whatever it sends).
+// id: FatSecret's recipe id, to fetch the full ingredient list later. servingsN: how many servings the recipe makes.
+export interface Recipe {
+  id: string | null; title: string; ingredients: RecipeIngredient[]; servings: string | null; servingsN: number | null;
+  instructions: string; nutrition: string | null; kcal: number | null;
+}
+
+const FRACTIONS: Record<string, number> = { "½": 0.5, "¼": 0.25, "¾": 0.75, "⅓": 1 / 3, "⅔": 2 / 3, "⅛": 0.125 };
+
+// "2", "1.5", "1/2", "1 1/2", "1½", "2-3" (first number) → a number; anything else ("to taste") → null.
+export function parseQuantity(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) && v > 0 ? v : null;
+  if (typeof v !== "string") return null;
+  let s = v.trim();
+  if (!s) return null;
+  for (const [k, n] of Object.entries(FRACTIONS)) s = s.replace(k, ` ${n} `);
+  s = s.split(/[-–]/)[0].trim();
+  let total = 0;
+  for (const part of s.split(/\s+/)) {
+    const frac = /^(\d+)\/(\d+)$/.exec(part);
+    const n = frac ? Number(frac[1]) / Number(frac[2]) : Number(part);
+    if (!Number.isFinite(n)) return null;
+    total += n;
+  }
+  return total > 0 ? total : null;
+}
 
 export function loadRecipeKey(): string | null {
   try {
@@ -32,7 +59,7 @@ export function saveRecipeKey(key: string | null): void {
 export async function searchRecipes(query: string, key = loadRecipeKey()): Promise<{ ok: true; recipes: Recipe[] } | { ok: false; error: string }> {
   if (!key) return { ok: false, error: "No recipe API key saved (Settings → Integrations → Coach)" };
   try {
-    const res = await fetch(`${URL}?title=${encodeURIComponent(query.slice(0, 100))}&limit=5`, {
+    const res = await fetch(`${ENDPOINT}?title=${encodeURIComponent(query.slice(0, 100))}&limit=5`, {
       headers: { "X-Api-Key": key },
       signal: AbortSignal.timeout(20_000),
     });
@@ -44,12 +71,19 @@ export async function searchRecipes(query: string, key = loadRecipeKey()): Promi
     }
     type Ing = string | { name?: string; quantity?: string | number; unit?: string };
     const data = await res.json() as { title?: string; ingredients?: Ing[] | string; servings?: string; instructions?: string[] | string; nutrition?: Record<string, unknown> }[];
-    const ing = (i: Ing) => (typeof i === "string" ? i : [i.quantity, i.unit, i.name].filter(v => v != null && v !== "").join(" "));
+    const ing = (i: Ing): RecipeIngredient => {
+      if (typeof i === "string") return { text: i.trim(), name: i.trim(), quantity: null, unit: null };
+      const unit = i.unit ? String(i.unit).trim() : null;
+      const name = String(i.name ?? "").trim();
+      return { text: [i.quantity, unit, name].filter(v => v != null && v !== "").join(" "), name, quantity: parseQuantity(i.quantity), unit: unit || null };
+    };
     const recipes = (Array.isArray(data) ? data : []).filter(r => r.title).map(r => ({
+      id: null,
       title: String(r.title).trim(),
-      ingredients: (Array.isArray(r.ingredients) ? r.ingredients.map(ing) : String(r.ingredients ?? "").split("|")).map(s => s.trim()).filter(Boolean),
+      ingredients: (Array.isArray(r.ingredients) ? r.ingredients.map(ing) : String(r.ingredients ?? "").split("|").map(s => ing(s))).filter(i => i.text),
       servings: r.servings ? String(r.servings) : null,
-      instructions: (Array.isArray(r.instructions) ? r.instructions.join(" ") : String(r.instructions ?? "")).replace(/\s+/g, " ").trim().slice(0, 900),
+      servingsN: parseQuantity(String(r.servings ?? "").match(/[\d./½¼¾]+/)?.[0]),
+      instructions: (Array.isArray(r.instructions) ? r.instructions.join(" ") : String(r.instructions ?? "")).replace(/\s+/g, " ").trim().slice(0, 1500),
       nutrition: r.nutrition && typeof r.nutrition === "object"
         ? Object.entries(r.nutrition).filter(([k]) => /^(calories|protein|carbohydrates?|(total_)?fat(_total)?)(_?(g|kcal))?$/i.test(k)).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(", ") || null
         : null,

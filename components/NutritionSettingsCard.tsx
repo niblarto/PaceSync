@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { kgToStLb, LB_PER_KG, stLbToKg, type WeightUnit } from "@/lib/weight-format";
+import { MEASURE_DEFS, type MeasureDef, type MeasureKey, type MeasureSettings } from "@/lib/units";
 
 interface NutritionConfig {
   targetWeightKg: number | null;
@@ -78,6 +79,89 @@ function earliestDate(currentKg: number, targetKg: number, today: string, maxLb:
 }
 
 const prettyDate = (d: string) => new Date(`${d}T12:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+
+// Recipe measures: recipes use US measures. Per measure: whether it is converted to metric before being matched to
+// a Lose It! food, and how many ml/g one of it is. Unticked ones are left as written (e.g. 2 tbsp).
+// Used by "Create meal" on the Nutrition page's Dinner card.
+function RecipeMeasures() {
+  const [rows, setRows] = useState<Record<MeasureKey, { convert: boolean; metric: string }> | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/settings/measures").then(r => r.json()).then((d: { measures?: MeasureSettings; error?: string }) => {
+      if (!d.measures) return;
+      setRows(Object.fromEntries(MEASURE_DEFS.map(m => [m.key, { convert: d.measures![m.key].convert, metric: String(d.measures![m.key].metric) }])) as Record<MeasureKey, { convert: boolean; metric: string }>);
+    }).catch(() => {});
+  }, []);
+
+  function set(key: MeasureKey, patch: Partial<{ convert: boolean; metric: string }>) {
+    setRows(r => (r ? { ...r, [key]: { ...r[key], ...patch } } : r));
+    setStatus(null);
+  }
+
+  const bad = (m: MeasureDef) => !(Number(rows?.[m.key].metric) > 0);
+
+  async function save() {
+    if (!rows || MEASURE_DEFS.some(bad)) return;
+    setSaving(true);
+    setStatus(null);
+    try {
+      const measures = Object.fromEntries(MEASURE_DEFS.map(m => [m.key, { convert: rows[m.key].convert, metric: Number(rows[m.key].metric) }]));
+      const res = await fetch("/api/settings/measures", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ measures }) });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || `Save failed (${res.status})`);
+      setStatus("Saved.");
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 border-t border-white/10 pt-4">
+      <div className="text-xs font-medium text-slate-300">🥄 Recipe measures</div>
+      <p className="text-xs text-slate-500">
+        Recipes found by “Create meal” use US measures. Tick <span className="text-slate-300">Convert</span> to turn a measure into metric (ml or g) using the
+        value beside it before the ingredient is matched to your Lose It! food. Untick it to leave that measure as written, such as tablespoons.
+      </p>
+      {!rows ? (
+        <p className="text-xs text-slate-500">Loading…</p>
+      ) : (
+        <>
+          <ul className="space-y-1.5">
+            {MEASURE_DEFS.map(m => (
+              <li key={m.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                <label className="flex items-center gap-2 w-24 shrink-0 text-slate-300">
+                  <input type="checkbox" checked={rows[m.key].convert} onChange={e => set(m.key, { convert: e.target.checked })} />
+                  Convert
+                </label>
+                <span className="w-40 shrink-0 text-slate-300">{m.label}</span>
+                <span className="text-slate-500">=</span>
+                <input inputMode="decimal" value={rows[m.key].metric} onChange={e => set(m.key, { metric: e.target.value })} aria-label={`${m.label} in ${m.metricUnit}`}
+                  className={`w-24 rounded-lg bg-slate-800 border text-xs px-2 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500 ${bad(m) ? "border-rose-500" : "border-slate-700"}`} />
+                <span className="text-slate-400">{m.metricUnit}</span>
+                {rows[m.key].metric !== String(m.defaultMetric) && (
+                  <button type="button" onClick={() => set(m.key, { metric: String(m.defaultMetric) })} className="text-[11px] text-slate-500 hover:text-slate-300 underline">
+                    reset to {m.defaultMetric}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+          <div className="flex items-center gap-3">
+            <button onClick={save} disabled={saving || MEASURE_DEFS.some(bad)}
+              className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-sm font-medium px-4 py-2 text-white transition-colors">
+              {saving ? "Saving…" : "Save measures"}
+            </button>
+            {status && <span className={`text-xs ${status === "Saved." ? "text-slate-400" : "text-rose-300"}`}>{status}</span>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 export function NutritionSettingsCard() {
   const [form, setForm] = useState<Form | null>(null);
@@ -316,6 +400,7 @@ export function NutritionSettingsCard() {
           </div>
         </div>
       )}
+      <RecipeMeasures />
     </div>
   );
 }

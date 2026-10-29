@@ -16,8 +16,14 @@ interface MealItem {
   kcal: number; proteinG: number; carbsG: number; fatG: number;
 }
 interface Meal { name: string; summary: string; items: MealItem[]; totals: Macros; fit: boolean; date: string }
+// Amounts are metric (g/ml) for the whole recipe; "count" is a number of things in countUnit.
+// keep: a measure left as written per Settings → Nutrition → Recipe measures (e.g. 2 tbsp); amount/unit are still its metric equivalent.
+interface RecipeIngredient {
+  text: string; name: string; amount: number | null; unit: "g" | "ml" | "count" | null; countUnit: string | null;
+  keep: { key: string; quantity: number; label: string } | null;
+}
 interface RecipeCard {
-  source: string; title: string; ingredients: string[]; instructions: string; nutrition: string | null;
+  source: string; title: string; ingredients: RecipeIngredient[]; servingsN: number | null; instructions: string; nutrition: string | null;
   kcal: number | null; servings: string | null; fits: boolean | null;
 }
 interface WebCard { title: string; url: string; snippet: string }
@@ -30,6 +36,22 @@ const sum = (list: Macros[]): Macros => ({
   kcal: list.reduce((a, m) => a + m.kcal, 0), proteinG: list.reduce((a, m) => a + m.proteinG, 0),
   carbsG: list.reduce((a, m) => a + m.carbsG, 0), fatG: list.reduce((a, m) => a + m.fatG, 0),
 });
+
+const trim1 = (n: number) => String(Math.round(n * 10) / 10);
+const trim2 = (n: number) => String(Math.round(n * 100) / 100);
+
+// The amount of a recipe ingredient for `eat` servings of a recipe that makes `makes` (metric): "170 g", "2 cloves".
+// null when the recipe gave no amount.
+function scaledAmount(i: RecipeIngredient, eat: number, makes: number | null): { amount: number; text: string; keep: { key: string; quantity: number } | null } | null {
+  if (i.amount == null || i.unit == null) return null;
+  const f = eat / (makes ?? 1);
+  const amount = i.amount * f;
+  if (!(amount > 0)) return null;
+  // A measure left as written shows as written (2 tbsp), not in metric.
+  if (i.keep) return { amount, text: `${trim2(i.keep.quantity * f)} ${i.keep.label}`, keep: { key: i.keep.key, quantity: i.keep.quantity * f } };
+  const text = i.unit === "count" ? `${amount < 1 ? trim2(amount) : trim1(amount)}${i.countUnit ? ` ${i.countUnit}` : ""}` : `${amount < 1 ? trim2(amount) : amount < 10 ? trim1(amount) : Math.round(amount)} ${i.unit}`;
+  return { amount, text, keep: null };
+}
 
 function MacroText({ m }: { m: Macros }) {
   return (
@@ -57,6 +79,7 @@ export function CreateMealModal({ date, meal, remaining, onLogged, onClose }: {
   const [tab, setTab] = useState(0);
   const [items, setItems] = useState<Record<string, ItemState>>({});
   const [bulk, setBulk] = useState(false);
+  const [eat, setEat] = useState<Record<number, string>>({}); // servings of each recipe to add, default 1
   const abort = useRef<AbortController | null>(null);
 
   const generate = useCallback(async () => {
@@ -148,6 +171,40 @@ export function CreateMealModal({ date, meal, remaining, onLogged, onClose }: {
     for (let ii = 0; ii < result!.meals[mi].items.length; ii++) {
       if (items[key(mi, ii)]?.status === "done") continue;
       await accept(mi, ii);
+    }
+    setBulk(false);
+  }
+
+  const servingsToEat = (ri: number) => { const n = Number(eat[ri] ?? "1"); return n > 0 ? n : 1; };
+
+  // Adds one recipe ingredient, scaled to the servings being eaten, as metric.
+  async function acceptIngredient(ri: number, ij: number) {
+    const r = result!.recipes[ri];
+    const ing = r.ingredients[ij];
+    const sc = scaledAmount(ing, servingsToEat(ri), r.servingsN);
+    const k = `r${ri}:${ij}`;
+    if (!sc || ing.unit == null) return;
+    setItems(s => ({ ...s, [k]: { status: "busy" } }));
+    try {
+      const res = await fetch("/api/nutrition/create-meal/accept-ingredient", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date, meal, item: { name: ing.name, amount: sc.amount, unit: ing.unit, countUnit: ing.countUnit, keep: sc.keep } }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
+      onLogged(body.day);
+      setItems(s => ({ ...s, [k]: { status: "done", logged: body.logged } }));
+    } catch (e) {
+      setItems(s => ({ ...s, [k]: { status: "error", message: e instanceof Error ? e.message : "Couldn't add" } }));
+    }
+  }
+
+  async function acceptAllIngredients(ri: number) {
+    setBulk(true);
+    const r = result!.recipes[ri];
+    for (let ij = 0; ij < r.ingredients.length; ij++) {
+      if (items[`r${ri}:${ij}`]?.status === "done" || !scaledAmount(r.ingredients[ij], servingsToEat(ri), r.servingsN)) continue;
+      await acceptIngredient(ri, ij);
     }
     setBulk(false);
   }
@@ -310,14 +367,56 @@ export function CreateMealModal({ date, meal, remaining, onLogged, onClose }: {
                         <p className="text-sm font-semibold text-slate-100">{r.title}</p>
                         <span className="text-[10px] rounded-full border border-white/10 text-slate-400 px-1.5 py-0.5">{r.source}</span>
                         {r.fits === true && <span className="text-[10px] rounded-full border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 px-1.5 py-0.5">within your calories</span>}
-                        {r.fits === false && <span className="text-[10px] rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-300 px-1.5 py-0.5">over your calories</span>}
                       </div>
                       {r.nutrition && <p className="text-xs text-green-400/90 tabular-nums">{r.nutrition}</p>}
                       {r.servings && <p className="text-xs text-slate-500">Servings: {r.servings}</p>}
                       {r.ingredients.length > 0 && (
                         <details className="text-xs text-slate-400">
-                          <summary className="cursor-pointer text-slate-300 hover:text-slate-100">Ingredients ({r.ingredients.length})</summary>
-                          <ul className="list-disc pl-5 mt-1 space-y-0.5">{r.ingredients.map((x, j) => <li key={j}>{x}</li>)}</ul>
+                          <summary className="cursor-pointer text-slate-300 hover:text-slate-100">Ingredients ({r.ingredients.length}) · add to Dinner</summary>
+                          <div className="mt-2 space-y-2">
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                              <label className="flex items-center gap-1.5">
+                                Servings to add
+                                <input inputMode="decimal" value={eat[i] ?? "1"} onChange={e => setEat(s => ({ ...s, [i]: e.target.value }))} aria-label="Servings to add"
+                                  className="w-14 rounded-lg bg-slate-800 border border-slate-700 text-xs px-2 py-1 text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+                              </label>
+                              <span className="text-slate-500">{r.servingsN ? `recipe makes ${trim1(r.servingsN)}` : "servings not given: amounts are for the whole recipe"}</span>
+                              <button onClick={() => acceptAllIngredients(i)} disabled={busy}
+                                className="ml-auto rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-xs font-medium px-3 py-1.5 text-white transition-colors">
+                                Add all
+                              </button>
+                            </div>
+                            <ul className="space-y-1">
+                              {r.ingredients.map((x, j) => {
+                                const sc = scaledAmount(x, servingsToEat(i), r.servingsN);
+                                const s = items[`r${i}:${j}`];
+                                return (
+                                  <li key={j} className="flex items-center gap-3 rounded-lg bg-slate-900/60 border border-white/5 px-3 py-1.5">
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm text-slate-100 truncate">
+                                        {s?.status === "done" ? s.logged.name : x.name}
+                                        {sc && <span className="ml-2 font-mono text-xs text-sky-300">{s?.status === "done" ? s.logged.label : sc.text}</span>}
+                                      </p>
+                                      <p className="text-[11px] text-slate-600 truncate">
+                                        {s?.status === "done" ? <MacroText m={s.logged} /> : <>recipe says: {x.text}</>}
+                                      </p>
+                                      {s?.status === "error" && <p className="text-xs text-rose-300 mt-0.5">{s.message}</p>}
+                                    </div>
+                                    {s?.status === "done" ? (
+                                      <span className="shrink-0 text-xs text-emerald-300">Added ✓</span>
+                                    ) : !sc ? (
+                                      <span className="shrink-0 text-[11px] text-slate-600">no amount</span>
+                                    ) : (
+                                      <button onClick={() => acceptIngredient(i, j)} disabled={busy}
+                                        className="shrink-0 rounded-lg border border-green-500/40 bg-green-500/15 hover:bg-green-500/25 disabled:opacity-40 text-xs font-semibold px-3 py-1 text-green-300 transition-colors">
+                                        {s?.status === "busy" ? "Adding…" : s?.status === "error" ? "Retry" : "Add"}
+                                      </button>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
                         </details>
                       )}
                       {r.instructions && (

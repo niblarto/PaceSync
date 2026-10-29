@@ -1,7 +1,9 @@
 import { getDb } from "@/lib/db";
 import { loadOllamaWebKey, ollamaWebSearch } from "@/lib/web-search";
-import { loadRecipeKey, searchRecipes } from "@/lib/recipe-api";
-import { loadFatSecret, searchFatSecret } from "@/lib/fatsecret";
+import { loadRecipeKey, searchRecipes, type RecipeIngredient } from "@/lib/recipe-api";
+import { getFatSecretRecipe, loadFatSecret, searchFatSecret } from "@/lib/fatsecret";
+import { LOSEIT_MASS_G, LOSEIT_VOLUME_ML, MEASURE_DEFS, toMetric, type MeasureSettings } from "@/lib/units";
+import { loadMeasures } from "@/lib/measures-config";
 import { addLoseItFood, getLoseItFoodDetails, localIsoDate, searchLoseItFoods, type DiaryDay, type FoodRef } from "@/lib/loseit-food";
 
 // "Create meal" on the Nutrition page's Dinner card. No AI: it offers (1) the
@@ -31,15 +33,25 @@ export interface MealSuggestion {
   date: string;          // the day it was eaten
 }
 
+// One recipe ingredient, amount converted to metric for the whole recipe (null when the recipe gave none).
+// "count" is a number of things (2 cloves, 1 can) in countUnit.
+// keep: a US measure left as written (its Convert box is off in Settings): the original quantity, e.g. 2 tbsp.
+export interface CardIngredient {
+  text: string; name: string; amount: number | null; unit: "g" | "ml" | "count" | null; countUnit: string | null;
+  keep: { key: string; quantity: number; label: string } | null;
+}
+
 export interface RecipeCard {
   source: "API Ninjas" | "FatSecret";
   title: string;
-  ingredients: string[];
+  ingredients: CardIngredient[];
+  servingsN: number | null; // how many servings the ingredient amounts make
   instructions: string;
   nutrition: string | null; // as the API gives it
   kcal: number | null;
   servings: string | null;
   fits: boolean | null;     // calories within what's left (null when unknown)
+  fatSecretId: string | null;
 }
 
 export interface WebCard { title: string; url: string; snippet: string }
@@ -152,6 +164,7 @@ export async function createMeals(
   budget: Macros, status: (line: string) => void = () => {}, onPartial: (meals: MealSuggestion[]) => void = () => {},
 ): Promise<{ ok: true; result: MealResult } | { ok: false; error: string }> {
   const notes: string[] = [];
+  const measures = loadMeasures();
 
   status("Finding your past dinners that fit what's left…");
   const meals = historyMeals(budget, localIsoDate());
@@ -199,14 +212,32 @@ export async function createMeals(
         if (seen.has(k)) continue;
         seen.add(k);
         recipes.push({
-          source, title: x.title, ingredients: x.ingredients, instructions: x.instructions, nutrition: x.nutrition, kcal: x.kcal, servings: x.servings,
-          fits: x.kcal == null ? null : x.kcal <= budget.kcal * 1.05,
+          source, title: x.title, ingredients: x.ingredients.map(i => cardIngredient(i, measures)), servingsN: x.servingsN, instructions: x.instructions,
+          nutrition: x.nutrition, kcal: x.kcal, servings: x.servings, fits: x.kcal == null ? null : x.kcal <= budget.kcal, fatSecretId: x.id,
         });
       }
     }
-    // Ones that fit the calories left first.
+    // Recipes over the calories left are dropped (ones with no calorie figure can't be judged, so stay);
+    // those known to fit come first.
+    const before = recipes.length;
+    for (let i = recipes.length - 1; i >= 0; i--) if (recipes[i].fits === false) recipes.splice(i, 1);
+    const hidden = before - recipes.length;
     recipes.sort((a, b) => Number(b.fits === true) - Number(a.fits === true));
-    status(`Recipes: ${recipes.length} found`);
+    recipes.splice(16);
+    status(`Recipes: ${recipes.length} found${hidden ? ` (${hidden} over your calories left, hidden)` : ""}`);
+
+    // FatSecret's search lists ingredient names only; the full recipe has their amounts.
+    const needAmounts = recipes.filter(r => r.fatSecretId).slice(0, 8);
+    if (fatSecret && needAmounts.length) {
+      status("Getting ingredient amounts from FatSecret…");
+      await Promise.all(needAmounts.map(async r => {
+        const full = await getFatSecretRecipe(r.fatSecretId!, fatSecret);
+        if (!full || !full.ingredients.length) return;
+        r.ingredients = full.ingredients.map(i => cardIngredient(i, measures));
+        r.servingsN = full.servingsN;
+        if (full.instructions) r.instructions = full.instructions;
+      }));
+    }
   } else if (terms.length) {
     notes.push("Recipe lookup skipped: no recipe API saved");
   }
@@ -214,7 +245,14 @@ export async function createMeals(
   if (!meals.length && !recipes.length && !web.length) {
     return { ok: false, error: notes.length ? `Nothing found. ${notes.join("; ")}` : "Nothing found — try again" };
   }
-  return { ok: true, result: { meals, recipes: recipes.slice(0, 16), web, notes } };
+  return { ok: true, result: { meals, recipes, web, notes } };
+}
+
+// American measures → metric, once, here (the ones set to convert in Settings → Nutrition → Recipe measures;
+// the rest keep their original quantity too); everything after works in grams and millilitres.
+function cardIngredient(i: RecipeIngredient, measures: MeasureSettings): CardIngredient {
+  const m = toMetric(i.quantity, i.unit, measures);
+  return { text: i.text, name: i.name, amount: m ? m.amount : null, unit: m ? m.unit : null, countUnit: m?.countUnit ?? null, keep: m?.keep ?? null };
 }
 
 // ── Background jobs ────────────────────────────────────────────────────────
@@ -243,7 +281,63 @@ export function mealJob(id: string): Job | null {
   return jobs.get(id) ?? null;
 }
 
-// ── Accept one ingredient ──────────────────────────────────────────────────
+// ── Add a recipe ingredient ────────────────────────────────────────────────
+
+export interface RecipeAmount { name: string; amount: number; unit: "g" | "ml" | "count"; countUnit: string | null; keep?: { key: string; quantity: number } | null }
+
+// "Snapper (Fish) (Mixed Species)" → "Snapper"; "chicken breast, boneless" → "chicken breast".
+function searchName(name: string): string {
+  return name.replace(/\([^)]*\)/g, " ").split(",")[0].replace(/\s+/g, " ").trim();
+}
+
+// The Lose It! food for a recipe ingredient's name: My Foods first (the foods you actually log, most-logged
+// first), else Lose It!'s own database. Tries the whole name, then its last two words, then the last word.
+async function findFoodByName(name: string): Promise<FoodRef & { brand: string | null; icon: string | null }> {
+  const clean = searchName(name);
+  const words = clean.split(" ");
+  const tries = [clean, words.slice(-2).join(" "), words[words.length - 1]].filter((t, i, a) => t.length > 1 && a.indexOf(t) === i);
+  for (const q of tries) {
+    const hits = await searchLoseItFoods(q);
+    const top = hits.find(h => !h.recipe) ?? hits[0];
+    if (top) return top;
+  }
+  throw new Error(`Couldn't find “${clean}” in Lose It!`);
+}
+
+// Logs one recipe ingredient (already scaled to what's being eaten, metric) to the day's meal: found in Lose It!,
+// then converted from grams/millilitres into the food's own unit. Millilitres of a food Lose It! measures by weight
+// are taken as grams (like water), which is marked with ≈.
+export async function acceptRecipeIngredient(ing: RecipeAmount, date: string, meal: number): Promise<{ day: DiaryDay; logged: Macros & { name: string; label: string } }> {
+  if (!(ing.amount > 0)) throw new Error("No amount to add");
+  const food = await findFoodByName(ing.name);
+  const d = await getLoseItFoodDetails(food);
+  const u = d.units ?? "";
+  const massG = LOSEIT_MASS_G[u], volMl = LOSEIT_VOLUME_ML[u];
+  let quantity: number, unit: "food" | "gram", factor: number, approx = false;
+  // A measure left as written (tablespoons, teaspoons by default) goes in as is when the food has that unit.
+  const keepUnit = ing.keep ? MEASURE_DEFS.find(m => m.key === ing.keep!.key)?.loseIt : undefined;
+  if (ing.keep && keepUnit && u === keepUnit) {
+    quantity = ing.keep.quantity; unit = "food"; factor = quantity / d.quantity;
+  } else if (ing.unit === "g") {
+    if (massG) { quantity = ing.amount / massG; unit = "food"; factor = quantity / d.quantity; }
+    else if (d.grams != null && d.grams > 0) { quantity = ing.amount; unit = "gram"; factor = ing.amount / d.grams; }
+    else throw new Error(`Lose It! has no weight for ${food.name}, so ${Math.round(ing.amount)} g can't be converted`);
+  } else if (ing.unit === "ml") {
+    if (volMl) { quantity = ing.amount / volMl; unit = "food"; factor = quantity / d.quantity; }
+    else if (d.grams != null && d.grams > 0) { quantity = ing.amount; unit = "gram"; factor = ing.amount / d.grams; approx = true; }
+    else throw new Error(`Lose It! has no weight for ${food.name}, so ${Math.round(ing.amount)} ml can't be converted`);
+  } else {
+    if (massG || volMl) throw new Error(`${food.name} is measured by ${massG ? "weight" : "volume"} in Lose It!, so “${Math.round(ing.amount * 10) / 10} ${ing.countUnit ?? ""}” can't be converted`);
+    quantity = ing.amount; unit = "food"; factor = ing.amount / d.quantity;
+  }
+  quantity = Math.round(quantity * 100) / 100;
+  const day = await addLoseItFood(food, date, meal, quantity, unit);
+  const s = (v: number | null) => Math.round((v ?? 0) * factor * 10) / 10;
+  const shown = `${approx ? "≈ " : ""}${unit === "gram" ? `${Math.round(quantity)} g` : `${quantity} ${d.units ?? "serving"}`}`;
+  return { day, logged: { name: food.name, label: shown, kcal: Math.round(s(d.kcal)), proteinG: s(d.proteinG), carbsG: s(d.carbsG), fatG: s(d.fatG) } };
+}
+
+// ── Accept one past-dinner item ────────────────────────────────────────────
 
 export interface AcceptItem { name: string; brand: string | null; amount: number; units: string; kcal: number }
 

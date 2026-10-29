@@ -1,5 +1,5 @@
 import { getDb } from "@/lib/db";
-import type { Recipe } from "@/lib/recipe-api";
+import { parseQuantity, type Recipe, type RecipeIngredient } from "@/lib/recipe-api";
 
 // Recipe ideas for "Create meal" from the FatSecret Platform API
 // (https://platform.fatsecret.com/docs/guides). OAuth2 client credentials; the
@@ -83,9 +83,13 @@ export async function searchFatSecret(
       const ing = r.recipe_ingredients?.ingredient;
       const n = r.recipe_nutrition;
       return {
+        id: r.recipe_id != null ? String(r.recipe_id) : null,
         title: String(r.recipe_name).trim(),
-        ingredients: (Array.isArray(ing) ? ing : ing ? [ing] : []).map(String).map(s => s.trim()).filter(Boolean),
+        // Names only here; getFatSecretRecipe fills in the amounts.
+        ingredients: (Array.isArray(ing) ? ing : ing ? [ing] : []).map(String).map(s => s.trim()).filter(Boolean)
+          .map((s): RecipeIngredient => ({ text: s, name: s, quantity: null, unit: null })),
         servings: null,
+        servingsN: null,
         instructions: String(r.recipe_description ?? "").replace(/\s+/g, " ").trim().slice(0, 400),
         nutrition: n ? `per serving: calories ${n.calories}, protein ${n.protein} g, carbohydrates ${n.carbohydrate} g, fat ${n.fat} g` : null,
         kcal: n && Number.isFinite(Number(n.calories)) ? Number(n.calories) : null,
@@ -97,7 +101,44 @@ export async function searchFatSecret(
   }
 }
 
+// One recipe in full (recipe.get v2): its ingredients with amounts, how many servings it makes, and its method.
+export async function getFatSecretRecipe(
+  id: string, creds = loadFatSecret(),
+): Promise<{ ingredients: RecipeIngredient[]; servingsN: number | null; instructions: string } | null> {
+  if (!creds) return null;
+  const t = await token(creds);
+  if (!t.ok) return null;
+  try {
+    const res = await fetch(`https://platform.fatsecret.com/rest/recipe/v2?${new URLSearchParams({ recipe_id: id, format: "json" })}`, {
+      headers: { Authorization: `Bearer ${t.token}` }, signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { error?: unknown; recipe?: FullRecipe };
+    const r = data.recipe;
+    if (data.error || !r) return null;
+    const list = <T,>(v: T | T[] | undefined): T[] => (v == null ? [] : Array.isArray(v) ? v : [v]);
+    const ingredients = list(r.ingredients?.ingredient).map((i): RecipeIngredient => {
+      const unit = i.measurement_description ? String(i.measurement_description).trim() : null;
+      const name = String(i.food_name ?? "").trim();
+      return { text: String(i.ingredient_description ?? "").trim() || name, name, quantity: parseQuantity(i.number_of_units), unit };
+    }).filter(i => i.name);
+    const steps = list(r.directions?.direction).map(d => String(d.direction_description ?? "").trim()).filter(Boolean);
+    const n = parseQuantity(r.number_of_servings);
+    return { ingredients, servingsN: n, instructions: steps.map((s, i) => `${i + 1}. ${s}`).join(" ").slice(0, 1500) };
+  } catch {
+    return null;
+  }
+}
+
+interface FullRecipe {
+  number_of_servings?: string | number;
+  ingredients?: { ingredient?: FullIng | FullIng[] };
+  directions?: { direction?: { direction_description?: string } | { direction_description?: string }[] };
+}
+interface FullIng { food_name?: string; ingredient_description?: string; measurement_description?: string; number_of_units?: string | number }
+
 interface Raw {
+  recipe_id?: string | number;
   recipe_name?: string; recipe_description?: string;
   recipe_nutrition?: { calories?: string | number; protein?: string | number; carbohydrate?: string | number; fat?: string | number };
   recipe_ingredients?: { ingredient?: string | string[] };
