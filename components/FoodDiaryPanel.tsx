@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { CreateMealModal, type Macros } from "@/components/CreateMealModal";
 
 // The Lose It! food diary for one day, by meal. Opening today or yesterday
 // asks the server to re-read them from Lose It! first (it throttles that to
@@ -103,10 +104,15 @@ function Macros({ t, className = "" }: { t: { proteinG: number | null; carbsG: n
 // page can reload its own numbers (Eaten today, the day's calorie bars).
 // dayChart: drawn above the meals for the day shown (the page's calorie bars),
 // given that day's eaten total from the diary.
-export function FoodDiaryPanel({ onChanged, dayChart }: {
+// targetsFor: the day's calorie and macro targets, for the Dinner card's "Create meal".
+export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
   onChanged?: () => void; dayChart?: (date: string, eaten: number, totals: { proteinG: number; carbsG: number; fatG: number }) => React.ReactNode;
+  targetsFor?: (date: string) => { kcal: number; proteinG: number; carbsG: number; fatG: number } | null;
 }) {
   const today = isoDate(new Date());
+  // "Create meal" pop-up; the budget is fixed when it opens so it doesn't shift as items are accepted.
+  const [creating, setCreating] = useState<Macros | null>(null);
+  const [createMsg, setCreateMsg] = useState<string | null>(null);
   const [date, setDate] = useState(today);
   const [diary, setDiary] = useState<Diary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -432,6 +438,25 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
                 <KcalChip kcal={m.totals.kcal} big />
               </div>
               {m.foods.length > 0 && <Macros t={m.totals} className="block px-1 mb-2 text-[11px] text-right" />}
+              {m.meal === 2 && date === today && diary?.connected && !drag && (
+                <div className="px-1 mb-2">
+                  <button
+                    onClick={() => {
+                      const t = targetsFor?.(date);
+                      if (!t) { setCreateMsg("Set a daily calorie limit and weight first (Settings → Nutrition) so there are targets to fit."); return; }
+                      const left = { kcal: t.kcal - diary.totals.kcal, proteinG: Math.max(0, t.proteinG - diary.totals.proteinG),
+                        carbsG: Math.max(0, t.carbsG - diary.totals.carbsG), fatG: Math.max(0, t.fatG - diary.totals.fatG) };
+                      if (left.kcal < 150) { setCreateMsg("Under 150 kcal left today, not enough for a meal."); return; }
+                      setCreateMsg(null);
+                      setCreating({ kcal: Math.round(left.kcal), proteinG: Math.round(left.proteinG), carbsG: Math.round(left.carbsG), fatG: Math.round(left.fatG) });
+                    }}
+                    className="text-xs rounded-lg border border-green-500/40 bg-green-500/15 hover:bg-green-500/25 text-green-300 font-semibold px-2.5 py-1 transition-colors"
+                  >
+                    ✨ Create meal
+                  </button>
+                  {createMsg && <p className="mt-1 text-[11px] text-amber-300">{createMsg}</p>}
+                </div>
+              )}
               {m.foods.length === 0 && <p className="px-1 py-3 text-xs text-slate-500">Nothing logged yet.</p>}
               {m.foods.length === 0 && date === today && !drag && (
                 <button
@@ -497,6 +522,10 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
       )}
 
       {diary?.lastError && <p className="mt-2 text-xs text-rose-300">Last sync failed: {diary.lastError}</p>}
+
+      {creating && (
+        <CreateMealModal date={date} meal={2} remaining={creating} onLogged={d => added(d as Partial<Diary>)} onClose={() => setCreating(null)} />
+      )}
 
       {drop && createPortal(
         <div

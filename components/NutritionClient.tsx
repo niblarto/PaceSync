@@ -1025,6 +1025,7 @@ export function NutritionClient() {
 
             <FoodDiaryPanel
               onChanged={() => load(CHART_DAYS)}
+              targetsFor={() => macroTargets(data.macroPlan, null)} // Create meal ignores exercise: the daily limit minus what's eaten
               dayChart={(date, eaten, totals) => (
                 <DayCaloriesBars row={data.days.find(d => d.date === date)} eaten={eaten} totals={totals} plan={data.macroPlan}
                   limit={cfg.dailyCalorieLimit} minKcal={cfg.minDailyCalories ?? 1400} />
