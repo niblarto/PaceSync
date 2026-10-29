@@ -47,18 +47,13 @@ function memoryDate(dateId: number): string {
 export const COACH_HANDOFF_KEY = "coach.discuss";
 
 type TileKey = "chat" | "report" | "context" | "memory";
-const COLLAPSE_KEY = "coach.collapsed";
-
-// Clickable tile title: ▼ when open, ▶ when minimised.
-function TileTitle({ open, onToggle, children }: { open: boolean; onToggle: () => void; children: ReactNode }) {
-  return (
-    <button onClick={onToggle} aria-expanded={open} title={open ? "Minimise" : "Expand"}
-      className="flex items-center gap-2 font-semibold text-sm text-left hover:text-slate-50 transition-colors">
-      <span className={`text-[10px] text-slate-500 transition-transform ${open ? "" : "-rotate-90"}`}>▼</span>
-      {children}
-    </button>
-  );
-}
+const TAB_KEY = "coach.tab";
+const TABS: { key: TileKey; label: string }[] = [
+  { key: "chat", label: "Conversation" },
+  { key: "report", label: "📋 Weekly report" },
+  { key: "context", label: "Training data" },
+  { key: "memory", label: "🧠 Coaching memory" },
+];
 
 const STARTERS = [
   "How did my training go this week?",
@@ -138,16 +133,17 @@ function timeLabel(iso: string): string {
 export function CoachClient() {
   const [messages, setMessages] = useState<Msg[] | null>(null);
   // Read after mount, so the server-rendered page and the first client render match.
-  const [collapsed, setCollapsed] = useState<Partial<Record<TileKey, boolean>>>({});
+  const [tab, setTabState] = useState<TileKey>("chat");
   useEffect(() => {
-    try { setCollapsed(JSON.parse(window.localStorage.getItem(COLLAPSE_KEY) || "{}")); } catch {}
+    try {
+      const t = window.localStorage.getItem(TAB_KEY);
+      if (TABS.some(x => x.key === t)) setTabState(t as TileKey);
+    } catch {}
   }, []);
-  const isOpen = (k: TileKey) => !collapsed[k];
-  const toggle = (k: TileKey) => setCollapsed(c => {
-    const next = { ...c, [k]: !c[k] };
-    try { window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify(next)); } catch {}
-    return next;
-  });
+  const setTab = (t: TileKey) => {
+    setTabState(t);
+    try { window.localStorage.setItem(TAB_KEY, t); } catch {}
+  };
   const [model, setModel] = useState("");
   const [input, setInput] = useState("");
   const [pending, setPending] = useState<string | null>(null);
@@ -270,7 +266,7 @@ export function CoachClient() {
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, pending]);
+  }, [messages, pending, tab]);
 
   useEffect(() => {
     if (!pending) return;
@@ -282,6 +278,7 @@ export function CoachClient() {
   async function send(text?: string, web = false) {
     const msg = (text ?? input).trim();
     if (!msg || pending) return;
+    setTab("chat");
     setError(null);
     setPending(msg);
     setInput("");
@@ -343,10 +340,24 @@ export function CoachClient() {
       } />
 
       <div className="flex-1 max-w-[1800px] w-full mx-auto px-4 py-6 flex flex-col gap-6">
+        <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 flex flex-col">
+        <div role="tablist" className="flex gap-1 px-3 pt-2 border-b border-white/10 flex-wrap">
+          {TABS.map(t => (
+            <button key={t.key} role="tab" aria-selected={tab === t.key} onClick={() => setTab(t.key)}
+              className={`px-4 py-2 text-sm font-medium whitespace-nowrap rounded-t-lg border-b-2 -mb-px transition-colors ${
+                tab === t.key
+                  ? "border-emerald-400 text-emerald-300 bg-white/5"
+                  : "border-transparent text-slate-400 hover:text-slate-200"
+              }`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
         {/* Chat */}
-        <div className={`rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 flex flex-col ${isOpen("chat") ? "h-[75vh] min-h-[28rem]" : ""}`}>
-          <div className={`flex items-center justify-between px-4 py-3 ${isOpen("chat") ? "border-b border-white/10" : ""}`}>
-            <TileTitle open={isOpen("chat")} onToggle={() => toggle("chat")}>Conversation</TileTitle>
+        {tab === "chat" && <div className="flex flex-col h-[75vh] min-h-[28rem]">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+            <span className="text-xs text-slate-500">Ask about your training</span>
             {confirmNew ? (
               <div className="flex items-center gap-2 text-xs">
                 <span className="text-slate-400">Start over?</span>
@@ -364,7 +375,6 @@ export function CoachClient() {
             )}
           </div>
 
-          {isOpen("chat") && <>
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
             {messages == null && <p className="text-sm text-slate-500">Loading…</p>}
             {empty && (
@@ -446,16 +456,14 @@ export function CoachClient() {
               Send
             </button>
           </form>
-          </>}
-        </div>
+        </div>}
 
-        {/* What the coach sees */}
-          {(() => {
+          {tab === "report" && (() => {
             const report = reports?.[reportIdx];
             return (
-              <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-4 space-y-3">
+              <div className="p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
-                  <TileTitle open={isOpen("report")} onToggle={() => toggle("report")}>📋 Weekly report</TileTitle>
+                  <span className="text-xs text-slate-500">Weekly training review</span>
                   <div className="flex items-center gap-2">
                     {reports && reports.length > 1 && (
                       <select
@@ -476,7 +484,6 @@ export function CoachClient() {
                     </button>
                   </div>
                 </div>
-                {isOpen("report") && <>
                 {reportError && <p className="text-xs text-red-400">{reportError}</p>}
                 {reports == null && <p className="text-xs text-slate-500">Loading…</p>}
                 {reports?.length === 0 && !writing && (
@@ -512,18 +519,17 @@ export function CoachClient() {
                     </div>
                   </>
                 )}
-                </>}
               </div>
             );
           })()}
-          <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-4 space-y-3">
+          {tab === "context" && <div className="p-4 space-y-3">
             <div className="flex items-center justify-between">
-              <TileTitle open={isOpen("context")} onToggle={() => toggle("context")}>Training data the coach sees</TileTitle>
+              <span className="text-xs text-slate-500">Training data the coach sees</span>
               <button onClick={loadContext} disabled={contextLoading} className="text-xs text-slate-400 hover:text-slate-200 disabled:opacity-40">
                 {contextLoading ? "Loading…" : "↻ Refresh"}
               </button>
             </div>
-            {!isOpen("context") ? null : context ? (
+            {context ? (
               <>
                 <p className="text-xs text-slate-500">
                   {context.runCount} runs in the last 4 weeks · rebuilt before every reply
@@ -535,14 +541,13 @@ export function CoachClient() {
             ) : (
               <p className="text-xs text-slate-500">{contextLoading ? "Gathering your Garmin, Runna and race data…" : "Not available."}</p>
             )}
-          </div>
+          </div>}
 
-          <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-4 space-y-3">
+          {tab === "memory" && <div className="p-4 space-y-3">
             <div className="flex items-center justify-between">
-              <TileTitle open={isOpen("memory")} onToggle={() => toggle("memory")}>🧠 Coaching memory</TileTitle>
+              <span className="text-xs text-slate-500">Coaching memory</span>
               <span className="text-xs text-slate-500">{memories?.length ?? 0} saved</span>
             </div>
-            {isOpen("memory") && <>
             <p className="text-xs text-slate-500">
               Each finished conversation is summarised here. The coach recalls the 3 most relevant from the last 30 days.
             </p>
@@ -580,8 +585,8 @@ export function CoachClient() {
                 </div>
               ))}
             </div>
-            </>}
-          </div>
+          </div>}
+        </div>
       </div>
     </div>
   );
