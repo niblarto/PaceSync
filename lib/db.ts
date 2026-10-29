@@ -316,6 +316,14 @@ CREATE TABLE IF NOT EXISTS loseit_my_foods (
   locale TEXT,
   recipe INTEGER NOT NULL DEFAULT 0
 );
+
+-- Local copy of BBC Good Food recipes read for "Create meal" (lib/bbc-good-food.ts): the parsed recipe, so a
+-- page is fetched once and then kept for weeks rather than read again each search.
+CREATE TABLE IF NOT EXISTS bgf_recipes (
+  url TEXT PRIMARY KEY,
+  fetched_at TEXT NOT NULL,
+  json TEXT NOT NULL
+);
 `;
 
 let db: Database.Database | null = null;

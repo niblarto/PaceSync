@@ -19,14 +19,16 @@ interface Meal { name: string; summary: string; items: MealItem[]; totals: Macro
 // Amounts are metric (g/ml) for the whole recipe; "count" is a number of things in countUnit.
 // keep: a measure left as written per Settings → Nutrition → Recipe measures (e.g. 2 tbsp); amount/unit are still its metric equivalent.
 interface RecipeIngredient {
-  text: string; name: string; amount: number | null; unit: "g" | "ml" | "count" | null; countUnit: string | null;
+  text: string; name: string; search: string; amount: number | null; unit: "g" | "ml" | "count" | null; countUnit: string | null;
   keep: { key: string; quantity: number; label: string } | null;
 }
 interface RecipeCard {
   source: string; title: string; ingredients: RecipeIngredient[]; servingsN: number | null; instructions: string; nutrition: string | null;
-  kcal: number | null; servings: string | null; fits: boolean | null;
+  kcal: number | null; servings: string | null; fits: boolean | null; metric: boolean | null; url: string | null;
 }
 interface WebCard { title: string; url: string; snippet: string }
+// A Lose It! food from /api/loseit/search, picked to replace what a recipe ingredient would otherwise match.
+interface SearchFood { pk: string; name: string; brand: string | null; icon: string | null; locale: string | null; mine: boolean; recipe: boolean; timesLogged: number }
 interface Result { meals: Meal[]; recipes: RecipeCard[]; web: WebCard[]; notes: string[] }
 type ItemState = { status: "busy" } | { status: "done"; logged: Macros & { name: string; label: string } } | { status: "error"; message: string };
 type Section = "dinners" | "recipes" | "web";
@@ -80,6 +82,13 @@ export function CreateMealModal({ date, meal, remaining, onLogged, onClose }: {
   const [items, setItems] = useState<Record<string, ItemState>>({});
   const [bulk, setBulk] = useState(false);
   const [eat, setEat] = useState<Record<number, string>>({}); // servings of each recipe to add, default 1
+  // Clicking an ingredient's name opens a Lose It! search to replace the food it would match.
+  const [swap, setSwap] = useState<Record<string, SearchFood>>({}); // chosen replacements, by ingredient key
+  const [picking, setPicking] = useState<string | null>(null);     // the ingredient whose search is open
+  const [pickQuery, setPickQuery] = useState("");
+  const [pickResults, setPickResults] = useState<SearchFood[] | null>(null);
+  const [pickBusy, setPickBusy] = useState(false);
+  const [pickError, setPickError] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
 
   const generate = useCallback(async () => {
@@ -177,6 +186,28 @@ export function CreateMealModal({ date, meal, remaining, onLogged, onClose }: {
 
   const servingsToEat = (ri: number) => { const n = Number(eat[ri] ?? "1"); return n > 0 ? n : 1; };
 
+  async function findFoods(q: string) {
+    if (q.trim().length < 2) return;
+    setPickBusy(true); setPickError(null);
+    try {
+      const res = await fetch(`/api/loseit/search?q=${encodeURIComponent(q.trim())}`);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Search failed (${res.status})`);
+      setPickResults(body.foods);
+    } catch (e) {
+      setPickError(e instanceof Error ? e.message : "Search failed");
+    } finally {
+      setPickBusy(false);
+    }
+  }
+
+  // Opens the search for an ingredient, starting from the recipe's own words (in UK names: "double cream").
+  function openPicker(k: string, ing: RecipeIngredient) {
+    if (picking === k) { setPicking(null); return; }
+    setPicking(k); setPickResults(null); setPickError(null); setPickQuery(ing.search);
+    findFoods(ing.search);
+  }
+
   // Adds one recipe ingredient, scaled to the servings being eaten, as metric.
   async function acceptIngredient(ri: number, ij: number) {
     const r = result!.recipes[ri];
@@ -188,7 +219,7 @@ export function CreateMealModal({ date, meal, remaining, onLogged, onClose }: {
     try {
       const res = await fetch("/api/nutrition/create-meal/accept-ingredient", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date, meal, item: { name: ing.name, amount: sc.amount, unit: ing.unit, countUnit: ing.countUnit, keep: sc.keep } }),
+        body: JSON.stringify({ date, meal, item: { name: ing.name, amount: sc.amount, unit: ing.unit, countUnit: ing.countUnit, keep: sc.keep, food: swap[k] ?? null } }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
@@ -364,8 +395,11 @@ export function CreateMealModal({ date, meal, remaining, onLogged, onClose }: {
                   {recipes.map((r, i) => (
                     <li key={i} className="rounded-lg bg-slate-800/40 border border-white/5 px-3 py-2.5 space-y-1.5">
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                        <p className="text-sm font-semibold text-slate-100">{r.title}</p>
+                        {r.url
+                          ? <a href={r.url} target="_blank" rel="noreferrer" className="text-sm font-semibold text-sky-300 hover:text-sky-200 hover:underline underline-offset-2">{r.title}</a>
+                          : <p className="text-sm font-semibold text-slate-100">{r.title}</p>}
                         <span className="text-[10px] rounded-full border border-white/10 text-slate-400 px-1.5 py-0.5">{r.source}</span>
+                        {r.metric === true && <span className="text-[10px] rounded-full border border-sky-500/40 bg-sky-500/10 text-sky-300 px-1.5 py-0.5">metric</span>}
                         {r.fits === true && <span className="text-[10px] rounded-full border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 px-1.5 py-0.5">within your calories</span>}
                       </div>
                       {r.nutrition && <p className="text-xs text-green-400/90 tabular-nums">{r.nutrition}</p>}
@@ -389,12 +423,21 @@ export function CreateMealModal({ date, meal, remaining, onLogged, onClose }: {
                             <ul className="space-y-1">
                               {r.ingredients.map((x, j) => {
                                 const sc = scaledAmount(x, servingsToEat(i), r.servingsN);
-                                const s = items[`r${i}:${j}`];
+                                const k = `r${i}:${j}`;
+                                const s = items[k];
+                                const chosen = swap[k];
                                 return (
-                                  <li key={j} className="flex items-center gap-3 rounded-lg bg-slate-900/60 border border-white/5 px-3 py-1.5">
+                                  <li key={j} className="rounded-lg bg-slate-900/60 border border-white/5 px-3 py-1.5">
+                                  <div className="flex items-center gap-3">
                                     <div className="flex-1 min-w-0">
                                       <p className="text-sm text-slate-100 truncate">
-                                        {s?.status === "done" ? s.logged.name : x.name}
+                                        {s?.status === "done" ? s.logged.name : (
+                                          <button type="button" onClick={() => openPicker(k, x)} title="Click to choose a different Lose It! food"
+                                            className="text-left underline decoration-dotted underline-offset-2 hover:text-green-400 transition-colors">
+                                            {chosen ? `${chosen.name}${chosen.brand ? ` · ${chosen.brand}` : ""}` : <span className="capitalize">{x.name}</span>}
+                                          </button>
+                                        )}
+                                        {chosen && s?.status !== "done" && <span className="ml-2 text-[10px] rounded-full border border-sky-500/40 bg-sky-500/10 text-sky-300 px-1.5 py-0.5">your choice</span>}
                                         {sc && <span className="ml-2 font-mono text-xs text-sky-300">{s?.status === "done" ? s.logged.label : sc.text}</span>}
                                       </p>
                                       <p className="text-[11px] text-slate-600 truncate">
@@ -412,6 +455,43 @@ export function CreateMealModal({ date, meal, remaining, onLogged, onClose }: {
                                         {s?.status === "busy" ? "Adding…" : s?.status === "error" ? "Retry" : "Add"}
                                       </button>
                                     )}
+                                  </div>
+                                  {picking === k && s?.status !== "done" && (
+                                    <div className="mt-2 space-y-1.5 border-t border-white/5 pt-2">
+                                      <form onSubmit={e => { e.preventDefault(); findFoods(pickQuery); }} className="flex gap-2">
+                                        <input value={pickQuery} onChange={e => setPickQuery(e.target.value)} placeholder="Search Lose It! foods" autoFocus
+                                          className="flex-1 min-w-0 rounded-lg bg-slate-800 border border-slate-700 text-xs px-2.5 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+                                        <button type="submit" disabled={pickBusy || pickQuery.trim().length < 2}
+                                          className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-xs font-medium px-3 py-1.5 text-white transition-colors">
+                                          {pickBusy ? "Searching…" : "Search"}
+                                        </button>
+                                        {chosen && (
+                                          <button type="button" onClick={() => { setSwap(w => { const n = { ...w }; delete n[k]; return n; }); setPicking(null); }}
+                                            className="rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 text-xs px-2.5 py-1.5 text-slate-300 transition-colors">
+                                            Use the recipe&apos;s
+                                          </button>
+                                        )}
+                                      </form>
+                                      {pickError && <p className="text-xs text-rose-300">{pickError}</p>}
+                                      {pickResults && pickResults.length === 0 && <p className="text-xs text-slate-500">No foods found.</p>}
+                                      {pickResults && pickResults.length > 0 && (
+                                        <ul className="max-h-48 overflow-y-auto">
+                                          {pickResults.slice(0, 20).map(f => (
+                                            <li key={f.pk}>
+                                              <button type="button" onClick={() => { setSwap(w => ({ ...w, [k]: f })); setPicking(null); }}
+                                                className="group w-full text-left px-2 py-1 text-xs hover:bg-slate-700/40 rounded-lg flex items-center justify-between gap-3">
+                                                <span className="truncate">
+                                                  <span className="text-slate-200 group-hover:text-green-400 transition-colors">{f.name}</span>
+                                                  {f.brand && <span className="text-slate-500"> · {f.brand}</span>}
+                                                </span>
+                                                {f.mine && <span className="shrink-0 text-[10px] text-sky-300">{f.timesLogged > 0 ? `logged ${f.timesLogged}×` : "my foods"}</span>}
+                                              </button>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      )}
+                                    </div>
+                                  )}
                                   </li>
                                 );
                               })}

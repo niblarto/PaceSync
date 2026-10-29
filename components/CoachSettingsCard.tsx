@@ -201,6 +201,41 @@ function FatSecretKey() {
   );
 }
 
+// Switch for "Create meal" reading recipes straight from bbcgoodfood.com (no API or key). Off by default.
+function BbcGoodFoodToggle() {
+  const [on, setOn] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/settings/bbc-good-food").then(r => r.json()).then(d => { if (typeof d.enabled === "boolean") setOn(d.enabled); }).catch(() => {});
+  }, []);
+
+  async function toggle(enabled: boolean) {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/settings/bbc-good-food", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) });
+      if (res.ok) setOn(enabled);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 border-t border-white/10 pt-4">
+      <div className="text-xs font-medium text-slate-300">🇬🇧 BBC Good Food recipes</div>
+      <label className="flex items-start gap-2 text-xs text-slate-300">
+        <input type="checkbox" className="mt-0.5" checked={!!on} disabled={on == null || busy} onChange={e => toggle(e.target.checked)} />
+        <span>Let “Create meal” read recipes from bbcgoodfood.com: UK recipes with metric amounts and per-serving nutrition, no key needed.</span>
+      </label>
+      <p className="text-xs text-slate-500">
+        It follows the site&apos;s robots.txt: it doesn&apos;t use the site&apos;s search. It reads the recipe list from their sitemaps (once a fortnight), then
+        only the few recipe pages a search needs, one at a time with a pause between, and keeps each locally so it is never read twice.
+        The first search after switching on takes about half a minute extra. Check the site&apos;s terms are fine for your use.
+      </p>
+    </div>
+  );
+}
+
 export function CoachSettingsCard() {
   const [config, setConfig] = useState<CoachConfig | null>(null);
   const [saving, setSaving] = useState(false);
@@ -322,6 +357,7 @@ export function CoachSettingsCard() {
           <WebSearchKey />
           <RecipeApiKey />
           <FatSecretKey />
+          <BbcGoodFoodToggle />
           {error && <p className="text-xs text-red-400">{error}</p>}
         </>
       )}

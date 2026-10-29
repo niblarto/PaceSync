@@ -94,6 +94,41 @@ export function toMetric(quantity: number | null, unit: string | null, settings:
   return { amount: quantity, unit: "count", countUnit: COUNTS.has(u) ? (u || null) : u, keep: null };
 }
 
+// g, kg, ml, l and their spellings: a recipe measured in these is a metric (UK-style) recipe.
+const METRIC_UNITS = new Set(["g", "gram", "gr", "kg", "kilogram", "mg", "ml", "milliliter", "millilitre", "l", "liter", "litre"]);
+export const isMetricUnit = (unit: string | null) => METRIC_UNITS.has(normalise(unit));
+
+const UNIT_WORDS = new Set([...Object.keys(ALIASES), ...Object.keys(FIXED_G), ...Object.keys(FIXED_ML), ...Array.from(COUNTS).filter(Boolean)]);
+
+// "4 tbsps heavy cream" → "heavy cream"; "1/2 cup of flour, sifted" → "flour". The recipe's own words for the food,
+// without its amount and measure. Falls back to `fallback` when nothing is left.
+export function ingredientName(text: string, fallback: string): string {
+  // "125g pancetta" → "125 g pancetta"; a unicode fraction counts as a number.
+  const words = text.split(",")[0].replace(/(\d)([a-zA-Z])/g, "$1 $2").replace(/[½¼¾⅓⅔⅛]/g, " 1 ").trim().split(/\s+/);
+  let i = 0;
+  while (i < words.length && /^[\d./-]+$|^(to|or)$/i.test(words[i])) i++;
+  if (i < words.length - 1 && UNIT_WORDS.has(normalise(words[i]))) i++;
+  if (i < words.length - 1 && /^of$/i.test(words[i])) i++;
+  return words.slice(i).join(" ").trim() || fallback;
+}
+
+// American food names → what a UK Lose It! food is called, applied to whole words: "heavy cream" → "double cream".
+const UK_NAMES: [RegExp, string][] = [
+  [/\bheavy (whipping )?cream\b|\bwhipping cream\b/gi, "double cream"],
+  [/\bhalf[- ]and[- ]half\b/gi, "single cream"],
+  [/\bcilantro\b/gi, "coriander"], [/\bscallions?\b|\bgreen onions?\b/gi, "spring onion"],
+  [/\bzucchinis?\b/gi, "courgette"], [/\beggplants?\b/gi, "aubergine"], [/\barugula\b/gi, "rocket"],
+  [/\bground beef\b/gi, "beef mince"], [/\bground (turkey|pork|lamb|chicken)\b/gi, "$1 mince"],
+  [/\bbell peppers?\b/gi, "pepper"], [/\b(confectioners'?|powdered) sugar\b/gi, "icing sugar"],
+  [/\bcornstarch\b/gi, "cornflour"], [/\bshrimps?\b/gi, "prawns"], [/\bgarbanzo beans?\b/gi, "chickpeas"],
+  [/\brutabaga\b/gi, "swede"], [/\ball[- ]purpose flour\b/gi, "plain flour"], [/\bbaking soda\b/gi, "bicarbonate of soda"],
+  [/\bbroiler\b/gi, "chicken"], [/\bfrench fries\b/gi, "chips"],
+];
+
+export function ukName(name: string): string {
+  return UK_NAMES.reduce((n, [re, to]) => n.replace(re, to), name);
+}
+
 // Lose It!'s own units, in grams / millilitres each, for converting a metric amount into a food's unit.
 export const LOSEIT_MASS_G: Record<string, number> = { Gram: 1, Kilogram: 1000, Milligram: 0.001, Microgram: 0.000001, Ounce: 28.3495, Pound: 453.592 };
 export const LOSEIT_VOLUME_ML: Record<string, number> = {

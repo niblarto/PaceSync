@@ -433,40 +433,48 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
                 overMeal === m.meal ? "bg-emerald-500/10 border-emerald-500/60 ring-1 ring-emerald-500/40" : "bg-slate-800/40 border-white/5"
               }`}
             >
-              <div className="flex items-center justify-between gap-2 px-1 mb-1">
-                <span className={`text-xs font-medium border rounded-full px-2.5 py-0.5 ${MEAL_STYLE[m.meal] ?? MEAL_STYLE[3]}`}>{m.name}</span>
-                <KcalChip kcal={m.totals.kcal} big />
-              </div>
-              {m.foods.length > 0 && <Macros t={m.totals} className="block px-1 mb-2 text-[11px] text-right" />}
-              {m.meal === 2 && date === today && diary?.connected && !drag && (
-                <div className="px-1 mb-2">
-                  <button
-                    onClick={() => {
-                      const t = targetsFor?.(date);
-                      if (!t) { setCreateMsg("Set a daily calorie limit and weight first (Settings → Nutrition) so there are targets to fit."); return; }
-                      const left = { kcal: t.kcal - diary.totals.kcal, proteinG: Math.max(0, t.proteinG - diary.totals.proteinG),
-                        carbsG: Math.max(0, t.carbsG - diary.totals.carbsG), fatG: Math.max(0, t.fatG - diary.totals.fatG) };
-                      if (left.kcal < 150) { setCreateMsg("Under 150 kcal left today, not enough for a meal."); return; }
-                      setCreateMsg(null);
-                      setCreating({ kcal: Math.round(left.kcal), proteinG: Math.round(left.proteinG), carbsG: Math.round(left.carbsG), fatG: Math.round(left.fatG) });
-                    }}
-                    className="text-xs rounded-lg border border-green-500/40 bg-green-500/15 hover:bg-green-500/25 text-green-300 font-semibold px-2.5 py-1 transition-colors"
-                  >
-                    ✨ Create meal
-                  </button>
-                  {createMsg && <p className="mt-1 text-[11px] text-amber-300">{createMsg}</p>}
-                </div>
-              )}
-              {m.foods.length === 0 && <p className="px-1 py-3 text-xs text-slate-500">Nothing logged yet.</p>}
-              {m.foods.length === 0 && date === today && !drag && (
-                <button
-                  onClick={() => copyToToday({ fromDate: shift(today, -1), meal: m.meal }, `yesterday's ${m.name.toLowerCase()}`)}
-                  disabled={!!copyMsg?.text.startsWith("Adding")}
-                  className="mx-1 mb-2 self-start text-xs rounded-lg border border-sky-500/30 bg-sky-500/10 hover:bg-sky-500/20 text-sky-200 px-2.5 py-1 disabled:opacity-50 transition-colors"
-                >
-                  Copy yesterday&apos;s {m.name.toLowerCase()}
-                </button>
-              )}
+              {/* Dinner today: Create meal and Copy yesterday's dinner sit in the title bar, beside the meal name. */}
+              {(() => {
+                const dinnerToday = m.meal === 2 && date === today && !!diary?.connected && !drag;
+                // Copy yesterday's <meal> shows in each meal's title bar until something is logged to that meal.
+                const copyHere = date === today && !drag && m.foods.length === 0;
+                return (
+                  <>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 px-1 mb-1">
+                      <span className={`text-xs font-medium border rounded-full px-2.5 py-0.5 ${MEAL_STYLE[m.meal] ?? MEAL_STYLE[3]}`}>{m.name}</span>
+                      {dinnerToday && (
+                        <button
+                          onClick={() => {
+                            const t = targetsFor?.(date);
+                            if (!t || !diary) { setCreateMsg("Set a daily calorie limit and weight first (Settings → Nutrition) so there are targets to fit."); return; }
+                            const left = { kcal: t.kcal - diary.totals.kcal, proteinG: Math.max(0, t.proteinG - diary.totals.proteinG),
+                              carbsG: Math.max(0, t.carbsG - diary.totals.carbsG), fatG: Math.max(0, t.fatG - diary.totals.fatG) };
+                            if (left.kcal < 150) { setCreateMsg("Under 150 kcal left today, not enough for a meal."); return; }
+                            setCreateMsg(null);
+                            setCreating({ kcal: Math.round(left.kcal), proteinG: Math.round(left.proteinG), carbsG: Math.round(left.carbsG), fatG: Math.round(left.fatG) });
+                          }}
+                          className="text-[11px] rounded-md border border-green-500/40 bg-green-500/15 hover:bg-green-500/25 text-green-300 font-semibold px-2 py-0.5 transition-colors"
+                        >
+                          ✨ Create meal
+                        </button>
+                      )}
+                      {copyHere && (
+                        <button
+                          onClick={() => copyToToday({ fromDate: shift(today, -1), meal: m.meal }, `yesterday's ${m.name.toLowerCase()}`)}
+                          disabled={!!copyMsg?.text.startsWith("Adding")}
+                          className="text-[11px] rounded-md border border-sky-500/30 bg-sky-500/10 hover:bg-sky-500/20 text-sky-200 px-2 py-0.5 disabled:opacity-50 transition-colors"
+                        >
+                          Copy yesterday
+                        </button>
+                      )}
+                      <span className="ml-auto"><KcalChip kcal={m.totals.kcal} big /></span>
+                    </div>
+                    {m.foods.length > 0 && <Macros t={m.totals} className="block px-1 mb-2 text-[11px] text-right" />}
+                    {dinnerToday && createMsg && <p className="px-1 mb-2 text-[11px] text-amber-300">{createMsg}</p>}
+                    {m.foods.length === 0 && <p className="px-1 py-3 text-xs text-slate-500">Nothing logged yet.</p>}
+                  </>
+                );
+              })()}
               <ul className="space-y-0.5">
                 {m.foods.map((f, i) => (
                   <li

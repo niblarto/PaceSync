@@ -29,13 +29,13 @@ export function saveOllamaWebKey(key: string | null): void {
     .run(KEY, JSON.stringify(key.trim()));
 }
 
-export async function ollamaWebSearch(query: string, key = loadOllamaWebKey()): Promise<{ ok: true; results: WebResult[] } | { ok: false; error: string }> {
+export async function ollamaWebSearch(query: string, key = loadOllamaWebKey(), maxResults = MAX_RESULTS): Promise<{ ok: true; results: WebResult[] } | { ok: false; error: string }> {
   if (!key) return { ok: false, error: "No Ollama web search key saved (Settings → Integrations → Coach)" };
   try {
     const res = await fetch(SEARCH_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ query: query.slice(0, 400), max_results: MAX_RESULTS }),
+      body: JSON.stringify({ query: query.slice(0, 400), max_results: maxResults }),
       signal: AbortSignal.timeout(30_000),
     });
     if (res.status === 401 || res.status === 403) return { ok: false, error: "Ollama rejected the web search key" };

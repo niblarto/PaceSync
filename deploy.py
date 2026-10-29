@@ -249,6 +249,8 @@ FILES = [
     ('lib/meal-builder.ts', 'lib/meal-builder.ts'),
     ('lib/recipe-api.ts', 'lib/recipe-api.ts'),
     ('lib/units.ts', 'lib/units.ts'),
+    ('lib/bbc-good-food.ts', 'lib/bbc-good-food.ts'),
+    ('app/api/settings/bbc-good-food/route.ts', 'app/api/settings/bbc-good-food/route.ts'),
     ('lib/measures-config.ts', 'lib/measures-config.ts'),
     ('app/api/settings/measures/route.ts', 'app/api/settings/measures/route.ts'),
     ('app/api/nutrition/create-meal/accept-ingredient/route.ts', 'app/api/nutrition/create-meal/accept-ingredient/route.ts'),

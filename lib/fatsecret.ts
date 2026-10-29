@@ -57,26 +57,46 @@ async function token(c: Credentials): Promise<{ ok: true; token: string } | { ok
   }
 }
 
-// Recipes matching `query`, optionally within a per-serving calorie range.
-export async function searchFatSecret(
-  query: string, opts: { kcalFrom?: number; kcalTo?: number } = {}, creds = loadFatSecret(),
-): Promise<{ ok: true; recipes: Recipe[] } | { ok: false; error: string }> {
+type SearchOpts = { kcalFrom?: number; kcalTo?: number; region?: string; page?: number };
+type SearchOut = { ok: true; recipes: Recipe[] } | { ok: false; error: string; soft?: boolean };
+
+// The region filter ("GB") is a Premier feature; once FatSecret refuses it, stop asking until the server restarts.
+let regionRefused = false;
+
+// Recipes matching `query`, optionally within a per-serving calorie range, preferring a region's recipes
+// (UK ones use metric measures) and starting from a later page for variety. Falls back to a plain search
+// when the region isn't allowed on this plan, or the page is past the end.
+export async function searchFatSecret(query: string, opts: SearchOpts = {}, creds = loadFatSecret()): Promise<SearchOut> {
+  let r = await searchOnce(query, { ...opts, region: regionRefused ? undefined : opts.region }, creds);
+  if (!r.ok && r.soft && opts.region && !regionRefused) {
+    regionRefused = true;
+    r = await searchOnce(query, { ...opts, region: undefined }, creds);
+  }
+  if (r.ok && r.recipes.length === 0 && (opts.page ?? 0) > 0) r = await searchOnce(query, { ...opts, page: 0, region: regionRefused ? undefined : opts.region }, creds);
+  return r;
+}
+
+async function searchOnce(query: string, opts: SearchOpts, creds: Credentials | null): Promise<SearchOut> {
   if (!creds) return { ok: false, error: "No FatSecret credentials saved (Settings → Integrations → Coach)" };
   const t = await token(creds);
   if (!t.ok) return t;
-  const p = new URLSearchParams({ search_expression: query.slice(0, 100), max_results: "5", format: "json" });
+  const p = new URLSearchParams({ search_expression: query.slice(0, 100), max_results: "10", format: "json" });
   if (opts.kcalFrom) p.set("calories.from", String(Math.round(opts.kcalFrom)));
   if (opts.kcalTo) p.set("calories.to", String(Math.round(opts.kcalTo)));
+  if (opts.region) p.set("region", opts.region);
+  if (opts.page) p.set("page_number", String(opts.page));
   try {
     const res = await fetch(`${SEARCH_URL}?${p}`, { headers: { Authorization: `Bearer ${t.token}` }, signal: AbortSignal.timeout(20_000) });
-    if (!res.ok) return { ok: false, error: `FatSecret recipe search failed (${res.status})` };
+    if (!res.ok) return { ok: false, error: `FatSecret recipe search failed (${res.status})`, soft: true };
     const data = await res.json() as {
       error?: { code?: number; message?: string };
       recipes?: { recipe?: Raw | Raw[] };
     };
     if (data.error) {
       // Code 21 = "Invalid IP address detected": the Pi's IP isn't whitelisted for this app.
-      return { ok: false, error: data.error.code === 21 ? "FatSecret blocked this IP address — whitelist the Pi's public IP in your FatSecret app settings" : `FatSecret: ${data.error.message ?? "error"}` };
+      return data.error.code === 21
+        ? { ok: false, error: "FatSecret blocked this IP address — whitelist the Pi's public IP in your FatSecret app settings" }
+        : { ok: false, error: `FatSecret: ${data.error.message ?? "error"}`, soft: true };
     }
     const list = data.recipes?.recipe ? (Array.isArray(data.recipes.recipe) ? data.recipes.recipe : [data.recipes.recipe]) : [];
     const recipes = list.filter(r => r.recipe_name).map(r => {
