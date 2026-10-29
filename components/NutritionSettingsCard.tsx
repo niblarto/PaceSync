@@ -13,6 +13,8 @@ interface NutritionConfig {
   weightUnit: WeightUnit;
   trendDays: number;
   kcalPerKg: number;
+  proteinPerKg?: number;
+  fatPct?: number;
   currentKg?: number | null;
   today?: string;
   maxLossLbPerWeek?: number;
@@ -32,6 +34,8 @@ interface Form {
   limit: string;
   trendDays: string;
   kcalPerKg: string;
+  proteinPerKg: string;
+  fatPct: string;
 }
 
 function toForm(c: NutritionConfig): Form {
@@ -48,6 +52,8 @@ function toForm(c: NutritionConfig): Form {
     limit: c.dailyCalorieLimit != null ? String(c.dailyCalorieLimit) : "",
     trendDays: String(c.trendDays),
     kcalPerKg: String(c.kcalPerKg),
+    proteinPerKg: String(c.proteinPerKg ?? 1.8),
+    fatPct: String(c.fatPct ?? 25),
   };
 }
 
@@ -101,7 +107,7 @@ export function NutritionSettingsCard() {
       dailyCalorieLimit: form.limit ? Number(form.limit) : null,
       trendDays: Number(form.trendDays) || 28, kcalPerKg: Number(form.kcalPerKg) || 7700,
     });
-    setForm({ ...next, limit: form.limit, trendDays: form.trendDays, kcalPerKg: form.kcalPerKg });
+    setForm({ ...next, limit: form.limit, trendDays: form.trendDays, kcalPerKg: form.kcalPerKg, proteinPerKg: form.proteinPerKg, fatPct: form.fatPct });
   }
 
   // The goal set in Lose It!: shown for reference, with a button to adopt its goal weight.
@@ -133,7 +139,7 @@ export function NutritionSettingsCard() {
         targetWeightKg: li.goalKg, weightUnit: f.unit, goalDate: li.date, goalDateAuto: f.goalAuto, goalFromLoseIt: true,
         dailyCalorieLimit: f.limit ? Number(f.limit) : null, trendDays: Number(f.trendDays) || 28, kcalPerKg: Number(f.kcalPerKg) || 7700,
       });
-      return { ...next, limit: f.limit, trendDays: f.trendDays, kcalPerKg: f.kcalPerKg };
+      return { ...next, limit: f.limit, trendDays: f.trendDays, kcalPerKg: f.kcalPerKg, proteinPerKg: f.proteinPerKg, fatPct: f.fatPct };
     });
   }, [li, formLoaded]);
 
@@ -156,6 +162,8 @@ export function NutritionSettingsCard() {
         weightUnit: form.unit,
         trendDays: Number(form.trendDays),
         kcalPerKg: Number(form.kcalPerKg),
+        proteinPerKg: Number(form.proteinPerKg) || 1.8,
+        fatPct: Number(form.fatPct) || 25,
       };
       const res = await fetch("/api/settings/nutrition", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const d = await res.json();
@@ -264,6 +272,21 @@ export function NutritionSettingsCard() {
               <label className="text-xs text-slate-400">Daily calorie limit (kcal eaten)</label>
               <input inputMode="numeric" value={form.limit} onChange={e => set("limit", e.target.value)} placeholder="e.g. 2000" className={INPUT} />
             </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-xs text-slate-400">Protein target (g per kg of body weight)</label>
+              <input inputMode="decimal" value={form.proteinPerKg} onChange={e => set("proteinPerKg", e.target.value)} className={INPUT} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs text-slate-400">Fat target (% of the day&apos;s calories)</label>
+              <input inputMode="numeric" value={form.fatPct} onChange={e => set("fatPct", e.target.value)} className={INPUT} />
+            </div>
+            <p className="sm:col-span-2 text-xs text-slate-500">
+              The food diary&apos;s Protein, Carbs and Fat bars use these. Calories are the daily limit plus that day&apos;s exercise; protein is a fixed amount
+              for your weight (1.6–2.0 g/kg is the usual range while losing weight), fat is a share of the calories and carbs take the rest.
+            </p>
           </div>
 
           <details className="text-xs">

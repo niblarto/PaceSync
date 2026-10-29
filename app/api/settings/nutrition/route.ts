@@ -13,7 +13,14 @@ export async function POST(req: NextRequest) {
   if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   let body: unknown;
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON" }, { status: 400 }); }
-  const config = sanitizeNutritionConfig(body);
+  // Clients that don't know the macro fields (the app) leave them out: keep what's saved.
+  const sent = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const saved = loadNutritionConfig();
+  const config = sanitizeNutritionConfig({
+    ...body as object,
+    proteinPerKg: sent.proteinPerKg ?? saved.proteinPerKg,
+    fatPct: sent.fatPct ?? saved.fatPct,
+  });
 
   // A goal date that would need more than 2 lb/week can't be saved.
   if (!config.goalFromLoseIt && !config.goalDateAuto && config.goalDate && config.targetWeightKg != null) {

@@ -220,7 +220,7 @@ fun NutritionScreen(nutritionApi: NutritionApi, api: PaceSyncApi) {
                     load()
                 }
             }
-            FoodDiaryCard(nutritionApi, diaryKey)
+            FoodDiaryCard(nutritionApi, diaryKey, d.macroPlan, d.days)
             CaloriesCard(d, range, onExpand = { fullscreen = "calories" }) { r -> range = r; prefs.edit().putInt("range", r).apply() }
             WeightCard(d, unit, onExpand = { fullscreen = "weight" })
             ProjectionsCard(d, unit)

@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar, CartesianGrid, ComposedChart, Legend, Line, ReferenceDot, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
+import { macroTargets, type MacroPlan } from "@/lib/macro-targets";
 import { formatWeight, formatWeightDelta, LB_PER_KG, type WeightUnit } from "@/lib/weight-format";
 
 // Mirrors lib/nutrition-dashboard.ts
@@ -66,6 +67,7 @@ interface Dashboard {
     loggedDays: number; windowDays: number; deficit7: number | null; deficit7Days: number;
   };
   projections: Projection[];
+  macroPlan?: MacroPlan;
   required: { kgPerWeek: number; dailyBalance: number; intake: number | null } | null;
   trendFit: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
   trendFit7: { startDate: string; startKg: number; endDate: string; endKg: number } | null;
@@ -225,11 +227,35 @@ function Stat({ label, value, sub, action, icon, tone = "sky", progress }: {
   );
 }
 
+// One macro against its target. Protein is a minimum (green once reached, amber before); carbs and fat are
+// limits (neutral until exceeded, then red).
+function MacroBar({ label, eaten, target, minimum }: { label: string; eaten: number; target: number; minimum?: boolean }) {
+  const over = eaten > target;
+  const color = minimum ? (eaten >= target ? "#34d399" : "#f59e0b") : over ? "#ef4444" : "#38bdf8";
+  const diff = Math.round(Math.abs(target - eaten));
+  const note = minimum
+    ? (eaten >= target ? <span className="text-emerald-300">+{diff} g</span> : <span className="text-amber-300">{diff} g left</span>)
+    : (over ? <span className="text-rose-300">+{diff} g over</span> : <span className="text-slate-500">{diff} g left</span>);
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="w-12 shrink-0 text-slate-400">{label}</span>
+      <div className="relative flex-1 h-2 rounded-full bg-slate-800">
+        <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${Math.min(100, (eaten / Math.max(target, 1)) * 100)}%`, background: color }} />
+      </div>
+      <span className="shrink-0 text-right font-mono tabular-nums text-slate-200 w-24">{Math.round(eaten)}<span className="text-slate-500"> / {Math.round(target)} g</span></span>
+      <span className="shrink-0 w-16 text-right">{note}</span>
+    </div>
+  );
+}
+
 // One day's calories at the top of the food diary, as long thin bars on one
 // shared scale: Eaten (white tip = that day's exercise, as on the old Daily
 // calories chart), Exercise and Burnt. No net line, limit marker or header. Eaten comes from the diary itself so adds and deletes
 // show at once.
-function DayCaloriesBars({ row, eaten, limit, minKcal }: { row: DayRow | undefined; eaten: number; limit: number | null; minKcal: number }) {
+function DayCaloriesBars({ row, eaten, limit, minKcal, plan, totals }: {
+  row: DayRow | undefined; eaten: number; limit: number | null; minKcal: number;
+  plan?: MacroPlan; totals: { proteinG: number; carbsG: number; fatG: number };
+}) {
   const e = Math.round(eaten);
   const ex = row?.exercise ?? null;
   const burnt = row?.burnt ?? null;
@@ -248,8 +274,9 @@ function DayCaloriesBars({ row, eaten, limit, minKcal }: { row: DayRow | undefin
       <span className="w-20 shrink-0 text-right font-mono font-semibold tabular-nums text-slate-200">{kcal(value)}</span>
     </div>
   );
+  const targets = macroTargets(plan, ex);
   return (
-    <div className="mb-4">
+    <div className={`mb-4 grid gap-x-8 gap-y-3 ${targets ? "md:grid-cols-[3fr_1fr]" : ""}`}>
       <div className="relative space-y-1.5">
         <Track label="Eaten" value={e} color={low ? "#ff0012" : C.eaten} width={e}>
           {tip > 0 && <div className="absolute inset-y-0 right-0" style={{ width: `${(tip / e) * 100}%`, background: low ? "#ef4444" : "#ffffff" }} />}
@@ -257,6 +284,13 @@ function DayCaloriesBars({ row, eaten, limit, minKcal }: { row: DayRow | undefin
         <Track label="Exercise" value={ex} color={C.exercise} width={ex} />
         <Track label={row?.partial ? "Burnt so far" : "Burnt"} value={burnt} color={C.burnt} width={burnt} />
       </div>
+      {targets && (
+        <div className="space-y-1.5" title={`Targets for ${Math.round(targets.kcal)} kcal: protein is a fixed amount for your weight, fat a share of the calories, carbs the rest. They rise with exercise.`}>
+          <MacroBar label="Protein" eaten={totals.proteinG} target={targets.proteinG} minimum />
+          <MacroBar label="Carbs" eaten={totals.carbsG} target={targets.carbsG} />
+          <MacroBar label="Fat" eaten={totals.fatG} target={targets.fatG} />
+        </div>
+      )}
     </div>
   );
 }
@@ -991,8 +1025,8 @@ export function NutritionClient() {
 
             <FoodDiaryPanel
               onChanged={() => load(CHART_DAYS)}
-              dayChart={(date, eaten) => (
-                <DayCaloriesBars row={data.days.find(d => d.date === date)} eaten={eaten}
+              dayChart={(date, eaten, totals) => (
+                <DayCaloriesBars row={data.days.find(d => d.date === date)} eaten={eaten} totals={totals} plan={data.macroPlan}
                   limit={cfg.dailyCalorieLimit} minKcal={cfg.minDailyCalories ?? 1400} />
               )}
             />

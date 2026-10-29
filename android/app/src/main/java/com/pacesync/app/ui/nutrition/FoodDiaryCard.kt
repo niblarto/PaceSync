@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,6 +35,9 @@ import androidx.compose.ui.unit.dp
 import com.pacesync.app.network.NutritionApi
 import com.pacesync.app.network.dto.LoseItDiaryDto
 import com.pacesync.app.network.dto.LoseItFoodDto
+import com.pacesync.app.network.dto.MacroPlanDto
+import com.pacesync.app.network.dto.NutritionDayRow
+import androidx.compose.material3.LinearProgressIndicator
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -66,8 +70,29 @@ private fun grams(v: Double?): String = when {
 }
 private fun macros(p: Double?, c: Double?, f: Double?) = "P ${grams(p)} · C ${grams(c)} · F ${grams(f)}"
 
+// One macro against its target: protein is a minimum (green once reached, amber before); carbs and fat are
+// limits (blue until exceeded, then red).
 @Composable
-fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int) {
+private fun MacroRow(label: String, eaten: Double, target: Double, minimum: Boolean) {
+    val over = eaten > target
+    val color = if (minimum) (if (eaten >= target) Color(0xFF34D399) else Color(0xFFF59E0B)) else if (over) Color(0xFFEF4444) else Color(0xFF38BDF8)
+    val diff = kotlin.math.abs(target - eaten).roundToInt()
+    val note = if (minimum) (if (eaten >= target) "+$diff g" else "$diff g left") else (if (over) "+$diff g over" else "$diff g left")
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(Modifier.fillMaxWidth()) {
+            Text(label, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+            Text("${eaten.roundToInt()} / ${target.roundToInt()} g · $note", style = MaterialTheme.typography.labelMedium, color = color)
+        }
+        LinearProgressIndicator(
+            progress = { (eaten / target.coerceAtLeast(1.0)).toFloat().coerceIn(0f, 1f) },
+            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+            color = color, trackColor = Color(0x33FFFFFF),
+        )
+    }
+}
+
+@Composable
+fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int, plan: MacroPlanDto?, days: List<NutritionDayRow>) {
     val context = LocalContext.current
     val today = remember { LocalDate.now() }
     var date by remember { mutableStateOf(LocalDate.now()) }
@@ -157,6 +182,15 @@ fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int) {
                         "Total ${kcalText(d.totals.kcal)} kcal · protein ${grams(d.totals.proteinG)} g · carbs ${grams(d.totals.carbsG)} g · fat ${grams(d.totals.fatG)} g",
                         style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium,
                     )
+                    // Targets: the calorie limit plus that day's exercise; protein fixed, fat a share, carbs the rest.
+                    if (plan?.proteinG != null && plan.limitKcal != null) {
+                        val kcal = plan.limitKcal + (days.firstOrNull { it.date == date.toString() }?.exercise ?: 0.0).coerceAtLeast(0.0)
+                        val fatG = kcal * plan.fatPct / 100 / 9
+                        val carbsG = ((kcal - plan.proteinG * 4 - fatG * 9) / 4).coerceAtLeast(0.0)
+                        MacroRow("Protein", d.totals.proteinG, plan.proteinG, minimum = true)
+                        MacroRow("Carbs", d.totals.carbsG, carbsG, minimum = false)
+                        MacroRow("Fat", d.totals.fatG, fatG, minimum = false)
+                    }
                 }
             }
             d?.lastSyncAt?.let { at ->

@@ -284,6 +284,7 @@ FILES = [
     ('lib/runna-config.ts',                       'lib/runna-config.ts'),
     ('lib/ntfy-config.ts',                        'lib/ntfy-config.ts'),
     ('lib/ntfy.ts',                               'lib/ntfy.ts'),
+    ('lib/macro-targets.ts',                      'lib/macro-targets.ts'),
     ('lib/strava-config.ts',                      'lib/strava-config.ts'),
     ('lib/metoffice-config.ts',                   'lib/metoffice-config.ts'),
     ('lib/discogs-config.ts',                     'lib/discogs-config.ts'),

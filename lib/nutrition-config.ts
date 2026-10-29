@@ -22,6 +22,8 @@ export interface NutritionConfig {
   weightUnit: WeightUnit;
   trendDays: number; // window the projections are based on
   kcalPerKg: number; // energy in 1 kg of body weight change
+  proteinPerKg: number; // protein target, g per kg of body weight
+  fatPct: number; // fat target, % of the day's calories (carbs take the rest)
 }
 
 export const DEFAULT_NUTRITION_CONFIG: NutritionConfig = {
@@ -34,6 +36,8 @@ export const DEFAULT_NUTRITION_CONFIG: NutritionConfig = {
   weightUnit: "st",
   trendDays: 28,
   kcalPerKg: 7700,
+  proteinPerKg: 1.8,
+  fatPct: 25,
 };
 
 function numOrNull(v: unknown, min: number, max: number): number | null {
@@ -54,6 +58,8 @@ export function sanitizeNutritionConfig(raw: unknown): NutritionConfig {
     weightUnit: r.weightUnit === "kg" || r.weightUnit === "lb" ? r.weightUnit : "st",
     trendDays: Math.round(numOrNull(r.trendDays, 7, 120) ?? d.trendDays),
     kcalPerKg: numOrNull(r.kcalPerKg, 3000, 10000) ?? d.kcalPerKg,
+    proteinPerKg: numOrNull(r.proteinPerKg, 0.5, 4) ?? d.proteinPerKg,
+    fatPct: numOrNull(r.fatPct, 10, 50) ?? d.fatPct,
   };
 }
 

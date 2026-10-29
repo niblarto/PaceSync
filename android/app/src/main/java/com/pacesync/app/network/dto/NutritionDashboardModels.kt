@@ -16,6 +16,10 @@ data class NutritionConfigDto(
     val kcalPerKg: Double = 7700.0,
 )
 
+// Inputs of the day's protein/carb/fat targets (lib/macro-targets.ts).
+@Serializable
+data class MacroPlanDto(val proteinG: Double? = null, val fatPct: Double = 25.0, val limitKcal: Double? = null)
+
 @Serializable
 data class NutritionDayRow(
     val date: String,
@@ -90,6 +94,7 @@ data class NutritionDashboardDto(
     val trendFit: TrendFitDto? = null,
     val trendFit7: TrendFitDto? = null,
     val postRunFit: TrendFitDto? = null,
+    val macroPlan: MacroPlanDto? = null,
 )
 
 @Serializable

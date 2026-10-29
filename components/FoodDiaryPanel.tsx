@@ -104,7 +104,7 @@ function Macros({ t, className = "" }: { t: { proteinG: number | null; carbsG: n
 // dayChart: drawn above the meals for the day shown (the page's calorie bars),
 // given that day's eaten total from the diary.
 export function FoodDiaryPanel({ onChanged, dayChart }: {
-  onChanged?: () => void; dayChart?: (date: string, eaten: number) => React.ReactNode;
+  onChanged?: () => void; dayChart?: (date: string, eaten: number, totals: { proteinG: number; carbsG: number; fatG: number }) => React.ReactNode;
 }) {
   const today = isoDate(new Date());
   const [date, setDate] = useState(today);
@@ -408,7 +408,7 @@ export function FoodDiaryPanel({ onChanged, dayChart }: {
         <p className="text-sm text-slate-500">Nothing logged.</p>
       )}
 
-      {diary && dayChart && diary.connected && (date === today || diary.meals.length > 0) && dayChart(date, diary.totals.kcal)}
+      {diary && dayChart && diary.connected && (date === today || diary.meals.length > 0) && dayChart(date, diary.totals.kcal, diary.totals)}
 
       {meals.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">

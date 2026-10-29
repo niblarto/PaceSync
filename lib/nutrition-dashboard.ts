@@ -1,3 +1,4 @@
+import type { MacroPlan } from "@/lib/macro-targets";
 import fs from "fs";
 import path from "path";
 import { loadGarminConfig } from "@/lib/garmin-config";
@@ -68,6 +69,7 @@ export interface NutritionDashboard {
     deficit7: number | null; deficit7Days: number; // last 7 complete days
   };
   projections: Projection[];
+  macroPlan: MacroPlan; // inputs of the day's protein/carb/fat targets (see lib/macro-targets.ts)
   required: { kgPerWeek: number; dailyBalance: number; intake: number | null } | null;
   // The straight line fitted through the weigh-ins in the trend window, so
   // the chart can show where the "Scale trend" projection comes from.
@@ -470,5 +472,11 @@ export function buildNutritionDashboard(chartDays: number): NutritionDashboard {
     }
   }
 
-  return { config, today, days, weights, postRunWeights, current, averages, projections, required, trendFit, trendFit7, postRunFit, sources: dataSources(today) };
+  return { config, today, days, weights, postRunWeights, current, averages, projections, required, trendFit, trendFit7, postRunFit,
+    macroPlan: {
+      proteinG: current ? Math.round(config.proteinPerKg * current.avg7Kg) : null,
+      fatPct: config.fatPct,
+      limitKcal: config.dailyCalorieLimit,
+    },
+    sources: dataSources(today) };
 }
