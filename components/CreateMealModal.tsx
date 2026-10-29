@@ -66,8 +66,8 @@ function MacroText({ m }: { m: Macros }) {
   );
 }
 
-export function CreateMealModal({ date, meal, remaining, onLogged, onClose }: {
-  date: string; meal: number; remaining: Macros; onLogged: (day: unknown) => void; onClose: () => void;
+export function CreateMealModal({ date, meal, remaining, testing = false, onLogged, onClose }: {
+  date: string; meal: number; remaining: Macros; testing?: boolean; onLogged: (day: unknown) => void; onClose: () => void;
 }) {
   // Nothing runs until "Find meals" is pressed.
   const [loading, setLoading] = useState(false);
@@ -264,7 +264,10 @@ export function CreateMealModal({ date, meal, remaining, onLogged, onClose }: {
         <div className="flex items-start justify-between gap-3 p-5 pb-3">
           <div className="min-w-0">
             <h3 className="text-sm font-semibold text-slate-100">Find dinner</h3>
-            <p className="text-xs text-slate-400 mt-0.5">Left for the day: <MacroText m={remaining} /></p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {testing ? "Test budget" : "Left for the day"}: <MacroText m={remaining} />
+              {testing && <span className="ml-2 text-[10px] rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-300 px-1.5 py-0.5">test: not what&apos;s really left (Settings → Nutrition)</span>}
+            </p>
           </div>
           <button onClick={onClose} className="shrink-0 rounded-lg border border-white/10 bg-slate-800/60 hover:bg-slate-700/60 text-sm px-3 py-1.5 text-slate-300 transition-colors">
             Close

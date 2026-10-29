@@ -163,6 +163,91 @@ function RecipeMeasures() {
   );
 }
 
+// A made-up budget for testing "Create meal" at any time of day. While it is on, the Dinner card's Create meal uses
+// these numbers instead of what's really left for the day.
+function MealTestBudget() {
+  const [on, setOn] = useState(false);
+  const [f, setF] = useState({ kcal: "700", proteinG: "40", carbsG: "60", fatG: "25" });
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/settings/meal-test-budget").then(r => r.json()).then(d => {
+      if (d.error) return;
+      setOn(!!d.enabled);
+      setF({ kcal: String(d.kcal), proteinG: String(d.proteinG), carbsG: String(d.carbsG), fatG: String(d.fatG) });
+      setLoaded(true);
+    }).catch(() => {});
+  }, []);
+
+  const bad = !(Number(f.kcal) >= 150) || ["proteinG", "carbsG", "fatG"].some(k => !(Number(f[k as keyof typeof f]) >= 0) || f[k as keyof typeof f].trim() === "");
+
+  async function save(enabled = on) {
+    if (bad) return;
+    setSaving(true);
+    setStatus(null);
+    try {
+      const res = await fetch("/api/settings/meal-test-budget", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled, kcal: Number(f.kcal), proteinG: Number(f.proteinG), carbsG: Number(f.carbsG), fatG: Number(f.fatG) }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || `Save failed (${res.status})`);
+      setStatus("Saved.");
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const field = (key: keyof typeof f, label: string, unit: string) => (
+    <label className="space-y-1">
+      <span className="block text-[11px] text-slate-400">{label}</span>
+      <div className="flex items-center gap-1.5">
+        <input inputMode="numeric" value={f[key]} onChange={e => { setF(s => ({ ...s, [key]: e.target.value })); setStatus(null); }}
+          className={`w-full rounded-lg bg-slate-800 border text-xs px-2 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500 ${
+            (key === "kcal" ? !(Number(f[key]) >= 150) : !(Number(f[key]) >= 0) || f[key].trim() === "") ? "border-rose-500" : "border-slate-700"}`} />
+        <span className="text-xs text-slate-500">{unit}</span>
+      </div>
+    </label>
+  );
+
+  return (
+    <div className="space-y-3 border-t border-white/10 pt-4">
+      <div className="text-xs font-medium text-slate-300">🧪 Create meal test budget</div>
+      <p className="text-xs text-slate-500">
+        For trying out “Create meal” at any time of day. While this is on, the Dinner card looks up past dinners and recipes against the
+        numbers below instead of what is really left for the day, and the pop-up says it is a test.
+      </p>
+      {!loaded ? (
+        <p className="text-xs text-slate-500">Loading…</p>
+      ) : (
+        <>
+          <label className="flex items-center gap-2 text-xs text-slate-300">
+            <input type="checkbox" checked={on} disabled={saving || bad} onChange={e => { setOn(e.target.checked); save(e.target.checked); }} />
+            Use the test budget
+          </label>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {field("kcal", "Calories", "kcal")}
+            {field("proteinG", "Protein", "g")}
+            {field("carbsG", "Carbs", "g")}
+            {field("fatG", "Fat", "g")}
+          </div>
+          <div className="flex items-center gap-3">
+            <button onClick={() => save()} disabled={saving || bad}
+              className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-sm font-medium px-4 py-2 text-white transition-colors">
+              {saving ? "Saving…" : "Save test budget"}
+            </button>
+            {status && <span className={`text-xs ${status === "Saved." ? "text-slate-400" : "text-rose-300"}`}>{status}</span>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function NutritionSettingsCard() {
   const [form, setForm] = useState<Form | null>(null);
   const [limits, setLimits] = useState<{ currentKg: number | null; today: string; maxLb: number } | null>(null);
@@ -401,6 +486,7 @@ export function NutritionSettingsCard() {
         </div>
       )}
       <RecipeMeasures />
+      <MealTestBudget />
     </div>
   );
 }

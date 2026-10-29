@@ -112,6 +112,7 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
   const today = isoDate(new Date());
   // "Create meal" pop-up; the budget is fixed when it opens so it doesn't shift as items are accepted.
   const [creating, setCreating] = useState<Macros | null>(null);
+  const [creatingTest, setCreatingTest] = useState(false); // the pop-up is using the test budget from Settings
   const [createMsg, setCreateMsg] = useState<string | null>(null);
   const [date, setDate] = useState(today);
   const [diary, setDiary] = useState<Diary | null>(null);
@@ -444,7 +445,15 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
                       <span className={`text-xs font-medium border rounded-full px-2.5 py-0.5 ${MEAL_STYLE[m.meal] ?? MEAL_STYLE[3]}`}>{m.name}</span>
                       {dinnerToday && (
                         <button
-                          onClick={() => {
+                          onClick={async () => {
+                            // The test budget from Settings → Nutrition, when switched on, replaces what's really left.
+                            const test = await fetch("/api/settings/meal-test-budget").then(r => r.json()).catch(() => null);
+                            if (test?.enabled) {
+                              setCreateMsg(null); setCreatingTest(true);
+                              setCreating({ kcal: test.kcal, proteinG: test.proteinG, carbsG: test.carbsG, fatG: test.fatG });
+                              return;
+                            }
+                            setCreatingTest(false);
                             const t = targetsFor?.(date);
                             if (!t || !diary) { setCreateMsg("Set a daily calorie limit and weight first (Settings → Nutrition) so there are targets to fit."); return; }
                             const left = { kcal: t.kcal - diary.totals.kcal, proteinG: Math.max(0, t.proteinG - diary.totals.proteinG),
@@ -532,7 +541,7 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
       {diary?.lastError && <p className="mt-2 text-xs text-rose-300">Last sync failed: {diary.lastError}</p>}
 
       {creating && (
-        <CreateMealModal date={date} meal={2} remaining={creating} onLogged={d => added(d as Partial<Diary>)} onClose={() => setCreating(null)} />
+        <CreateMealModal date={date} meal={2} remaining={creating} testing={creatingTest} onLogged={d => added(d as Partial<Diary>)} onClose={() => setCreating(null)} />
       )}
 
       {drop && createPortal(
