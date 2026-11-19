@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
   // The latest weekly report (if this week's), so "let's discuss the report" works.
   const report = latestReport();
   const system = buildCoachSystemPrompt(context.text, recall.memories.map(m => m.document), report ? { week: weekLabel(report.weekStart), content: report.content } : undefined);
-  const result = web ? await coachWebChat(system, history) : await coachChat(system, history);
+  const result = web ? await coachWebChat(system, history) : await coachChat(system, history, { search: true });
   if (!result.ok) {
     // Leave the conversation as it was so the message can be resent.
     deleteMessage(userMsg.id);

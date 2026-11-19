@@ -31,8 +31,11 @@ function localLabel(config: CoachConfig): string {
 }
 
 // The local model on the AI DJ service PC.
-// web: the service searches SearXNG for the question first and returns sources.
-async function localChat(config: CoachConfig, system: string, messages: CoachMessage[], think: boolean, web = false): Promise<CoachReply> {
+// web: "required" = the model must search (🌐 button); "auto" = the model has
+// the search tools and decides for itself (normal chat). The service runs the
+// tool loop against mcp-searxng and returns the sources it used.
+type WebMode = false | "required" | "auto";
+async function localChat(config: CoachConfig, system: string, messages: CoachMessage[], think: boolean, web: WebMode = false): Promise<CoachReply> {
   const dj = loadAiDjConfig();
   if (!dj?.url) return { ok: false, error: "The local model runs on the AI DJ service PC — set its URL in Settings → AI DJ" };
   try {
@@ -43,9 +46,11 @@ async function localChat(config: CoachConfig, system: string, messages: CoachMes
       signal: AbortSignal.timeout(think ? LOCAL_THINK_TIMEOUT_MS : LOCAL_TIMEOUT_MS),
     });
     if (res.status === 404) return { ok: false, error: "The AI DJ service on the PC needs restarting to pick up the Coach" };
-    const data = await res.json() as { reply?: string; error?: string; sources?: WebSource[] };
+    const data = await res.json() as { reply?: string; error?: string; sources?: WebSource[]; searches?: string[] };
     if (!res.ok || !data.reply) return { ok: false, error: data.error ?? `AI DJ service ${res.status}` };
-    return web
+    // In auto mode only badge replies where the model actually searched.
+    const searched = web === "required" || (data.searches?.length ?? 0) > 0;
+    return web && searched
       ? { ok: true, reply: data.reply, model: `${localLabel(config)} · 🌐 web`, sources: data.sources ?? [] }
       : { ok: true, reply: data.reply, model: localLabel(config) };
   } catch (err) {
@@ -90,16 +95,21 @@ function bridge(payload: Record<string, unknown>): Promise<{ ok: true; reply: st
 // has hit its limit and "fall back to local" is on, the local model answers
 // instead. opts.think: let the local model reason first (reports; slower but
 // careful with numbers). Chat stays fast.
-export async function coachChat(system: string, messages: CoachMessage[], opts: { think?: boolean } = {}): Promise<CoachReply> {
+// The local model always has the web search tools (mcp-searxng, run by the AI
+// DJ service) and decides for itself when to use them - chat, daily brief,
+// session summaries and the weekly/health/nutrition reports alike. Pass
+// opts.search = false to switch that off for a particular call.
+export async function coachChat(system: string, messages: CoachMessage[], opts: { think?: boolean; search?: boolean } = {}): Promise<CoachReply> {
   const config = loadCoachConfig();
-  if (config.provider === "local") return localChat(config, system, messages, !!opts.think);
+  const search: WebMode = opts.search === false ? false : "auto";
+  if (config.provider === "local") return localChat(config, system, messages, !!opts.think, search);
 
   const model = config.provider === "claude" ? config.claudeModel : config.geminiModel;
   const effort = config.provider === "claude" ? config.claudeEffort : undefined;
   const r = await bridge({ system, messages, model, effort });
   if (r.ok) return { ok: true, reply: r.reply, model: coachModelLabel(config) };
   if (config.fallbackToLocal && LIMIT_RE.test(r.error)) {
-    const local = await localChat(config, system, messages, !!opts.think);
+    const local = await localChat(config, system, messages, !!opts.think, search);
     const who = config.provider === "claude" ? "Claude" : "Gemini";
     if (local.ok) return { ...local, model: `${local.model} (${who} limit reached)`, note: `${who} limit reached` };
     return { ok: false, error: `${who} limit reached, and the local model couldn't answer either: ${local.error}` };
@@ -115,7 +125,7 @@ export async function coachChat(system: string, messages: CoachMessage[], opts: 
 export async function coachWebChat(system: string, messages: CoachMessage[]): Promise<CoachReply> {
   const config = loadCoachConfig();
   // Local model: the AI DJ service searches the self-hosted SearXNG itself.
-  if (config.provider === "local") return localChat(config, system, messages, false, true);
+  if (config.provider === "local") return localChat(config, system, messages, false, "required");
   if (loadOllamaWebKey()) {
     const question = [...messages].reverse().find(m => m.role === "user")?.content ?? "";
     const search = await ollamaWebSearch(question);
@@ -132,9 +142,9 @@ You can search the web (Google Search) for this answer. Use it for evidence and 
   const r = await bridge({ system: webSystem, messages, model: config.geminiModel, web: true });
   if (r.ok) return { ok: true, reply: r.reply, sources: r.sources ?? [], model: `Gemini · ${config.geminiModel} · 🌐 web` };
   if (config.fallbackToLocal && LIMIT_RE.test(r.error)) {
-    const local = await localChat(config, system, messages, false);
+    const local = await localChat(config, system, messages, false, "required");
     if (local.ok) {
-      return { ...local, model: `${local.model} (Gemini limit reached, no web search)`, note: "Gemini's limit is reached, so this was answered by the local model without searching the web." };
+      return { ...local, model: `${local.model} (Gemini limit reached)`, note: "Gemini's limit is reached, so this was answered by the local model, searching the web through SearXNG." };
     }
     return { ok: false, error: `Gemini's limit is reached and the local model couldn't answer either: ${local.error}` };
   }
