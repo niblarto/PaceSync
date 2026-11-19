@@ -3098,6 +3098,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
           <div className="flex items-center gap-4 shrink-0">
             <Link href="/coach" className={NAV_LINK}>Coach</Link>
             <Link href="/nutrition" className={NAV_LINK}>Nutrition</Link>
+            <Link href="/health" className={NAV_LINK}>Health</Link>
             {garminConfigured && (
               <Link href="/garmin" className={NAV_LINK}>Garmin</Link>
             )}

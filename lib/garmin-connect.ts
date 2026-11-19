@@ -36,20 +36,41 @@ async function refreshDiToken(t: DiTokens): Promise<string | null> {
   return d.access_token;
 }
 
-export async function garminConnectGet<T>(apiPath: string): Promise<T> {
+// One call to connectapi.garmin.com with the DI token, renewed once on a 401/403. Returns the raw response.
+async function garminConnectFetch(apiPath: string, init: (token: string) => RequestInit): Promise<Response> {
   const tokens = loadTokens();
   if (!tokens) throw new Error("Garmin sign-in not found (is GarminDB set up?)");
-  const get = (token: string) => fetch(`https://connectapi.garmin.com${apiPath}`, {
-    headers: { Authorization: `Bearer ${token}` }, cache: "no-store", signal: AbortSignal.timeout(20_000),
+  const call = (token: string) => fetch(`https://connectapi.garmin.com${apiPath}`, {
+    cache: "no-store", signal: AbortSignal.timeout(30_000), ...init(token),
   });
-  let res = await get(tokens.di_token);
+  let res = await call(tokens.di_token);
   if (res.status === 401 || res.status === 403) {
     const fresh = await refreshDiToken(tokens);
     if (!fresh) throw new Error("Garmin sign-in expired and couldn't be renewed");
-    res = await get(fresh);
+    res = await call(fresh);
   }
+  return res;
+}
+
+export async function garminConnectGet<T>(apiPath: string): Promise<T> {
+  const res = await garminConnectFetch(apiPath, token => ({ headers: { Authorization: `Bearer ${token}` } }));
   if (!res.ok) throw new Error(`Garmin request failed (${res.status})`);
   return res.json() as Promise<T>;
+}
+
+// A JSON POST/PUT; the response body (JSON when there is one) comes back with the status instead of throwing,
+// so callers can show Garmin's own error text.
+export async function garminConnectSend(
+  method: "POST" | "PUT", apiPath: string, body: BodyInit, contentType?: string,
+): Promise<{ status: number; ok: boolean; data: unknown }> {
+  const res = await garminConnectFetch(apiPath, token => ({
+    method, body,
+    headers: { Authorization: `Bearer ${token}`, ...(contentType ? { "Content-Type": contentType } : {}) },
+  }));
+  const text = await res.text();
+  let data: unknown = text;
+  try { data = JSON.parse(text); } catch {}
+  return { status: res.status, ok: res.ok, data };
 }
 
 function kvGet<T>(key: string): T | null {

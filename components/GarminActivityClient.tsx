@@ -1,6 +1,6 @@
 "use client";
 
-import { HeaderSongBar } from "@/components/SongProgressBar";
+import { HeaderSongBar, usePlayingUri } from "@/components/SongProgressBar";
 import { useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { useSession } from "next-auth/react";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
@@ -271,6 +271,7 @@ export function GarminActivityClient({ id }: { id: string }) {
   const [mix, setMix] = useState<MixPacing | null>(null);
   const [votes, setVotes] = useState<{ uri: string; paceSec: number; vote: "up" | "down" }[]>([]);
   const [deletedUris, setDeletedUris] = useState<Set<string>>(new Set());
+  const playingUri = usePlayingUri();
   // "Overlay a Pace Pro plan" — lets the pace chart also show a saved Pace
   // Pro plan's per-split target pace (distance-based, unlike the existing
   // blue "Target" line above which is time-based, from the mix actually
@@ -1129,7 +1130,7 @@ export function GarminActivityClient({ id }: { id: string }) {
                     return (
                       <div
                         key={i}
-                        className={`flex items-center gap-2 text-xs rounded border px-2 py-1.5 ${MIX_ROW_STYLE[t.verdict]} ${isDeleted ? "opacity-40 line-through" : ""}`}
+                        className={`flex items-center gap-2 text-xs rounded border px-2 py-1.5 ${MIX_ROW_STYLE[t.verdict]} ${t.uri && t.uri === playingUri ? "ring-2 ring-orange-400 bg-orange-500/15" : ""} ${isDeleted ? "opacity-40 line-through" : ""}`}
                         title={t.segment}
                       >
                         <span className="text-slate-600 shrink-0 tabular-nums w-10">{fmtTimeTick(t.startsAtSec)}</span>

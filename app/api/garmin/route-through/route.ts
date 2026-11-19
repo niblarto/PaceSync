@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { loadGarminConfig } from "@/lib/garmin-config";
+import { kindsSql, parseKinds } from "@/lib/route-graph";
 import path from "path";
 
 // Running activities whose recorded GPS passes within ~30 m of a point — the
@@ -30,7 +31,7 @@ export async function GET(req: NextRequest) {
     const activities = db.prepare(`
       SELECT a.activity_id AS id, a.name, a.start_time AS startTime, a.distance AS distanceMi
       FROM activities a
-      WHERE LOWER(a.sport) LIKE '%running%'
+      WHERE ${kindsSql("a.sport", parseKinds(req.nextUrl.searchParams.get("kinds")))}
         AND a.activity_id IN (
           SELECT DISTINCT activity_id FROM activity_records
           WHERE position_lat BETWEEN ? AND ? AND position_long BETWEEN ? AND ?

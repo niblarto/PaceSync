@@ -38,6 +38,9 @@ import androidx.compose.ui.unit.dp
 import com.pacesync.app.network.NutritionApi
 import com.pacesync.app.network.dto.LoseItDiaryDto
 import com.pacesync.app.network.dto.LoseItFoodDto
+import com.pacesync.app.network.dto.LoseItSyncDayRequest
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import com.pacesync.app.network.dto.MacroPlanDto
 import com.pacesync.app.network.dto.NutritionDayRow
 import androidx.compose.material3.LinearProgressIndicator
@@ -100,6 +103,8 @@ fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int, plan: MacroPlanDto
     // "Snack Me!" at the bottom of the card (today only): the sheet is open, with the calories left when it opened.
     var snackLeft by remember { mutableStateOf<Double?>(null) }
     var snackReload by remember { mutableIntStateOf(0) } // bumped when snacks were added, to reload this diary
+    val scope = rememberCoroutineScope()
+    var syncing by remember { mutableStateOf(false) } // a past day is being re-read from Lose It!
     val today = remember { LocalDate.now() }
     var date by remember { mutableStateOf(LocalDate.now()) }
     var diary by remember { mutableStateOf<LoseItDiaryDto?>(null) }
@@ -144,6 +149,24 @@ fun FoodDiaryCard(nutritionApi: NutritionApi, reloadKey: Int, plan: MacroPlanDto
                 }) { Text("Pick date") }
                 TextButton(onClick = { date = date.plusDays(1) }, enabled = date.isBefore(today)) { Text("Next ›") }
                 if (date != today) TextButton(onClick = { date = today }) { Text("Today") }
+                // Re-reads just this past day from Lose It! (today has pull-to-refresh).
+                if (date != today && diary?.connected == true) {
+                    if (syncing) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    else TextButton(enabled = !loading, onClick = {
+                        scope.launch {
+                            syncing = true
+                            val before = diary?.totals?.kcal ?: 0.0
+                            val resp = runCatching { nutritionApi.syncDay(LoseItSyncDayRequest(date.toString())) }.getOrNull()
+                            if (resp?.isSuccessful == true && resp.body() != null) {
+                                diary = resp.body(); error = null
+                                val diff = ((diary?.totals?.kcal ?: 0.0) - before).roundToInt()
+                                Toast.makeText(context, if (diff == 0) "Synced: nothing had changed." else "Synced: ${if (diff > 0) "+" else "−"}${kotlin.math.abs(diff)} kcal.", Toast.LENGTH_SHORT).show()
+                                onChanged()
+                            } else error = "Couldn't sync this day (${resp?.code() ?: "offline"})"
+                            syncing = false
+                        }
+                    }) { Text("⟳ Sync") }
+                }
             }
 
             error?.let { Text(it, color = Color(0xFFF87171), style = MaterialTheme.typography.bodySmall) }

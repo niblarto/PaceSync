@@ -22,9 +22,9 @@ export async function GET() {
     const db = new Database(path.join(config.dbPath, "garmin_activities.db"), { readonly: true, fileMustExist: true });
     db.pragma("busy_timeout = 30000");
     const activities = db.prepare(`
-      SELECT activity_id AS id, name, start_time AS startTime, distance AS distanceMi
+      SELECT activity_id AS id, name, start_time AS startTime, distance AS distanceMi, LOWER(sport) AS sport
       FROM activities
-      WHERE LOWER(sport) LIKE '%running%'
+      WHERE LOWER(sport) LIKE '%running%' OR LOWER(sport) LIKE '%walking%'
       ORDER BY start_time DESC
     `).all();
     db.close();

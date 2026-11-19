@@ -8,6 +8,7 @@ import com.pacesync.app.network.dto.MobileTokenResponse
 import com.pacesync.app.network.dto.PinMixRequest
 import com.pacesync.app.network.dto.PinRouteRequest
 import com.pacesync.app.network.dto.PinnedRouteResponse
+import com.pacesync.app.network.dto.RaceSplitsResponse
 import com.pacesync.app.network.dto.PlayRequest
 import com.pacesync.app.network.dto.PlaybackActionRequest
 import com.pacesync.app.network.dto.PlaybackStateResponse
@@ -49,6 +50,10 @@ interface PaceSyncApi {
 
     @GET("api/todays-run/history")
     suspend fun getTodaysRunHistory(@Query("date") date: String, @Query("title") title: String): Response<TodaysRunHistoryResponse>
+
+    // A race's pinned Pace Pro mix (tracklist), if one is linked.
+    @GET("api/ai-dj/race-splits")
+    suspend fun getRaceSplits(@Query("date") date: String, @Query("title") title: String): Response<RaceSplitsResponse>
 
     // Route picker (scheduled workout, no pinned route yet) — recent
     // GarminDB activities at a matching distance, same source the web app's

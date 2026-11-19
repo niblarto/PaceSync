@@ -161,7 +161,14 @@ function buildRequest(build: LoseItBuild, who: GwtIdentity, method: string, para
   const tokens: (string | number)[] = [1, 2, 3, 4, allTypes.length, ...allTypes.map(idx)];
   tokens.push(idx(allTypes[0]), 0, idx(type("com.loseit.core.client.model.UserId")), who.userId, idx(who.username), hoursFromGmt());
   tokens.push(...writeParams(idx, type));
-  return `7|0|${strings.length}|${strings.join("|")}|${tokens.join("|")}|`;
+  // The request is "|"-separated, so a "|" (or "\") inside a string, such as a food called "Curry | Weight Watchers
+  // Friendly", must be escaped the way GWT does it. Unescaped, the request is misread and the server answers 500.
+  const esc = (t: string) => t
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\!")
+    .replace(/\u0000/g, "\\0")
+    .replace(/[\n\r\u2028\u2029]/g, c => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+  return `7|0|${strings.length}|${strings.map(esc).join("|")}|${tokens.join("|")}|`;
 }
 
 export interface GwtResponse { tokens: unknown[]; strings: string[] }

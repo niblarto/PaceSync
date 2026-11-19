@@ -160,6 +160,10 @@ FILES = [
     ('app/api/garmin/route-point/route.ts',       'app/api/garmin/route-point/route.ts'),
     ('lib/saved-routes.ts',                       'lib/saved-routes.ts'),
     ('app/api/garmin/saved-routes/route.ts',      'app/api/garmin/saved-routes/route.ts'),
+    ('lib/garmin-course.ts',                      'lib/garmin-course.ts'),
+    ('lib/workout-steps.ts',                      'lib/workout-steps.ts'),
+    ('app/api/garmin/route-draw/route.ts',        'app/api/garmin/route-draw/route.ts'),
+    ('app/api/garmin/send-course/route.ts',       'app/api/garmin/send-course/route.ts'),
     ('lib/coach-brief.ts',                        'lib/coach-brief.ts'),
     ('app/api/coach/brief/route.ts',              'app/api/coach/brief/route.ts'),
     ('app/api/cron/coach-brief/route.ts',         'app/api/cron/coach-brief/route.ts'),
@@ -220,6 +224,19 @@ FILES = [
     ('app/api/nutrition/dashboard/route.ts', 'app/api/nutrition/dashboard/route.ts'),
     ('app/api/settings/nutrition/route.ts', 'app/api/settings/nutrition/route.ts'),
     ('app/nutrition/page.tsx', 'app/nutrition/page.tsx'),
+    ('app/health/page.tsx', 'app/health/page.tsx'),
+    ('components/HealthClient.tsx', 'components/HealthClient.tsx'),
+    ('components/AiSummaryPanel.tsx', 'components/AiSummaryPanel.tsx'),
+    ('lib/health-dashboard.ts', 'lib/health-dashboard.ts'),
+    ('lib/health-summary.ts', 'lib/health-summary.ts'),
+    ('lib/health-ignored.ts', 'lib/health-ignored.ts'),
+    ('lib/sleep-coach.ts', 'lib/sleep-coach.ts'),
+    ('app/api/health/ignore/route.ts', 'app/api/health/ignore/route.ts'),
+    ('app/api/health/dashboard/route.ts', 'app/api/health/dashboard/route.ts'),
+    ('app/api/health/night/route.ts', 'app/api/health/night/route.ts'),
+    ('components/SleepTimelineModal.tsx', 'components/SleepTimelineModal.tsx'),
+    ('app/api/health/summary/route.ts', 'app/api/health/summary/route.ts'),
+    ('app/api/cron/health-summary/route.ts', 'app/api/cron/health-summary/route.ts'),
     ('components/NutritionClient.tsx', 'components/NutritionClient.tsx'),
     ('components/NutritionSettingsCard.tsx', 'components/NutritionSettingsCard.tsx'),
     ('lib/nutrition-config.ts', 'lib/nutrition-config.ts'),
@@ -243,6 +260,7 @@ FILES = [
     ('app/api/loseit/food/route.ts', 'app/api/loseit/food/route.ts'),
     ('app/api/loseit/log/route.ts', 'app/api/loseit/log/route.ts'),
     ('app/api/loseit/confirm-deletion/route.ts', 'app/api/loseit/confirm-deletion/route.ts'),
+    ('app/api/loseit/sync-day/route.ts', 'app/api/loseit/sync-day/route.ts'),
     ('app/api/loseit/copy/route.ts', 'app/api/loseit/copy/route.ts'),
     ('app/api/loseit/move/route.ts', 'app/api/loseit/move/route.ts'),
     ('app/api/loseit/icon/route.ts', 'app/api/loseit/icon/route.ts'),
@@ -437,6 +455,7 @@ FILES = [
     ('lib/pace-pro.ts',                            'lib/pace-pro.ts'),
     ('lib/pace-pro-pin.ts',                        'lib/pace-pro-pin.ts'),
     ('lib/pace-pro-saved.ts',                      'lib/pace-pro-saved.ts'),
+    ('lib/race-pace-pro-link.ts',                  'lib/race-pace-pro-link.ts'),
     ('lib/workout-title-cache.ts',                 'lib/workout-title-cache.ts'),
     ('app/api/settings/pace-pro-saved/route.ts',   'app/api/settings/pace-pro-saved/route.ts'),
     ('app/api/settings/pace-pro-saved/activity/route.ts', 'app/api/settings/pace-pro-saved/activity/route.ts'),
@@ -855,6 +874,15 @@ nutrition_cron_line = (
     f'-H "X-Cron-Secret: {cron_secret}"'
 )
 run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/nutrition-summary' || {{ (crontab -l 2>/dev/null; echo '{nutrition_cron_line}') | crontab -; }}""")
+
+print('  Ensuring cron job (Health AI summary, hourly; writes once a day after 05:00 when the AI is up)...')
+health_cron_log = f'/home/{PI["user"]}/cron-health-summary.log'
+health_cron_line = (
+    f'37 * * * * curl -s -m 60 -o {health_cron_log} '
+    f'-X POST http://localhost:{PORT}/api/cron/health-summary '
+    f'-H "X-Cron-Secret: {cron_secret}"'
+)
+run(ssh, f"""crontab -l 2>/dev/null | grep -q '/api/cron/health-summary' || {{ (crontab -l 2>/dev/null; echo '{health_cron_line}') | crontab -; }}""")
 
 print('  Ensuring cron job (Lose It! food diary, hourly 07:23-23:23; ~4.6 KB per run)...')
 loseit_cron_log = f'/home/{PI["user"]}/cron-loseit.log'

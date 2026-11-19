@@ -7,6 +7,7 @@ import { setRaceSplits, type RaceSplitsEntry } from "@/lib/race-splits";
 import { setPinnedRoute } from "@/lib/pinned-routes";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { saveTodaysRunEntry, timelineToHistoryTracks } from "@/lib/todays-run-history";
+import { setRacePaceProMixId, removeRacePaceProMixId } from "@/lib/race-pace-pro-link";
 import path from "path";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -42,6 +43,7 @@ export async function POST(req: NextRequest) {
     savedAt: new Date().toISOString(),
   };
   setRaceSplits(entry);
+  setRacePaceProMixId(body.date, body.workoutTitle, mix.id); // pinned to the race card, route or not
 
   // A COMPLETED date (today or earlier) also gets the mix's tracklist saved
   // into todays_run_history under this exact (date, title) — the same
@@ -101,4 +103,14 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({ ok: true, splits: entry, routeLinked });
+}
+
+// Unpin the Pace Pro tracklist from a race (the splits and any pinned route stay).
+export async function DELETE(req: NextRequest) {
+  const session = await getServerSession(authOptions);
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { date, title } = await req.json() as { date?: string; title?: string };
+  if (!date || !DATE_RE.test(date) || !title) return NextResponse.json({ error: "date and title required" }, { status: 400 });
+  removeRacePaceProMixId(date, title);
+  return NextResponse.json({ ok: true });
 }

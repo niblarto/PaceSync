@@ -173,7 +173,9 @@ function rowFromEntry(e: LoseItEntry, state: SyncState): FoodRowInput {
 // ── Sync ───────────────────────────────────────────────────────────────────
 
 async function syncDay(date: string, state: SyncState, expectFewer = false): Promise<number> {
-  const stored = (getDb().prepare("SELECT COUNT(*) AS n FROM loseit_food_log WHERE date = ? AND source = 'rpc'").get(date) as { n: number }).n;
+  // Foods held for the day from any source (an older day is still the export's until it is first read over RPC), so a
+  // partial read can't replace a full day of either kind.
+  const stored = (getDb().prepare("SELECT COUNT(*) AS n FROM loseit_food_log WHERE date = ?").get(date) as { n: number }).n;
   let entries = await withLoseItSession(who => fetchDay(who, date));
   // Twice, Lose It! answered with only part of a day (the meals before dinner)
   // that it returned in full seconds later. A read that shows fewer foods than
@@ -194,7 +196,7 @@ async function syncDay(date: string, state: SyncState, expectFewer = false): Pro
   // believed straight away.
   const missing = state.missingMeals ?? (state.missingMeals = {});
   const readMeals = new Set(entries.map(e => e.meal));
-  const heldMeals = (getDb().prepare("SELECT DISTINCT meal FROM loseit_food_log WHERE date = ? AND source = 'rpc' ORDER BY meal").all(date) as { meal: number }[])
+  const heldMeals = (getDb().prepare("SELECT DISTINCT meal FROM loseit_food_log WHERE date = ? ORDER BY meal").all(date) as { meal: number }[])
     .map(r => r.meal).filter(m => !readMeals.has(m));
   if (!expectFewer && stored > 0 && heldMeals.length > 0) {
     const m = missing[date];
@@ -211,7 +213,7 @@ async function syncDay(date: string, state: SyncState, expectFewer = false): Pro
         { title: "Lose It! meal missing", tags: "warning" }).catch(() => false);
     }
     // Rows of the missing meals stay as they were; everything else follows this read.
-    const kept = (getDb().prepare("SELECT * FROM loseit_food_log WHERE date = ? AND source = 'rpc' AND meal IN (" + heldMeals.join(",") + ") ORDER BY meal, seq").all(date) as DbRow[])
+    const kept = (getDb().prepare("SELECT * FROM loseit_food_log WHERE date = ? AND meal IN (" + heldMeals.join(",") + ") ORDER BY meal, seq").all(date) as DbRow[])
       .map((r): FoodRowInput => ({
         entryId: r.entry_id, meal: r.meal, name: r.name, brand: r.brand, icon: r.icon, quantity: r.quantity, units: r.units, kcal: r.kcal,
         fatG: r.fat_g, satFatG: r.sat_fat_g, cholesterolMg: r.cholesterol_mg, sodiumMg: r.sodium_mg, carbsG: r.carbs_g, fiberG: r.fiber_g,
@@ -234,9 +236,17 @@ const MISSING_CHECK_GAP_MS = 4 * 60_000;
 export function pendingMealDeletion(date: string): { meals: { meal: number; name: string; foods: number }[] } | null {
   const m = loadState().missingMeals?.[date];
   if (!m?.alerted) return null;
-  const counts = getDb().prepare("SELECT meal, COUNT(*) AS n FROM loseit_food_log WHERE date = ? AND source = 'rpc' GROUP BY meal").all(date) as { meal: number; n: number }[];
+  const counts = getDb().prepare("SELECT meal, COUNT(*) AS n FROM loseit_food_log WHERE date = ? GROUP BY meal").all(date) as { meal: number; n: number }[];
   const meals = m.meals.map(meal => ({ meal, name: MEAL_NAMES[meal] ?? "Snacks", foods: counts.find(c => c.meal === meal)?.n ?? 0 })).filter(x => x.foods > 0);
   return meals.length ? { meals } : null;
+}
+
+// The "Sync" button on a past day: re-reads that one day from Lose It! now (any date, not only today and yesterday), for
+// foods added or changed in Lose It! after PaceSync last read it. Same safeguards as the regular sync for a partial read.
+export async function syncLoseItDay(date: string): Promise<DiaryDay> {
+  if (!loadLoseItAccount()) throw new Error("Connect a Lose It! account in Settings first");
+  await refreshDay(date);
+  return getDiaryDay(date);
 }
 
 // The answer to "was it deleted?": yes applies what Lose It! shows now (the meals go); no keeps them and starts the checks again.

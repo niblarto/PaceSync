@@ -181,6 +181,26 @@ data class TodaysRunEntry(
 @Serializable
 data class TodaysRunHistoryResponse(val entry: TodaysRunEntry? = null)
 
+// Mirrors app/api/ai-dj/race-splits's GET: the Pace Pro mix pinned to a race
+// (its tracklist shows on the race when there's no saved "Today's Run" mix).
+@Serializable
+data class RaceMixTrack(
+    val uri: String? = null,
+    val name: String,
+    val artist: String,
+    val startsAt: String = "0:00",
+    val durationSec: Double? = null,
+    val segment: String? = null,
+    val tempo: Double? = null,
+    val energy: Double? = null,
+)
+
+@Serializable
+data class RaceMixPin(val id: String, val title: String, val totalSec: Double = 0.0, val tracks: List<RaceMixTrack> = emptyList())
+
+@Serializable
+data class RaceSplitsResponse(val paceProMix: RaceMixPin? = null)
+
 // Mirrors lib/cron-schedule.ts's CronJobState.
 @Serializable
 data class CronJobState(

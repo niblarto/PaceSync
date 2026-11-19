@@ -1136,6 +1136,10 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
   // Pace Pro splits pasted in for a race workout — keyed by workout date,
   // fetched on expand same as mixSnapshots/pinnedRoutes below.
   const [raceSplits, setRaceSplits] = useState<Record<string, RaceSplitsEntry | null>>({});
+  // The saved Pace Pro mix pinned to each race (by workout date), with its tracklist.
+  interface RaceMixPin { id: string; title: string; totalSec: number; tracks: { uri: string; name: string; artist: string; startsAt: string; tempo: number }[] }
+  const [raceMixes, setRaceMixes] = useState<Record<string, RaceMixPin | null>>({});
+  const [raceMixOpen, setRaceMixOpen] = useState<Set<string>>(new Set());
   const [splitsEditing, setSplitsEditing] = useState<string | null>(null); // workout date whose textarea is open
   const [splitsText, setSplitsText] = useState("");
   const [splitsSaving, setSplitsSaving] = useState(false);
@@ -1255,8 +1259,9 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     if (raceSplits[w.date] !== undefined) return;
     fetch(`/api/ai-dj/race-splits?date=${w.date}&title=${encodeURIComponent(w.title)}`)
       .then(r => r.json())
-      .then((d: { splits?: RaceSplitsEntry | null }) => {
+      .then((d: { splits?: RaceSplitsEntry | null; paceProMix?: RaceMixPin | null }) => {
         setRaceSplits(s => ({ ...s, [w.date]: d.splits ?? null }));
+        setRaceMixes(s => ({ ...s, [w.date]: d.paceProMix ?? null }));
       })
       .catch(() => setRaceSplits(s => ({ ...s, [w.date]: null })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1329,6 +1334,11 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       setSplitsLinking(null);
       setSplitsEditing(null);
       setSplitsLinkedMsg(`Linked to "${target.title}" — splits${d.routeLinked ? " and route" : ""} saved.`);
+      // ...and the mix's tracklist is now pinned to the race card
+      fetch(`/api/ai-dj/race-splits?date=${target.date}&title=${encodeURIComponent(target.title)}`)
+        .then(r => r.json())
+        .then((rd: { paceProMix?: RaceMixPin | null }) => setRaceMixes(s => ({ ...s, [target.date]: rd.paceProMix ?? null })))
+        .catch(() => {});
       // The link may have also pinned a route (if the mix had one attached)
       // — re-fetch so the "📌 Pinned route" button appears immediately
       // instead of waiting for the next expand/routeMap-close refetch.
@@ -1398,6 +1408,37 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
       }));
       onAiDjMix(mix.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w, raceSplits[w.date]), w.date, mix.timeline);
     } catch { /* best-effort — no tracklist to load if this fails */ }
+  }
+
+  // Loads a race's pinned Pace Pro mix into the main track list (delete / similar / suggest actions are there).
+  async function loadRaceMixIntoTracklist(w: RunnaWorkout, mixId: string) {
+    if (!onAiDjMix) return;
+    try {
+      const res = await fetch(`/api/settings/pace-pro-saved?id=${encodeURIComponent(mixId)}`);
+      const d = await res.json() as { mix?: SavedPaceProMix; error?: string };
+      if (!res.ok || !d.mix) return;
+      const mix = d.mix;
+      const tracks: TrackWithBPM[] = mix.timeline.flatMap(s => s.tracks).filter(t => t.uri).map(t => ({
+        id: t.uri.split(":")[2] ?? t.uri,
+        name: t.name,
+        artists: [{ name: t.artist }],
+        album: { name: "", images: [] },
+        duration_ms: Math.round((t.durationSec ?? 0) * 1000),
+        uri: t.uri,
+        bpm: Math.round(t.tempo ?? 0),
+        energy: t.energy ?? 0,
+      }));
+      onAiDjMix(mix.title, mixName(w), tracks, mix.totalSec, mixSegmentsFor(w, raceSplits[w.date]), w.date, mix.timeline);
+    } catch { /* best-effort */ }
+  }
+
+  async function unpinRaceMix(date: string, title: string) {
+    setRaceMixes(s => ({ ...s, [date]: null }));
+    await fetch("/api/ai-dj/race-splits/link-pace-pro", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date, title }),
+    }).catch(() => {});
   }
 
   async function saveRaceSplits(w: RunnaWorkout) {
@@ -1816,17 +1857,6 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                         });
                       })()}
                     </div>
-                    {w.appUrl && (
-                      <a
-                        href={w.appUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-block text-xs text-green-400 hover:text-green-300 underline mt-1"
-                        onClick={e => e.stopPropagation()}
-                      >
-                        View in Runna app ↗
-                      </a>
-                    )}
                     {garminConfigured && onPaceFilter && paceSpm.length > 0 && (() => {
                       let withSpm = parsePacesFromSegments(w.segments)
                         .map(p => ({ pace: p, spm: lookupSpm(p, paceSpm) }))
@@ -1854,6 +1884,368 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                               </button>
                             );
                           })}
+                        </div>
+                      );
+                    })()}
+                    {w.type === "race" && (() => {
+                      const saved = raceSplits[w.date];
+                      const isEditing = splitsEditing === w.date;
+                      if (isEditing) {
+                        return (
+                          <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-2">
+                            <p className="text-xs text-purple-300/80 font-medium">Race splits</p>
+                            <div
+                              tabIndex={0}
+                              onClick={e => e.stopPropagation()}
+                              onPaste={e => {
+                                const item = Array.from(e.clipboardData.items).find(i => i.type.startsWith("image/"));
+                                const file = item?.getAsFile();
+                                if (file) { e.preventDefault(); void handleSplitsImage(file); }
+                              }}
+                              className="rounded-lg bg-slate-800/60 border border-dashed border-white/15 text-slate-400 text-xs px-3 py-2 focus:outline-none focus:ring-1 focus:ring-purple-500 cursor-text select-none"
+                              title="Click here, then Ctrl+V to paste a screenshot of the race splits table"
+                            >
+                              {splitsImageTranscribing ? "Reading screenshot…" : "📸 Click here, then paste (Ctrl+V) a screenshot of the splits table"}
+                            </div>
+                            {splitsLinking === w.date ? (
+                              <div className="rounded-lg bg-slate-800/60 border border-white/10 p-2 space-y-1.5">
+                                <div className="flex items-center justify-between">
+                                  <p className="text-[11px] text-slate-400">Link a saved Pace Pro mix</p>
+                                  <button onClick={e => { e.stopPropagation(); setSplitsLinking(null); }} className="text-[11px] text-slate-500 hover:text-slate-300">✕</button>
+                                </div>
+                                {paceProLibrary === null && <p className="text-[11px] text-slate-600">Loading…</p>}
+                                {paceProLibrary?.length === 0 && <p className="text-[11px] text-slate-600">No saved Pace Pro mixes yet.</p>}
+                                <div className="max-h-32 overflow-y-auto no-scrollbar space-y-1">
+                                  {paceProLibrary?.map(mix => (
+                                    <button
+                                      key={mix.id}
+                                      onClick={e => { e.stopPropagation(); void linkPaceProMix(w, mix.id); }}
+                                      disabled={splitsLinkBusy}
+                                      className="w-full text-left text-[11px] rounded-md bg-slate-900/60 hover:bg-slate-900 disabled:opacity-40 px-2 py-1 text-slate-300 transition-colors flex items-center justify-between gap-2"
+                                    >
+                                      <span className="truncate">{mix.title}</span>
+                                      {mix.activityId && <span className="text-emerald-400 shrink-0" title="Has a linked Garmin route">🗺</span>}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={e => { e.stopPropagation(); openSplitsLinkPicker(w.date); }}
+                                className="text-[11px] text-purple-300 hover:text-purple-200 underline"
+                              >
+                                🔗 Link existing Pace Pro mix…
+                              </button>
+                            )}
+                            <p className="text-[11px] text-slate-600">…or paste/edit the table as text below:</p>
+                            <textarea
+                              value={splitsText}
+                              onChange={e => setSplitsText(e.target.value)}
+                              onClick={e => e.stopPropagation()}
+                              placeholder={"1\t1.72 mi\t7:57 /mi\t1.72 mi\t7:57 /mi\t- 2 m\n2\t1.62 mi\t8:14 /mi\t3.35 mi\t8:05 /mi\t+ 54 m\n..."}
+                              rows={6}
+                              className="w-full rounded-lg bg-slate-800 border border-slate-700 text-xs font-mono px-2 py-1.5 text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                            />
+                            {splitsError && <p className="text-xs text-red-400">{splitsError}</p>}
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={e => { e.stopPropagation(); saveRaceSplits(w); }}
+                                disabled={splitsSaving || !splitsText.trim()}
+                                className="text-xs px-2.5 py-1 rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 text-black font-semibold transition-colors"
+                              >
+                                {splitsSaving ? "Saving…" : "Save splits"}
+                              </button>
+                              <button
+                                onClick={e => { e.stopPropagation(); setSplitsEditing(null); setSplitsText(""); setSplitsError(null); }}
+                                className="text-xs text-slate-500 hover:text-slate-300"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      }
+                      if (saved && saved.splits.length > 0) {
+                        return (
+                          <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-1">
+                            <p className="text-xs text-purple-300/80 font-medium flex items-center justify-between gap-2">
+                              <span>🏁 Pace Pro splits — {saved.splits.length} split{saved.splits.length === 1 ? "" : "s"}, {saved.splits[saved.splits.length - 1].cumulativeMi}mi</span>
+                              <span className="flex items-center gap-2 shrink-0">
+                                <button
+                                  onClick={e => { e.stopPropagation(); setSplitsEditing(w.date); setSplitsText(""); setSplitsError(null); }}
+                                  className="text-[11px] text-purple-300 hover:text-purple-200 underline"
+                                >
+                                  Replace
+                                </button>
+                                <button
+                                  onClick={e => { e.stopPropagation(); removeRaceSplitsFor(w.date, w.title); }}
+                                  className="text-[11px] text-red-400/80 hover:text-red-300 underline"
+                                >
+                                  Remove
+                                </button>
+                              </span>
+                            </p>
+                            <div className="max-h-32 overflow-y-auto no-scrollbar space-y-0.5">
+                              {saved.splits.map(s => (
+                                <p key={s.splitNum} className="text-[11px] text-slate-400 font-mono">
+                                  {s.splitNum}. {s.splitMi}mi @ {fmtPaceSec(s.splitPaceSec)}/mi
+                                  <span className="text-slate-600"> · cum {s.cumulativeMi}mi @ {fmtPaceSec(s.cumulativePaceSec)}/mi · {s.elevationChangeM >= 0 ? "+" : ""}{s.elevationChangeM}m</span>
+                                </p>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      }
+                      return (
+                        <button
+                          onClick={e => { e.stopPropagation(); setSplitsEditing(w.date); setSplitsText(""); setSplitsError(null); }}
+                          className="text-xs px-2.5 py-1 rounded-lg border bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25 transition-colors"
+                        >
+                          🏁 Add race splits
+                        </button>
+                      );
+                    })()}
+                    {w.type === "race" && raceMixes[w.date] && (() => {
+                      const pin = raceMixes[w.date]!;
+                      const open = raceMixOpen.has(w.date);
+                      return (
+                        <div className="rounded-lg border border-purple-500/40 bg-purple-500/10 px-3 py-2 space-y-1.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <button
+                              onClick={e => { e.stopPropagation(); setRaceMixOpen(s => { const n = new Set(s); if (n.has(w.date)) n.delete(w.date); else n.add(w.date); return n; }); }}
+                              className="min-w-0 flex-1 text-left text-xs text-purple-200 truncate"
+                              title="Show or hide the tracklist"
+                            >
+                              📌 Pace Pro tracklist: {pin.title} · {pin.tracks.length} track{pin.tracks.length === 1 ? "" : "s"} <span className="text-purple-300/60">{open ? "▾" : "▸"}</span>
+                            </button>
+                            <span className="flex items-center gap-2 shrink-0">
+                              {onAiDjMix && (
+                                <button
+                                  onClick={e => { e.stopPropagation(); void loadRaceMixIntoTracklist(w, pin.id); }}
+                                  title="Load this tracklist into the main track list — delete, similar and suggest actions available there"
+                                  className="text-[11px] text-purple-300 hover:text-purple-200 underline"
+                                >
+                                  Tracklist →
+                                </button>
+                              )}
+                              <button
+                                onClick={e => { e.stopPropagation(); void unpinRaceMix(w.date, w.title); }}
+                                className="text-[11px] text-red-400/80 hover:text-red-300 underline"
+                                title="Unpin this tracklist from the race (the saved Pace Pro mix is kept)"
+                              >
+                                Unpin
+                              </button>
+                            </span>
+                          </div>
+                          {open && (
+                            <div className="max-h-48 overflow-y-auto no-scrollbar space-y-0.5">
+                              {pin.tracks.map((t, i) => (
+                                <p key={`${t.uri}-${i}`} className="text-[11px] text-slate-400 flex gap-2">
+                                  <span className="text-slate-600 font-mono tabular-nums w-10 shrink-0">{t.startsAt}</span>
+                                  <span className="truncate">{t.name} <span className="text-slate-600">— {t.artist}</span></span>
+                                  {t.tempo > 0 && <span className="ml-auto text-slate-600 tabular-nums shrink-0">{Math.round(t.tempo)} bpm</span>}
+                                </p>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                    {w.type === "race" && raceMixes[w.date] === null && splitsEditing !== w.date && (
+                      <button
+                        onClick={e => { e.stopPropagation(); setSplitsEditing(w.date); setSplitsText(""); setSplitsError(null); openSplitsLinkPicker(w.date); }}
+                        className="text-xs px-2.5 py-1 rounded-lg border bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25 transition-colors self-start"
+                      >
+                        📌 Pin a Pace Pro tracklist…
+                      </button>
+                    )}
+                    {showRouteMaps && garminConfigured && pinnedRoutes[w.date] && (
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={async e => {
+                            e.stopPropagation();
+                            const pr = pinnedRoutes[w.date]!;
+                            const mixTracks = await resolveRouteMapTracks(w, pr);
+                            const formattedRunDate = fmtPinnedRunDate(pr.runDate);
+                            setRouteMap({
+                              id: pr.activityId,
+                              label: `${formattedRunDate} · ${pr.distanceMi.toFixed(1)}mi`,
+                              segments: mixSegmentsFor(w, raceSplits[w.date]),
+                              workoutDate: w.date,
+                              workoutTitle: w.title,
+                              runDate: formattedRunDate,
+                              distanceMi: pr.distanceMi,
+                              mixTracks,
+                            });
+                          }}
+                          className="flex-1 text-left text-xs px-2.5 py-1.5 rounded-lg border border-purple-500/40 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 transition-colors"
+                          title={pinnedRoutes[w.date]!.name || undefined}
+                        >
+                          📌 Pinned route: {fmtPinnedRunDate(pinnedRoutes[w.date]!.runDate)} · {pinnedRoutes[w.date]!.distanceMi.toFixed(1)}mi
+                        </button>
+                        {onAiDjMix && (mixSnapshots[w.date] || pinnedRoutes[w.date]!.paceProMixId) && (
+                          <button
+                            onClick={e => { e.stopPropagation(); void loadPinnedRouteIntoTracklist(w, pinnedRoutes[w.date]!); }}
+                            title="Load this route's tracklist into the main track list — delete, similar and suggest actions available there"
+                            className="shrink-0 text-xs text-purple-300 hover:text-purple-200 underline px-1"
+                          >
+                            Tracklist →
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {showRouteMaps && isRun && w.distanceMi && savedRoutes && (() => {
+                      const matching = savedRoutes.filter(sr => Math.abs(sr.distanceMi - w.distanceMi!) <= 0.3);
+                      if (!matching.length) return null;
+                      return (
+                        <div className="pt-1 space-y-1.5">
+                          <p className="text-xs text-slate-500">
+                            Saved routes at this distance ({(w.distanceMi - 0.3).toFixed(1)}–{(w.distanceMi + 0.3).toFixed(1)}mi)
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {matching.map(sr => (
+                              <button
+                                key={sr.id}
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  setRouteMap({
+                                    id: `saved:${sr.id}`,
+                                    label: `${sr.name} · ${sr.distanceMi.toFixed(1)}mi`,
+                                    segments: mixSegmentsFor(w, raceSplits[w.date]),
+                                    workoutDate: w.date,
+                                    workoutTitle: w.title,
+                                    runDate: "Saved route",
+                                    distanceMi: sr.distanceMi,
+                                    mixTracks: mixSnapshots[w.date]?.tracks,
+                                  });
+                                }}
+                                className="min-w-0 max-w-full truncate whitespace-nowrap text-xs px-2 py-1 rounded-lg border bg-green-500/15 border-green-500/30 text-green-300 hover:bg-green-500/25 transition-colors"
+                                title={sr.name}
+                              >
+                                🗺️ {sr.name} · {sr.distanceMi.toFixed(1)}mi
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    {showRouteMaps && garminConfigured && isRun && w.distanceMi && (() => {
+                      const r = routes[w.uid];
+                      if (!r || r.total === 0) return null;
+                      const canNewer = r.offset > 0;
+                      const canOlder = r.offset + 3 < r.total;
+                      const pagerBtn = "px-1.5 py-1 rounded-lg border border-white/10 text-slate-400 hover:text-sky-300 hover:border-sky-500/30 disabled:opacity-25 disabled:hover:text-slate-400 disabled:hover:border-white/10 transition-colors text-xs shrink-0";
+                      return (
+                        <div className="pt-1 space-y-1.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs text-slate-500">
+                              Runs at the distance ({w.distanceMi}–{(w.distanceMi + 0.5).toFixed(1)}mi) · {r.offset + 1}–{Math.min(r.offset + 3, r.total)} of {r.total}
+                            </p>
+                            <CreateRouteLink w={w} />
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={e => { e.stopPropagation(); if (canNewer) fetchRoutes(w.uid, w.distanceMi!, Math.max(0, r.offset - 3)); }}
+                              disabled={!canNewer || r.loading}
+                              className={pagerBtn}
+                              title="Newer runs"
+                            >
+                              &lt;
+                            </button>
+                            <div className={`flex flex-nowrap gap-1.5 flex-1 min-w-0 ${r.loading ? "opacity-50" : ""}`}>
+                              {r.items.map(a => (
+                                <button
+                                  key={a.activity_id}
+                                  onClick={e => {
+                                    e.stopPropagation();
+                                    setRouteMap({
+                                      id: a.activity_id,
+                                      label: `${routeDate(a)} · ${a.distance.toFixed(1)}mi`,
+                                      segments: mixSegmentsFor(w, raceSplits[w.date]),
+                                      workoutDate: w.date,
+                                      workoutTitle: w.title,
+                                      runDate: routeDate(a),
+                                      distanceMi: a.distance,
+                                      mixTracks: mixSnapshots[w.date]?.tracks,
+                                    });
+                                  }}
+                                  className="flex-1 min-w-0 truncate whitespace-nowrap text-center text-xs px-1.5 py-1 rounded-lg border bg-sky-500/15 border-sky-500/30 text-sky-300 hover:bg-sky-500/25 transition-colors"
+                                  title={a.name ?? undefined}
+                                >
+                                  {routeDate(a)} · {a.distance.toFixed(1)}mi{routePace(a) ? ` · ${routePace(a)!.replace("/mi", "")}` : ""}
+                                </button>
+                              ))}
+                            </div>
+                            <button
+                              onClick={e => { e.stopPropagation(); if (canOlder) fetchRoutes(w.uid, w.distanceMi!, r.offset + 3); }}
+                              disabled={!canOlder || r.loading}
+                              className={pagerBtn}
+                              title="Older runs"
+                            >
+                              &gt;
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    {showRouteMaps && garminConfigured && isRun && w.distanceMi && courses && (() => {
+                      // Courses close to this run's distance — a shade under
+                      // through +0.25mi over — newest first (the API already
+                      // sorts by creation date descending).
+                      const matching = courses.filter(c =>
+                        c.distanceMi >= w.distanceMi! - 0.05 && c.distanceMi <= w.distanceMi! + 0.25
+                      );
+                      if (!matching.length) return null;
+                      const offset = courseOffsets[w.uid] ?? 0;
+                      const canNewer = offset > 0;
+                      const canOlder = offset + 3 < matching.length;
+                      const pagerBtn = "px-1.5 py-1 rounded-lg border border-white/10 text-slate-400 hover:text-green-300 hover:border-green-500/30 disabled:opacity-25 disabled:hover:text-slate-400 disabled:hover:border-white/10 transition-colors text-xs shrink-0";
+                      const page = (o: number) => setCourseOffsets(s => ({ ...s, [w.uid]: o }));
+                      return (
+                        <div className="pt-1 space-y-1.5">
+                          <p className="text-xs text-slate-500">
+                            Courses at this distance ({(w.distanceMi - 0.05).toFixed(2)}–{(w.distanceMi + 0.25).toFixed(2)}mi) · {offset + 1}–{Math.min(offset + 3, matching.length)} of {matching.length}
+                          </p>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={e => { e.stopPropagation(); if (canNewer) page(Math.max(0, offset - 3)); }}
+                              disabled={!canNewer}
+                              className={pagerBtn}
+                              title="Newer courses"
+                            >
+                              &lt;
+                            </button>
+                            <div className="flex flex-nowrap gap-1.5 flex-1 min-w-0">
+                              {matching.slice(offset, offset + 3).map(c => {
+                                const highlight = courseMatchesDate(c.name, w.date);
+                                return (
+                                  <a
+                                    key={c.id}
+                                    href={`https://connect.garmin.com/modern/course/${c.id}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={e => e.stopPropagation()}
+                                    className={`flex-1 min-w-0 truncate whitespace-nowrap text-center text-xs px-1.5 py-1 rounded-lg border transition-colors ${
+                                      highlight
+                                        ? "bg-green-500/40 border-green-300/70 text-green-50 font-medium hover:bg-green-500/50"
+                                        : "bg-green-500/15 border-green-500/30 text-green-300 hover:bg-green-500/25"
+                                    }`}
+                                    title={`${c.name} · ${c.distanceMi.toFixed(1)}mi`}
+                                  >
+                                    {c.name} · {c.distanceMi.toFixed(1)}mi
+                                  </a>
+                                );
+                              })}
+                            </div>
+                            <button
+                              onClick={e => { e.stopPropagation(); if (canOlder) page(offset + 3); }}
+                              disabled={!canOlder}
+                              className={pagerBtn}
+                              title="Older courses"
+                            >
+                              &gt;
+                            </button>
+                          </div>
                         </div>
                       );
                     })()}
@@ -2004,311 +2396,6 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
                         </>
                       );
                     })()}
-                    {w.type === "race" && (() => {
-                      const saved = raceSplits[w.date];
-                      const isEditing = splitsEditing === w.date;
-                      if (isEditing) {
-                        return (
-                          <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-2">
-                            <p className="text-xs text-purple-300/80 font-medium">Race splits</p>
-                            <div
-                              tabIndex={0}
-                              onClick={e => e.stopPropagation()}
-                              onPaste={e => {
-                                const item = Array.from(e.clipboardData.items).find(i => i.type.startsWith("image/"));
-                                const file = item?.getAsFile();
-                                if (file) { e.preventDefault(); void handleSplitsImage(file); }
-                              }}
-                              className="rounded-lg bg-slate-800/60 border border-dashed border-white/15 text-slate-400 text-xs px-3 py-2 focus:outline-none focus:ring-1 focus:ring-purple-500 cursor-text select-none"
-                              title="Click here, then Ctrl+V to paste a screenshot of the race splits table"
-                            >
-                              {splitsImageTranscribing ? "Reading screenshot…" : "📸 Click here, then paste (Ctrl+V) a screenshot of the splits table"}
-                            </div>
-                            {splitsLinking === w.date ? (
-                              <div className="rounded-lg bg-slate-800/60 border border-white/10 p-2 space-y-1.5">
-                                <div className="flex items-center justify-between">
-                                  <p className="text-[11px] text-slate-400">Link a saved Pace Pro mix</p>
-                                  <button onClick={e => { e.stopPropagation(); setSplitsLinking(null); }} className="text-[11px] text-slate-500 hover:text-slate-300">✕</button>
-                                </div>
-                                {paceProLibrary === null && <p className="text-[11px] text-slate-600">Loading…</p>}
-                                {paceProLibrary?.length === 0 && <p className="text-[11px] text-slate-600">No saved Pace Pro mixes yet.</p>}
-                                <div className="max-h-32 overflow-y-auto no-scrollbar space-y-1">
-                                  {paceProLibrary?.map(mix => (
-                                    <button
-                                      key={mix.id}
-                                      onClick={e => { e.stopPropagation(); void linkPaceProMix(w, mix.id); }}
-                                      disabled={splitsLinkBusy}
-                                      className="w-full text-left text-[11px] rounded-md bg-slate-900/60 hover:bg-slate-900 disabled:opacity-40 px-2 py-1 text-slate-300 transition-colors flex items-center justify-between gap-2"
-                                    >
-                                      <span className="truncate">{mix.title}</span>
-                                      {mix.activityId && <span className="text-emerald-400 shrink-0" title="Has a linked Garmin route">🗺</span>}
-                                    </button>
-                                  ))}
-                                </div>
-                              </div>
-                            ) : (
-                              <button
-                                onClick={e => { e.stopPropagation(); openSplitsLinkPicker(w.date); }}
-                                className="text-[11px] text-purple-300 hover:text-purple-200 underline"
-                              >
-                                🔗 Link existing Pace Pro mix…
-                              </button>
-                            )}
-                            <p className="text-[11px] text-slate-600">…or paste/edit the table as text below:</p>
-                            <textarea
-                              value={splitsText}
-                              onChange={e => setSplitsText(e.target.value)}
-                              onClick={e => e.stopPropagation()}
-                              placeholder={"1\t1.72 mi\t7:57 /mi\t1.72 mi\t7:57 /mi\t- 2 m\n2\t1.62 mi\t8:14 /mi\t3.35 mi\t8:05 /mi\t+ 54 m\n..."}
-                              rows={6}
-                              className="w-full rounded-lg bg-slate-800 border border-slate-700 text-xs font-mono px-2 py-1.5 text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
-                            />
-                            {splitsError && <p className="text-xs text-red-400">{splitsError}</p>}
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={e => { e.stopPropagation(); saveRaceSplits(w); }}
-                                disabled={splitsSaving || !splitsText.trim()}
-                                className="text-xs px-2.5 py-1 rounded-lg bg-purple-500 hover:bg-purple-400 disabled:opacity-40 text-black font-semibold transition-colors"
-                              >
-                                {splitsSaving ? "Saving…" : "Save splits"}
-                              </button>
-                              <button
-                                onClick={e => { e.stopPropagation(); setSplitsEditing(null); setSplitsText(""); setSplitsError(null); }}
-                                className="text-xs text-slate-500 hover:text-slate-300"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      }
-                      if (saved && saved.splits.length > 0) {
-                        return (
-                          <div className="mt-1.5 rounded-lg bg-slate-900/50 border border-purple-500/15 px-3 py-2 space-y-1">
-                            <p className="text-xs text-purple-300/80 font-medium flex items-center justify-between gap-2">
-                              <span>🏁 Pace Pro splits — {saved.splits.length} split{saved.splits.length === 1 ? "" : "s"}, {saved.splits[saved.splits.length - 1].cumulativeMi}mi</span>
-                              <span className="flex items-center gap-2 shrink-0">
-                                <button
-                                  onClick={e => { e.stopPropagation(); setSplitsEditing(w.date); setSplitsText(""); setSplitsError(null); }}
-                                  className="text-[11px] text-purple-300 hover:text-purple-200 underline"
-                                >
-                                  Replace
-                                </button>
-                                <button
-                                  onClick={e => { e.stopPropagation(); removeRaceSplitsFor(w.date, w.title); }}
-                                  className="text-[11px] text-red-400/80 hover:text-red-300 underline"
-                                >
-                                  Remove
-                                </button>
-                              </span>
-                            </p>
-                            <div className="max-h-32 overflow-y-auto no-scrollbar space-y-0.5">
-                              {saved.splits.map(s => (
-                                <p key={s.splitNum} className="text-[11px] text-slate-400 font-mono">
-                                  {s.splitNum}. {s.splitMi}mi @ {fmtPaceSec(s.splitPaceSec)}/mi
-                                  <span className="text-slate-600"> · cum {s.cumulativeMi}mi @ {fmtPaceSec(s.cumulativePaceSec)}/mi · {s.elevationChangeM >= 0 ? "+" : ""}{s.elevationChangeM}m</span>
-                                </p>
-                              ))}
-                            </div>
-                          </div>
-                        );
-                      }
-                      return (
-                        <button
-                          onClick={e => { e.stopPropagation(); setSplitsEditing(w.date); setSplitsText(""); setSplitsError(null); }}
-                          className="text-xs px-2.5 py-1 rounded-lg border bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25 transition-colors"
-                        >
-                          🏁 Add race splits
-                        </button>
-                      );
-                    })()}
-                    {showRouteMaps && garminConfigured && pinnedRoutes[w.date] && (
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={async e => {
-                            e.stopPropagation();
-                            const pr = pinnedRoutes[w.date]!;
-                            const mixTracks = await resolveRouteMapTracks(w, pr);
-                            const formattedRunDate = fmtPinnedRunDate(pr.runDate);
-                            setRouteMap({
-                              id: pr.activityId,
-                              label: `${formattedRunDate} · ${pr.distanceMi.toFixed(1)}mi`,
-                              segments: mixSegmentsFor(w, raceSplits[w.date]),
-                              workoutDate: w.date,
-                              workoutTitle: w.title,
-                              runDate: formattedRunDate,
-                              distanceMi: pr.distanceMi,
-                              mixTracks,
-                            });
-                          }}
-                          className="flex-1 text-left text-xs px-2.5 py-1.5 rounded-lg border border-purple-500/40 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 transition-colors"
-                          title={pinnedRoutes[w.date]!.name || undefined}
-                        >
-                          📌 Pinned route: {fmtPinnedRunDate(pinnedRoutes[w.date]!.runDate)} · {pinnedRoutes[w.date]!.distanceMi.toFixed(1)}mi
-                        </button>
-                        {onAiDjMix && (mixSnapshots[w.date] || pinnedRoutes[w.date]!.paceProMixId) && (
-                          <button
-                            onClick={e => { e.stopPropagation(); void loadPinnedRouteIntoTracklist(w, pinnedRoutes[w.date]!); }}
-                            title="Load this route's tracklist into the main track list — delete, similar and suggest actions available there"
-                            className="shrink-0 text-xs text-purple-300 hover:text-purple-200 underline px-1"
-                          >
-                            Tracklist →
-                          </button>
-                        )}
-                      </div>
-                    )}
-                    {showRouteMaps && garminConfigured && isRun && w.distanceMi && (() => {
-                      const r = routes[w.uid];
-                      if (!r || r.total === 0) return null;
-                      const canNewer = r.offset > 0;
-                      const canOlder = r.offset + 3 < r.total;
-                      const pagerBtn = "px-1.5 py-1 rounded-lg border border-white/10 text-slate-400 hover:text-sky-300 hover:border-sky-500/30 disabled:opacity-25 disabled:hover:text-slate-400 disabled:hover:border-white/10 transition-colors text-xs shrink-0";
-                      return (
-                        <div className="pt-1 space-y-1.5">
-                          <p className="text-xs text-slate-500">
-                            Runs at the distance ({w.distanceMi}–{(w.distanceMi + 0.5).toFixed(1)}mi) · {r.offset + 1}–{Math.min(r.offset + 3, r.total)} of {r.total}
-                          </p>
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              onClick={e => { e.stopPropagation(); if (canNewer) fetchRoutes(w.uid, w.distanceMi!, Math.max(0, r.offset - 3)); }}
-                              disabled={!canNewer || r.loading}
-                              className={pagerBtn}
-                              title="Newer runs"
-                            >
-                              &lt;
-                            </button>
-                            <div className={`flex flex-nowrap gap-1.5 flex-1 min-w-0 ${r.loading ? "opacity-50" : ""}`}>
-                              {r.items.map(a => (
-                                <button
-                                  key={a.activity_id}
-                                  onClick={e => {
-                                    e.stopPropagation();
-                                    setRouteMap({
-                                      id: a.activity_id,
-                                      label: `${routeDate(a)} · ${a.distance.toFixed(1)}mi`,
-                                      segments: mixSegmentsFor(w, raceSplits[w.date]),
-                                      workoutDate: w.date,
-                                      workoutTitle: w.title,
-                                      runDate: routeDate(a),
-                                      distanceMi: a.distance,
-                                      mixTracks: mixSnapshots[w.date]?.tracks,
-                                    });
-                                  }}
-                                  className="flex-1 min-w-0 truncate whitespace-nowrap text-center text-xs px-1.5 py-1 rounded-lg border bg-sky-500/15 border-sky-500/30 text-sky-300 hover:bg-sky-500/25 transition-colors"
-                                  title={a.name ?? undefined}
-                                >
-                                  {routeDate(a)} · {a.distance.toFixed(1)}mi{routePace(a) ? ` · ${routePace(a)!.replace("/mi", "")}` : ""}
-                                </button>
-                              ))}
-                            </div>
-                            <button
-                              onClick={e => { e.stopPropagation(); if (canOlder) fetchRoutes(w.uid, w.distanceMi!, r.offset + 3); }}
-                              disabled={!canOlder || r.loading}
-                              className={pagerBtn}
-                              title="Older runs"
-                            >
-                              &gt;
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })()}
-                    {showRouteMaps && isRun && w.distanceMi && savedRoutes && (() => {
-                      const matching = savedRoutes.filter(sr => Math.abs(sr.distanceMi - w.distanceMi!) <= 0.3);
-                      if (!matching.length) return null;
-                      return (
-                        <div className="pt-1 space-y-1.5">
-                          <p className="text-xs text-slate-500">
-                            Saved routes at this distance ({(w.distanceMi - 0.3).toFixed(1)}–{(w.distanceMi + 0.3).toFixed(1)}mi)
-                          </p>
-                          <div className="flex flex-wrap gap-1.5">
-                            {matching.map(sr => (
-                              <button
-                                key={sr.id}
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  setRouteMap({
-                                    id: `saved:${sr.id}`,
-                                    label: `${sr.name} · ${sr.distanceMi.toFixed(1)}mi`,
-                                    segments: mixSegmentsFor(w, raceSplits[w.date]),
-                                    workoutDate: w.date,
-                                    workoutTitle: w.title,
-                                    runDate: "Saved route",
-                                    distanceMi: sr.distanceMi,
-                                    mixTracks: mixSnapshots[w.date]?.tracks,
-                                  });
-                                }}
-                                className="min-w-0 max-w-full truncate whitespace-nowrap text-xs px-2 py-1 rounded-lg border bg-green-500/15 border-green-500/30 text-green-300 hover:bg-green-500/25 transition-colors"
-                                title={sr.name}
-                              >
-                                🗺️ {sr.name} · {sr.distanceMi.toFixed(1)}mi
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })()}
-                    {showRouteMaps && garminConfigured && isRun && w.distanceMi && courses && (() => {
-                      // Courses close to this run's distance — a shade under
-                      // through +0.25mi over — newest first (the API already
-                      // sorts by creation date descending).
-                      const matching = courses.filter(c =>
-                        c.distanceMi >= w.distanceMi! - 0.05 && c.distanceMi <= w.distanceMi! + 0.25
-                      );
-                      if (!matching.length) return null;
-                      const offset = courseOffsets[w.uid] ?? 0;
-                      const canNewer = offset > 0;
-                      const canOlder = offset + 3 < matching.length;
-                      const pagerBtn = "px-1.5 py-1 rounded-lg border border-white/10 text-slate-400 hover:text-green-300 hover:border-green-500/30 disabled:opacity-25 disabled:hover:text-slate-400 disabled:hover:border-white/10 transition-colors text-xs shrink-0";
-                      const page = (o: number) => setCourseOffsets(s => ({ ...s, [w.uid]: o }));
-                      return (
-                        <div className="pt-1 space-y-1.5">
-                          <p className="text-xs text-slate-500">
-                            Courses at this distance ({(w.distanceMi - 0.05).toFixed(2)}–{(w.distanceMi + 0.25).toFixed(2)}mi) · {offset + 1}–{Math.min(offset + 3, matching.length)} of {matching.length}
-                          </p>
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              onClick={e => { e.stopPropagation(); if (canNewer) page(Math.max(0, offset - 3)); }}
-                              disabled={!canNewer}
-                              className={pagerBtn}
-                              title="Newer courses"
-                            >
-                              &lt;
-                            </button>
-                            <div className="flex flex-nowrap gap-1.5 flex-1 min-w-0">
-                              {matching.slice(offset, offset + 3).map(c => {
-                                const highlight = courseMatchesDate(c.name, w.date);
-                                return (
-                                  <a
-                                    key={c.id}
-                                    href={`https://connect.garmin.com/modern/course/${c.id}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    onClick={e => e.stopPropagation()}
-                                    className={`flex-1 min-w-0 truncate whitespace-nowrap text-center text-xs px-1.5 py-1 rounded-lg border transition-colors ${
-                                      highlight
-                                        ? "bg-green-500/40 border-green-300/70 text-green-50 font-medium hover:bg-green-500/50"
-                                        : "bg-green-500/15 border-green-500/30 text-green-300 hover:bg-green-500/25"
-                                    }`}
-                                    title={`${c.name} · ${c.distanceMi.toFixed(1)}mi`}
-                                  >
-                                    {c.name} · {c.distanceMi.toFixed(1)}mi
-                                  </a>
-                                );
-                              })}
-                            </div>
-                            <button
-                              onClick={e => { e.stopPropagation(); if (canOlder) page(offset + 3); }}
-                              disabled={!canOlder}
-                              className={pagerBtn}
-                              title="Older courses"
-                            >
-                              &gt;
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })()}
                   </div>
                 )}
               </div>
@@ -2352,6 +2439,22 @@ export const RunnaScheduleCard = forwardRef<RunnaScheduleHandle, RunnaSchedulePr
     </div>
   );
 });
+
+// Opens the Route Finder at this workout's distance, runs the route search straight away and lays the workout's
+// steps over the routes it finds.
+function CreateRouteLink({ w }: { w: RunnaWorkout }) {
+  if (!w.distanceMi) return null;
+  return (
+    <Link
+      href={`/routes?distance=${w.distanceMi}&auto=1&workout=${encodeURIComponent(w.uid)}`}
+      onClick={e => e.stopPropagation()}
+      className="shrink-0 whitespace-nowrap text-xs px-2 py-0.5 rounded-lg border border-green-500/30 bg-green-500/15 text-green-300 hover:bg-green-500/25 transition-colors"
+      title={`Create ${w.distanceMi}mi routes to choose from`}
+    >
+      ＋ Create route
+    </Link>
+  );
+}
 
 // Legacy export so any existing import still compiles
 export { RunnaScheduleCard as RunnaCard };

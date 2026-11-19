@@ -72,3 +72,7 @@ data class LoseItConnectRequest(val email: String, val password: String)
 // No default on purpose: the JSON encoder skips default-valued fields.
 @Serializable
 data class LoseItSyncRequest(val full: Boolean)
+
+// POST api/loseit/sync-day: re-read one past day from Lose It!; answers with that day's diary.
+@Serializable
+data class LoseItSyncDayRequest(val date: String)

@@ -4,7 +4,7 @@ import { loadGarminConfig } from "@/lib/garmin-config";
 import { getRouteGraph } from "@/lib/route-graph-cache";
 import { loadOrsKey, orsRateInfo } from "@/lib/ors";
 import { finishRoutes } from "@/lib/route-finish";
-import { familiarityOf, firstUnreachableLeg, MAX_GENERATED_WAYPOINTS, minGeneratedWaypoints, nearestNode, suggestLoops } from "@/lib/route-graph";
+import { parseKinds, familiarityOf, firstUnreachableLeg, MAX_GENERATED_WAYPOINTS, minGeneratedWaypoints, nearestNode, suggestLoops } from "@/lib/route-graph";
 
 // New loop routes of a requested distance, stitched together from the paths
 // in the user's own recorded runs. GET ?distanceMi=6.2[&seed=n][&lat=&lng=][&endLat=&endLng=][&minRuns=2][&via=lat,lng|lat,lng]
@@ -23,6 +23,7 @@ export async function GET(req: NextRequest) {
     .map(v => v.split(",").map(parseFloat))
     .filter(v => v.length === 2 && !isNaN(v[0]) && !isNaN(v[1]))
     .slice(0, 8);
+  const kinds = parseKinds(req.nextUrl.searchParams.get("kinds"));
   const snap = req.nextUrl.searchParams.get("snap") === "1";
   const avoidLights = req.nextUrl.searchParams.get("avoidLights") === "1";
   const preferParks = req.nextUrl.searchParams.get("preferParks") === "1";
@@ -37,8 +38,8 @@ export async function GET(req: NextRequest) {
 
   try {
     // Built once and cached (activities you excluded are left out of it).
-    const graph = getRouteGraph(config.dbPath);
-    if (!graph) return NextResponse.json({ error: "No GPS data in your running history yet" }, { status: 404 });
+    const graph = getRouteGraph(config.dbPath, kinds);
+    if (!graph) return NextResponse.json({ error: `No GPS data in your ${kinds === "walks" ? "walking" : kinds === "both" ? "running or walking" : "running"} history yet` }, { status: 404 });
 
     const start = !isNaN(lat) && !isNaN(lng) ? nearestNode(graph, lat, lng, minRuns) : graph.home;
     const end = !isNaN(endLat) && !isNaN(endLng) ? nearestNode(graph, endLat, endLng, minRuns) : undefined;

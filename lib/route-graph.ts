@@ -60,7 +60,15 @@ function haversineM(lat1: number, lng1: number, lat2: number, lng2: number): num
   return EARTH_RADIUS_M * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-export function buildRouteGraph(dbDir: string, excluded: Set<string> = new Set()): RouteGraph | null {
+// Which activities the path graph is built from: your runs, your walks, or both.
+export type ActivityKinds = "runs" | "walks" | "both";
+export function parseKinds(v: unknown): ActivityKinds { return v === "walks" || v === "both" ? v : "runs"; }
+export function kindsSql(col: string, kinds: ActivityKinds): string {
+  const run = `LOWER(${col}) LIKE '%running%'`, walk = `LOWER(${col}) LIKE '%walking%'`;
+  return kinds === "walks" ? walk : kinds === "both" ? `(${run} OR ${walk})` : run;
+}
+
+export function buildRouteGraph(dbDir: string, excluded: Set<string> = new Set(), kinds: ActivityKinds = "runs"): RouteGraph | null {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const Database = require("better-sqlite3") as typeof import("better-sqlite3");
   const db = new Database(path.join(dbDir, "garmin_activities.db"), { readonly: true, fileMustExist: true });
@@ -106,7 +114,7 @@ export function buildRouteGraph(dbDir: string, excluded: Set<string> = new Set()
     SELECT r.activity_id AS id, r.position_lat AS lat, r.position_long AS lng
     FROM activity_records r
     JOIN activities a ON a.activity_id = r.activity_id
-    WHERE LOWER(a.sport) LIKE '%running%'
+    WHERE ${kindsSql("a.sport", kinds)}
       AND r.position_lat IS NOT NULL AND r.position_long IS NOT NULL
     ORDER BY r.activity_id, r.record
   `).iterate() as IterableIterator<{ id: number | string; lat: number; lng: number }>;
@@ -398,6 +406,44 @@ function dijkstra(
     return out.reverse();
   };
   return { src, real, path };
+}
+
+// The graph node closest to a point, no matter how well run (for a point that already is a node's position).
+export function exactNode(g: RouteGraph, qLat: number, qLng: number): number {
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < g.lat.length; i++) {
+    if (g.adj[i].length === 0) continue;
+    const d = haversineM(qLat, qLng, g.lat[i], g.lng[i]);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+// Shortest way along paths run at least `minRuns` times from node `a` to node `b`, turning round freely
+// (it's a hand-drawn route). Null when they aren't joined by such paths.
+export function shortestPathNodes(g: RouteGraph, a: number, b: number, minRuns: number): number[] | null {
+  if (a === b) return [a];
+  const dist = new Map<number, number>([[a, 0]]);
+  const parent = new Map<number, number>();
+  const done = new Set<number>();
+  const heap = new MinHeap();
+  heap.push(0, a);
+  while (heap.size > 0) {
+    const [c, n] = heap.pop();
+    if (done.has(n)) continue;
+    done.add(n);
+    if (n === b) break;
+    for (const e of g.adj[n]) {
+      if (e.cnt < minRuns || done.has(e.to)) continue;
+      const nc = c + e.len;
+      const old = dist.get(e.to);
+      if (old === undefined || nc < old) { dist.set(e.to, nc); parent.set(e.to, n); heap.push(nc, e.to); }
+    }
+  }
+  if (!done.has(b)) return null;
+  const out = [b];
+  for (let n = b; n !== a;) { n = parent.get(n)!; out.push(n); }
+  return out.reverse();
 }
 
 // ---- loop search ----------------------------------------------------------

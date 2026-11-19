@@ -31,20 +31,23 @@ function localLabel(config: CoachConfig): string {
 }
 
 // The local model on the AI DJ service PC.
-async function localChat(config: CoachConfig, system: string, messages: CoachMessage[], think: boolean): Promise<CoachReply> {
+// web: the service searches SearXNG for the question first and returns sources.
+async function localChat(config: CoachConfig, system: string, messages: CoachMessage[], think: boolean, web = false): Promise<CoachReply> {
   const dj = loadAiDjConfig();
   if (!dj?.url) return { ok: false, error: "The local model runs on the AI DJ service PC — set its URL in Settings → AI DJ" };
   try {
     const res = await fetch(`${dj.url}/coach/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ system, messages, model: config.ollamaModel || undefined, think }),
+      body: JSON.stringify({ system, messages, model: config.ollamaModel || undefined, think, web: web || undefined }),
       signal: AbortSignal.timeout(think ? LOCAL_THINK_TIMEOUT_MS : LOCAL_TIMEOUT_MS),
     });
     if (res.status === 404) return { ok: false, error: "The AI DJ service on the PC needs restarting to pick up the Coach" };
-    const data = await res.json() as { reply?: string; error?: string };
+    const data = await res.json() as { reply?: string; error?: string; sources?: WebSource[] };
     if (!res.ok || !data.reply) return { ok: false, error: data.error ?? `AI DJ service ${res.status}` };
-    return { ok: true, reply: data.reply, model: localLabel(config) };
+    return web
+      ? { ok: true, reply: data.reply, model: `${localLabel(config)} · 🌐 web`, sources: data.sources ?? [] }
+      : { ok: true, reply: data.reply, model: localLabel(config) };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
@@ -104,12 +107,15 @@ export async function coachChat(system: string, messages: CoachMessage[], opts: 
   return r;
 }
 
-// The Coach's 🌐 button. With an Ollama web search key saved: search the web
+// The Coach's 🌐 button. With the local model: web search via SearXNG on the
+// AI DJ service. Otherwise, with an Ollama web search key saved: search the web
 // for the question, then the usual coach AI (Settings → Coach, with its
 // fallback) answers from the results plus the training data. Without a key:
 // Gemini with Google Search (needs a paid Gemini key).
 export async function coachWebChat(system: string, messages: CoachMessage[]): Promise<CoachReply> {
   const config = loadCoachConfig();
+  // Local model: the AI DJ service searches the self-hosted SearXNG itself.
+  if (config.provider === "local") return localChat(config, system, messages, false, true);
   if (loadOllamaWebKey()) {
     const question = [...messages].reverse().find(m => m.role === "user")?.content ?? "";
     const search = await ollamaWebSearch(question);

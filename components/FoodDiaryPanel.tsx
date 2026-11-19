@@ -341,6 +341,29 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
     return () => clearInterval(t);
   }, []);
 
+  // "Sync" on a past day: re-reads just that day from Lose It! (the ↻ button only covers today, plus yesterday once
+  // on each new day), for foods added or changed in Lose It! since it was last read.
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  async function syncThisDay() {
+    setSyncing(true); setError(null); setSyncMsg(null);
+    try {
+      const before = diary?.totals.kcal ?? 0;
+      const res = await fetch("/api/loseit/sync-day", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date }) });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Sync failed (${res.status})`);
+      setDiary(body);
+      onChanged?.();
+      const diff = Math.round(body.totals.kcal - before);
+      setSyncMsg(diff === 0 ? "Synced: nothing had changed." : `Synced: ${diff > 0 ? "+" : "−"}${Math.abs(diff).toLocaleString("en-GB")} kcal.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  }
+  useEffect(() => { setSyncMsg(null); }, [date]);
+
   // The server re-reads Lose It! at most every 5 minutes. After a refresh the
   // button gives way to a countdown to when the next one is allowed; at zero
   // the button comes back (nothing refreshes by itself).
@@ -406,6 +429,12 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
           {loading && !(diary?.connected && canRefresh) && <span className="text-xs font-normal text-slate-500">loading…</span>}
         </h2>
         <div className="flex items-center gap-1.5">
+          {/* Sync a past day: sits to the left of the calendar buttons */}
+          {diary?.connected && date !== today && (
+            <button onClick={syncThisDay} disabled={syncing || loading} title="Re-read this day from Lose It!" className={addBtn}>
+              {syncing ? "Syncing…" : "⟳ Sync"}
+            </button>
+          )}
           <button onClick={() => setDate(d => shift(d, -1))} className={navBtn} aria-label="Previous day">‹</button>
           <input
             type="date"
@@ -427,6 +456,7 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
       {adding && <AddFoodPanel date={date} onAdded={added} />}
 
       {error && <p className="text-sm text-rose-300">{error}</p>}
+      {syncMsg && <p className="mb-2 text-xs text-emerald-300">{syncMsg}</p>}
       {diary?.pendingDeletion && (
         <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-xs space-y-2">
           <p className="text-amber-200">
@@ -749,11 +779,14 @@ export function FoodDiaryPanel({ onChanged, dayChart, targetsFor }: {
                   Edit amount
                 </button>
                 <div className="my-1 border-t border-white/10" />
-                {MEALS.map((name, toMeal) => (
-                  <button key={name} role="menuitem" onClick={() => copyToToday({ items: [item], toMeal }, `${t.food.name} (${name})`)} className="block w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-700/60">
-                    Add to {name}
-                  </button>
-                ))}
+                {/* Hover (or tap) "Add to today" to pick which of today's meals gets a copy of this food */}
+                <SubMenu label="Add to today">
+                  {MEALS.map((name, toMeal) => (
+                    <button key={name} role="menuitem" onClick={() => copyToToday({ items: [item], toMeal }, `${t.food.name} (${name})`)} className="block w-full text-left px-3 py-1.5 text-slate-200 hover:bg-slate-700/60">
+                      {name}
+                    </button>
+                  ))}
+                </SubMenu>
                 <div className="my-1 border-t border-white/10" />
                 <button role="menuitem" onClick={() => remove(t.food, t.meal)} className="block w-full text-left px-3 py-1.5 text-rose-300 hover:bg-rose-500/15">
                   Delete
@@ -793,6 +826,40 @@ function ContextMenu({ x, y, children }: { x: number; y: number; children: React
       {children}
     </div>,
     document.body,
+  );
+}
+
+// A menu item that opens a submenu beside it on hover (a tap opens it too, for touch screens). The submenu opens
+// to the left instead when there isn't room on the right. It touches the item with no gap, so moving the pointer
+// across to it doesn't close it.
+function SubMenu({ label, children }: { label: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const [left, setLeft] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const show = () => {
+    const r = ref.current?.getBoundingClientRect();
+    if (r) setLeft(r.right + 160 > window.innerWidth - 8);
+    setOpen(true);
+  };
+  return (
+    <div ref={ref} className="relative" onMouseEnter={show} onMouseLeave={() => setOpen(false)}>
+      <button
+        role="menuitem" aria-haspopup="menu" aria-expanded={open}
+        onClick={() => (open ? setOpen(false) : show())}
+        className={`flex w-full items-center justify-between gap-4 text-left px-3 py-1.5 text-slate-200 hover:bg-slate-700/60 ${open ? "bg-slate-700/60" : ""}`}
+      >
+        {label}
+        <span className="text-slate-500">{left ? "◂" : "▸"}</span>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className={`absolute top-0 z-50 min-w-[140px] rounded-lg border border-white/10 bg-slate-900 shadow-xl py-1 text-xs ${left ? "right-full" : "left-full"}`}
+        >
+          {children}
+        </div>
+      )}
+    </div>
   );
 }
 

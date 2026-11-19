@@ -174,6 +174,20 @@ fun ActivityDetailScreen(
         runCatching { api.getTodaysRunHistory(date, title) }.getOrNull()?.let { resp ->
             if (resp.isSuccessful) tracks = resp.body()?.entry?.tracks ?: emptyList()
         }
+        // No saved mix for this day: a race may have a Pace Pro mix pinned to it — show that tracklist.
+        if (tracks.isEmpty()) {
+            runCatching { api.getRaceSplits(date, title) }.getOrNull()?.let { resp ->
+                resp.body()?.paceProMix?.let { mix ->
+                    tracks = mix.tracks.map { t ->
+                        val (mm, ss) = t.startsAt.split(":").let { (it.getOrNull(0)?.toDoubleOrNull() ?: 0.0) to (it.getOrNull(1)?.toDoubleOrNull() ?: 0.0) }
+                        com.pacesync.app.network.dto.HistoryTrack(
+                            uri = t.uri, name = t.name, artist = t.artist, startsAtSec = mm * 60 + ss,
+                            durationSec = t.durationSec ?: 0.0, segment = t.segment, tempo = t.tempo, energy = t.energy,
+                        )
+                    }
+                }
+            }
+        }
 
         // Pinned route — two-step: pointer first, then GPS points if one exists.
         runCatching { api.getPinnedRoute(date, title) }.getOrNull()?.let { resp ->

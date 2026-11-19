@@ -5,7 +5,9 @@ import Link from "next/link";
 import { useSession } from "next-auth/react";
 import "leaflet/dist/leaflet.css";
 import { useRunnaData } from "./RunnaCard";
-import { playInSpotify } from "./TrackRow";
+import { playInSpotify, StarIcon } from "./TrackRow";
+import { useFavourites } from "./useFavourites";
+import { HeaderSongBar, usePlayingUri, ensurePlaying } from "./SongProgressBar";
 import { useRunningPlaylist } from "./useRunningPlaylist";
 import { deleteTrackFromLibrary } from "@/lib/track-delete-client";
 import { useRouteMap, type WorkoutSection } from "@/hooks/useRouteMap";
@@ -54,6 +56,8 @@ export function RunDetailClient({ date, title }: { date: string; title: string }
   const { data: session } = useSession();
   const { id: RUNNING_PLAYLIST_ID } = useRunningPlaylist();
   const { pastRuns } = useRunnaData();
+  const { favourites, toggle: toggleFavourite } = useFavourites();
+  const playingUri = usePlayingUri();
   const run = useMemo(() => pastRuns.find(r => r.date === date && r.title === title), [pastRuns, date, title]);
 
   const [tracks, setTracks] = useState<TrackPacing[] | null>(null);
@@ -139,6 +143,7 @@ export function RunDetailClient({ date, title }: { date: string; title: string }
           )}
           {summary && <p className="text-xs text-slate-500 mt-0.5">{summary}</p>}
         </div>
+        <HeaderSongBar className="flex-1 min-w-0 max-w-md mx-4" />
         <div className="flex items-center gap-3 shrink-0">
           <div className="flex rounded-lg overflow-hidden border border-white/10 text-xs">
             <button
@@ -188,17 +193,17 @@ export function RunDetailClient({ date, title }: { date: string; title: string }
                   key={`${t.uri ?? t.name}-${i}`}
                   onMouseEnter={() => setHoveredIdx(i)}
                   onMouseLeave={() => setHoveredIdx(prev => (prev === i ? null : prev))}
-                  className={`px-3 py-2.5 transition-colors ${hoveredIdx === i ? "bg-cyan-500/15" : ""} ${isDeleted ? "opacity-40 line-through" : ""}`}
+                  className={`px-3 py-2.5 transition-colors border-l-2 ${t.uri && t.uri === playingUri ? "bg-orange-500/15 border-orange-400" : `border-transparent ${hoveredIdx === i ? "bg-cyan-500/15" : ""}`} ${isDeleted ? "opacity-40 line-through" : ""}`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <button
                       type="button"
-                      onClick={() => { if (t.uri) playInSpotify(t.uri, session?.accessToken).catch(() => {}); }}
+                      onClick={() => { if (t.uri) { playInSpotify(t.uri, session?.accessToken).catch(() => {}); ensurePlaying(); } }}
                       disabled={!t.uri}
                       className="min-w-0 flex-1 text-left hover:underline disabled:no-underline"
                       title={t.uri ? "Play in Spotify" : undefined}
                     >
-                      <p className="text-sm text-slate-200 truncate">{t.name}</p>
+                      <p className={`text-sm truncate ${t.uri && t.uri === playingUri ? "text-orange-300 font-medium" : "text-slate-200"}`}>{t.uri && t.uri === playingUri ? "▶ " : ""}{t.name}</p>
                       <p className="text-xs text-slate-500 truncate">{t.artist}</p>
                     </button>
                     <p className="text-xs text-slate-500 tabular-nums shrink-0">{mmss(t.startsAtSec)}</p>
@@ -230,9 +235,17 @@ export function RunDetailClient({ date, title }: { date: string; title: string }
                         🐇 Too fast
                       </button>
                       <button
+                        onClick={() => toggleFavourite(t.uri!)}
+                        title={favourites.has(t.uri) ? "Favourite: used first in Pace Pro / Race mixes at its BPM. Click to unfavourite" : "Favourite: use this first in Pace Pro / Race mixes at its BPM"}
+                        aria-pressed={favourites.has(t.uri)}
+                        className={`ml-auto rounded px-1.5 py-0.5 transition-colors ${favourites.has(t.uri) ? "bg-yellow-400/15 text-yellow-400" : "bg-slate-800/60 text-slate-500 hover:text-yellow-400"}`}
+                      >
+                        <StarIcon filled={favourites.has(t.uri)} />
+                      </button>
+                      <button
                         onClick={() => deleteTrack(t)}
                         title="Delete this track from the library and Spotify playlist"
-                        className="ml-auto rounded bg-red-500/10 hover:bg-red-500/20 text-red-300 px-2 py-0.5 text-[11px] transition-colors"
+                        className="rounded bg-red-500/10 hover:bg-red-500/20 text-red-300 px-2 py-0.5 text-[11px] transition-colors"
                       >
                         🗑 Delete
                       </button>

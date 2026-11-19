@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { loadGarminConfig } from "@/lib/garmin-config";
 import { getRouteGraph } from "@/lib/route-graph-cache";
-import { runsNear, WAYPOINT_RADIUS_M } from "@/lib/route-graph";
+import { parseKinds, runsNear, WAYPOINT_RADIUS_M } from "@/lib/route-graph";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
   const config = loadGarminConfig();
   if (!config) return NextResponse.json({ error: "Garmin DB not configured" }, { status: 404 });
   try {
-    const graph = getRouteGraph(config.dbPath);
+    const graph = getRouteGraph(config.dbPath, parseKinds(req.nextUrl.searchParams.get("kinds")));
     if (!graph) return NextResponse.json({ runs: 0, total: 0, radius });
     return NextResponse.json({ runs: runsNear(graph, lat, lng, radius), total: graph.runCount, radius });
   } catch (err) {

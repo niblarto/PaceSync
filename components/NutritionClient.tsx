@@ -505,28 +505,33 @@ function SummaryPanel() {
 
 // Wheel / drag / touch zoom for a chart's numeric x-domain, like the tracklist
 // chart: wheel zooms around the cursor (a sideways swipe pans), dragging pans,
-// pinch zooms and one finger pans on touch. `domain` is null at full view.
-function useChartZoom(dataMin: number, dataMax: number, minSpan: number) {
+// pinch zooms and one finger pans on touch. With no `home`, `domain` is null at
+// full view. With a `home` window (the default view, a part of the data), `domain`
+// is always the window being shown: it starts at home, can be dragged or swiped
+// along the data without zooming, and `custom` says it has been moved or zoomed.
+function useChartZoom(dataMin: number, dataMax: number, minSpan: number, home?: [number, number]) {
   // A callback ref held in state: the charts only mount once their data has
   // loaded, so the listeners must attach when the element appears, not at
   // the component's first render.
   const [el, setEl] = useState<HTMLDivElement | null>(null);
-  const [domain, setDomain] = useState<[number, number] | null>(null);
+  const [custom, setCustom] = useState<[number, number] | null>(null); // null = the home window (or full view)
+  const domain = custom ?? home ?? null;
   const domainRef = useRef(domain);
   domainRef.current = domain;
-  const bounds = useRef({ dataMin, dataMax, minSpan });
-  bounds.current = { dataMin, dataMax, minSpan };
+  const bounds = useRef({ dataMin, dataMax, minSpan, home });
+  bounds.current = { dataMin, dataMax, minSpan, home };
 
   const apply = useCallback((lo: number, hi: number) => {
-    const { dataMin: min, dataMax: max } = bounds.current;
+    const { dataMin: min, dataMax: max, home: hm } = bounds.current;
     const full = max - min;
     const span = Math.min(full, hi - lo);
     let l = Math.max(min, lo);
     let h = l + span;
     if (h > max) { h = max; l = h - span; }
-    setDomain(span >= full - 1e-6 ? null : [l, h]);
+    const [hl, hh] = hm ?? [min, max];
+    setCustom(Math.abs(l - hl) < 1 && Math.abs(h - hh) < 1 ? null : [l, h]);
   }, []);
-  const reset = useCallback(() => setDomain(null), []);
+  const reset = useCallback(() => setCustom(null), []);
 
   useEffect(() => {
     if (!el) return;
@@ -569,6 +574,7 @@ function useChartZoom(dataMin: number, dataMax: number, minSpan: number) {
     const onUp = () => { drag = null; el.style.cursor = ""; };
 
     let panX: number | null = null;
+    let panY = 0;
     let panFrom: [number, number] | null = null;
     let pinchDist: number | null = null;
     let pinchFrom: [number, number] | null = null;
@@ -585,6 +591,7 @@ function useChartZoom(dataMin: number, dataMax: number, minSpan: number) {
       } else if (e.touches.length === 1) {
         pinchDist = null;
         panX = e.touches[0].clientX;
+        panY = e.touches[0].clientY;
         panFrom = cur();
       }
     };
@@ -595,9 +602,12 @@ function useChartZoom(dataMin: number, dataMax: number, minSpan: number) {
         const scale = pinchDist / Math.max(1, dist(e.touches[0], e.touches[1]));
         zoomAround(pinchFrom[0], pinchFrom[1], pinchFrac, scale);
       } else if (e.touches.length === 1 && panX != null && panFrom && domainRef.current) {
-        // One finger pans only when zoomed in, so the page still scrolls at full view.
+        // One finger pans the chart along its dates when the movement is mainly sideways; a mainly vertical
+        // swipe is left to scroll the page (the element is touch-action: pan-y, so the browser takes that).
+        const dx = e.touches[0].clientX - panX, dy = e.touches[0].clientY - panY;
+        if (Math.abs(dx) <= Math.abs(dy)) return;
         e.preventDefault();
-        const d = ((e.touches[0].clientX - panX) / Math.max(1, el.getBoundingClientRect().width)) * (panFrom[1] - panFrom[0]);
+        const d = (dx / Math.max(1, el.getBoundingClientRect().width)) * (panFrom[1] - panFrom[0]);
         apply(panFrom[0] - d, panFrom[1] - d);
       }
     };
@@ -606,6 +616,7 @@ function useChartZoom(dataMin: number, dataMax: number, minSpan: number) {
       else if (e.touches.length === 1) { pinchDist = null; panX = e.touches[0].clientX; panFrom = cur(); }
     };
 
+    el.style.touchAction = "pan-y"; // sideways drags and pinches are the chart's; vertical swipes still scroll the page
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("mousedown", onDown);
     window.addEventListener("mousemove", onMove);
@@ -626,7 +637,7 @@ function useChartZoom(dataMin: number, dataMax: number, minSpan: number) {
     };
   }, [el, apply]);
 
-  return { ref: setEl, domain, reset };
+  return { ref: setEl, domain, custom: custom != null, reset };
 }
 
 export function NutritionClient() {
@@ -697,10 +708,11 @@ export function NutritionClient() {
     for (const p of data.projections) if (p.hitDate) candidates.push(toMs(p.hitDate));
     const endMs = Math.min(Math.max(...candidates), toMs(today) + 730 * DAY_MS);
     const todayMs = toMs(today);
-    // Only the last 28 days to the left of today; the projection to the right
-    // sets the width, and both sides share one time scale. Older weigh-ins and
-    // the left end of the fitted lines run off the edge.
-    const startMs = todayMs - 28 * DAY_MS;
+    // The chart opens on a window from 28 days back to 60 days after today (homeLo..homeHi); dragging it sideways
+    // scrolls back through up to 180 days of weigh-ins on the left and on along the projections to the right.
+    // Both sides share one time scale.
+    const startMs = todayMs - 180 * DAY_MS;
+    const homeLo = todayMs - 28 * DAY_MS, homeHi = Math.min(endMs, todayMs + 60 * DAY_MS);
     const history = data.weights.filter(w => toMs(w.date) >= startMs).map(w => ({ t: toMs(w.date), kg: w.kg }));
     const target = cfg?.targetWeightKg ?? null;
 
@@ -802,15 +814,15 @@ export function NutritionClient() {
     });
     const stoneTicks = unit === "st" ? halfStoneTicks(domain[0], domain[1]) : [];
     return {
-      points, startMs, endMs, domain,
+      points, startMs, endMs, homeLo, homeHi, domain,
       anchor, avgFrom: todayMs - 6 * DAY_MS, todayMs, endMarks,
       ticks: stoneTicks.length > 0 ? stoneTicks : undefined,
     };
   }, [data, cfg, today]);
 
 
-  const wZoom = useChartZoom(weightChart?.startMs ?? 0, weightChart?.endMs ?? 0, 3 * DAY_MS);
-  const wDomain = wZoom.domain;
+  const wZoom = useChartZoom(weightChart?.startMs ?? 0, weightChart?.endMs ?? 0, 3 * DAY_MS, weightChart ? [weightChart.homeLo, weightChart.homeHi] : undefined);
+  const wDomain = wZoom.domain; // the window being shown: home (today −28 days to +60 days) until dragged or zoomed
 
   // Weight chart's y-axis refitted to the weights inside the zoomed span.
   const weightZoomY = useMemo(() => {
@@ -1039,14 +1051,14 @@ export function NutritionClient() {
                 {!weightChart ? (
                   <p className="text-sm text-slate-500">No weigh-ins yet.</p>
                 ) : (
-                  <div ref={wZoom.ref} className={`select-none ${wDomain ? "cursor-grab" : ""}`}>
+                  <div ref={wZoom.ref} className="select-none cursor-grab">
                   <div className="flex justify-end mb-1 min-h-[1.5rem]">
-                    {wDomain
+                    {wZoom.custom
                       ? <button onClick={wZoom.reset}
                           className="text-xs px-2.5 py-1 rounded-lg border border-sky-500/40 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 transition-colors">
-                          Reset zoom
+                          Back to today
                         </button>
-                      : <span className="text-[11px] text-slate-600">scroll to zoom · drag to pan</span>}
+                      : <span className="text-[11px] text-slate-600">scroll to zoom · drag to move along the dates</span>}
                   </div>
                   <ResponsiveContainer width="100%" height={320}>
                     <ComposedChart data={weightChart.points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>

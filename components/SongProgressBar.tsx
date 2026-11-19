@@ -33,6 +33,22 @@ export function HeaderSongBar({ className }: { className?: string }) {
   if (others > 0) return null;
   return <SongProgressBar headerBar className={className} />;
 }
+
+// The track Spotify is playing now, shared by every bar's polling so track lists can highlight it.
+let playingUri: string | null = null;
+const playingListeners = new Set<() => void>();
+function setPlayingUri(u: string | null) {
+  if (u === playingUri) return;
+  playingUri = u;
+  playingListeners.forEach(l => l());
+}
+export function usePlayingUri(): string | null {
+  return useSyncExternalStore(
+    cb => { playingListeners.add(cb); return () => { playingListeners.delete(cb); }; },
+    () => playingUri,
+    () => null,
+  );
+}
 const EVENT = "pacesync:playback-changed";
 
 // Tells every SongProgressBar on the page to re-read the player now (after
@@ -105,7 +121,8 @@ export function SongProgressBar({ trackNames, className = "w-72 max-w-[45%]", ba
     fetch("/api/spotify/playback")
       .then(r => (r.ok ? r.json() : null))
       .then((d: { isPlaying?: boolean; hasDevice?: boolean; trackUri?: string | null; trackName?: string | null; artistName?: string | null; progressMs?: number; durationMs?: number } | null) => {
-        if (!d || !d.hasDevice || !d.trackUri) { setState(null); return; }
+        if (!d || !d.hasDevice || !d.trackUri) { setState(null); setPlayingUri(null); return; }
+        setPlayingUri(d.trackUri);
         setState({
           isPlaying: !!d.isPlaying, trackUri: d.trackUri, trackName: d.trackName ?? null, artistName: d.artistName ?? null,
           progressMs: d.progressMs ?? 0, durationMs: d.durationMs ?? 0, at: Date.now(),

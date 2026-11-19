@@ -5,6 +5,7 @@ import com.pacesync.app.data.TokenStore
 import com.pacesync.app.network.dto.LoseItConnectRequest
 import com.pacesync.app.network.dto.LoseItDiaryDto
 import com.pacesync.app.network.dto.LoseItStatusDto
+import com.pacesync.app.network.dto.LoseItSyncDayRequest
 import com.pacesync.app.network.dto.LoseItSyncRequest
 import com.pacesync.app.network.dto.NutritionDashboardDto
 import com.pacesync.app.network.dto.NutritionSettingsDto
@@ -58,6 +59,10 @@ interface NutritionApi {
 
     @POST("api/loseit/sync")
     suspend fun syncLoseIt(@Body body: LoseItSyncRequest): Response<LoseItStatusDto>
+
+    // The food diary's "Sync" on a past day: re-reads that one day from Lose It! and returns its diary.
+    @POST("api/loseit/sync-day")
+    suspend fun syncDay(@Body body: LoseItSyncDayRequest): Response<LoseItDiaryDto>
 
     // "Snack Me!": snacks from the Lose It! history that fit under the calories left.
     @POST("api/nutrition/snack-me")
