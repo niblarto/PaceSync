@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { listRaces, getRaceByGarminActivity, createRace, type RaceStatus } from "@/lib/races";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -9,8 +10,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // checkbox state check (does a races row already exist for THIS
 // activity?), instead of fetching and scanning the whole list client-side.
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const activityId = req.nextUrl.searchParams.get("garminActivityId");
   if (activityId) {
     const race = getRaceByGarminActivity(activityId);

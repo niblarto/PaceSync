@@ -7,7 +7,7 @@ import { getDb } from "@/lib/db";
 // asked for street routing.
 
 const KEY = "ors_api_key";
-const DIRECTIONS_URL = "https://api.openrouteservice.org/v2/directions/foot-walking/geojson";
+const DIRECTIONS_URL = "https://api.heigit.org/openrouteservice/v2/directions/foot-walking/geojson";
 const MAX_WAYPOINTS = 48; // ORS allows 50 per request
 const SNAP_RADIUS_M = 100;
 

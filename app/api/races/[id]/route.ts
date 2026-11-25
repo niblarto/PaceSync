@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { getRace, updateRace, deleteRace, type RaceStatus } from "@/lib/races";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const race = getRace(params.id);
   if (!race) return NextResponse.json({ error: "Race not found" }, { status: 404 });
   return NextResponse.json({ race });

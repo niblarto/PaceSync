@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { listRunningPlaylists, loadRunningPlaylistConfig, setActiveRunningPlaylist, removeRunningPlaylist } from "@/lib/running-playlist-config";
 import { countTracks } from "@/lib/tracks-store";
 import { getSpotifyBlockedUntil, setSpotifyBlockedUntil, parseRetryAfter } from "@/lib/spotify-rate-limit";
@@ -16,9 +17,8 @@ async function trackCount(entry: { csvFile: string }): Promise<number | null> {
 
 // GET — every playlist this app has been pointed at, plus which is active
 // and (for the Select Playlist list) each one's current track count.
-export async function GET() {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export async function GET(req: NextRequest) {
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const playlists = listRunningPlaylists();
   const active = loadRunningPlaylistConfig();
   const withCounts = await Promise.all(

@@ -324,6 +324,27 @@ CREATE TABLE IF NOT EXISTS bgf_recipes (
   fetched_at TEXT NOT NULL,
   json TEXT NOT NULL
 );
+
+-- External API access (lib/api-keys.ts): only the SHA-256 of each key is kept, so a copy of this database can't be used
+-- to call the API. The request log is trimmed to 30 days.
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  prefix TEXT NOT NULL,
+  key_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT
+);
+CREATE TABLE IF NOT EXISTS api_request_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  key_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  status INTEGER NOT NULL,
+  ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_api_request_log_at ON api_request_log(at);
 `;
 
 let db: Database.Database | null = null;

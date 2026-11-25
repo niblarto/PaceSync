@@ -142,6 +142,22 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
   const sourceModeRef = useRef<"runs" | "streets" | "draw">("runs");
   sourceModeRef.current = sourceMode;
   const [snap, setSnap] = useState(false);
+  // ✨ AI assistance (one switch for all of it): a plain-English request box, a reason and name for each route found,
+  // a pick for the selected workout, and the saved route that suits it best. Remembered in this browser.
+  const [aiOn, setAiOn] = useState(false);
+  const [aiText, setAiText] = useState("");
+  const [viaStreets, setViaStreets] = useState<string[]>([]);   // roads to include (set by the AI request box)
+  const [heading, setHeading] = useState<string | null>(null);   // compass direction to favour (set by the AI request box)
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiMsg, setAiMsg] = useState<{ ok: boolean; text: string; unsupported?: string[] } | null>(null);
+  const [aiReview, setAiReview] = useState<{ pick: number | null; why: string; routes: { note: string; name: string }[]; bestSaved: { id: string; reason: string } | null } | null>(null);
+  const [aiReviewing, setAiReviewing] = useState(false);
+  useEffect(() => { try { setAiOn(localStorage.getItem("routefinder.ai") === "1"); } catch { /* ignore */ } }, []);
+  function toggleAi(on: boolean) {
+    setAiOn(on);
+    try { localStorage.setItem("routefinder.ai", on ? "1" : "0"); } catch { /* ignore */ }
+    if (!on) { setAiReview(null); setAiMsg(null); }
+  }
   const [avoidLights, setAvoidLights] = useState(false);
   const [preferParks, setPreferParks] = useState(false);
   const [orsHasKey, setOrsHasKey] = useState<boolean | null>(null);
@@ -177,6 +193,14 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
   const [saved, setSaved] = useState<SavedRoute[]>([]);
   const [savedOpen, setSavedOpen] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  // The name a route was saved under, so "⌚ Garmin" on its card sends the course with that same name (not a new auto name).
+  const [savedNames, setSavedNames] = useState<Record<string, string>>({});
+  const routeSig = (c: Candidate) => `${c.distanceMi.toFixed(3)}|${c.points.length}|${c.points[0]?.[0]}|${c.points[c.points.length - 1]?.[1]}`;
+  useEffect(() => {
+    if (!savedMsg || /^Sending/.test(savedMsg)) return;
+    const t = setTimeout(() => setSavedMsg(null), 9000);
+    return () => clearTimeout(t);
+  }, [savedMsg]);
   const [justSaved, setJustSaved] = useState<Set<number>>(new Set());
   // While placing a waypoint: a circle follows the cursor with a count of the
   // runs that pass through it.
@@ -210,6 +234,19 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
       })
       .catch(() => {});
   }, []);
+
+  // Opened from a scheduled run's "Create route": put that run's header line ("Easy Run • 4.3mi") in the request box,
+  // once the workouts have loaded (only if the box is still empty).
+  const aiPrefilled = useRef(false);
+  useEffect(() => {
+    if (!aiOn || !initialWorkout || aiPrefilled.current || planUid !== initialWorkout) return;
+    const w = workouts.find(x => x.uid === initialWorkout);
+    if (!w) return;
+    aiPrefilled.current = true;
+    const header = w.segments.find(l => !l.trim().startsWith("•") && l.includes("•"));
+    const text = header ? header.split("•").map(x => x.trim()).filter(Boolean).slice(0, 2).join(" • ") : `${w.title}${w.distanceMi ? ` • ${w.distanceMi}mi` : ""}`;
+    setAiText(t => t.trim() ? t : text);
+  }, [aiOn, initialWorkout, planUid, workouts]);
 
   const selectedRoute = routes?.[selected] ?? null;
   const timeline: Timeline | null = useMemo(() => {
@@ -342,7 +379,8 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
     const w = workouts.find(x => x.uid === planUid);
     const d = w ? new Date(`${w.date}T12:00:00`) : new Date();
     const date = `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getFullYear() % 100).padStart(2, "0")}`;
-    return `${c.distanceMi.toFixed(2).padStart(5, "0")} - ${date} - ${w ? w.title : c.isLoop ? "Loop" : "Route"}`;
+    const ai = aiOn ? aiReview?.routes[routes?.indexOf(c) ?? -1]?.name : "";
+    return `${c.distanceMi.toFixed(2).padStart(5, "0")} - ${date} - ${w ? w.title : ai || (c.isLoop ? "Loop" : "Route")}`;
   }
 
   // Saved home → opening location and default start.
@@ -459,19 +497,26 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
     }
   }
 
-  async function suggest() {
-    const mi = parseFloat(distance);
+  // `o` lets the AI request box search with settings it has just worked out (state hasn't updated yet).
+  async function suggest(o: { distance?: string; minRuns?: string; kinds?: "runs" | "walks" | "both"; snap?: boolean; avoidLights?: boolean; preferParks?: boolean; heading?: string | null; streets?: string[] } = {}) {
+    const useStreets = o.streets ?? viaStreets;
+    const useHeading = o.heading !== undefined ? o.heading : heading;
+    const useSnap = o.snap ?? snap, useAvoidLights = o.avoidLights ?? avoidLights, usePreferParks = o.preferParks ?? preferParks;
+    const mi = parseFloat(o.distance ?? distance);
     if (!mi || mi < 1 || mi > 30) { setError("Enter a distance between 1 and 30 miles"); return; }
     setLoading(true);
     setError(null);
+    setAiReview(null);
     try {
       const streets = sourceMode === "streets";
       const from = start ?? (streets ? home : null);
       if (streets && !from) { setError("Set a start point first (📍 Set start, or save a home)"); setLoading(false); return; }
       const q = new URLSearchParams({ distanceMi: String(mi), seed: String(Math.floor(Math.random() * 1e9)) });
-      if (!streets) { q.set("minRuns", minRuns); q.set("kinds", kinds); if (snap) q.set("snap", "1"); }
-      if (avoidLights) q.set("avoidLights", "1");
-      if (preferParks) q.set("preferParks", "1");
+      if (!streets) { q.set("minRuns", o.minRuns ?? minRuns); q.set("kinds", o.kinds ?? kinds); if (useSnap) q.set("snap", "1"); }
+      if (!streets && useStreets.length > 0) useStreets.forEach(n => q.append("street", n));
+      if (!streets && useHeading) q.set("heading", useHeading);
+      if (useAvoidLights) q.set("avoidLights", "1");
+      if (usePreferParks) q.set("preferParks", "1");
       if (from) { q.set("lat", String(from[0])); q.set("lng", String(from[1])); }
       if (end) { q.set("endLat", String(end[0])); q.set("endLng", String(end[1])); }
       if (via.length > 0) q.set("via", via.map(v => `${v[0]},${v[1]}`).join("|"));
@@ -485,10 +530,73 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
       setRuns(d.runs ?? null);
       setSelected(0);
       if (!start && d.start) setStart(d.start);
+      if (aiOn && d.routes && d.routes.length > 0) void reviewRoutes(d.routes, mi);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
+    }
+  }
+
+  const workoutForAi = () => {
+    const w = workouts.find(x => x.uid === planUid);
+    return w ? { title: w.title, type: w.type, distanceMi: w.distanceMi, steps: w.segments } : undefined;
+  };
+
+  // The AI's view of the routes just found: a note and name for each, a pick for the workout, the best saved route.
+  async function reviewRoutes(found: Candidate[], targetMi: number) {
+    setAiReviewing(true);
+    try {
+      const w = workouts.find(x => x.uid === planUid);
+      const near = (mi: number) => Math.abs(mi - (w?.distanceMi ?? targetMi)) <= Math.max(1, (w?.distanceMi ?? targetMi) * 0.25);
+      const res = await fetch("/api/garmin/route-ai", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task: "review", targetMi, workout: workoutForAi(), wanted: aiText.trim() || undefined,
+          routes: found.map(c => ({ distanceMi: c.distanceMi, score: c.score, overlapPct: c.overlapPct, familiarPct: c.familiarPct, compactness: c.compactness, isLoop: c.isLoop, lights: c.lights, parkPct: c.parkPct })),
+          saved: saved.filter(r => near(r.distanceMi)).map(r => ({ id: r.id, name: r.name, distanceMi: r.distanceMi, isLoop: r.isLoop })),
+        }),
+      });
+      const d = await res.json() as { pick?: number | null; why?: string; routes?: { note: string; name: string }[]; bestSaved?: { id: string; reason: string } | null; error?: string };
+      if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`);
+      setAiReview({ pick: d.pick ?? null, why: d.why ?? "", routes: d.routes ?? [], bestSaved: d.bestSaved ?? null });
+      if (d.pick != null) setSelected(d.pick);
+    } catch (e) {
+      setAiMsg({ ok: false, text: `AI review unavailable: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setAiReviewing(false);
+    }
+  }
+
+  // "Describe the route you want": the AI fills in the finder's own settings, then the search runs.
+  async function askAi() {
+    if (!aiText.trim()) return;
+    setAiBusy(true);
+    setAiMsg(null);
+    try {
+      const res = await fetch("/api/garmin/route-ai", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: "parse", text: aiText, workout: workoutForAi() }),
+      });
+      const d = await res.json() as { distanceMi?: number | null; kinds?: "runs" | "walks" | "both" | null; avoidLights?: boolean; preferParks?: boolean; snap?: boolean; minRuns?: number | null; heading?: string | null; streets?: string[]; understood?: string; unsupported?: string[]; error?: string };
+      if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`);
+      const o = {
+        distance: d.distanceMi != null ? String(d.distanceMi) : undefined,
+        minRuns: d.minRuns != null ? String(d.minRuns) : undefined,
+        kinds: d.kinds ?? undefined, snap: sourceMode === "runs" ? !!d.snap : undefined,
+        avoidLights: !!d.avoidLights, preferParks: !!d.preferParks, heading: d.heading ?? null, streets: d.streets ?? [],
+      };
+      if (o.distance) setDistance(o.distance);
+      if (o.minRuns) setMinRuns(o.minRuns);
+      if (o.kinds) { setUseRuns(o.kinds !== "walks"); setUseWalks(o.kinds !== "runs"); }
+      if (o.snap !== undefined) setSnap(o.snap);
+      setAvoidLights(o.avoidLights); setPreferParks(o.preferParks); setHeading(o.heading); setViaStreets(o.streets);
+      setAiMsg({ ok: true, text: d.understood || "Settings filled in.", unsupported: d.unsupported });
+      await suggest(o);
+    } catch (e) {
+      setAiMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setAiBusy(false);
     }
   }
 
@@ -521,9 +629,11 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
       const res = await fetch("/api/garmin/send-course", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, points }),
       });
-      const d = await res.json() as { courseId?: number; error?: string };
+      const d = await res.json() as { courseId?: number; devices?: string[]; deviceError?: string; error?: string };
       if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`);
-      setSavedMsg(`"${name}" is in your Garmin courses — sync your watch to get it.`);
+      setSavedMsg(d.devices && d.devices.length > 0
+        ? `"${name}" is in your Garmin courses and queued for your ${d.devices.join(" and ")} — sync your watch to get it.`
+        : `"${name}" is in your Garmin courses, but wasn't sent to your watch${d.deviceError ? ` (couldn't send to device: ${d.deviceError})` : ""}. Use Send to Device in Garmin Connect.`);
     } catch (e) {
       setSavedMsg(e instanceof Error ? e.message : "Couldn't send the route to Garmin");
     }
@@ -597,10 +707,27 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
           source: c.source ?? (sourceMode === "streets" ? "streets" : "runs"), snapped: !!c.snapped, isLoop: c.isLoop,
         }),
       });
-      const d = await res.json() as { error?: string };
+      const d = await res.json() as { error?: string; route?: { id: string; name: string; distanceMi: number } };
       if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`);
       setJustSaved(s => new Set(s).add(i));
-      setSavedMsg("Saved. Pin it to a scheduled run from the Runna schedule on the dashboard.");
+      setSavedNames(n => ({ ...n, [routeSig(c)]: name.trim() || base }));
+      // Opened from a scheduled run's "Create route" button: pin the saved route to that run too.
+      const target = initialWorkout ? workouts.find(w => w.uid === initialWorkout) : undefined;
+      if (target && d.route) {
+        const pin = await fetch("/api/garmin/pin-route", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            date: target.date, workoutTitle: target.title, activityId: `saved:${d.route.id}`,
+            name: d.route.name, distanceMi: d.route.distanceMi, runDate: "Saved route",
+          }),
+        }).catch(() => null);
+        setSavedMsg(pin?.ok
+          ? `Saved and pinned to ${target.title} (${new Date(`${target.date}T12:00:00`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })}).`
+          : "Saved, but couldn't pin it to the scheduled run. Pin it from the Runna schedule on the dashboard.");
+      } else {
+        setSavedMsg("Saved. Pin it to a scheduled run from the Runna schedule on the dashboard.");
+      }
       loadSaved();
     } catch (e) {
       setSavedMsg(e instanceof Error ? e.message : "Couldn't save the route");
@@ -1021,6 +1148,42 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
                 ? "Brand-new routes of the distance you pick on real streets, from your start (and end) point — not based on your runs."
                 : "Click points on the map and the route is drawn from one to the next."}
             </p>
+            <label className="flex items-center gap-2 text-xs text-slate-300" title="Plain-English requests, a note and name for each route, a pick for the selected workout, and the best saved route">
+              <input type="checkbox" checked={aiOn} onChange={e => toggleAi(e.target.checked)} />
+              ✨ AI assistance
+            </label>
+            {aiOn && sourceMode !== "draw" && (
+              <div className="space-y-2 rounded-lg border border-violet-400/20 bg-violet-500/5 p-2.5">
+                <textarea
+                  value={aiText} onChange={e => setAiText(e.target.value)} rows={2}
+                  onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void askAi(); } }}
+                  placeholder="Describe the route, e.g. “5 miles on familiar paths, avoid traffic lights, through parks”"
+                  className="w-full rounded-lg bg-slate-800 border border-white/10 px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 resize-none"
+                />
+                <div className="flex items-center gap-2">
+                  <button onClick={() => void askAi()} disabled={aiBusy || loading || !aiText.trim()} className="rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-40 px-3 py-1 text-xs font-medium">
+                    {aiBusy ? "Thinking…" : "Ask AI"}
+                  </button>
+                  <span className="text-[10px] text-slate-500">Sends your text and route statistics (never map points) to the AI chosen in Settings → Coach.</span>
+                </div>
+                {heading && (
+                  <button onClick={() => setHeading(null)} className="rounded-lg border border-violet-400/40 bg-violet-500/10 px-2 py-0.5 text-[11px] text-violet-200 hover:bg-violet-500/20" title="Stop favouring this direction">
+                    🧭 Favouring {({ N: "north", NE: "north-east", E: "east", SE: "south-east", S: "south", SW: "south-west", W: "west", NW: "north-west" } as Record<string, string>)[heading] ?? heading} ✕
+                  </button>
+                )}
+                {viaStreets.length > 0 && (
+                  <button onClick={() => setViaStreets([])} className="rounded-lg border border-violet-400/40 bg-violet-500/10 px-2 py-0.5 text-[11px] text-violet-200 hover:bg-violet-500/20" title="Stop including these roads. The road names are looked up on OpenStreetMap (overpass-api.de).">
+                    🛣️ Including {viaStreets.join(" and ")} ✕
+                  </button>
+                )}
+                {aiMsg && (
+                  <p className={`text-[11px] ${aiMsg.ok ? "text-violet-200" : "text-red-300"}`}>
+                    {aiMsg.ok ? "✨ " : ""}{aiMsg.text}
+                    {aiMsg.unsupported && aiMsg.unsupported.length > 0 && <span className="text-amber-300"> Can&apos;t do: {aiMsg.unsupported.join(", ")}.</span>}
+                  </p>
+                )}
+              </div>
+            )}
             {sourceMode !== "streets" && (
               <div className="flex items-center gap-4 text-xs text-slate-300">
                 <span className="text-slate-500">Use:</span>
@@ -1096,7 +1259,7 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
               />
               <span className="text-sm text-slate-400">miles</span>
               <button
-                onClick={suggest} disabled={loading}
+                onClick={() => void suggest()} disabled={loading}
                 className="ml-auto rounded-lg bg-green-600 hover:bg-green-500 disabled:opacity-50 px-4 py-1.5 text-sm font-medium"
               >
                 {loading ? "Searching…" : routes ? "More" : "Suggest"}
@@ -1313,6 +1476,10 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
                   </label>
                   <span className="text-[11px] text-slate-500">Each track in a file becomes a saved route.</span>
                 </div>
+                {aiOn && aiReview?.bestSaved && (() => {
+                  const b = saved.find(r => r.id === aiReview.bestSaved!.id);
+                  return b ? <p className="text-[11px] text-violet-200">✨ Best saved route for {workouts.find(x => x.uid === planUid)?.title ?? "this distance"}: <span className="font-medium">{b.name}</span>. {aiReview.bestSaved.reason}</p> : null;
+                })()}
                 {saved.length === 0 && <p className="text-xs text-slate-500">Nothing saved yet — press 💾 Save on a route, or import a GPX file.</p>}
                 <div className="max-h-64 overflow-y-auto rounded-lg border border-white/5 divide-y divide-white/5">
                   {saved.map(r => (
@@ -1331,7 +1498,15 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
               </div>
             )}
           </div>
-          {savedMsg && <p className="text-xs text-green-300">{savedMsg}</p>}
+          {savedMsg && (
+            // A floating message, so it's seen wherever the button was (it used to sit under the Saved routes panel, off screen).
+            <div role="status" onClick={() => setSavedMsg(null)}
+              className={`fixed bottom-5 left-1/2 -translate-x-1/2 z-50 max-w-[90vw] cursor-pointer rounded-lg border px-4 py-2.5 text-sm shadow-xl backdrop-blur-sm ${
+                /couldn.t|fail|error|HTTP \d|required|unauthor/i.test(savedMsg) ? "border-red-500/40 bg-red-950/90 text-red-200"
+                : /^Sending/.test(savedMsg) ? "border-sky-500/40 bg-slate-900/95 text-sky-200" : "border-green-500/40 bg-green-950/90 text-green-200"}`}>
+              {savedMsg}
+            </div>
+          )}
 
           {routes && routes.length === 0 && !loading && (
             <p className="text-sm text-slate-400">
@@ -1339,6 +1514,11 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
             </p>
           )}
 
+          {aiOn && (aiReviewing || aiReview?.why) && (
+            <p className="rounded-lg border border-violet-400/20 bg-violet-500/5 px-3 py-2 text-xs text-violet-200">
+              {aiReviewing ? "✨ Reviewing the routes…" : `✨ ${aiReview?.pick != null ? `Pick: route ${aiReview.pick + 1}. ` : ""}${aiReview?.why}`}
+            </p>
+          )}
           {routes?.map((r, i) => (
             <div
               key={i}
@@ -1352,6 +1532,8 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
                   <span className="rounded bg-emerald-700/40 text-emerald-300 text-[11px] px-1.5 py-0.5" title="Distance fit, smoothness, familiarity, lights and parks">Score {r.score}</span>
                 )}
                 {r.snapped && <span className="text-[10px] text-sky-300">streets</span>}
+                {aiOn && aiReview?.pick === i && <span className="rounded bg-violet-600/40 text-violet-200 text-[11px] px-1.5 py-0.5">✨ Pick</span>}
+                {aiOn && aiReview?.routes[i]?.name && <span className="text-[11px] text-violet-300/90">{aiReview.routes[i].name}</span>}
                 <button
                   onClick={e => { e.stopPropagation(); void saveRoute(i); }}
                   disabled={justSaved.has(i)}
@@ -1366,7 +1548,7 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
                   GPX ⬇
                 </button>
                 <button
-                  onClick={e => { e.stopPropagation(); void sendToGarmin(routeName(r), r.points); }}
+                  onClick={e => { e.stopPropagation(); void sendToGarmin(savedNames[routeSig(r)] ?? routeName(r), r.points); }}
                   className="text-xs text-slate-400 hover:text-slate-200"
                   title="Send to Garmin courses"
                 >
@@ -1385,6 +1567,7 @@ export function RoutePlannerClient({ initialDistance, autoSearch, initialWorkout
                 {r.lights !== null && r.lights !== undefined ? ` · 🚦 ${r.lights}` : ""}
                 {r.parkPct !== null && r.parkPct !== undefined ? ` · 🌳 ${r.parkPct}%` : ""}
               </p>
+              {aiOn && aiReview?.routes[i]?.note && <p className="mt-0.5 text-xs text-violet-200/90">✨ {aiReview.routes[i].note}</p>}
             </div>
           ))}
         </div>

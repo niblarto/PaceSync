@@ -15,6 +15,7 @@ const LINKS: { href: string; label: string; needsGarmin?: boolean }[] = [
   { href: "/coach", label: "Coach" },
   { href: "/nutrition", label: "Nutrition" },
   { href: "/health", label: "Health" },
+  { href: "/metrics", label: "Metrics" },
   { href: "/garmin", label: "Garmin", needsGarmin: true },
   { href: "/races", label: "Races" },
   { href: "/pace-pro", label: "Pace Pro" },

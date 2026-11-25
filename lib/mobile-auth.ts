@@ -34,6 +34,12 @@ export async function createMobileToken(): Promise<string> {
     .sign(jwtSecret());
 }
 
+// A 60-second token the /api/v1 gateway uses to call the app's own read routes on its behalf, once the caller's API key
+// has been checked. Never handed out.
+export async function createInternalToken(): Promise<string> {
+  return new SignJWT({ scope: MOBILE_SCOPE }).setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("60s").sign(jwtSecret());
+}
+
 async function verifyMobileBearer(req: NextRequest): Promise<boolean> {
   const header = req.headers.get("authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";

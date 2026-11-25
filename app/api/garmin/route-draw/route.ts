@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hasApiAccess } from "@/lib/mobile-auth";
 import { loadGarminConfig } from "@/lib/garmin-config";
+import { applyWaterFilter } from "@/lib/route-water";
 import { getRouteGraph } from "@/lib/route-graph-cache";
 import { parseKinds, exactNode, nearestNode, shortestPathNodes } from "@/lib/route-graph";
 import { loadOrsKey, orsDirections } from "@/lib/ors";
@@ -31,6 +32,7 @@ export async function POST(req: NextRequest) {
       if (!config) return NextResponse.json({ error: "Garmin DB not configured" }, { status: 404 });
       const g = getRouteGraph(config.dbPath, parseKinds(b.kinds));
       if (!g) return NextResponse.json({ error: "No GPS data in your history for that activity type yet" }, { status: 404 });
+      await applyWaterFilter(g).catch(() => null);
       const minRuns = Math.min(50, Math.max(1, Math.round(b.minRuns ?? 2)));
       const a = b.exactFrom ? exactNode(g, from[0], from[1]) : nearestNode(g, from[0], from[1], minRuns);
       const z = nearestNode(g, to[0], to[1], minRuns);

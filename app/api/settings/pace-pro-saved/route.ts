@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasApiAccess } from "@/lib/mobile-auth";
 import { listSavedPaceProMixes, saveSavedPaceProMix, deleteSavedPaceProMix, getSavedPaceProMix } from "@/lib/pace-pro-saved";
 import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 
@@ -8,8 +9,7 @@ import type { AiDjMixResponse } from "@/lib/ai-dj-mix";
 // resolving a linked Pace Pro mix's own tracklist) instead of the whole
 // library — no id returns the full list, same as before.
 export async function GET(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await hasApiAccess(req))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const id = req.nextUrl.searchParams.get("id");
   if (id) {
     const mix = getSavedPaceProMix(id);

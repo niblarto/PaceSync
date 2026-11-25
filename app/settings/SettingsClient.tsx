@@ -8,6 +8,7 @@ import { StatusTab } from "@/components/StatusTab";
 import { NutritionSettingsCard } from "@/components/NutritionSettingsCard";
 import { LoseItSettingsCard } from "@/components/LoseItSettingsCard";
 import { BackupSettingsCard } from "@/components/BackupSettingsCard";
+import { ApiAccessCard } from "@/components/ApiAccessCard";
 import { GarminPersonalApiCard } from "@/components/GarminPersonalApiCard";
 import { createPortal } from "react-dom";
 import { SongProgressBar, ensurePlaying } from "@/components/SongProgressBar";
@@ -5923,6 +5924,8 @@ export function SettingsClient({ bbcMode, bbcReplacePid, bbcReplaceName }: Setti
     {/* ── Tab: Security ── */}
     <div className={activeTab === "security" ? "grid grid-cols-1 gap-6 items-start" : "hidden"}>
     <div className="space-y-6">
+
+      <ApiAccessCard />
 
       {/* Two-factor authentication */}
       <div className="rounded-xl bg-slate-900/85 backdrop-blur-sm border border-white/10 p-5 space-y-4">

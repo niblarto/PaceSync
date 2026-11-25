@@ -3099,6 +3099,7 @@ const displayZones = zones.length > 0 ? zones : getDefaultZones();
             <Link href="/coach" className={NAV_LINK}>Coach</Link>
             <Link href="/nutrition" className={NAV_LINK}>Nutrition</Link>
             <Link href="/health" className={NAV_LINK}>Health</Link>
+            <Link href="/metrics" className={NAV_LINK}>Metrics</Link>
             {garminConfigured && (
               <Link href="/garmin" className={NAV_LINK}>Garmin</Link>
             )}

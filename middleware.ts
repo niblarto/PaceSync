@@ -62,6 +62,7 @@ export const config = {
     "/coach/:path*",
     "/nutrition/:path*",
     "/health/:path*",
+    "/metrics/:path*",
     "/crawler/:path*",
     "/api/auth/signin/:path*",
     "/api/auth/callback/:path*",
